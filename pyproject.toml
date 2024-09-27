@@ -1,0 +1,27 @@
+[project]
+name = "hs-m3u8"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "昊色居士", email = "xhrtxh@gmail.com" }
+]
+dependencies = [
+    "m3u8>=6.0.0",
+    "hssp>=0.4.4",
+]
+readme = "README.md"
+requires-python = ">= 3.10"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.rye]
+managed = true
+dev-dependencies = []
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hs_m3u8"]

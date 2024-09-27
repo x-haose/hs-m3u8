@@ -1,0 +1,21 @@
+# python generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# venv
+.venv
+
+# downloiad
+downloads
+
+# pycharm
+.idea
+
+# res
+res/ffmpeg_linux
+res/ffmpeg_mac
+res/ffmpeg_win.exe

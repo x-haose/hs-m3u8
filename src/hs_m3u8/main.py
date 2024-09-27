@@ -1,0 +1,333 @@
+"""
+M3U8 下载器
+"""
+import asyncio
+import platform
+import posixpath
+import shutil
+import subprocess
+from enum import auto, Enum
+from hashlib import md5
+from pathlib import Path
+from typing import Any, Dict, List, Union
+from urllib.parse import urljoin, urlparse
+from zipfile import ZipFile
+
+import m3u8
+from loguru import logger
+
+from hssp.network import Net
+from hssp.utils import crypto
+
+
+def get_ffmpeg():
+    """
+    根据平台不同获取不同的ffmpeg可执行文件
+    :return: FFmpeg 的可执行文件路径
+    """
+    current_os = platform.system()
+
+    res_path = Path(__file__).parent.parent.parent / 'res'
+
+    if current_os == 'Windows':
+        ffmpeg_bin = res_path / 'ffmpeg_win.exe'
+    elif current_os == 'Linux':
+        ffmpeg_bin = res_path / 'ffmpeg_linux'
+    elif current_os == 'Darwin':
+        ffmpeg_bin = res_path / 'ffmpeg_mac'
+    else:
+        ffmpeg_bin = "ffmpeg"
+
+    if ffmpeg_bin.exists():
+        return str(ffmpeg_bin)
+
+    # ZIP 文件
+    ffmpeg_bin_zip = Path(ffmpeg_bin.parent) / f"{ffmpeg_bin.name}.zip"
+    if ffmpeg_bin_zip.exists():
+        # 解压缩到同一目录
+        with ZipFile(ffmpeg_bin_zip, 'r') as zip_ref:
+            zip_ref.extractall(ffmpeg_bin.parent)
+
+    return ffmpeg_bin
+
+
+class ContentType(Enum):
+    """
+    获取URL数据的，类型枚举
+    """
+    Text = auto()
+    Json = auto()
+    Bytes = auto()
+
+
+class M3u8Key:
+    """
+    M3u8key
+    """
+
+    def __init__(self, key: bytes, iv: str = None):
+        """
+        :param key: 密钥
+        :param iv: 偏移
+        """
+        self.key = key
+        self.iv = iv or key
+
+
+class M3u8Downloader:
+    """
+    M3u8 异步下载器，并保留hls文件
+    """
+    retry_count: int = 0
+    retry_max_count: int = 50
+    ts_url_list: list = []
+    ts_path_list: list = []
+    ts_key: M3u8Key = None
+    m3u8_md5 = ""
+
+    def __init__(self, url: str, save_path: str, decrypt=False, max_workers=None):
+        """
+        :param url: m3u8 地址
+        :param save_path: 保存路径
+        :param decrypt: 如果ts被加密，是否解密ts
+        """
+        self.net = Net(sem=asyncio.Semaphore(max_workers))
+        self.decrypt = decrypt
+        self.url = urlparse(url)
+        self.save_dir = Path(save_path) / "hls"
+        self.save_name = Path(save_path).name
+        self.key_path = self.save_dir / "key.key"
+
+        if not self.save_dir.exists():
+            self.save_dir.mkdir(parents=True)
+
+        logger.add(self.save_dir.parent / f"{self.save_name}.log")
+        self.logger = logger
+
+    async def run(self, merge=True, del_hls=False):
+        await self.start(merge, del_hls)
+        await self.net.close()
+
+    async def start(self, merge=True, del_hls=False):
+        """
+        下载器启动函数
+        :param merge: ts下载完后是否合并，默认合并
+        :param del_hls: 是否删除hls系列文件，包括.m3u8文件、*.ts、.key文件
+        :return:
+        """
+        mp4_path = self.save_dir.parent / f"{self.save_name}.mp4"
+        if Path(mp4_path).exists():
+            self.logger.info(f"{mp4_path}已存在")
+            if del_hls:
+                shutil.rmtree(str(self.save_dir))
+            return True
+
+        self.logger.info(
+            f"开始下载，合并ts为mp4={merge}, 删除hls信息={del_hls}, 下载地址为：{self.url.geturl()}. 保存路径为：{self.save_dir}")
+        await self._download()
+        self.logger.info("ts下载完成")
+        self.ts_path_list = [ts_path for ts_path in self.ts_path_list if ts_path]
+        count_1, count_2 = len(self.ts_url_list), len(self.ts_path_list)
+        self.logger.info(f"TS应下载数量为：{count_1}, 实际下载数量为：{count_2}")
+        if count_1 == 0 or count_2 == 0:
+            self.logger.error("ts数量为0，请检查！！！")
+            return
+
+        if count_2 != count_1:
+            self.logger.error(f"ts下载数量与实际数量不符合！！！应该下载数量为：{count_1}, 实际下载数量为：{count_2}")
+            self.logger.error(self.ts_url_list)
+            self.logger.error(self.ts_path_list)
+            if self.retry_count < self.retry_max_count:
+                self.retry_count += 1
+                self.logger.error(f"正在进行重试：{self.retry_count}/{self.retry_max_count}")
+                return self.start(merge, del_hls)
+            return False
+
+        if not merge:
+            return True
+
+        if self.merge():
+            self.logger.info("合并成功")
+        else:
+            self.logger.error(
+                f"mp4合并失败. ts应该下载数量为：{count_1}, 实际下载数量为：{count_2}. 保存路径为：{self.save_dir}")
+            return False
+        if del_hls:
+            shutil.rmtree(str(self.save_dir))
+        return True
+
+    async def _download(self):
+        """
+        下载ts文件、m3u8文件、key文件
+        :return:
+        """
+        self.ts_url_list = await self.get_ts_list(self.url)
+        self.ts_path_list = [None] * len(self.ts_url_list)
+        await asyncio.gather(*[self._download_ts(url) for url in self.ts_url_list])
+
+    async def get_url_content(self, url: str, content_type: ContentType) -> Union[bytes, str, Any]:
+        """
+        按照类型获取url内容
+        :param url: 请求地址
+        :param content_type: 内容类型
+        :return:
+        """
+        data = None
+        try:
+            resp = await self.net.get(url)
+            if content_type == ContentType.Bytes:
+                data = resp.content
+            if content_type == ContentType.Text:
+                data = resp.text
+            if content_type == ContentType.Json:
+                data = resp.json
+            if resp.status_code != 200:
+                self.logger.error(f"请求{url}内容时返回码不正确，类型为：{content_type}, 返回码为:{resp.status_code}")
+                return None
+        except BaseException as exception:
+            self.logger.error(f"请求{url}内容时发生异常，类型为：{content_type}, 异常信息为:{exception}")
+
+        return data
+
+    async def get_ts_list(self, url) -> List[Dict]:
+        """
+        解析m3u8并保存至列表
+        :param url:
+        :return:
+        """
+        resp = await self.net.get(url.geturl())
+        m3u8_text = resp.text
+        m3u8_obj = m3u8.loads(m3u8_text)
+        prefix = f'{url.scheme}://{url.netloc}'
+        base_path = posixpath.normpath(url.path + '/..') + "/"
+        m3u8_obj.base_uri = urljoin(prefix, base_path)
+
+        # 解析多层m3u8， 默认选取比特率最高的
+        ts_url_list = []
+        if len(m3u8_obj.playlists) > 0:
+            bandwidth = 0
+            play_url = ""
+            self.logger.info("发现多个播放列表")
+            for playlist in m3u8_obj.playlists:
+                if int(playlist.stream_info.bandwidth) > bandwidth:
+                    bandwidth = int(playlist.stream_info.bandwidth)
+                    play_url = playlist.absolute_uri
+            self.logger.info(f"选择的播放地址：{play_url}，比特率：{bandwidth}")
+            return await self.get_ts_list(urlparse(play_url))
+
+        # 遍历ts文件
+        for index, segments in enumerate(m3u8_obj.segments):
+            ts_uri = segments.uri if "http" in m3u8_obj.segments[index].uri else segments.absolute_uri
+            m3u8_obj.segments[index].uri = Path(segments.uri).name.split('?')[0]
+            ts_url_list.append({'uri': ts_uri, 'index': index})
+
+        # 保存解密key
+        if len(m3u8_obj.keys) > 0 and m3u8_obj.keys[0]:
+            resp = await self.net.get(m3u8_obj.keys[0].absolute_uri)
+            key_data = resp.content
+            self.save_file(key_data, self.key_path)
+            self.ts_key = M3u8Key(key=key_data, iv=m3u8_obj.keys[0].iv)
+            key = m3u8_obj.segments[0].key
+            key.uri = "key.key"
+            m3u8_obj.segments[0].key = key
+
+        # 导出m3u8文件
+        m3u8_text = m3u8_obj.dumps()
+        self.m3u8_md5 = md5(m3u8_text.encode("utf8")).hexdigest().lower()
+        self.save_file(m3u8_text, self.save_dir / f"{self.m3u8_md5}.m3u8")
+        self.logger.info("导出m3u8文件成功")
+
+        return ts_url_list
+
+    async def _download_ts(self, ts_item: Dict):
+        """
+        下载ts
+        :param ts_item: ts 数据
+        :return:
+        """
+        index = ts_item['index']
+        ts_uri = ts_item['uri']
+        ts_name = Path(ts_uri).name.split('?')[0]
+        ts_path = self.save_dir / ts_name
+        if Path(ts_path).exists():
+            self.ts_path_list[index] = str(ts_path)
+            return
+        resp = await self.net.get(ts_item['uri'])
+        ts_content = resp.content
+        if ts_content is None:
+            return
+
+        if self.ts_key and self.decrypt:
+            ts_content = crypto.decrypt_aes_256_cbc_pad7(ts_content, self.ts_key.key, self.ts_key.iv)
+
+        self.save_file(ts_content, ts_path)
+        self.logger.info(f"{ts_uri}下载成功")
+        self.ts_path_list[index] = str(ts_path)
+
+    def merge(self):
+        """
+        合并ts文件为mp4文件
+        :return:
+        """
+        self.logger.info("开始合并mp4")
+        if len(self.ts_path_list) != len(self.ts_url_list):
+            self.logger.error("数量不足拒绝合并！")
+            return False
+
+        # 整合后的ts文件路径
+        big_ts_path = self.save_dir.parent / f"{self.save_name}.ts"
+        if big_ts_path.exists():
+            big_ts_path.unlink()
+
+        # mp4路径
+        mp4_path = self.save_dir.parent / f"{self.save_name}.mp4"
+
+        # 把ts文件整合到一起
+        big_ts_file = big_ts_path.open('ab+')
+        for path in self.ts_path_list:
+            with open(path, 'rb') as ts_file:
+                data = ts_file.read()
+                if self.ts_key:
+                    data = crypto.decrypt_aes_256_cbc_pad7(data, self.ts_key.key, self.ts_key.iv)
+                big_ts_file.write(data)
+        big_ts_file.close()
+        self.logger.info("ts文件整合完毕")
+
+        # 把大的ts文件转换成mp4文件
+        ffmpeg_bin = get_ffmpeg()
+        command = f'{ffmpeg_bin} -i "{big_ts_path}" -c copy -map 0:v -map 0:a -bsf:a aac_adtstoasc -threads 32 "{mp4_path}" -y'
+        self.logger.info(f"ts整合成功，开始转为mp4。 command：{command}")
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        if result.returncode != 0:
+            logger.error(f"命令执行失败: {result.stderr or result.stdout}")
+
+        if Path(mp4_path).exists():
+            big_ts_path.unlink()
+        return Path(mp4_path).exists()
+
+    @staticmethod
+    def save_file(content: bytes | str, filepath):
+        """
+        保存内容到文件
+        :param content: 内容
+        :param filepath: 文件路径
+        :return:
+        """
+        mode = 'wb' if isinstance(content, bytes) else 'w'
+        with open(file=filepath, mode=mode) as file:
+            file.write(content)
+
+
+async def main():
+    url = "https://surrit.com/6d3bb2b2-d707-4b79-adf0-89542cb1383c/playlist.m3u8"
+    name = "SDAB-129"
+    dl = M3u8Downloader(
+        url=url,
+        save_path=f"downloads/{name}",
+        max_workers=64
+    )
+    await dl.run(del_hls=False, merge=True)
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
