@@ -91,8 +91,9 @@ class M3u8Downloader:
         :param save_path: 保存路径
         :param decrypt: 如果ts被加密，是否解密ts
         """
+        sem = asyncio.Semaphore(max_workers) if max_workers else None
         self.headers = headers
-        self.net = Net(sem=asyncio.Semaphore(max_workers))
+        self.net = Net(sem=sem)
         self.decrypt = decrypt
         self.url = urlparse(url)
         self.save_dir = Path(save_path) / "hls"
