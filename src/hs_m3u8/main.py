@@ -85,12 +85,13 @@ class M3u8Downloader:
     ts_key: M3u8Key = None
     m3u8_md5 = ""
 
-    def __init__(self, url: str, save_path: str, decrypt=False, max_workers=None):
+    def __init__(self, url: str, save_path: str, decrypt=False, max_workers=None, headers=None):
         """
         :param url: m3u8 地址
         :param save_path: 保存路径
         :param decrypt: 如果ts被加密，是否解密ts
         """
+        self.headers = headers
         self.net = Net(sem=asyncio.Semaphore(max_workers))
         self.decrypt = decrypt
         self.url = urlparse(url)
@@ -174,7 +175,7 @@ class M3u8Downloader:
         """
         data = None
         try:
-            resp = await self.net.get(url)
+            resp = await self.net.get(url, headers=self.headers)
             if content_type == ContentType.Bytes:
                 data = resp.content
             if content_type == ContentType.Text:
@@ -195,7 +196,7 @@ class M3u8Downloader:
         :param url:
         :return:
         """
-        resp = await self.net.get(url.geturl())
+        resp = await self.net.get(url.geturl(), headers=self.headers)
         m3u8_text = resp.text
         m3u8_obj = m3u8.loads(m3u8_text)
         prefix = f'{url.scheme}://{url.netloc}'
@@ -223,7 +224,7 @@ class M3u8Downloader:
 
         # 保存解密key
         if len(m3u8_obj.keys) > 0 and m3u8_obj.keys[0]:
-            resp = await self.net.get(m3u8_obj.keys[0].absolute_uri)
+            resp = await self.net.get(m3u8_obj.keys[0].absolute_uri, headers=self.headers)
             key_data = resp.content
             self.save_file(key_data, self.key_path)
             self.ts_key = M3u8Key(key=key_data, iv=m3u8_obj.keys[0].iv)
