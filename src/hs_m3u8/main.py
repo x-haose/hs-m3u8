@@ -244,7 +244,7 @@ class M3u8Downloader:
         # 遍历ts文件
         for index, segments in enumerate(m3u8_obj.segments):
             ts_uri = segments.uri if "http" in m3u8_obj.segments[index].uri else segments.absolute_uri
-            m3u8_obj.segments[index].uri = Path(segments.uri).name.split("?")[0]
+            m3u8_obj.segments[index].uri = f"{index}.ts"
             ts_url_list.append({"uri": ts_uri, "index": index})
 
         # 保存解密key
@@ -273,8 +273,7 @@ class M3u8Downloader:
         """
         index = ts_item["index"]
         ts_uri = ts_item["uri"]
-        ts_name = Path(ts_uri).name.split("?")[0]
-        ts_path = self.save_dir / ts_name
+        ts_path = self.save_dir / f"{index}.ts"
         if Path(ts_path).exists():
             self.ts_path_list[index] = str(ts_path)
             return
