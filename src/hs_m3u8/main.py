@@ -27,17 +27,11 @@ def get_ffmpeg():
     :return: FFmpeg 的可执行文件路径
     """
     current_os = platform.system()
+    if current_os != "Windows":
+        return "ffmpeg"
 
     res_path = Path(__file__).parent.parent.parent / "res"
-
-    if current_os == "Windows":
-        ffmpeg_bin = res_path / "ffmpeg_win.exe"
-    elif current_os == "Linux":
-        ffmpeg_bin = res_path / "ffmpeg_linux"
-    elif current_os == "Darwin":
-        ffmpeg_bin = res_path / "ffmpeg_mac"
-    else:
-        ffmpeg_bin = "ffmpeg"
+    ffmpeg_bin = res_path / "ffmpeg_win.exe"
 
     if ffmpeg_bin.exists():
         return str(ffmpeg_bin)
