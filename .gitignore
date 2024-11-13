@@ -9,6 +9,11 @@ wheels/
 # venv
 .venv
 
+# rye
+.python-version
+requirements.lock
+requirements-dev.lock
+
 # downloiad
 downloads
 
@@ -16,6 +21,4 @@ downloads
 .idea
 
 # res
-res/ffmpeg_linux
-res/ffmpeg_mac
 res/ffmpeg_win.exe
