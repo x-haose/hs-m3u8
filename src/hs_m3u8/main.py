@@ -16,7 +16,7 @@ from urllib.parse import urljoin, urlparse
 from zipfile import ZipFile
 
 import m3u8
-from hssp.network import Net
+from hssp import Net
 from hssp.utils import crypto
 from loguru import logger
 
