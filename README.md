@@ -8,11 +8,7 @@ m3u8 视频下载工具。支持大部分的m3u8视频下载。后续增加UI界
 - 自动选择高分辨m3u8
 - 合并MP4
 - 可选择保留ts文件
-- 内置ffmpeg可执行文件
-  - Windows平台
-  - Mac平台
-  - Linux amd平台
-  - 未内置的平台：i686、arm64、armhf、armel
+- 内置Windows平台ffmpeg可执行文件（由于Linux及Mac下权限问题，需自行安装ffmpeg文件）
 
 ## 使用
 
