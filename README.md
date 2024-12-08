@@ -35,6 +35,7 @@ rye sync
 ```
 
 ### pip 安装
+该`requirements.lock`文件是在Mac环境在生成的，不同系统环境下可能会遇到不同的效果，如果使用请使用`rye`安装
 
 ```bash
 pip install -r requirements.lock
