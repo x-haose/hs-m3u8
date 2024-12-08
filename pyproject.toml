@@ -5,6 +5,20 @@ description = "m3u8 下载器"
 authors = [
     { name = "昊色居士", email = "xhrtxh@gmail.com" }
 ]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Development Status :: 4 - Beta",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: BSD",
+    "Operating System :: Microsoft :: Windows",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 
 license = "MIT"
 readme = "README.md"
@@ -24,12 +38,15 @@ managed = true
 dev-dependencies = [
     "pre-commit>=4.0.1",
 ]
+include = [
+    "src/hs_m3u8/"
+]
 
 [tool.hatch.metadata]
 allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/sanic_api"]
+packages = ["src/hs_m3u8"]
 
 [[tool.rye.sources]]
 name = "default"
@@ -114,5 +131,10 @@ unfixable = []
 
 
 [tool.rye.scripts]
+publish_testpypi = { cmd = "rye publish --repository testpypi --repository-url https://test.pypi.org/legacy/" }
+publish_pypi = { cmd = "rye publish" }
+sb = { cmd = "rye build --clean" }
+spt = { chain = ["sb", "publish_testpypi"] }
+sp = { chain = ["sb", "publish_pypi"] }
 check_i = { cmd = "rye run pre-commit install" }
 check = { cmd = "rye run pre-commit run --all-files" }
