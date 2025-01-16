@@ -8,10 +8,8 @@ import posixpath
 import shutil
 import subprocess
 from collections.abc import Callable
-from enum import Enum, auto
 from hashlib import md5
 from pathlib import Path
-from typing import Any
 from urllib.parse import urljoin, urlparse
 from zipfile import ZipFile
 
@@ -46,16 +44,6 @@ def get_ffmpeg():
     return ffmpeg_bin
 
 
-class ContentType(Enum):
-    """
-    获取URL数据的，类型枚举
-    """
-
-    Text = auto()
-    Json = auto()
-    Bytes = auto()
-
-
 class M3u8Key:
     """
     M3u8key
@@ -80,6 +68,7 @@ class M3u8Downloader:
     ts_url_list: list = []
     ts_path_list: list = []
     ts_key: M3u8Key = None
+    mp4_head_hrl: str = None
     m3u8_md5 = ""
 
     def __init__(
@@ -165,7 +154,7 @@ class M3u8Downloader:
         if not merge:
             return True
 
-        if self.merge():
+        if await self.merge():
             self.logger.info("合并成功")
         else:
             self.logger.error(
@@ -184,30 +173,6 @@ class M3u8Downloader:
         self.ts_url_list = await self.get_ts_list(self.m3u8_url)
         self.ts_path_list = [None] * len(self.ts_url_list)
         await asyncio.gather(*[self._download_ts(url) for url in self.ts_url_list])
-
-    async def get_url_content(self, url: str, content_type: ContentType) -> bytes | str | Any:
-        """
-        按照类型获取url内容
-        :param url: 请求地址
-        :param content_type: 内容类型
-        :return:
-        """
-        data = None
-        try:
-            resp = await self.net.get(url, headers=self.headers)
-            if content_type == ContentType.Bytes:
-                data = resp.content
-            if content_type == ContentType.Text:
-                data = resp.text
-            if content_type == ContentType.Json:
-                data = resp.json
-            if resp.status_code != 200:
-                self.logger.error(f"请求{url}内容时返回码不正确，类型为：{content_type}, 返回码为:{resp.status_code}")
-                return None
-        except BaseException as exception:
-            self.logger.error(f"请求{url}内容时发生异常，类型为：{content_type}, 异常信息为:{exception}")
-
-        return data
 
     async def get_ts_list(self, url) -> list[dict]:
         """
@@ -234,6 +199,14 @@ class M3u8Downloader:
                     play_url = playlist.absolute_uri
             self.logger.info(f"选择的播放地址：{play_url}，比特率：{bandwidth}")
             return await self.get_ts_list(urlparse(play_url))
+
+        # 处理具有 #EXT-X-MAP:URI="*.mp4" 的情况
+        segment_map_count = len(m3u8_obj.segment_map)
+        if segment_map_count > 0:
+            if segment_map_count > 1:
+                raise ValueError("暂不支持segment_map有多个的情况，请提交issues，并告知m3u8的地址，方便做适配")
+            self.mp4_head_hrl = prefix + m3u8_obj.segment_map[0].uri
+            m3u8_obj.segment_map[0].uri = "head.mp4"
 
         # 遍历ts文件
         for index, segments in enumerate(m3u8_obj.segments):
@@ -283,7 +256,7 @@ class M3u8Downloader:
         self.logger.info(f"{ts_uri}下载成功")
         self.ts_path_list[index] = str(ts_path)
 
-    def merge(self):
+    async def merge(self):
         """
         合并ts文件为mp4文件
         :return:
@@ -301,8 +274,17 @@ class M3u8Downloader:
         # mp4路径
         mp4_path = self.save_dir.parent / f"{self.save_name}.mp4"
 
+        # 如果保护mp4的头，则把ts放到后面
+        mp4_head_data = b""
+        if self.mp4_head_hrl:
+            resp = await self.net.get(self.mp4_head_hrl)
+            mp4_head_data = resp.content
+            mp4_head_file = self.save_dir / "head.mp4"
+            mp4_head_file.write_bytes(mp4_head_data)
+
         # 把ts文件整合到一起
         big_ts_file = big_ts_path.open("ab+")
+        big_ts_file.write(mp4_head_data)
         for path in self.ts_path_list:
             with open(path, "rb") as ts_file:
                 data = ts_file.read()
@@ -316,7 +298,7 @@ class M3u8Downloader:
         ffmpeg_bin = get_ffmpeg()
         command = (
             f'{ffmpeg_bin} -i "{big_ts_path}" '
-            f'-c copy -map 0:v -map 0:a -bsf:a aac_adtstoasc -threads 32 "{mp4_path}" -y'
+            f'-c copy -map 0:v -map 0:a? -bsf:a aac_adtstoasc -threads 32 "{mp4_path}" -y'
         )
         self.logger.info(f"ts整合成功，开始转为mp4。 command：{command}")
         result = subprocess.run(command, shell=True, capture_output=True, text=True)
