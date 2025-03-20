@@ -54,8 +54,9 @@ class M3u8Key:
         :param key: 密钥
         :param iv: 偏移
         """
+        iv = bytes.fromhex(iv[2:]) if iv and iv.startswith("0x") else iv
         self.key = key
-        self.iv = iv or key
+        self.iv = iv
 
 
 class M3u8Downloader:
@@ -78,6 +79,7 @@ class M3u8Downloader:
         decrypt=False,
         max_workers=None,
         headers=None,
+        key: M3u8Key = None,
         get_m3u8_func: Callable = None,
     ):
         """
@@ -101,6 +103,7 @@ class M3u8Downloader:
         self.save_dir = Path(save_path) / "hls"
         self.save_name = Path(save_path).name
         self.key_path = self.save_dir / "key.key"
+        self.custom_key = key
 
         if not self.save_dir.exists():
             self.save_dir.mkdir(parents=True)
@@ -216,10 +219,16 @@ class M3u8Downloader:
 
         # 保存解密key
         if len(m3u8_obj.keys) > 0 and m3u8_obj.keys[0]:
-            resp = await self.net.get(m3u8_obj.keys[0].absolute_uri, headers=self.headers)
-            key_data = resp.content
+            iv = m3u8_obj.keys[0].iv
+            if not self.custom_key:
+                resp = await self.net.get(m3u8_obj.keys[0].absolute_uri, headers=self.headers)
+                key_data = resp.content
+            else:
+                key_data = self.custom_key.key
+                iv = self.custom_key.iv or iv
+
             self.save_file(key_data, self.key_path)
-            self.ts_key = M3u8Key(key=key_data, iv=m3u8_obj.keys[0].iv)
+            self.ts_key = M3u8Key(key=key_data, iv=iv)
             key = m3u8_obj.segments[0].key
             key.uri = "key.key"
             m3u8_obj.segments[0].key = key
@@ -244,7 +253,7 @@ class M3u8Downloader:
         if Path(ts_path).exists():
             self.ts_path_list[index] = str(ts_path)
             return
-        resp = await self.net.get(ts_item["uri"])
+        resp = await self.net.get(ts_item["uri"], self.headers)
         ts_content = resp.content
         if ts_content is None:
             return
