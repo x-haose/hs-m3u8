@@ -9,6 +9,7 @@ import shutil
 import subprocess
 from collections.abc import Callable
 from hashlib import md5
+from importlib import resources
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 from zipfile import ZipFile
@@ -28,20 +29,18 @@ def get_ffmpeg():
     if current_os != "Windows":
         return "ffmpeg"
 
-    res_path = Path(__file__).parent.parent.parent / "res"
-    ffmpeg_bin = res_path / "ffmpeg_win.exe"
+    with resources.as_file(resources.files("hs_m3u8.res")) as package_dir:
+        ffmpeg_bin = package_dir / "ffmpeg_win.exe"
+        if ffmpeg_bin.exists():
+            return str(ffmpeg_bin)
 
-    if ffmpeg_bin.exists():
-        return str(ffmpeg_bin)
+        # ZIP 文件
+        ffmpeg_bin_zip = package_dir / "ffmpeg_win.exe.zip"
+        if ffmpeg_bin_zip.exists():
+            with ZipFile(ffmpeg_bin_zip, "r") as zip_ref:
+                zip_ref.extractall(ffmpeg_bin.parent)
 
-    # ZIP 文件
-    ffmpeg_bin_zip = Path(ffmpeg_bin.parent) / f"{ffmpeg_bin.name}.zip"
-    if ffmpeg_bin_zip.exists():
-        # 解压缩到同一目录
-        with ZipFile(ffmpeg_bin_zip, "r") as zip_ref:
-            zip_ref.extractall(ffmpeg_bin.parent)
-
-    return ffmpeg_bin
+        return ffmpeg_bin
 
 
 class M3u8Key:
