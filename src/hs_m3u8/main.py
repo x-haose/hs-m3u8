@@ -16,6 +16,7 @@ from zipfile import ZipFile
 
 import m3u8
 from hssp import Net
+from hssp.models.net import RequestModel
 from hssp.utils import crypto
 from loguru import logger
 
@@ -80,6 +81,9 @@ class M3u8Downloader:
         headers=None,
         key: M3u8Key = None,
         get_m3u8_func: Callable = None,
+        m3u8_request_before: Callable[[RequestModel], RequestModel] = None,
+        key_request_before: Callable[[RequestModel], RequestModel] = None,
+        ts_request_before: Callable[[RequestModel], RequestModel] = None,
     ):
         """
 
@@ -91,11 +95,29 @@ class M3u8Downloader:
             headers: 情求头
             get_m3u8_func: 处理m3u8情求的回调函数。适用于m3u8地址不是真正的地址，
                            而是包含m3u8内容的情求，会把m3u8_url的响应传递给get_m3u8_func，要求返回真正的m3u8内容
+           m3u8_request_before: m3u8请求前的回调函数
+           key_request_before: key请求前的回调函数
+           ts_request_before: ts 请求前的回调函数
         """
 
         sem = asyncio.Semaphore(max_workers) if max_workers else None
         self.headers = headers
-        self.net = Net(sem=sem)
+
+        # m3u8 内容的请求器
+        self.m3u8_net = Net(sem=sem)
+        if m3u8_request_before:
+            self.m3u8_net.request_before_signal.connect(m3u8_request_before)
+
+        # 加密key的请求器
+        self.key_net = Net()
+        if key_request_before:
+            self.key_net.request_before_signal.connect(key_request_before)
+
+        # ts内容的请求器
+        self.ts_net = Net()
+        if ts_request_before:
+            self.ts_net.request_before_signal.connect(ts_request_before)
+
         self.decrypt = decrypt
         self.m3u8_url = urlparse(m3u8_url)
         self.get_m3u8_func = get_m3u8_func
@@ -112,7 +134,9 @@ class M3u8Downloader:
 
     async def run(self, merge=True, del_hls=False):
         await self.start(merge, del_hls)
-        await self.net.close()
+        await self.m3u8_net.close()
+        await self.key_net.close()
+        await self.ts_net.close()
 
     async def start(self, merge=True, del_hls=False):
         """
@@ -182,7 +206,7 @@ class M3u8Downloader:
         :param url:
         :return:
         """
-        resp = await self.net.get(url.geturl(), headers=self.headers)
+        resp = await self.m3u8_net.get(url.geturl(), headers=self.headers)
         m3u8_text = self.get_m3u8_func(resp.text) if self.get_m3u8_func else resp.text
         m3u8_obj = m3u8.loads(m3u8_text)
         prefix = f"{url.scheme}://{url.netloc}"
@@ -220,7 +244,7 @@ class M3u8Downloader:
         if len(m3u8_obj.keys) > 0 and m3u8_obj.keys[0]:
             iv = m3u8_obj.keys[0].iv
             if not self.custom_key:
-                resp = await self.net.get(m3u8_obj.keys[0].absolute_uri, headers=self.headers)
+                resp = await self.key_net.get(m3u8_obj.keys[0].absolute_uri, headers=self.headers)
                 key_data = resp.content
             else:
                 key_data = self.custom_key.key
@@ -252,7 +276,7 @@ class M3u8Downloader:
         if Path(ts_path).exists():
             self.ts_path_list[index] = str(ts_path)
             return
-        resp = await self.net.get(ts_item["uri"], self.headers)
+        resp = await self.ts_net.get(ts_item["uri"], self.headers)
         ts_content = resp.content
         if ts_content is None:
             return
@@ -282,10 +306,10 @@ class M3u8Downloader:
         # mp4路径
         mp4_path = self.save_dir.parent / f"{self.save_name}.mp4"
 
-        # 如果保护mp4的头，则把ts放到后面
+        # 如果有mp4的头，则把ts放到后面
         mp4_head_data = b""
         if self.mp4_head_hrl:
-            resp = await self.net.get(self.mp4_head_hrl)
+            resp = await self.ts_net.get(self.mp4_head_hrl)
             mp4_head_data = resp.content
             mp4_head_file = self.save_dir / "head.mp4"
             mp4_head_file.write_bytes(mp4_head_data)
