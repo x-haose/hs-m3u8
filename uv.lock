@@ -606,7 +606,7 @@ wheels = [
 
 [[package]]
 name = "hs-m3u8"
-version = "0.1.6"
+version = "0.1.7"
 source = { editable = "." }
 dependencies = [
     { name = "hssp" },
