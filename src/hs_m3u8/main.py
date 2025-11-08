@@ -17,6 +17,7 @@ from zipfile import ZipFile
 import m3u8
 from hssp import Net
 from hssp.models.net import RequestModel
+from hssp.network.response import Response
 from hssp.utils import crypto
 from loguru import logger
 
@@ -82,8 +83,11 @@ class M3u8Downloader:
         key: M3u8Key = None,
         get_m3u8_func: Callable = None,
         m3u8_request_before: Callable[[RequestModel], RequestModel] = None,
+        m3u8_response_after: Callable[[Response], Response] = None,
         key_request_before: Callable[[RequestModel], RequestModel] = None,
+        key_response_after: Callable[[Response], Response] = None,
         ts_request_before: Callable[[RequestModel], RequestModel] = None,
+        ts_response_after: Callable[[Response], Response] = None,
     ):
         """
 
@@ -96,8 +100,11 @@ class M3u8Downloader:
             get_m3u8_func: 处理m3u8情求的回调函数。适用于m3u8地址不是真正的地址，
                            而是包含m3u8内容的情求，会把m3u8_url的响应传递给get_m3u8_func，要求返回真正的m3u8内容
            m3u8_request_before: m3u8请求前的回调函数
+           m3u8_response_after: m3u8响应后的回调函数
            key_request_before: key请求前的回调函数
-           ts_request_before: ts 请求前的回调函数
+           key_response_after: key响应后的回调函数
+           ts_request_before: ts请求前的回调函数
+           ts_response_after: ts响应后的回调函数
         """
 
         sem = asyncio.Semaphore(max_workers) if max_workers else None
@@ -107,16 +114,22 @@ class M3u8Downloader:
         self.m3u8_net = Net(sem=sem)
         if m3u8_request_before:
             self.m3u8_net.request_before_signal.connect(m3u8_request_before)
+        if m3u8_response_after:
+            self.m3u8_net.response_after_signal.connect(m3u8_response_after)
 
         # 加密key的请求器
         self.key_net = Net()
         if key_request_before:
             self.key_net.request_before_signal.connect(key_request_before)
+        if key_response_after:
+            self.key_net.response_after_signal.connect(key_response_after)
 
         # ts内容的请求器
         self.ts_net = Net()
         if ts_request_before:
             self.ts_net.request_before_signal.connect(ts_request_before)
+        if ts_response_after:
+            self.ts_net.response_after_signal.connect(ts_response_after)
 
         self.decrypt = decrypt
         self.m3u8_url = urlparse(m3u8_url)
@@ -146,6 +159,7 @@ class M3u8Downloader:
         :return:
         """
         mp4_path = self.save_dir.parent / f"{self.save_name}.mp4"
+        mp4_path = mp4_path.absolute()
         if Path(mp4_path).exists():
             self.logger.info(f"{mp4_path}已存在")
             if del_hls:
@@ -155,7 +169,7 @@ class M3u8Downloader:
         self.logger.info(
             f"开始下载: 合并ts为mp4={merge}, "
             f"删除hls信息={del_hls}, "
-            f"下载地址为：{self.m3u8_url.geturl()}. 保存路径为：{self.save_dir}"
+            f"下载地址为：{self.m3u8_url.geturl()}. 保存路径为：{self.save_dir.absolute()}"
         )
 
         await self._download()
@@ -165,7 +179,7 @@ class M3u8Downloader:
         self.logger.info(f"TS应下载数量为：{count_1}, 实际下载数量为：{count_2}")
         if count_1 == 0 or count_2 == 0:
             self.logger.error("ts数量为0，请检查！！！")
-            return
+            return None
 
         if count_2 != count_1:
             self.logger.error(f"ts下载数量与实际数量不符合！！！应该下载数量为：{count_1}, 实际下载数量为：{count_2}")
@@ -282,7 +296,7 @@ class M3u8Downloader:
             return
 
         if self.ts_key and self.decrypt:
-            ts_content = crypto.decrypt_aes_256_cbc_pad7(ts_content, self.ts_key.key, self.ts_key.iv)
+            ts_content = crypto.decrypt_aes_256_cbc(ts_content, self.ts_key.key, self.ts_key.iv)
 
         self.save_file(ts_content, ts_path)
         self.logger.info(f"{ts_uri}下载成功")
@@ -321,7 +335,7 @@ class M3u8Downloader:
             with open(path, "rb") as ts_file:
                 data = ts_file.read()
                 if self.ts_key:
-                    data = crypto.decrypt_aes_256_cbc_pad7(data, self.ts_key.key, self.ts_key.iv)
+                    data = crypto.decrypt_aes_256_cbc(data, self.ts_key.key, self.ts_key.iv)
                 big_ts_file.write(data)
         big_ts_file.close()
         self.logger.info("ts文件整合完毕")
