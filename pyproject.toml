@@ -26,7 +26,7 @@ requires-python = ">= 3.10"
 
 dependencies = [
     "m3u8>=6.0.0",
-    "hssp>=0.4.4",
+    "hssp>=0.4.18",
 ]
 
 [project.urls]
@@ -38,25 +38,13 @@ documentation = "https://github.com/x-haose/hs-m3u8"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.rye]
-managed = true
-dev-dependencies = [
-    "pre-commit>=4.0.1",
-    "twine>=6.0.1",
-]
+[tool.hatch.build.targets.sdist]
 include = [
-    "src/hs_m3u8/"
+    "src/hs_m3u8",
 ]
-
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/hs_m3u8"]
-
-[[tool.rye.sources]]
-name = "default"
-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 [tool.bandit]
 skips = [
@@ -127,20 +115,10 @@ ignore = [
     # do not perform function calls in argument defaults
     "B008",
     # too complex
-    "C901"
+    "C901",
 ]
 fixable = ["ALL"]
 unfixable = []
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
-
-
-[tool.rye.scripts]
-publish_testpypi = { cmd = "rye run twine upload -r testpypi dist/*" }
-publish_pypi = { cmd = "rye run twine upload dist/*" }
-sb = { cmd = "rye build --clean" }
-spt = { chain = ["sb", "publish_testpypi"] }
-sp = { chain = ["sb", "publish_pypi"] }
-check_i = { cmd = "rye run pre-commit install" }
-check = { cmd = "rye run pre-commit run --all-files" }
