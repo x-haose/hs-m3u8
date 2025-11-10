@@ -3,17 +3,15 @@ M3U8 下载器
 """
 
 import asyncio
-import platform
 import posixpath
 import shutil
-import subprocess
 from collections.abc import Callable
 from hashlib import md5
-from importlib import resources
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
-from zipfile import ZipFile
+from typing import Any
+from urllib.parse import ParseResult, urljoin, urlparse
 
+import av
 import m3u8
 from hssp import Net
 from hssp.models.net import RequestModel
@@ -22,40 +20,28 @@ from hssp.utils import crypto
 from loguru import logger
 
 
-def get_ffmpeg():
-    """
-    根据平台不同获取不同的ffmpeg可执行文件
-    :return: FFmpeg 的可执行文件路径
-    """
-    current_os = platform.system()
-    if current_os != "Windows":
-        return "ffmpeg"
-
-    with resources.as_file(resources.files("hs_m3u8.res")) as package_dir:
-        ffmpeg_bin = package_dir / "ffmpeg_win.exe"
-        if ffmpeg_bin.exists():
-            return str(ffmpeg_bin)
-
-        # ZIP 文件
-        ffmpeg_bin_zip = package_dir / "ffmpeg_win.exe.zip"
-        if ffmpeg_bin_zip.exists():
-            with ZipFile(ffmpeg_bin_zip, "r") as zip_ref:
-                zip_ref.extractall(ffmpeg_bin.parent)
-
-        return ffmpeg_bin
-
-
 class M3u8Key:
     """
     M3u8key
     """
 
-    def __init__(self, key: bytes, iv: str = None):
+    def __init__(self, key: bytes, iv: str | bytes | None = None):
         """
-        :param key: 密钥
-        :param iv: 偏移
+        Args:
+            key: 密钥
+            iv: 偏移，可以是十六进制字符串(0x开头)、bytes或None
         """
-        iv = bytes.fromhex(iv[2:]) if iv and iv.startswith("0x") else iv
+        try:
+            if isinstance(iv, str) and iv.startswith("0x"):
+                iv = bytes.fromhex(iv[2:])
+            elif isinstance(iv, str):
+                iv = bytes.fromhex(iv)
+        except ValueError as e:
+            raise ValueError(f"iv {iv!r} 值不对: {e}") from e
+
+        if iv and len(iv) != 16:
+            raise ValueError(f"iv {iv} 长度不等于16")
+
         self.key = key
         self.iv = iv
 
@@ -65,36 +51,28 @@ class M3u8Downloader:
     M3u8 异步下载器，并保留hls文件
     """
 
-    retry_count: int = 0
-    retry_max_count: int = 50
-    ts_url_list: list = []
-    ts_path_list: list = []
-    ts_key: M3u8Key = None
-    mp4_head_hrl: str = None
-    m3u8_md5 = ""
-
     def __init__(
         self,
         m3u8_url: str,
         save_path: str,
-        decrypt=False,
-        max_workers=None,
-        headers=None,
-        key: M3u8Key = None,
-        get_m3u8_func: Callable = None,
-        m3u8_request_before: Callable[[RequestModel], RequestModel] = None,
-        m3u8_response_after: Callable[[Response], Response] = None,
-        key_request_before: Callable[[RequestModel], RequestModel] = None,
-        key_response_after: Callable[[Response], Response] = None,
-        ts_request_before: Callable[[RequestModel], RequestModel] = None,
-        ts_response_after: Callable[[Response], Response] = None,
+        is_decrypt: bool = False,
+        max_workers: int | None = None,
+        headers: dict[str, Any] | None = None,
+        key: M3u8Key | None = None,
+        get_m3u8_func: Callable | None = None,
+        m3u8_request_before: Callable[[RequestModel], RequestModel] | None = None,
+        m3u8_response_after: Callable[[Response], Response] | None = None,
+        key_request_before: Callable[[RequestModel], RequestModel] | None = None,
+        key_response_after: Callable[[Response], Response] | None = None,
+        ts_request_before: Callable[[RequestModel], RequestModel] | None = None,
+        ts_response_after: Callable[[Response], Response] | None = None,
     ):
         """
 
         Args:
             m3u8_url: m3u8 地址
             save_path: 保存路径
-            decrypt: 如果ts被加密，是否解密ts
+            is_decrypt: 如果ts被加密，是否解密ts
             max_workers: 最大并发数
             headers: 情求头
             get_m3u8_func: 处理m3u8情求的回调函数。适用于m3u8地址不是真正的地址，
@@ -131,13 +109,22 @@ class M3u8Downloader:
         if ts_response_after:
             self.ts_net.response_after_signal.connect(ts_response_after)
 
-        self.decrypt = decrypt
+        self.is_decrypt = is_decrypt
         self.m3u8_url = urlparse(m3u8_url)
         self.get_m3u8_func = get_m3u8_func
         self.save_dir = Path(save_path) / "hls"
         self.save_name = Path(save_path).name
         self.key_path = self.save_dir / "key.key"
         self.custom_key = key
+
+        # 实例变量初始化
+        self.retry_count: int = 0
+        self.retry_max_count: int = 50
+        self.ts_url_list: list = []
+        self.ts_path_list: list = []
+        self.ts_key: M3u8Key | None = None
+        self.mp4_head_url: str | None = None
+        self.m3u8_md5: str = ""
 
         if not self.save_dir.exists():
             self.save_dir.mkdir(parents=True)
@@ -154,15 +141,18 @@ class M3u8Downloader:
     async def start(self, merge=True, del_hls=False):
         """
         下载器启动函数
-        :param merge: ts下载完后是否合并，默认合并
-        :param del_hls: 是否删除hls系列文件，包括.m3u8文件、*.ts、.key文件
-        :return:
+        Args:
+            merge: ts下载完后是否合并，默认合并
+            del_hls: 是否删除hls系列文件，包括.m3u8文件、*.ts、.key文件
+
+        Returns:
+
         """
         mp4_path = self.save_dir.parent / f"{self.save_name}.mp4"
         mp4_path = mp4_path.absolute()
-        if Path(mp4_path).exists():
+        if mp4_path.exists():
             self.logger.info(f"{mp4_path}已存在")
-            if del_hls:
+            if del_hls and self.save_dir.exists():
                 shutil.rmtree(str(self.save_dir))
             return True
 
@@ -188,7 +178,7 @@ class M3u8Downloader:
             if self.retry_count < self.retry_max_count:
                 self.retry_count += 1
                 self.logger.error(f"正在进行重试：{self.retry_count}/{self.retry_max_count}")
-                return self.start(merge, del_hls)
+                return await self.start(merge, del_hls)
             return False
 
         if not merge:
@@ -201,24 +191,30 @@ class M3u8Downloader:
                 f"mp4合并失败. ts应该下载数量为：{count_1}, 实际下载数量为：{count_2}. 保存路径为：{self.save_dir}"
             )
             return False
+
         if del_hls:
             shutil.rmtree(str(self.save_dir))
+
         return True
 
     async def _download(self):
         """
         下载ts文件、m3u8文件、key文件
-        :return:
+        Returns:
+
         """
         self.ts_url_list = await self.get_ts_list(self.m3u8_url)
         self.ts_path_list = [None] * len(self.ts_url_list)
         await asyncio.gather(*[self._download_ts(url) for url in self.ts_url_list])
 
-    async def get_ts_list(self, url) -> list[dict]:
+    async def get_ts_list(self, url: ParseResult) -> list[dict]:
         """
         解析m3u8并保存至列表
-        :param url:
-        :return:
+        Args:
+            url: m3u8地址
+
+        Returns:
+
         """
         resp = await self.m3u8_net.get(url.geturl(), headers=self.headers)
         m3u8_text = self.get_m3u8_func(resp.text) if self.get_m3u8_func else resp.text
@@ -245,7 +241,7 @@ class M3u8Downloader:
         if segment_map_count > 0:
             if segment_map_count > 1:
                 raise ValueError("暂不支持segment_map有多个的情况，请提交issues，并告知m3u8的地址，方便做适配")
-            self.mp4_head_hrl = prefix + m3u8_obj.segment_map[0].uri
+            self.mp4_head_url = prefix + m3u8_obj.segment_map[0].uri
             m3u8_obj.segment_map[0].uri = "head.mp4"
 
         # 遍历ts文件
@@ -281,32 +277,40 @@ class M3u8Downloader:
     async def _download_ts(self, ts_item: dict):
         """
         下载ts
-        :param ts_item: ts 数据
-        :return:
+        Args:
+            ts_item: ts数据
+
+        Returns:
+
         """
         index = ts_item["index"]
         ts_uri = ts_item["uri"]
         ts_path = self.save_dir / f"{index}.ts"
-        if Path(ts_path).exists():
+
+        if ts_path.exists():
             self.ts_path_list[index] = str(ts_path)
             return
+
         resp = await self.ts_net.get(ts_item["uri"], self.headers)
         ts_content = resp.content
         if ts_content is None:
             return
 
-        if self.ts_key and self.decrypt:
+        if self.ts_key and self.is_decrypt:
             ts_content = crypto.decrypt_aes_256_cbc(ts_content, self.ts_key.key, self.ts_key.iv)
 
         self.save_file(ts_content, ts_path)
         self.logger.info(f"{ts_uri}下载成功")
         self.ts_path_list[index] = str(ts_path)
 
-    async def merge(self):
+    async def merge(self) -> bool:
         """
         合并ts文件为mp4文件
-        :return:
+
+        Returns:
+            返回是否合并成功
         """
+
         self.logger.info("开始合并mp4")
         if len(self.ts_path_list) != len(self.ts_url_list):
             self.logger.error("数量不足拒绝合并！")
@@ -322,47 +326,99 @@ class M3u8Downloader:
 
         # 如果有mp4的头，则把ts放到后面
         mp4_head_data = b""
-        if self.mp4_head_hrl:
-            resp = await self.ts_net.get(self.mp4_head_hrl)
+        if self.mp4_head_url:
+            resp = await self.ts_net.get(self.mp4_head_url)
             mp4_head_data = resp.content
             mp4_head_file = self.save_dir / "head.mp4"
             mp4_head_file.write_bytes(mp4_head_data)
 
         # 把ts文件整合到一起
-        big_ts_file = big_ts_path.open("ab+")
-        big_ts_file.write(mp4_head_data)
-        for path in self.ts_path_list:
-            with open(path, "rb") as ts_file:
-                data = ts_file.read()
-                if self.ts_key:
-                    data = crypto.decrypt_aes_256_cbc(data, self.ts_key.key, self.ts_key.iv)
-                big_ts_file.write(data)
-        big_ts_file.close()
+        with big_ts_path.open("ab+") as big_ts_file:
+            big_ts_file.write(mp4_head_data)
+            for path in self.ts_path_list:
+                with open(path, "rb") as ts_file:
+                    data = ts_file.read()
+                    if self.ts_key:
+                        data = crypto.decrypt_aes_256_cbc(data, self.ts_key.key, self.ts_key.iv)
+                    big_ts_file.write(data)
         self.logger.info("ts文件整合完毕")
 
         # 把大的ts文件转换成mp4文件
-        ffmpeg_bin = get_ffmpeg()
-        command = (
-            f'{ffmpeg_bin} -i "{big_ts_path}" '
-            f'-c copy -map 0:v -map 0:a? -bsf:a aac_adtstoasc -threads 32 "{mp4_path}" -y'
-        )
-        self.logger.info(f"ts整合成功，开始转为mp4。 command：{command}")
-        result = subprocess.run(command, shell=True, capture_output=True, text=True)
-        if result.returncode != 0:
-            logger.error(f"命令执行失败: {result.stderr or result.stdout}")
+        self.logger.info(f"ts整合成功，开始转为mp4。 ts路径：{big_ts_path} mp4路径：{mp4_path}")
+        result = self.ts_to_mp4(big_ts_path, mp4_path)
+        if not result:
+            self.logger.error("ts转mp4失败！")
+            return False
 
-        if Path(mp4_path).exists():
-            big_ts_path.unlink()
-        return Path(mp4_path).exists()
+        # 删除完整ts文件
+        big_ts_path.unlink()
+        return True
 
     @staticmethod
-    def save_file(content: bytes | str, filepath):
+    def save_file(content: bytes | str, filepath: Path | str):
         """
         保存内容到文件
-        :param content: 内容
-        :param filepath: 文件路径
-        :return:
+        Args:
+            content: 内容
+            filepath: 文件路径
+
+        Returns:
+
         """
         mode = "wb" if isinstance(content, bytes) else "w"
         with open(file=filepath, mode=mode) as file:
             file.write(content)
+
+    @staticmethod
+    def ts_to_mp4(ts_path: Path, mp4_path: Path) -> bool:
+        """
+        将 TS 转为 MP4 (stream copy,不重编码)
+        Args:
+            ts_path: ts 视频文件路径
+            mp4_path: mp4 视频文件路径
+
+        Returns:
+            返回是否转换成功：mp4路径存在并且是一个文件并且大小大于0
+        """
+        if not ts_path.exists():
+            raise FileNotFoundError("ts文件不存在")
+
+        if not mp4_path.parent.exists():
+            mp4_path.parent.mkdir(parents=True)
+
+        with av.open(str(ts_path)) as input_container, av.open(str(mp4_path), "w") as output_container:
+            # 映射视频流
+            out_stream = None
+            if input_container.streams.video:
+                in_stream = input_container.streams.video[0]
+                out_stream = output_container.add_stream(in_stream.codec_context.name)
+                out_stream.width = in_stream.codec_context.width
+                out_stream.height = in_stream.codec_context.height
+                out_stream.pix_fmt = in_stream.codec_context.pix_fmt
+                if in_stream.average_rate:
+                    out_stream.rate = in_stream.average_rate
+
+            # 映射音频流 (如果存在)
+            out_audio = None
+            if input_container.streams.audio:
+                in_audio = input_container.streams.audio[0]
+                out_audio = output_container.add_stream(in_audio.codec_context.name)
+                out_audio.rate = in_audio.codec_context.sample_rate  # type: ignore
+                if in_audio.codec_context.layout:
+                    out_audio.layout = in_audio.codec_context.layout  # type: ignore
+                if in_audio.codec_context.format:
+                    out_audio.format = in_audio.codec_context.format  # type: ignore
+
+            # Stream copy - 直接复制数据包,不重编码
+            for packet in input_container.demux():
+                if packet.dts is None:
+                    continue
+
+                if packet.stream.type == "video" and out_stream:
+                    packet.stream = out_stream
+                    output_container.mux(packet)
+                elif packet.stream.type == "audio" and out_audio:
+                    packet.stream = out_audio
+                    output_container.mux(packet)
+
+        return mp4_path.exists() and mp4_path.is_file() and mp4_path.stat().st_size > 0
