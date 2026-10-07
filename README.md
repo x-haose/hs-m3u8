@@ -8,7 +8,7 @@ m3u8 视频下载工具。支持大部分的m3u8视频下载。后续增加UI界
 - 自动选择高分辨m3u8
 - 合并MP4
 - 可选择保留ts文件
-- 内置Windows平台ffmpeg可执行文件（由于Linux及Mac下权限问题，需自行安装ffmpeg文件）
+- 合并使用 PyAV（wheel 内置 FFmpeg），无需另装 ffmpeg
 
 ## 计划
 
@@ -35,7 +35,7 @@ pip install hs-m3u8
 url = "https://surrit.com/6d3bb2b2-d707-4b79-adf0-89542cb1383c/playlist.m3u8"
 name = "SDAB-129"
 dl = M3u8Downloader(
-    url=url,
+    m3u8_url=url,
     save_path=f"downloads/{name}",
     max_workers=64
 )
@@ -47,12 +47,12 @@ await dl.run(del_hls=False, merge=True)
 
 ## 开发
 
-### 先安装rye
+### 先安装uv
 
-rye网站：https://rye.astral.sh/
+uv网站：https://docs.astral.sh/uv/
 
-### 使用rye 安装包及虚拟环境
+### 使用uv 安装包及虚拟环境
 
 ```bash
-rye sync
+uv sync
 ```
