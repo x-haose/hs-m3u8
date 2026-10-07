@@ -1,6 +1,6 @@
 [project]
 name = "hs-m3u8"
-version = "0.1.8"
+dynamic = ["version"]
 description = "m3u8 下载器"
 authors = [
     { name = "昊色居士", email = "xhrtxh@gmail.com" }
@@ -27,6 +27,8 @@ requires-python = ">= 3.10"
 dependencies = [
     "m3u8>=6.0.0",
     "hssp>=0.4.18",
+    "av>=16.0.1",
+    "loguru>=0.7.3",
 ]
 
 [dependency-groups]
@@ -43,6 +45,9 @@ documentation = "https://github.com/x-haose/hs-m3u8"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/hs_m3u8/__init__.py"
 
 [tool.hatch.build.targets.sdist]
 include = [

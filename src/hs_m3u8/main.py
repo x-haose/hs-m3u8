@@ -372,9 +372,9 @@ class M3u8Downloader:
     @staticmethod
     def ts_to_mp4(ts_path: Path, mp4_path: Path) -> bool:
         """
-        将 TS 转为 MP4 (stream copy,不重编码)
+        将 TS 或拼接后的 fMP4 转为 MP4 (stream copy,不重编码)
         Args:
-            ts_path: ts 视频文件路径
+            ts_path: 输入视频文件路径，TS 或 init 段加分片拼接成的 fMP4
             mp4_path: mp4 视频文件路径
 
         Returns:
@@ -387,38 +387,17 @@ class M3u8Downloader:
             mp4_path.parent.mkdir(parents=True)
 
         with av.open(str(ts_path)) as input_container, av.open(str(mp4_path), "w") as output_container:
-            # 映射视频流
-            out_stream = None
-            if input_container.streams.video:
-                in_stream = input_container.streams.video[0]
-                out_stream = output_container.add_stream(in_stream.codec_context.name)
-                out_stream.width = in_stream.codec_context.width
-                out_stream.height = in_stream.codec_context.height
-                out_stream.pix_fmt = in_stream.codec_context.pix_fmt
-                if in_stream.average_rate:
-                    out_stream.rate = in_stream.average_rate
-
-            # 映射音频流 (如果存在)
-            out_audio = None
-            if input_container.streams.audio:
-                in_audio = input_container.streams.audio[0]
-                out_audio = output_container.add_stream(in_audio.codec_context.name)
-                out_audio.rate = in_audio.codec_context.sample_rate  # type: ignore
-                if in_audio.codec_context.layout:
-                    out_audio.layout = in_audio.codec_context.layout  # type: ignore
-                if in_audio.codec_context.format:
-                    out_audio.format = in_audio.codec_context.format  # type: ignore
+            # 取第一路视频和第一路音频，按输入流的完整编码参数（含 extradata）建输出流；
+            # fMP4 的 SPS/PPS 只存在于 extradata，不复制就无法解码
+            in_streams = [*input_container.streams.video[:1], *input_container.streams.audio[:1]]
+            out_streams = {s.index: output_container.add_stream_from_template(s) for s in in_streams}
 
             # Stream copy - 直接复制数据包,不重编码
-            for packet in input_container.demux():
+            for packet in input_container.demux(*in_streams):
                 if packet.dts is None:
                     continue
 
-                if packet.stream.type == "video" and out_stream:
-                    packet.stream = out_stream
-                    output_container.mux(packet)
-                elif packet.stream.type == "audio" and out_audio:
-                    packet.stream = out_audio
-                    output_container.mux(packet)
+                packet.stream = out_streams[packet.stream.index]
+                output_container.mux(packet)
 
         return mp4_path.exists() and mp4_path.is_file() and mp4_path.stat().st_size > 0
