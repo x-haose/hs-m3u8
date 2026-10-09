@@ -88,8 +88,7 @@ pub enum Error {
     Cancelled,
 }
 
-/// 包装的错误里的原因；原因的地址与外层已显示的 `shown` 相同时不再重复（回调改写或重定向后两者会不同，
-/// 那时照常显示）。
+/// 包装的错误里的原因；原因的地址显示出来（只到路径）与外层的相同时不再重复，回调改写路径或重定向后照常显示。
 struct CauseText<'a> {
     cause: &'a Error,
     shown: &'a Url,
@@ -101,11 +100,10 @@ fn cause_text<'a>(cause: &'a Error, shown: &'a Url) -> CauseText<'a> {
 
 impl fmt::Display for CauseText<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let same = |url: &Url| bare_url(url) == bare_url(self.shown);
         match self.cause {
-            Error::Http { url, kind, .. } if **url == *self.shown => write!(f, "{kind}"),
-            Error::Integrity { url, kind } if **url == *self.shown => {
-                write!(f, "数据校验失败：{kind}")
-            }
+            Error::Http { url, kind, .. } if same(url) => write!(f, "{kind}"),
+            Error::Integrity { url, kind } if same(url) => write!(f, "数据校验失败：{kind}"),
             other => write!(f, "{other}"),
         }
     }
