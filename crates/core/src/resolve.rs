@@ -10,14 +10,13 @@ use url::Url;
 use crate::hooks::{HookKind, Hooks, Purpose, run_hook};
 use crate::http::{Http, Permit};
 use crate::request::JobRequest;
-use crate::selection::SelectionKey;
+use crate::selection::{SelectionKey, track_streams};
 use crate::{Error, Unsupported};
 
-/// 解析得到的一条轨：媒体播放列表的地址、取流方式与首次拉到的内容。
+/// 解析得到的一条轨：媒体播放列表的地址与首次拉到的内容。
 /// 第 0 条为所选变体，第 1 条（若有）为独立的音频 rendition。
 pub(crate) struct ResolvedTrack {
     pub url: Url,
-    pub streams: Streams,
     pub playlist: MediaPlaylist,
 }
 
@@ -36,7 +35,7 @@ impl Resolved {
 
     /// 各轨的取流方式。
     pub(crate) fn streams(&self) -> Vec<Streams> {
-        self.tracks.iter().map(|t| t.streams).collect()
+        track_streams(self.selection.as_ref())
     }
 }
 
@@ -54,7 +53,6 @@ pub(crate) async fn resolve(
             Playlist::Media(playlist) => Resolved {
                 tracks: vec![ResolvedTrack {
                     url: request.url.clone(),
-                    streams: Streams::All,
                     playlist,
                 }],
                 selection: None,
@@ -67,24 +65,14 @@ pub(crate) async fn resolve(
                     },
                     None => hls::select(&master, &request.preference)?,
                 };
-                let key = SelectionKey::of(&selection);
-                // 选了独立音频 rendition 时，变体里混着的音频不用，与播放器的行为一致
-                let main = match selection.audio {
-                    Some(_) => Streams::Video,
-                    None => Streams::All,
-                };
+                let key = SelectionKey::of(&selection, &master);
                 let url = selection.variant.uri;
                 let playlist = fetch_media(http, hooks, &url, cancel).await?;
-                let mut tracks = vec![ResolvedTrack {
-                    url,
-                    streams: main,
-                    playlist,
-                }];
+                let mut tracks = vec![ResolvedTrack { url, playlist }];
                 if let Some(audio) = selection.audio {
                     let playlist = fetch_media(http, hooks, &audio.uri, cancel).await?;
                     tracks.push(ResolvedTrack {
                         url: audio.uri,
-                        streams: Streams::Audio,
                         playlist,
                     });
                 }

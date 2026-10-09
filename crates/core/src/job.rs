@@ -54,7 +54,7 @@ pub(crate) async fn run(
     // 即使播放列表已出现 ENDLIST（中断期间直播结束了）
     let recorded = read_record(root.clone())
         .await?
-        .filter(|r| r.source == source);
+        .filter(|r| r.source_digest == source);
     let continuing_live = recorded
         .as_ref()
         .is_some_and(|r| matches!(r.kind, RecordKind::Live { .. }));
@@ -79,11 +79,10 @@ async fn run_live(task: Task, source: String, resolved: Resolved) -> Result<Outp
         .live
         .ok_or(Error::Unsupported(Unsupported::Live))?;
     let record = JobRecord {
-        source,
+        source_digest: source,
         selection: resolved.selection.clone(),
-        streams: resolved.streams(),
         kind: RecordKind::Live {
-            url: url_digest(&task.request.url),
+            url_digest: url_digest(&task.request.url),
         },
     };
     let dir = WorkDir::open(task.request.resolved_work_dir(), record.clone()).await?;
@@ -98,8 +97,9 @@ async fn run_live(task: Task, source: String, resolved: Resolved) -> Result<Outp
         stop: &task.stop,
     };
     let recording = live::record(ctx, resolved.tracks, options, &record).await?;
-    let stored = dir.scan(record.streams.len()).await?;
-    let input = merge_live(&dir, &stored, record.streams, Some(recording))?;
+    let streams = record.streams();
+    let stored = dir.scan(streams.len()).await?;
+    let input = merge_live(&dir, &stored, streams, Some(recording))?;
     task.finish(dir, input).await
 }
 
@@ -109,11 +109,10 @@ async fn run_vod(task: Task, source: String, resolved: Resolved) -> Result<Outpu
     let selection = resolved.selection.clone();
     let plan = Plan::new(resolved.tracks)?;
     let record = JobRecord {
-        source,
+        source_digest: source,
         selection,
-        streams,
         kind: RecordKind::Vod {
-            plan: plan.digest(),
+            plan_digest: plan.digest(),
         },
     };
     let dir = WorkDir::open(task.request.resolved_work_dir(), record.clone()).await?;
@@ -128,7 +127,7 @@ async fn run_vod(task: Task, source: String, resolved: Resolved) -> Result<Outpu
     )
     .await?;
     let input = MergeInput {
-        streams: record.streams,
+        streams,
         groups,
         segments: plan.segment_count(),
         live: None,
@@ -146,16 +145,17 @@ async fn merge_only(task: Task) -> Result<Output, Error> {
     else {
         return Err(Error::NothingRecorded);
     };
-    if record.source != source_digest(&request.url, &request.preference) {
+    if record.source_digest != source_digest(&request.url, &request.preference) {
         return Err(Error::WorkDir {
             path: root,
             problem: WorkDirProblem::SourceMismatch,
         });
     }
     let dir = WorkDir::open(root, record.clone()).await?;
-    let stored = dir.scan(record.streams.len()).await?;
+    let streams = record.streams();
+    let stored = dir.scan(streams.len()).await?;
     live::count_stored(&stored, &task.progress);
-    let input = merge_live(&dir, &stored, record.streams, None)?;
+    let input = merge_live(&dir, &stored, streams, None)?;
     task.finish(dir, input).await
 }
 

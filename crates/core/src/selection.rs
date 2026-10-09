@@ -4,6 +4,7 @@
 use hs_m3u8_hls::{
     MasterPlaylist, Rendition, RenditionKind, Resolution, SelectedAudio, Selection, Variant,
 };
+use hs_m3u8_remux::Streams;
 
 /// 一次选轨的身份。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,9 +14,17 @@ pub(crate) struct SelectionKey {
     pub audio: Option<RenditionKey>,
 }
 
-/// 变体的属性；地址常带令牌，不作身份。
+/// 变体的身份：属性，以及属性完全相同的变体里排第几。地址常带令牌，不作身份。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct VariantKey {
+    pub attributes: VariantAttributes,
+    /// 主播放列表中属性与它完全相同的变体里排第几（从 0 起）；冗余流（RFC 8216 6.2.3）的属性完全相同
+    pub occurrence: usize,
+}
+
+/// 变体的属性。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VariantAttributes {
     pub bandwidth: Option<u64>,
     pub resolution: Option<Resolution>,
     pub codecs: Vec<String>,
@@ -31,9 +40,23 @@ pub(crate) struct RenditionKey {
 }
 
 impl SelectionKey {
-    pub(crate) fn of(selection: &Selection) -> Self {
+    /// `selection` 为从 `master` 中选出的轨。
+    pub(crate) fn of(selection: &Selection, master: &MasterPlaylist) -> Self {
+        let position = master
+            .variants
+            .iter()
+            .position(|v| *v == selection.variant)
+            .expect("所选变体来自这份主播放列表");
+        let attributes = VariantAttributes::of(&selection.variant);
+        let occurrence = master.variants[..position]
+            .iter()
+            .filter(|v| VariantAttributes::of(v) == attributes)
+            .count();
         SelectionKey {
-            variant: VariantKey::of(&selection.variant),
+            variant: VariantKey {
+                attributes,
+                occurrence,
+            },
             audio: selection
                 .audio
                 .as_ref()
@@ -41,12 +64,13 @@ impl SelectionKey {
         }
     }
 
-    /// 在 `master` 中找回这次选轨；属性相同的变体有多个时取第一个。找不到时为 None。
+    /// 在 `master` 中找回这次选轨；找不到时为 None。
     pub(crate) fn find(&self, master: &MasterPlaylist) -> Option<Selection> {
         let variant = master
             .variants
             .iter()
-            .find(|v| VariantKey::of(v) == self.variant)?;
+            .filter(|v| VariantAttributes::of(v) == self.variant.attributes)
+            .nth(self.variant.occurrence)?;
         let audio = match &self.audio {
             None => None,
             Some(key) => {
@@ -66,14 +90,23 @@ impl SelectionKey {
     }
 }
 
-impl VariantKey {
+impl VariantAttributes {
     fn of(variant: &Variant) -> Self {
-        VariantKey {
+        VariantAttributes {
             bandwidth: variant.bandwidth,
             resolution: variant.resolution,
             codecs: variant.codecs.clone(),
             audio_group: variant.audio.clone(),
         }
+    }
+}
+
+/// 各轨的取流方式：选了独立音频 rendition 时，第 0 条轨只取视频（变体里混着的音频不用，与播放器一致），
+/// 第 1 条轨取音频；否则只有一条轨，全取。来源本身是媒体播放列表时 `selection` 为 None。
+pub(crate) fn track_streams(selection: Option<&SelectionKey>) -> Vec<Streams> {
+    match selection.and_then(|s| s.audio.as_ref()) {
+        Some(_) => vec![Streams::Video, Streams::Audio],
+        None => vec![Streams::All],
     }
 }
 
@@ -89,7 +122,7 @@ impl RenditionKey {
 
 #[cfg(test)]
 mod tests {
-    use hs_m3u8_hls::{Playlist, Preference, Url, parse, select};
+    use hs_m3u8_hls::{Playlist, Preference, Url, VariantChoice, parse, select};
 
     use super::*;
 
@@ -107,7 +140,7 @@ mod tests {
     #[test]
     fn selection_is_found_again_after_variants_are_added_and_tokens_change() {
         let before = master(&format!("#EXTM3U\n{AUDIO}{LOW}"));
-        let key = SelectionKey::of(&select(&before, &Preference::default()).unwrap());
+        let key = SelectionKey::of(&select(&before, &Preference::default()).unwrap(), &before);
 
         // 多了一个更高的变体，地址的令牌也换了：按 Best 会选到新变体，按记录仍是原来那个
         let after = master(&format!(
@@ -126,7 +159,7 @@ mod tests {
     #[test]
     fn missing_variant_or_rendition_is_not_found() {
         let before = master(&format!("#EXTM3U\n{AUDIO}{LOW}"));
-        let key = SelectionKey::of(&select(&before, &Preference::default()).unwrap());
+        let key = SelectionKey::of(&select(&before, &Preference::default()).unwrap(), &before);
         let without_variant = master(&format!(
             "#EXTM3U\n{AUDIO}{}",
             LOW.replace("BANDWIDTH=1000", "BANDWIDTH=2000")
@@ -137,5 +170,22 @@ mod tests {
             AUDIO.replace("\"en\"", "\"fr\"")
         ));
         assert_eq!(key.find(&without_audio), None);
+    }
+
+    #[test]
+    fn redundant_variants_are_told_apart_by_position() {
+        let redundant = "#EXT-X-STREAM-INF:BANDWIDTH=1000,RESOLUTION=640x360\na/v.m3u8\n\
+                         #EXT-X-STREAM-INF:BANDWIDTH=1000,RESOLUTION=640x360\nb/v.m3u8\n";
+        let m = master(&format!("#EXTM3U\n{redundant}"));
+        for index in [0, 1] {
+            let preference = Preference {
+                variant: VariantChoice::Index(index),
+                audio_language: None,
+            };
+            let selection = select(&m, &preference).unwrap();
+            let key = SelectionKey::of(&selection, &m);
+            assert_eq!(key.variant.occurrence, index);
+            assert_eq!(key.find(&m).unwrap().variant.uri, selection.variant.uri);
+        }
     }
 }

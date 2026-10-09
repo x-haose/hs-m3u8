@@ -301,6 +301,69 @@ async fn failure_then_resume() {
     assert_eq!(server.hits("seg0.ts"), 1);
 }
 
+/// CDN 在路径里放每次会话不同的令牌：续传时分片的地址都变了，但身份（地址最后一段）不变，照常续传。
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_survives_tokens_in_the_path() {
+    let dir = test_dir("resume_path_token");
+    let server = Server::start().await;
+    let playlist = |token: &str| {
+        format!(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\n{token}/seg0.ts\n\
+             #EXTINF:1,\n{token}/seg1.ts\n#EXT-X-ENDLIST\n"
+        )
+    };
+    server.put("tok1/seg0.ts", fixture("ts_a/seg0.ts"));
+    server.put("index.m3u8", playlist("tok1"));
+    let req = request(server.url("index.m3u8"), &dir);
+    assert!(run(req.clone()).await.is_err());
+
+    for name in TS_A {
+        server.put(&format!("tok2/{name}"), fixture(&format!("ts_a/{name}")));
+    }
+    server.put("index.m3u8", playlist("tok2"));
+    let output = run(req).await.unwrap();
+
+    let want = expected_ts_a(&dir);
+    assert_output(&output, &want);
+    assert_eq!(server.hits("tok2/seg0.ts"), 0);
+}
+
+/// 主播放列表里有两个属性完全相同的变体（冗余流）：续传选回上次那个，不会因为换了一个而判定计划变了。
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_finds_the_same_redundant_variant() {
+    let dir = test_dir("resume_redundant");
+    let server = Server::start().await;
+    for host in ["a", "b"] {
+        for name in TS_A {
+            server.put(&format!("{host}/{name}"), fixture(&format!("ts_a/{name}")));
+        }
+        server.put(
+            &format!("{host}/v.m3u8"),
+            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n\
+             #EXT-X-ENDLIST\n",
+        );
+    }
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=160x90\na/v.m3u8\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=160x90\nb/v.m3u8\n",
+    );
+    let req = request(server.url("master.m3u8"), &dir);
+    // 两者相同时按最佳选到后一个；并发为 1，seg1 的请求到达时 seg0 已写完
+    let gate = server.gate("b/seg1.ts");
+    let job = engine().start(req.clone()).unwrap();
+    gate.arrived.notified().await;
+    job.cancel();
+    assert!(matches!(job.wait().await, Err(Error::Cancelled)));
+    server.ungate("b/seg1.ts");
+
+    let output = run(req).await.unwrap();
+
+    let want = expected_ts_a(&dir);
+    assert_output(&output, &want);
+    assert_eq!((server.hits("a/seg0.ts"), server.hits("b/seg0.ts")), (0, 1));
+}
+
 /// 取消在途任务；运行期间同一任务目录不能被第二个任务使用；取消后续传。
 #[tokio::test(flavor = "multi_thread")]
 async fn cancel_lock_and_resume() {
