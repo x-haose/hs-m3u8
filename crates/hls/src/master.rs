@@ -54,8 +54,8 @@ pub(crate) fn parse(text: &str, url: &Url) -> Result<MasterPlaylist, Error> {
         variants: Vec::new(),
         renditions: Vec::new(),
     };
-    // 已读到 EXT-X-STREAM-INF、等待其 URI 行的变体：(行号, 变体去掉 URI 的部分)
-    let mut pending: Option<(usize, Variant)> = None;
+    // 已读到 EXT-X-STREAM-INF、等待其 URI 行：(行号, 属性)
+    let mut pending: Option<(usize, StreamInf)> = None;
 
     for line in lines(text).skip(1) {
         let at = |kind| Error::Syntax {
@@ -76,7 +76,7 @@ pub(crate) fn parse(text: &str, url: &Url) -> Result<MasterPlaylist, Error> {
                     let value = value.ok_or(at(SyntaxError::MissingValue {
                         tag: "EXT-X-STREAM-INF",
                     }))?;
-                    pending = Some((line.number, parse_stream_inf(value, url).map_err(at)?));
+                    pending = Some((line.number, parse_stream_inf(value).map_err(at)?));
                 }
                 "EXT-X-MEDIA" => {
                     let value =
@@ -88,11 +88,16 @@ pub(crate) fn parse(text: &str, url: &Url) -> Result<MasterPlaylist, Error> {
                 _ => {}
             },
             LineKind::Uri(uri) => {
-                let (_, mut variant) = pending.take().ok_or(at(SyntaxError::UriWithoutInfo {
+                let (_, info) = pending.take().ok_or(at(SyntaxError::UriWithoutInfo {
                     expected: "EXT-X-STREAM-INF",
                 }))?;
-                variant.uri = resolve(url, uri).map_err(at)?;
-                playlist.variants.push(variant);
+                playlist.variants.push(Variant {
+                    uri: resolve(url, uri).map_err(at)?,
+                    bandwidth: info.bandwidth,
+                    resolution: info.resolution,
+                    codecs: info.codecs,
+                    audio: info.audio,
+                });
             }
         }
     }
@@ -107,12 +112,18 @@ pub(crate) fn parse(text: &str, url: &Url) -> Result<MasterPlaylist, Error> {
     Ok(playlist)
 }
 
-/// 解析 STREAM-INF 的属性；`uri` 先填为播放列表自身地址，读到 URI 行后替换。
-fn parse_stream_inf(value: &str, url: &Url) -> Result<Variant, SyntaxError> {
+/// EXT-X-STREAM-INF 的属性，字段含义同 [`Variant`]。
+struct StreamInf {
+    bandwidth: Option<u64>,
+    resolution: Option<Resolution>,
+    codecs: Vec<String>,
+    audio: Option<String>,
+}
+
+fn parse_stream_inf(value: &str) -> Result<StreamInf, SyntaxError> {
     let attrs = Attributes::parse(value)?;
     let resolution = attrs.get("RESOLUTION").map(parse_resolution).transpose()?;
-    Ok(Variant {
-        uri: url.clone(),
+    Ok(StreamInf {
         bandwidth: attrs
             .get("BANDWIDTH")
             .map(|b| parse_u64("BANDWIDTH", b))

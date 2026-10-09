@@ -1,5 +1,7 @@
 //! 选轨：从主播放列表里选出要下载的视频变体与音频 rendition。
 
+use url::Url;
+
 use crate::{MasterPlaylist, Rendition, RenditionKind, Variant};
 
 /// 选轨偏好。
@@ -24,7 +26,15 @@ pub enum VariantChoice {
 pub struct Selection {
     pub variant: Variant,
     /// 独立的音频 rendition；None 表示音频混在变体流里（或没有音频）
-    pub audio: Option<Rendition>,
+    pub audio: Option<SelectedAudio>,
+}
+
+/// 有独立媒体播放列表的音频 rendition。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedAudio {
+    /// 该 rendition 的媒体播放列表地址
+    pub uri: Url,
+    pub rendition: Rendition,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -77,7 +87,7 @@ fn select_audio(
     master: &MasterPlaylist,
     variant: &Variant,
     preference: &Preference,
-) -> Result<Option<Rendition>, SelectError> {
+) -> Result<Option<SelectedAudio>, SelectError> {
     let Some(group) = &variant.audio else {
         return Ok(None);
     };
@@ -106,5 +116,10 @@ fn select_audio(
         ),
         None => candidates.iter().find(|r| r.default).or(candidates.first()),
     };
-    Ok(chosen.filter(|r| r.uri.is_some()).map(|r| (*r).clone()))
+    Ok(chosen.and_then(|r| {
+        Some(SelectedAudio {
+            uri: r.uri.clone()?,
+            rendition: (*r).clone(),
+        })
+    }))
 }

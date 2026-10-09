@@ -335,3 +335,45 @@ fn malformed_input_is_reported_with_its_line() {
         }
     );
 }
+
+#[test]
+fn numbers_that_would_overflow_are_rejected() {
+    let max = u64::MAX;
+    assert_eq!(
+        error(&format!(
+            "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:{max}\n#EXTINF:4,\na.ts\n#EXTINF:4,\nb.ts\n"
+        )),
+        Error::Syntax {
+            line: 6,
+            kind: SyntaxError::SequenceOverflow
+        }
+    );
+    assert_eq!(
+        error(&format!(
+            "#EXTM3U\n#EXT-X-DISCONTINUITY-SEQUENCE:{max}\n#EXT-X-DISCONTINUITY\n#EXTINF:4,\na.ts\n"
+        )),
+        Error::Syntax {
+            line: 5,
+            kind: SyntaxError::SequenceOverflow
+        }
+    );
+    // 字节范围的结束位置要能用 u64 表示，Range 请求头才拼得出来
+    assert_eq!(
+        error(&format!(
+            "#EXTM3U\n#EXT-X-BYTERANGE:2@{max}\n#EXTINF:4,\na.ts\n"
+        )),
+        Error::Syntax {
+            line: 2,
+            kind: SyntaxError::ByteRange(format!("2@{max}"))
+        }
+    );
+    assert_eq!(
+        error(&format!(
+            "#EXTM3U\n#EXT-X-MAP:URI=\"i.mp4\",BYTERANGE=\"2@{max}\"\n#EXTINF:4,\na.m4s\n"
+        )),
+        Error::Syntax {
+            line: 2,
+            kind: SyntaxError::ByteRange(format!("2@{max}"))
+        }
+    );
+}
