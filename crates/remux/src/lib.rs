@@ -1,7 +1,7 @@
 //! 转封装：把 HLS 各条轨的分片原样复制（不重编码）进一个 MP4。
 //!
 //! 输入按不连续段组（两个 `EXT-X-DISCONTINUITY` 之间）组织，每组里每条轨一份分片列表，fMP4 另带 init 段。
-//! - 组内：分片经 FFmpeg 的 concatf 协议按字节顺序读取，不先拼成大文件。
+//! - 组内：分片按字节顺序当作一个连续的输入读取，同一时刻只打开一个文件，不先拼成大文件。
 //! - 组间：整组使用同一个时间偏移，保留组内各轨（如视频与独立音频 rendition）原有的相对时序；
 //!   各组首尾相接，下一组从上一组所有流的最晚结束时刻之后开始。
 //! - 每条轨按调用方指定的 [`Streams`] 贡献第一路视频和（或）第一路音频，未指定种类的流不进输出、
@@ -11,6 +11,7 @@
 //! 输出先写 `<输出>.part`，写完回读核对每路流的包数后改名；任一步失败都删除临时文件并返回错误。
 //! 已存在的输出文件会被替换。错误信息已包含原因，不再经 `source()` 链出同一段文字。
 
+mod chain;
 mod ffi;
 
 use std::collections::VecDeque;
@@ -20,8 +21,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use ffmpeg::format::context::StreamIo;
 use ffmpeg::{Dictionary, Packet, Rational, Rescale, Rounding, codec, encoder, format, media};
 use ffmpeg_next as ffmpeg;
+
+use crate::chain::{SegmentChain, ffmpeg_path};
 
 /// 时间戳在组间换算时使用的公共时间基（微秒）。
 const MICROS: Rational = Rational(1, 1_000_000);
@@ -175,7 +179,7 @@ pub enum Error {
     EmptyTrack { group: usize, track: usize },
     #[error("第 {group} 组读不出任何视频或音频包")]
     EmptyGroup { group: usize },
-    #[error("路径不是有效的 UTF-8：{0}")]
+    #[error("输出路径无法交给 FFmpeg（不是有效的 UTF-8 或含 NUL 字符）：{}", .0.display())]
     NonUtf8Path(PathBuf),
     #[error("打开第 {group} 组第 {track} 条轨失败：{cause}")]
     OpenInput {
@@ -251,6 +255,9 @@ pub fn remux(
     init()?;
     validate(streams, groups)?;
     let part = with_suffix(output, ".part");
+    if ffmpeg_path(&part).is_none() {
+        return Err(Error::NonUtf8Path(output.to_path_buf()));
+    }
     write_verified(streams, groups, &part)
         .and_then(|report| {
             std::fs::rename(&part, output).map_err(|cause| Error::Io {
@@ -319,53 +326,43 @@ fn discard(path: &Path, failure: Error) -> Error {
     }
 }
 
-/// concatf 列表中的一行：单引号包裹的 `file:` URL。FFmpeg 按 av_get_token 解析，引号外的 `\` 是转义符，
-/// 引号内原样保留，因此 Windows 路径的反斜杠必须在引号内；路径自身的单引号写成 `'\''`。
-fn concatf_line(path: &Path) -> Result<String, Error> {
-    let absolute = std::path::absolute(path).map_err(|cause| Error::Io {
-        action: "解析绝对路径",
-        path: path.to_path_buf(),
-        cause,
-    })?;
-    let text = absolute
-        .to_str()
-        .ok_or_else(|| Error::NonUtf8Path(absolute.clone()))?;
-    Ok(format!("'file:{}'\n", text.replace('\'', r"'\''")))
-}
-
-/// 用 concatf 打开一条轨在一组里的全部分片（init 段在前）。列表文件写在 `list` 处，打开后即删除。
+/// 打开一条轨在一组里的全部分片（init 段在前），当作一个连续的输入。返回输入与记录文件错误的位置。
 fn open_track(
     segments: &TrackSegments,
-    list: &Path,
     group: usize,
     track: usize,
-) -> Result<format::context::Input, Error> {
-    let mut content = String::new();
-    for path in segments.init.iter().chain(&segments.segments) {
-        content.push_str(&concatf_line(path)?);
-    }
-    std::fs::write(list, content).map_err(|cause| Error::Io {
-        action: "写入",
-        path: list.to_path_buf(),
+) -> Result<(format::context::Input, chain::Failure), Error> {
+    let paths: Vec<PathBuf> = segments
+        .init
+        .iter()
+        .chain(&segments.segments)
+        .cloned()
+        .collect();
+    let (chain, failure) = SegmentChain::new(paths).map_err(|(path, cause)| Error::Io {
+        action: "读取",
+        path,
         cause,
     })?;
-    let list_url = list
-        .to_str()
-        .ok_or_else(|| Error::NonUtf8Path(list.to_path_buf()))?;
-    let opened = format::input(&format!("concatf:{list_url}")).map_err(|cause| Error::OpenInput {
-        group,
-        track,
-        cause: cause.into(),
-    });
-    match (opened, std::fs::remove_file(list)) {
-        (Ok(ictx), Ok(())) => Ok(ictx),
-        (Ok(_), Err(cause)) => Err(Error::Io {
-            action: "删除",
-            path: list.to_path_buf(),
-            cause,
-        }),
-        (Err(failure), _) => Err(discard(list, failure)),
-    }
+    let opened = StreamIo::from_read_seek(chain)
+        .and_then(|io| format::input_from_stream(io, None, None))
+        .map_err(|cause| {
+            read_failure(&failure).unwrap_or(Error::OpenInput {
+                group,
+                track,
+                cause: cause.into(),
+            })
+        })?;
+    Ok((opened, failure))
+}
+
+/// 分片链记下的文件错误；FFmpeg 只拿到错误码，这里换回带路径的原始错误。
+fn read_failure(failure: &chain::Failure) -> Option<Error> {
+    let (path, cause) = failure.lock().unwrap_or_else(|p| p.into_inner()).take()?;
+    Some(Error::Io {
+        action: "读取",
+        path,
+        cause,
+    })
 }
 
 /// 一条轨在某组中被选中的一路流。
@@ -380,11 +377,10 @@ struct Selected {
 fn open_selected(
     segments: &TrackSegments,
     wanted: Streams,
-    list: &Path,
     group: usize,
     track: usize,
-) -> Result<(format::context::Input, Vec<Selected>), Error> {
-    let ictx = open_track(segments, list, group, track)?;
+) -> Result<(format::context::Input, chain::Failure, Vec<Selected>), Error> {
+    let (ictx, failure) = open_track(segments, group, track)?;
     let mut selected = Vec::new();
     for kind in [StreamKind::Video, StreamKind::Audio] {
         if !wanted.wants(kind) {
@@ -412,7 +408,7 @@ fn open_selected(
             shape: ffi::shape(&stream, kind),
         });
     }
-    Ok((ictx, selected))
+    Ok((ictx, failure, selected))
 }
 
 /// 一条轨在第 0 组确定的一路输出流。
@@ -433,6 +429,8 @@ struct Source {
     group: usize,
     track: usize,
     ictx: format::context::Input,
+    /// 读分片文件出错时的路径与原因
+    failure: chain::Failure,
     /// 输入流下标 → 输出流下标；None 表示该流不进输出
     map: Vec<Option<usize>>,
     time_bases: Vec<Rational>,
@@ -442,7 +440,13 @@ struct Source {
 }
 
 impl Source {
-    fn new(group: usize, track: usize, ictx: format::context::Input, mappings: &[Mapping]) -> Self {
+    fn new(
+        group: usize,
+        track: usize,
+        ictx: format::context::Input,
+        failure: chain::Failure,
+        mappings: &[Mapping],
+    ) -> Self {
         let n = ictx.nb_streams() as usize;
         let mut map = vec![None; n];
         let mut time_bases = vec![Rational(0, 1); n];
@@ -454,6 +458,7 @@ impl Source {
             group,
             track,
             ictx,
+            failure,
             map,
             time_bases,
             queue: VecDeque::new(),
@@ -469,11 +474,11 @@ impl Source {
                 Ok(()) => {}
                 Err(ffmpeg::Error::Eof) => return Ok(None),
                 Err(cause) => {
-                    return Err(Error::Read {
+                    return Err(read_failure(&self.failure).unwrap_or(Error::Read {
                         group: self.group,
                         track: self.track,
                         cause: cause.into(),
-                    });
+                    }));
                 }
             }
             // TS 可能在文件中途出现新流，其下标超出建立映射时的流数
@@ -528,12 +533,11 @@ fn write_verified(
     groups: &[DiscontinuityGroup],
     part: &Path,
 ) -> Result<Report, Error> {
-    let list = with_suffix(part, ".list");
     let mut octx = format::output_as(part, "mp4").map_err(|cause| Error::OpenOutput {
         path: part.to_path_buf(),
         cause: cause.into(),
     })?;
-    let (layout, first_sources) = create_outputs(streams, &groups[0], &mut octx, &list)?;
+    let (layout, first_sources) = create_outputs(streams, &groups[0], &mut octx)?;
     write_header(&mut octx)?;
     let mut outs: Vec<OutStream> = layout
         .iter()
@@ -560,7 +564,7 @@ fn write_verified(
     for group in 0..groups.len() {
         let group_sources = match sources.take() {
             Some(s) => s,
-            None => open_group(streams, groups, group, &layout, &list)?,
+            None => open_group(streams, groups, group, &layout)?,
         };
         write_group(group, group_sources, &mut octx, &mut outs, margin_us)?;
     }
@@ -589,12 +593,11 @@ fn create_outputs(
     streams: &[Streams],
     first: &DiscontinuityGroup,
     octx: &mut format::context::Output,
-    list: &Path,
 ) -> Result<(Vec<Vec<TrackOutput>>, Vec<Source>), Error> {
     let mut layout: Vec<Vec<TrackOutput>> = Vec::new();
     let mut sources = Vec::new();
     for (track, segments) in first.tracks.iter().enumerate() {
-        let (ictx, selected) = open_selected(segments, streams[track], list, 0, track)?;
+        let (ictx, failure, selected) = open_selected(segments, streams[track], 0, track)?;
         if selected.is_empty() {
             return Err(Error::NoStreams { track });
         }
@@ -622,7 +625,7 @@ fn create_outputs(
             });
         }
         layout.push(outputs);
-        sources.push(Source::new(0, track, ictx, &mappings));
+        sources.push(Source::new(0, track, ictx, failure, &mappings));
     }
     Ok((layout, sources))
 }
@@ -650,11 +653,10 @@ fn open_group(
     groups: &[DiscontinuityGroup],
     group: usize,
     layout: &[Vec<TrackOutput>],
-    list: &Path,
 ) -> Result<Vec<Source>, Error> {
     let mut sources = Vec::new();
     for (track, segments) in groups[group].tracks.iter().enumerate() {
-        let (ictx, selected) = open_selected(segments, streams[track], list, group, track)?;
+        let (ictx, failure, selected) = open_selected(segments, streams[track], group, track)?;
         let expected = &layout[track];
         if selected.len() != expected.len()
             || selected
@@ -681,7 +683,7 @@ fn open_group(
                 output: e.out,
             });
         }
-        sources.push(Source::new(group, track, ictx, &mappings));
+        sources.push(Source::new(group, track, ictx, failure, &mappings));
     }
     Ok(sources)
 }
