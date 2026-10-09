@@ -281,14 +281,17 @@ fn segment_key(
     }
 }
 
-/// `<长度>[@<偏移>]`
+/// `<长度>[@<偏移>]`，长度至少为 1。
 fn parse_byte_range(value: &str) -> Result<(u64, Option<u64>), SyntaxError> {
     let bad = || SyntaxError::ByteRange(value.to_owned());
     let (length, offset) = match value.trim().split_once('@') {
         Some((length, offset)) => (length, Some(offset)),
         None => (value.trim(), None),
     };
-    let length = length.trim().parse().map_err(|_| bad())?;
+    let length: u64 = length.trim().parse().map_err(|_| bad())?;
+    if length == 0 {
+        return Err(bad());
+    }
     let offset = offset
         .map(|o| o.trim().parse().map_err(|_| bad()))
         .transpose()?;
