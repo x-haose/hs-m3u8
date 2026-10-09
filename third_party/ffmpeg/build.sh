@@ -68,12 +68,17 @@ jobs=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)
 make -j"$jobs"
 make install
 
-# MSVC 工具链产出的静态库仍以 lib*.a 命名，rustc 在 MSVC 目标上按 <名>.lib 查找
+# ffmpeg-sys-next 按这些文件名链接：MSVC 目标找 <名>.lib，其余找 lib<名>.a
 if [[ $PLATFORM == windows ]]; then
-  for lib in "$PREFIX"/lib/lib*.a; do
-    name=$(basename "$lib" .a)
-    mv "$lib" "$PREFIX/lib/${name#lib}.lib"
-  done
+  libs=(avformat.lib avcodec.lib avutil.lib)
+else
+  libs=(libavformat.a libavcodec.a libavutil.a)
 fi
+for lib in "${libs[@]}"; do
+  if [[ ! -f "$PREFIX/lib/$lib" ]]; then
+    echo "安装目录缺少 $PREFIX/lib/$lib" >&2
+    exit 1
+  fi
+done
 
 echo "FFmpeg $VERSION 已安装到 $PREFIX"
