@@ -13,7 +13,7 @@ use crate::live::{self, Context, Recording};
 use crate::request::{JobRequest, Resume, check_output};
 use crate::resolve::{self, Resolved};
 use crate::vod::{self, Plan};
-use crate::workdir::{JobRecord, RecordKind, Stored, WorkDir, read_record};
+use crate::workdir::{JobRecord, RecordKind, Stored, WorkDir, read_resumable};
 use crate::{
     Error, JobType, LiveEnd, LiveReport, Output, Progress, Stage, Unsupported, WorkDirProblem,
     blocking,
@@ -51,9 +51,9 @@ pub(crate) async fn run(
     }
     let root = request.resolved_work_dir();
     let source = source_digest(&request.url, &request.preference);
-    // 任务目录里有同一来源的记录时，按记录的选轨找回同一条轨；记录的是直播时按直播继续，
+    // 任务目录里有同一来源、可续的记录时，按记录的选轨找回同一条轨；记录的是直播时按直播继续，
     // 即使播放列表已出现 ENDLIST（中断期间直播结束了）
-    let recorded = read_record(root.clone())
+    let recorded = read_resumable(root.clone())
         .await?
         .filter(|r| r.source_digest == source);
     let continuing_live = recorded
@@ -140,7 +140,7 @@ async fn run_vod(task: Task, source: String, resolved: Resolved) -> Result<Outpu
 async fn merge_only(task: Task) -> Result<Output, Error> {
     let request = &task.request;
     let root = request.resolved_work_dir();
-    let Some(record) = read_record(root.clone()).await? else {
+    let Some(record) = read_resumable(root.clone()).await? else {
         return Err(Error::NothingRecorded);
     };
     if let RecordKind::Vod { .. } = record.kind {

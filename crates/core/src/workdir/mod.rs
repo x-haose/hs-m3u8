@@ -168,9 +168,16 @@ impl WorkDir {
     }
 }
 
-/// 读取任务目录的记录；目录或 `job.json` 不存在时为 None。不加锁，只用于决定走哪条流程。
-pub(crate) async fn read_record(root: PathBuf) -> Result<Option<JobRecord>, Error> {
-    blocking(move || read_job(&root)).await?
+/// 有可续的内容时读取任务目录的记录；目录或 `job.json` 不存在，或还没有已完成的分片时为 None（按当前请求
+/// 从头开始，见 [`WorkDir::open`]）。不加锁，只用于决定走哪条流程、按什么选轨；[`WorkDir::open`] 加锁后再核对。
+pub(crate) async fn read_resumable(root: PathBuf) -> Result<Option<JobRecord>, Error> {
+    blocking(move || {
+        let Some(record) = read_job(&root)? else {
+            return Ok(None);
+        };
+        Ok(has_completed_segments(&Layout { root })?.then_some(record))
+    })
+    .await?
 }
 
 fn read_job(root: &Path) -> Result<Option<JobRecord>, Error> {
