@@ -126,8 +126,8 @@ fn merge_group(
 /// 报告中的缺失分片：`known` 为本次运行记下原因的，加上无法合并的，以及空洞中其余的（原因不明），
 /// 按会话、轨道、序号排列，相接且原因相同的合成一个区间。
 ///
-/// 简化：缺失不落盘，之前的运行里在某个会话最后一个已完成分片之后缺的不在报告里；需要完整报告时把缺失
-/// 记进任务目录。
+/// 简化：缺失不落盘，之前的运行里某个会话第一个已完成分片之前或最后一个之后缺的不在报告里；需要完整报告时
+/// 把缺失记进任务目录。
 pub(crate) fn report_missed(plan: &MergePlan, known: Vec<Missed>) -> Vec<Missed> {
     let known = merge_ranges(known);
     let mut all: Vec<Missed> = plan
