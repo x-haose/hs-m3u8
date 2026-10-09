@@ -465,6 +465,7 @@ impl Hooks for SiteHooks {
     }
 }
 
+/// 经站点适配回调（服务器要求签名请求头、key 变换过、分片带伪装前缀）下载：成片与明文样本合并的一致。
 #[tokio::test(flavor = "multi_thread")]
 async fn hooks_adapt_site() {
     let dir = test_dir("hooks");
@@ -566,7 +567,7 @@ async fn signed_init_urls_resume_with_the_right_init() {
     assert_eq!(std::fs::read(&output.path).unwrap(), want);
 }
 
-/// 两个 init 段的地址只差查询串（站点按查询串区分内容）：各拉各的，不当成同一个。
+/// 把 init 段地址 `init?p=<目录>` 改写为 `<目录>/init.mp4`：模拟按查询串区分内容的站点。
 struct InitByQuery;
 
 impl Hooks for InitByQuery {
@@ -581,6 +582,7 @@ impl Hooks for InitByQuery {
     }
 }
 
+/// 两个 init 段的地址只差查询串（站点按查询串区分内容）：各拉各的，不当成同一个。
 #[tokio::test(flavor = "multi_thread")]
 async fn inits_differing_only_in_query_are_distinct() {
     let dir = test_dir("init_query");

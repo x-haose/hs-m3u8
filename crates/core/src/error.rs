@@ -5,8 +5,8 @@
 //! - 来源内容：[`Error::Playlist`]、[`Error::NotMediaPlaylist`]、[`Error::Select`]、[`Error::Unsupported`]、
 //!   [`Error::Integrity`]、[`Error::KeyLength`]，同样的来源再试也不会成功；
 //! - 外部依赖：[`Error::Http`]（看 [`HttpError::retryable`]）、[`Error::Io`]；
-//!   [`Error::Segment`]、[`Error::Key`] 说明出在哪个分片或 key，可否重试看其原因；
-//! - 直播录制停滞：[`Error::LiveStalled`]，任务目录保留，可稍后续录；
+//!   [`Error::Segment`]、[`Error::Key`] 说明出在哪个分片或 key，[`Error::LiveStalled`] 说明直播哪条轨停滞，
+//!   可否重试看其原因（[`Error::retryable`]）；
 //! - 任务目录：[`Error::WorkDir`]、[`Error::NothingRecorded`]；
 //! - 回调：[`Error::Hook`]；合并：[`Error::Remux`]；[`Error::Cancelled`]。
 //!
@@ -248,10 +248,12 @@ pub enum WorkDirProblem {
     /// 点播：播放列表的分片与记录的不一致
     #[error("播放列表的分片与记录的不一致，不能续传")]
     PlanChanged,
-    /// 记录的变体或音频 rendition 已不在主播放列表中
+    /// 记录的变体或音频 rendition 已不在主播放列表中。已录的直播可用 [`crate::Resume::MergeOnly`] 合并，
+    /// 或换一个任务目录重新开始
     #[error("记录的变体或音频已不在主播放列表中")]
     SelectionGone,
-    /// 直播：地址的查询串与记录的不同，且当前窗口与已录的分片接不上，无法确认是同一个直播
+    /// 直播：地址的查询串与记录的不同，且当前窗口与已录的分片接不上，无法确认是同一个直播。可用原来的地址续录、
+    /// 用 [`crate::Resume::MergeOnly`] 合并已录的部分，或换一个任务目录重新录
     #[error("地址与记录的不同，且当前内容与已录的接不上，无法确认是同一个直播")]
     SourceUnverified,
 }
