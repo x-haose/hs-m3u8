@@ -12,7 +12,7 @@
 - 正确性优先：每个分片使用自己的 key 与 IV；失败一律上抛；任何时刻中断都可安全续传；产物要么完整、要么不存在。
 - 同一核心服务三类使用方：Rust 库、Python 包 `hs-m3u8`、Tauri 桌面应用。
 - 站点适配通过回调完成（改写播放列表、修改请求、变换 key、变换分片）。
-- 直播录制（无 `#EXT-X-ENDLIST` 的播放列表），排在点播流程完成之后，见 5.9。
+- 直播录制（无 `#EXT-X-ENDLIST` 的播放列表），中断后可续录，见 5.9。
 
 非目标：
 
@@ -29,12 +29,15 @@ hs-m3u8/
 ├── rust-toolchain.toml     锁定工具链版本
 ├── crates/
 │   ├── hls/                播放列表解析与规范化、选轨、IV 推导；纯计算，无 IO
-│   ├── core/               下载任务：HTTP、调度、解密校验、续传、合并编排、进度
+│   ├── core/               下载任务：HTTP、调度、解密校验、续传、直播录制、合并编排、进度
 │   ├── remux/              FFmpeg 转封装；全项目唯一的 FFI 边界
-│   └── py/                 PyO3 绑定（cdylib），模块名 hs_m3u8._native
-├── python/hs_m3u8/         Python 包：类型化包装、异常类、.pyi
-├── apps/desktop/           Tauri 应用（src-tauri/ 与前端）
-├── third_party/ffmpeg/     FFmpeg 构建脚本：固定版本与 configure 参数
+│   └── py/                 PyO3 绑定（cdylib），模块名 hs_m3u8._native（Python 绑定阶段建立）
+├── python/hs_m3u8/         Python 包：类型化包装、异常类、.pyi（同上）
+├── apps/desktop/           Tauri 应用：src-tauri/ 与前端（GUI 阶段建立）
+├── third_party/
+│   ├── ffmpeg/             FFmpeg 构建脚本：固定版本与 configure 参数
+│   └── ffmpeg-sys-next/    ffmpeg-sys-next 的本地修改版，差异见其中的 PATCHED.md
+├── scripts/                检查脚本：依赖方向、禁止压制属性
 ├── tests/fixtures/         测试样本（用 ffmpeg testsrc 生成，不含第三方内容）
 └── docs/
 ```
@@ -232,7 +235,7 @@ hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
 - PyO3 0.29.3 + `pyo3-async-runtimes` 0.29.0（tokio）+ maturin 1.15.0；`abi3-py311` wheel（最低 Python 3.11），FFmpeg 静态链接进扩展模块。
 - Python 回调在阻塞线程池中获取 GIL 后执行，不占用 tokio 工作线程。
 - `core::Error` 在边界上翻译为 Python 异常层级，`retryable` 等字段作为异常属性保留。
-- 0.1.x 参数对应关系：`key` → `key=hs_m3u8.Key(...)`；`get_m3u8_func` → `on_playlist`；`*_request_before` → `on_request`；`key_response_after` → `on_key`；`ts_response_after` → `on_segment`；`del_hls` → `keep_hls`；`merge=False` → `keep_hls=True` 并且只下载不合并。
+- 0.1.x 参数对应关系：`key` → `key=hs_m3u8.Key(...)`；`get_m3u8_func` → `on_playlist`；`*_request_before` → `on_request`；`key_response_after` → `on_key`；`ts_response_after` → `on_segment`；`merge`、`del_hls` → 输出目标：MP4、可播放的本地 HLS 目录，或两者都要。
 
 ## 8. 桌面应用（GUI 阶段细化）
 
@@ -255,23 +258,23 @@ hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
 
 - 纯计算：`hls` 的规范化规则（KEY/MAP/BYTERANGE/不连续传播、IV 推导、URL 解析、选轨）、计划摘要、AES 解密（已知向量）、分片校验。
 - 编解码与端到端：
-  - `remux` 用仓库内的小样本（ffmpeg testsrc 生成，几百 KB）覆盖 TS、fMP4、分流、HEVC、不连续，断言每条流的包数和帧数；
-  - 端到端在测试内起本地 HTTP 服务提供 HLS 样本（含 AES-128、字节范围、重定向，注入 500 与超时），跑完整任务后核对输出帧数，并覆盖中途取消再续传；
-  - Python 绑定做一个端到端冒烟。
+  - `remux` 用仓库内的小样本（ffmpeg testsrc 生成，几百 KB）覆盖 TS、fMP4、音视频分离、HEVC、不连续，断言每条流的包数和帧数；
+  - `core` 的端到端在测试内起本地 HTTP 服务提供 HLS 样本（含 AES-128、字节范围、重定向、按请求次数变化的直播播放列表，注入 404、500 与阻塞），跑完整任务后把输出与直接合并同一批样本的结果逐字节比较，并覆盖取消、续传与续录；
+  - Python 绑定做一个端到端冒烟（Python 绑定阶段）。
 
 不写用假件拼流程、复述实现的测试。
 
-检查命令（`make check`，零告警才算通过）：
+检查命令（`make check`，零告警才算通过；Rust 部分为 Makefile 的 `rs_*` 目标，CI 调用同样的目标）：
 
 1. `cargo fmt --check`
 2. 依赖方向：`scripts/check_deps.sh` 用 `cargo tree` 断言第 3 节（含传递依赖与全部目标平台）
-3. `cargo deny check`（`deny.toml`）：安全公告与撤回版本、许可证白名单（只允许宽松许可证；FFmpeg 的 LGPL 由其构建脚本检查）、禁用 OpenSSL、依赖只来自 crates.io
-4. `cargo clippy --workspace --all-targets -- -D warnings`
-5. `cargo test --workspace`
-6. Python：maturin 构建 + 端到端冒烟
-7. 前端（GUI 阶段）：`tsc --noEmit`、lint、构建
-
-覆盖率：`hls`、`core`、`remux` 各自行覆盖 ≥ 80%，由 cargo-llvm-cov 在 `make check` 与 CI 中检查。
+3. 禁止压制属性：`scripts/check_no_suppression.sh`（`#[allow]`、`#[expect]`，含 `cfg_attr` 包裹的）
+4. `cargo deny check`（`deny.toml`）：安全公告与撤回版本、许可证白名单（只允许宽松许可证；FFmpeg 的 LGPL 由其构建脚本检查）、禁用 OpenSSL、依赖只来自 crates.io
+5. `cargo clippy --workspace --all-targets -- -D warnings`
+6. `cargo test --workspace`
+7. 覆盖率：`hls`、`core`、`remux` 各自行覆盖 ≥ 80%（cargo-llvm-cov）
+8. Python：maturin 构建 + 端到端冒烟（Python 绑定阶段加入）
+9. 前端：`tsc --noEmit`、lint、构建（GUI 阶段加入）
 
 ## 11. CI 与发布
 
@@ -281,7 +284,7 @@ hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
 
 ## 12. 待验证风险与待定问题
 
-按顺序验证（Windows 静态构建与链接、不连续段与分片读取已于 2026-10-09 完成）：
+按顺序验证：
 
 1. 高并发下 Python 回调的 GIL 竞争（`on_segment` 每个分片调用一次）。
 2. 资源嗅探的注入脚本（GUI 阶段）。
@@ -292,4 +295,4 @@ hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
 
 ## 依据的版本（2026-10-08 查 crates.io）
 
-tokio 1.53.2、tokio-util 0.7.19、reqwest 0.13.5、axum 0.8.9（2026-10-09 查，仅测试用）、m3u8-rs 6.0.1、aes 0.9.3、cbc 0.2.1、url 2.5.8、thiserror 2.0.21、serde 1.0.229、serde_json 1.0.151、sha2 0.11.0、rusqlite 0.40.2、pyo3 0.29.3、pyo3-async-runtimes 0.29.0、maturin 1.15.0、ffmpeg-next 9.0.0、tauri 2.12.1、cargo-deny 0.20.2。
+tokio 1.53.2、tokio-util 0.7.19、reqwest 0.13.5、axum 0.8.9（2026-10-09 查，仅测试用）、aes 0.9.3、cbc 0.2.1、url 2.5.8、thiserror 2.0.21、serde 1.0.229、serde_json 1.0.151、sha2 0.11.0、rusqlite 0.40.2、pyo3 0.29.3、pyo3-async-runtimes 0.29.0、maturin 1.15.0、ffmpeg-next 9.0.0、tauri 2.12.1、cargo-deny 0.20.2、cargo-llvm-cov 0.9.1（2026-10-09 查）、libc 0.2.190（2026-10-10 查，仅测试用）。

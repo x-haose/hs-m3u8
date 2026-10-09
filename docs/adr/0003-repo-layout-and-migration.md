@@ -10,7 +10,7 @@
 3. 重写在长期分支 `rewrite/rust` 上进行；核心与 Python 绑定达到下列条件后合入 master，Python 0.1.x 代码只保留在 git 历史中：
    - 覆盖 0.1.x 全部能力：自定义请求头、自定义 key、m3u8 文本/请求/key 三类回调、断点续传、保留 HLS 目录；
    - 修掉 0.1.x 审查出的全部问题；
-   - 支持音视频分流；
+   - 支持音视频分离；
    - macOS、Windows、Linux 三平台 CI 通过。
 4. Python 绑定以 `hs-m3u8` 1.0.0 发布，最低 Python 3.11，API 不兼容 0.1.x，README 提供迁移说明。
 5. 桌面应用在 master 上继续开发，与 Python 包分开发版。
