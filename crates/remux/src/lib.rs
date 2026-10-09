@@ -4,8 +4,8 @@
 //! - 组内：分片经 FFmpeg 的 concatf 协议按字节顺序读取，不先拼成大文件。
 //! - 组间：整组使用同一个时间偏移，保留组内各轨（如视频与独立音频 rendition）原有的相对时序；
 //!   各组首尾相接，下一组从上一组所有流的最晚结束时刻之后开始。
-//! - 每条轨贡献第一路视频和（或）第一路音频，同一类流只能来自一条轨；
-//!   后续组的流布局与编码参数必须与第一组一致。
+//! - 每条轨按调用方指定的 [`Streams`] 贡献第一路视频和（或）第一路音频，未指定种类的流不进输出、不检查编码；
+//!   同一类流只能来自一条轨；后续组的流布局与编码参数必须与第一组一致。
 //! - 只接受 H.264、HEVC 视频与 AAC 音频，与 FFmpeg 构建启用的组件一致。
 //!
 //! 输出先写 `<输出>.part`，写完回读核对每路流的包数后改名；任一步失败都删除临时文件并返回错误。
@@ -73,6 +73,35 @@ impl fmt::Display for StreamKind {
     }
 }
 
+/// 一条轨在输出中贡献哪些种类的流，各组相同。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Streams {
+    pub video: bool,
+    pub audio: bool,
+}
+
+impl Streams {
+    pub const ALL: Streams = Streams {
+        video: true,
+        audio: true,
+    };
+    pub const VIDEO: Streams = Streams {
+        video: true,
+        audio: false,
+    };
+    pub const AUDIO: Streams = Streams {
+        video: false,
+        audio: true,
+    };
+
+    fn wants(self, kind: StreamKind) -> bool {
+        match kind {
+            StreamKind::Video => self.video,
+            StreamKind::Audio => self.audio,
+        }
+    }
+}
+
 /// 一路输出流的合并结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamReport {
@@ -97,6 +126,8 @@ pub enum Error {
     Init(ffmpeg::Error),
     #[error("至少需要一个不连续段组")]
     NoGroups,
+    #[error("指定了 {found} 条轨的取流方式，第 0 组有 {expected} 条轨")]
+    StreamsCount { expected: usize, found: usize },
     #[error("第 {group} 组有 {found} 条轨，第 0 组有 {expected} 条")]
     TrackCount {
         group: usize,
@@ -115,7 +146,7 @@ pub enum Error {
         track: usize,
         source: ffmpeg::Error,
     },
-    #[error("第 {track} 条轨没有视频或音频流")]
+    #[error("第 {track} 条轨没有指定要取的视频或音频流")]
     NoStreams { track: usize },
     #[error("第 {track} 条轨的{kind}流与前面的轨重复")]
     DuplicateKind { track: usize, kind: StreamKind },
@@ -180,12 +211,16 @@ pub enum Error {
     },
 }
 
-/// 把各不连续段组的分片复制进 `output`（MP4，moov 前置）。
-pub fn remux(groups: &[DiscontinuityGroup], output: &Path) -> Result<Report, Error> {
+/// 把各不连续段组的分片复制进 `output`（MP4，moov 前置）。`tracks[i]` 为第 i 条轨贡献的流种类。
+pub fn remux(
+    tracks: &[Streams],
+    groups: &[DiscontinuityGroup],
+    output: &Path,
+) -> Result<Report, Error> {
     init()?;
-    validate(groups)?;
+    validate(tracks, groups)?;
     let part = with_suffix(output, ".part");
-    write_verified(groups, &part)
+    write_verified(tracks, groups, &part)
         .and_then(|report| {
             std::fs::rename(&part, output).map_err(|source| Error::Io {
                 action: "重命名",
@@ -208,8 +243,14 @@ fn init() -> Result<(), Error> {
     result.map_err(Error::Init)
 }
 
-fn validate(groups: &[DiscontinuityGroup]) -> Result<(), Error> {
+fn validate(tracks: &[Streams], groups: &[DiscontinuityGroup]) -> Result<(), Error> {
     let first = groups.first().ok_or(Error::NoGroups)?;
+    if tracks.len() != first.tracks.len() {
+        return Err(Error::StreamsCount {
+            expected: first.tracks.len(),
+            found: tracks.len(),
+        });
+    }
     for (group, g) in groups.iter().enumerate() {
         if g.tracks.len() != first.tracks.len() {
             return Err(Error::TrackCount {
@@ -304,14 +345,18 @@ struct Selected {
     shape: Shape,
 }
 
-/// 选出输入里第一路视频与第一路音频，并检查编码是否受支持。
+/// 按 `wanted` 选出输入里第一路视频与（或）第一路音频，并检查编码是否受支持。
 fn select_streams(
     ictx: &format::context::Input,
+    wanted: Streams,
     group: usize,
     track: usize,
 ) -> Result<Vec<Selected>, Error> {
     let mut selected = Vec::new();
     for kind in [StreamKind::Video, StreamKind::Audio] {
+        if !wanted.wants(kind) {
+            continue;
+        }
         let Some(stream) = ictx
             .streams()
             .find(|s| s.parameters().medium() == kind.medium())
@@ -434,6 +479,7 @@ impl Source {
 
 /// 打开第 `group` 组的全部轨，按 `outputs` 建立流映射并检查与第 0 组一致。
 fn open_group(
+    tracks: &[Streams],
     groups: &[DiscontinuityGroup],
     group: usize,
     outputs: &[Vec<TrackOutput>],
@@ -442,7 +488,7 @@ fn open_group(
     let mut sources = Vec::new();
     for (track, segments) in groups[group].tracks.iter().enumerate() {
         let ictx = open_track(segments, list, group, track)?;
-        let selected = select_streams(&ictx, group, track)?;
+        let selected = select_streams(&ictx, tracks[track], group, track)?;
         let expected = &outputs[track];
         if selected.len() != expected.len()
             || selected.iter().zip(expected).any(|(s, e)| s.kind != e.kind)
@@ -467,7 +513,11 @@ fn open_group(
     Ok(sources)
 }
 
-fn write_verified(groups: &[DiscontinuityGroup], part: &Path) -> Result<Report, Error> {
+fn write_verified(
+    tracks: &[Streams],
+    groups: &[DiscontinuityGroup],
+    part: &Path,
+) -> Result<Report, Error> {
     let list = with_suffix(part, ".list");
     let mut octx = format::output_as(part, "mp4").map_err(|source| Error::OpenOutput {
         path: part.to_path_buf(),
@@ -481,7 +531,7 @@ fn write_verified(groups: &[DiscontinuityGroup], part: &Path) -> Result<Report, 
     let mut first_sources = Vec::new();
     for (track, segments) in groups[0].tracks.iter().enumerate() {
         let ictx = open_track(segments, &list, 0, track)?;
-        let selected = select_streams(&ictx, 0, track)?;
+        let selected = select_streams(&ictx, tracks[track], 0, track)?;
         if selected.is_empty() {
             return Err(Error::NoStreams { track });
         }
@@ -546,7 +596,7 @@ fn write_verified(groups: &[DiscontinuityGroup], part: &Path) -> Result<Report, 
     for group in 0..groups.len() {
         let mut group_sources = match sources.take() {
             Some(s) => s,
-            None => open_group(groups, group, &outputs, &list)?,
+            None => open_group(tracks, groups, group, &outputs, &list)?,
         };
         for source in &mut group_sources {
             source.prime(&mut skipped)?;

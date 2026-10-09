@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use ffmpeg_next as ffmpeg;
-use hs_m3u8_remux::{DiscontinuityGroup, Error, StreamKind, TrackSegments, remux};
+use hs_m3u8_remux::{DiscontinuityGroup, Error, StreamKind, Streams, TrackSegments, remux};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/media")
@@ -140,7 +140,7 @@ fn ts_single_group_copies_every_packet_from_zero_with_moov_first() {
     let output = dir.join("out.mp4");
     let a = track("ts_a");
 
-    let report = remux(&[group([a.clone()])], &output).unwrap();
+    let report = remux(&[Streams::ALL], &[group([a.clone()])], &output).unwrap();
 
     let (v_in, a_in) = timelines(&concat_track(&a, &dir, "in.ts"));
     let streams: Vec<_> = report
@@ -181,7 +181,12 @@ fn split_fmp4_renditions_merge_into_one_file() {
     let output = dir.join("out.mp4");
     let (video, audio) = (track("fmp4_a/video"), track("fmp4_a/audio"));
 
-    let report = remux(&[group([video.clone(), audio.clone()])], &output).unwrap();
+    let report = remux(
+        &[Streams::VIDEO, Streams::AUDIO],
+        &[group([video.clone(), audio.clone()])],
+        &output,
+    )
+    .unwrap();
 
     let v_in = timelines(&concat_track(&video, &dir, "v.mp4")).0;
     let a_in = timelines(&concat_track(&audio, &dir, "a.mp4")).1;
@@ -202,7 +207,12 @@ fn discontinuity_groups_are_laid_end_to_end() {
     let (va, aa) = timelines(&concat_track(&a, &dir, "a.ts"));
     let (vb, ab) = timelines(&concat_track(&b, &dir, "b.ts"));
 
-    remux(&[group([a.clone()]), group([b]), group([a])], &output).unwrap();
+    remux(
+        &[Streams::ALL],
+        &[group([a.clone()]), group([b]), group([a])],
+        &output,
+    )
+    .unwrap();
 
     let (v_out, a_out) = timelines(&output);
     assert_eq!(v_out.len(), 2 * va.len() + vb.len());
@@ -226,7 +236,12 @@ fn split_renditions_keep_their_relative_timing_across_discontinuities() {
     let vb_in = timelines(&concat_track(&vb, &dir, "vb.mp4")).0;
     let ab_in = timelines(&concat_track(&ab, &dir, "ab.mp4")).1;
 
-    remux(&[group([va, aa]), group([vb, ab])], &output).unwrap();
+    remux(
+        &[Streams::VIDEO, Streams::AUDIO],
+        &[group([va, aa]), group([vb, ab])],
+        &output,
+    )
+    .unwrap();
 
     let (v_out, a_out) = timelines(&output);
     assert_eq!(
@@ -267,7 +282,7 @@ fn hevc_output_is_tagged_hvc1() {
     let output = dir.join("out.mp4");
     let hevc = track("ts_hevc");
 
-    remux(&[group([hevc.clone()])], &output).unwrap();
+    remux(&[Streams::ALL], &[group([hevc.clone()])], &output).unwrap();
 
     let (v_in, a_in) = timelines(&concat_track(&hevc, &dir, "in.ts"));
     let (v_out, a_out) = timelines(&output);
@@ -286,7 +301,7 @@ fn paths_with_quotes_and_spaces_are_read() {
     }
     let output = dir.join("out file.mp4");
 
-    let report = remux(&[group([track_in(&dir)])], &output).unwrap();
+    let report = remux(&[Streams::ALL], &[group([track_in(&dir)])], &output).unwrap();
 
     assert_eq!(report.streams.len(), 2);
     assert!(output.exists());
@@ -300,7 +315,7 @@ fn timestamps_going_back_within_a_group_fail_and_leave_no_files() {
     let mut mixed = track("ts_a");
     mixed.segments.extend(track("ts_b").segments);
 
-    let err = remux(&[group([mixed])], &output).unwrap_err();
+    let err = remux(&[Streams::ALL], &[group([mixed])], &output).unwrap_err();
 
     assert!(matches!(err, Error::Mux(_)), "应为封装错误，实际 {err:?}");
     assert_no_leftovers(&output);
@@ -311,7 +326,12 @@ fn same_stream_kind_from_two_tracks_is_rejected() {
     let dir = work_dir("duplicate");
     let output = dir.join("out.mp4");
 
-    let err = remux(&[group([track("ts_a"), track("fmp4_a/audio")])], &output).unwrap_err();
+    let err = remux(
+        &[Streams::ALL; 2],
+        &[group([track("ts_a"), track("fmp4_a/audio")])],
+        &output,
+    )
+    .unwrap_err();
 
     assert!(
         matches!(
@@ -326,12 +346,43 @@ fn same_stream_kind_from_two_tracks_is_rejected() {
     assert_no_leftovers(&output);
 }
 
+/// 另一条轨提供音频时只取本轨的视频：本轨混着的音频不进输出，其编码（MP3）也不检查。
+#[test]
+fn unwanted_streams_are_dropped_without_codec_checks() {
+    let dir = work_dir("unwanted_streams");
+    let output = dir.join("out.mp4");
+    let (muxed, audio) = (track("ts_mp3"), track("fmp4_a/audio"));
+
+    let report = remux(
+        &[Streams::VIDEO, Streams::AUDIO],
+        &[group([muxed.clone(), audio.clone()])],
+        &output,
+    )
+    .unwrap();
+
+    let v_in = timelines(&concat_track(&muxed, &dir, "v.ts")).0;
+    let a_in = timelines(&concat_track(&audio, &dir, "a.mp4")).1;
+    let streams: Vec<_> = report
+        .streams
+        .iter()
+        .map(|s| (s.kind, s.codec, s.packets))
+        .collect();
+    assert_eq!(
+        streams,
+        vec![
+            (StreamKind::Video, "h264", v_in.len() as u64),
+            (StreamKind::Audio, "aac", a_in.len() as u64)
+        ]
+    );
+}
+
 #[test]
 fn resolution_change_between_groups_is_rejected() {
     let dir = work_dir("params_changed");
     let output = dir.join("out.mp4");
 
     let err = remux(
+        &[Streams::ALL],
         &[group([track("ts_a")]), group([track("ts_small")])],
         &output,
     )
@@ -357,7 +408,7 @@ fn mp3_audio_is_rejected() {
     let dir = work_dir("mp3");
     let output = dir.join("out.mp4");
 
-    let err = remux(&[group([track("ts_mp3")])], &output).unwrap_err();
+    let err = remux(&[Streams::ALL], &[group([track("ts_mp3")])], &output).unwrap_err();
 
     assert!(
         matches!(
