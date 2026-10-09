@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use url::Url;
 
+use crate::StallCause;
 use crate::hooks::{HookError, HookKind};
 use crate::ident::bare_url;
 
@@ -129,8 +130,9 @@ impl Error {
             Error::Segment { cause, .. } | Error::Key { cause, .. } => cause.retryable(),
             Error::LiveStalled { cause, .. } => match cause {
                 StallError::RefreshFailed(error) => error.retryable(),
-                StallError::RefreshPending | StallError::TrackStopped { .. } => true,
+                StallError::RefreshPending => true,
                 StallError::Unrecordable(kind) => kind.retryable(),
+                StallError::TrackStopped(cause) => *cause == StallCause::NoNewSegments,
             },
             _ => false,
         }
@@ -217,13 +219,16 @@ pub enum StallError {
     /// 播放列表仍在列出新分片，但一个都没有下载成功；带最近一次取不到分片或 init 段的原因
     #[error("有新分片，但一个都没有下载成功，最近一次：{0}")]
     Unrecordable(HttpError),
-    /// 这条轨不再出新分片（`playlist_gone` 为播放列表已被删除时的 HTTP 状态），而其他轨仍在出
-    #[error("这条轨不再出新分片{}，其他轨仍在出", gone_text(*.playlist_gone))]
-    TrackStopped { playlist_gone: Option<u16> },
+    /// 这条轨看起来已结束（原因同 [`StallCause`]），而其他轨仍在出新分片；播放列表被删除时不可重试
+    #[error("这条轨{}，其他轨仍在出新分片", stopped_text(*.0))]
+    TrackStopped(StallCause),
 }
 
-fn gone_text(status: Option<u16>) -> String {
-    status.map_or_else(String::new, |s| format!("（播放列表返回 HTTP {s}）"))
+fn stopped_text(cause: StallCause) -> String {
+    match cause {
+        StallCause::NoNewSegments => "不再出新分片".to_owned(),
+        StallCause::PlaylistGone(status) => format!("的播放列表已被删除（HTTP {status}）"),
+    }
 }
 
 /// 任务目录不能使用的原因。

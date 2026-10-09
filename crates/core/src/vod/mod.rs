@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use self::plan::Plan;
-use crate::fetch::{Fetcher, Item, fetch_init, record_done};
+use crate::fetch::{Fetcher, Item, count_done, fetch_init};
 use crate::http::{Http, Permit};
 use crate::ident::Fingerprint;
 use crate::workdir::{self, Layout, SegmentName};
@@ -54,7 +54,7 @@ pub(crate) async fn download(
     }
     fetcher
         .drain(|_, result| {
-            record_done(progress, result?);
+            count_done(progress, result?);
             Ok(())
         })
         .await?;

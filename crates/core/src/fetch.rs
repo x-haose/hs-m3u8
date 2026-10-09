@@ -89,14 +89,12 @@ impl Fetcher {
         })
     }
 
-    /// 立即拉取一个分片（经回调、解密、校验），不排队、不写盘；用于续录时核对内容。失败时返回原始错误，
-    /// 不包装为 [`Error::Segment`]。
-    pub(crate) async fn fetch(&self, segment: &Segment) -> Result<Vec<u8>, Error> {
-        fetch_segment(&self.ctx, segment, &self.abort).await
-    }
-
-    pub(crate) fn is_idle(&self) -> bool {
-        self.pending.is_empty() && self.running.is_empty()
+    /// 立即拉取第 `track` 条轨的一个分片（经回调、解密、校验），不排队、不写盘；用于续录时核对内容。
+    /// 失败同排队下载的分片一样包装为 [`Error::Segment`]（取消除外）。
+    pub(crate) async fn fetch(&self, track: usize, segment: &Segment) -> Result<Vec<u8>, Error> {
+        fetch_segment(&self.ctx, segment, &self.abort)
+            .await
+            .map_err(|e| segment_error(track, segment, e))
     }
 
     /// 丢弃排队的项并取消在途的项；在途的项随后以 [`Error::Cancelled`] 结束。
@@ -133,8 +131,21 @@ impl Fetcher {
     }
 }
 
-/// 一个分片成功后更新进度。
-pub(crate) fn record_done(progress: &watch::Sender<Progress>, len: u64) {
+/// 分片失败包装为 [`Error::Segment`]，取消原样返回。
+fn segment_error(track: usize, segment: &Segment, error: Error) -> Error {
+    match error {
+        Error::Cancelled => Error::Cancelled,
+        cause => Error::Segment {
+            track,
+            sequence: segment.sequence,
+            url: Box::new(segment.uri.clone()),
+            cause: Box::new(cause),
+        },
+    }
+}
+
+/// 一个分片成功后计入进度。
+pub(crate) fn count_done(progress: &watch::Sender<Progress>, len: u64) {
     progress.send_modify(|p| {
         p.bytes += len;
         p.segments_done += 1;
@@ -153,15 +164,7 @@ async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
     };
     let data = fetch_segment(&ctx, &segment, &cancel)
         .await
-        .map_err(|e| match e {
-            Error::Cancelled => Error::Cancelled,
-            e => Error::Segment {
-                track,
-                sequence: segment.sequence,
-                url: Box::new(segment.uri.clone()),
-                cause: Box::new(e),
-            },
-        });
+        .map_err(|e| segment_error(track, &segment, e));
     let result = match data {
         Ok(data) => {
             let len = data.len() as u64;

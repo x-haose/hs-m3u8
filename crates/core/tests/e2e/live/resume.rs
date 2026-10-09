@@ -5,7 +5,10 @@ use std::time::Duration;
 use hs_m3u8_core::{Error, LiveEnd, LiveOptions, MissReason, Resume, Url, WorkDirProblem};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
-use super::{STALL, interrupt, live_request, missed, playlist, put_long, put_split_master, report};
+use super::{
+    STALL, expected_split_long, interrupt, live_request, missed, playlist, playlist_in, put_long,
+    put_split_master, report,
+};
 use crate::server::Server;
 use crate::{assert_output, engine, expected, expected_long, fixture, run, test_dir, track};
 
@@ -305,48 +308,27 @@ async fn encoder_restart_with_reused_names_starts_a_new_session() {
 async fn skipped_segments_are_not_refilled_later() {
     let dir = test_dir("resume_after_then_continue");
     let server = Server::start().await;
-    let media = |kind: &str, first: u64, last: u64, end: bool| {
-        let mut text =
-            format!("#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
-        for i in first..=last {
-            text += &format!("#EXTINF:1,\n{kind}/seg{i}.ts\n");
-        }
-        if end {
-            text += "#EXT-X-ENDLIST\n";
-        }
-        text
-    };
     put_split_master(&server);
     put_long(&server, "v/", &[0, 1, 2, 3]);
     put_long(&server, "a/", &[0]);
     // 运行 1：窗口 [0,1]，音频 seg1 取不到
-    server.put("video.m3u8", media("v", 0, 1, false));
-    server.put("audio.m3u8", media("a", 0, 1, false));
+    server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
+    server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
     let req = live_request(server.url("master.m3u8"), &dir, STALL);
     interrupt(&req, |p| p.segments_done == 3 && p.segments_missed == 1).await;
 
     // 运行 2：窗口 [1,2]；视频与会话 0 重叠，音频没有 → 会话 1，视频只录 2，音频录 1、2
     put_long(&server, "a/", &[1, 2, 3]);
-    server.put("video.m3u8", media("v", 1, 2, false));
-    server.put("audio.m3u8", media("a", 1, 2, false));
+    server.put("video.m3u8", playlist_in("v/", &[1, 2], false));
+    server.put("audio.m3u8", playlist_in("a/", &[1, 2], false));
     interrupt(&req, |p| p.segments_done == 6).await;
 
     // 运行 3：窗口 [1,2,3] 并结束；两轨都接得上会话 1
-    server.put("video.m3u8", media("v", 1, 3, true));
-    server.put("audio.m3u8", media("a", 1, 3, true));
+    server.put("video.m3u8", playlist_in("v/", &[1, 2, 3], true));
+    server.put("audio.m3u8", playlist_in("a/", &[1, 2, 3], true));
     let output = run(req).await.unwrap();
 
-    let group = |video: &[&str], audio: &[&str]| DiscontinuityGroup {
-        tracks: vec![track("ts_long", None, video), track("ts_long", None, audio)],
-    };
-    let want = expected(
-        &dir,
-        &[Streams::Video, Streams::Audio],
-        &[
-            group(&["seg0.ts", "seg1.ts"], &["seg0.ts"]),
-            group(&["seg2.ts", "seg3.ts"], &["seg1.ts", "seg2.ts", "seg3.ts"]),
-        ],
-    );
+    let want = expected_split_long(&dir, &[(&[0, 1], &[0]), (&[2, 3], &[1, 2, 3])]);
     assert_output(&output, &want);
     assert_eq!(output.segments, 8);
 }

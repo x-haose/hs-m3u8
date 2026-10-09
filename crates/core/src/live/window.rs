@@ -5,7 +5,8 @@ use std::ops::ControlFlow;
 
 use hs_m3u8_hls::{InitSection, MediaPlaylist, Segment};
 
-use super::session::{Earlier, Start};
+use super::missable;
+use super::session::{Recorded, Start};
 use crate::fetch::Item;
 use crate::ident::Fingerprint;
 use crate::workdir::{Layout, SegmentName};
@@ -38,20 +39,31 @@ enum Overlap {
 pub(super) struct Processed {
     /// 已处理（排入下载或记为缺失）的最大序号
     last: Option<u64>,
-    /// 续录时该会话已录完的序号：其中最小的之后、不超过 `last` 而不在其中的分片还要补录；
+    /// 续录时会话中已录完的序号：大于 `refill_after`、不超过 `last` 而不在其中的分片还要补录；
     /// 处理完第一份非空播放列表即清空
     refill: BTreeSet<u64>,
+    /// 补录的下界（不含），见 [`Recorded`]
+    refill_after: Option<u64>,
 }
 
 impl Processed {
-    /// 序号为 `sequence` 的分片是否要录：比已处理的都新，或是续录时会话中间没录完的。
+    /// 序号为 `sequence` 的分片是否要录：比已处理的都新，或是续录时会话里没录完的。
     pub(super) fn is_new(&self, sequence: u64) -> bool {
         self.last.is_none_or(|last| sequence > last)
-            || self
-                .refill
-                .first()
-                .is_some_and(|&first| sequence > first && !self.refill.contains(&sequence))
+            || (!self.refill.is_empty()
+                && self.refill_after.is_none_or(|after| sequence > after)
+                && !self.refill.contains(&sequence))
     }
+}
+
+/// 与上一份比对后怎么处理这份播放列表。
+enum Alignment {
+    /// 照常处理
+    Proceed,
+    /// 疑似编码器重启但还没确认：这份不处理
+    Skip,
+    /// 应结束录制
+    End(LiveEnd),
 }
 
 /// 处理一份播放列表需要的外部信息。
@@ -162,14 +174,14 @@ impl Window {
     }
 
     /// 接着之前的会话：比对基准、编号与各组的 init 段都沿用它的分片。
-    fn continue_from(&mut self, earlier: &Earlier) {
-        self.previous = listed_of(earlier);
-        for name in earlier.segments().values() {
+    fn continue_from(&mut self, recorded: &Recorded) {
+        self.previous = listed_of(recorded);
+        for name in recorded.segments().values() {
             self.group_inits.insert(name.discontinuity, name.init);
         }
-        self.max_discontinuity = earlier.segments().values().map(|n| n.discontinuity).max();
-        self.processed.last = Some(earlier.last());
-        self.processed.refill = earlier.segments().keys().copied().collect();
+        self.max_discontinuity = recorded.segments().values().map(|n| n.discontinuity).max();
+        self.processed.last = Some(recorded.last());
+        (self.processed.refill_after, self.processed.refill) = recorded.refill();
     }
 
     pub(super) fn processed(&self) -> &Processed {
@@ -197,11 +209,10 @@ impl Window {
         if playlist.segments.is_empty() {
             return Ok(ControlFlow::Continue(Update::unchanged(playlist.ended)));
         }
-        if let ControlFlow::Break(end) = self.align(scope.track, playlist) {
-            return Ok(end.map_or(
-                ControlFlow::Continue(Update::unchanged(false)),
-                ControlFlow::Break,
-            ));
+        match self.align(scope.track, playlist) {
+            Alignment::Proceed => {}
+            Alignment::Skip => return Ok(ControlFlow::Continue(Update::unchanged(false))),
+            Alignment::End(end) => return Ok(ControlFlow::Break(end)),
         }
         let window_moved =
             playlist.segments.first().map(|s| s.sequence) != self.previous.keys().min().copied();
@@ -266,23 +277,25 @@ impl Window {
         Ok(ControlFlow::Continue(listing))
     }
 
-    /// 与上一份比对并确定本次的编号偏移。`Break(None)` 为疑似编码器重启但还没确认，这份播放列表不处理；
-    /// `Break(Some)` 为应结束录制。
-    fn align(&mut self, track: usize, playlist: &MediaPlaylist) -> ControlFlow<Option<LiveEnd>> {
+    /// 与上一份比对并确定本次的编号偏移。
+    fn align(&mut self, track: usize, playlist: &MediaPlaylist) -> Alignment {
         match compare(&self.previous, self.processed.last, playlist) {
             Overlap::Matched(offset) => self.offset = offset,
             Overlap::Disjoint => self.offset = self.disjoint_offset(playlist),
             Overlap::Regressed => {
                 self.regressions += 1;
-                let restarted = self.regressions >= RESTART_CONFIRMATIONS;
-                return ControlFlow::Break(restarted.then_some(LiveEnd::Restarted { track }));
+                return if self.regressions >= RESTART_CONFIRMATIONS {
+                    Alignment::End(LiveEnd::Restarted { track })
+                } else {
+                    Alignment::Skip
+                };
             }
             Overlap::Inconsistent(sequence) => {
-                return ControlFlow::Break(Some(LiveEnd::Inconsistent { track, sequence }));
+                return Alignment::End(LiveEnd::Inconsistent { track, sequence });
             }
         }
         self.regressions = 0;
-        ControlFlow::Continue(())
+        Alignment::Proceed
     }
 
     /// 没有重叠时的编号偏移：沿用当前偏移。不连续段序号按 RFC 8216 本是绝对的（没写
@@ -455,8 +468,8 @@ fn compare(
 }
 
 /// 之前会话已录的分片作为比对基准。
-fn listed_of(earlier: &Earlier) -> HashMap<u64, Listed> {
-    earlier
+fn listed_of(recorded: &Recorded) -> HashMap<u64, Listed> {
+    recorded
         .segments()
         .iter()
         .map(|(&sequence, name)| {
@@ -469,20 +482,17 @@ fn listed_of(earlier: &Earlier) -> HashMap<u64, Listed> {
         .collect()
 }
 
-/// `playlist` 与 `earlier` 重叠、身份与编号都一致时，重叠的分片中序号最大的一个；
-/// 有矛盾或没有重叠时为 None。
-pub(super) fn newest_overlap<'p>(
-    earlier: &Earlier,
-    playlist: &'p MediaPlaylist,
-) -> Option<&'p Segment> {
-    let previous = listed_of(earlier);
-    match compare(&previous, Some(earlier.last()), playlist) {
+/// `playlist` 与 `recorded` 重叠、身份与编号都一致时，重叠的分片，序号从大到小；有矛盾或没有重叠时为空。
+pub(super) fn overlaps<'p>(recorded: &Recorded, playlist: &'p MediaPlaylist) -> Vec<&'p Segment> {
+    let previous = listed_of(recorded);
+    match compare(&previous, Some(recorded.last()), playlist) {
         Overlap::Matched(_) => playlist
             .segments
             .iter()
             .rev()
-            .find(|s| previous.contains_key(&s.sequence)),
-        _ => None,
+            .filter(|s| previous.contains_key(&s.sequence))
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -497,23 +507,11 @@ fn split_fetched(fetched: NewInits) -> Result<(Vec<ReadyInit>, Vec<FailedInit>),
                 fingerprint: Fingerprint::of_content(&data),
                 data,
             }),
-            Err(e) => match missable_http(&e) {
+            Err(e) => match missable(&e) {
                 Some(kind) => failed.push(FailedInit { init, kind }),
                 None => return Err(e),
             },
         }
     }
     Ok((ready, failed))
-}
-
-/// 取不到的请求：404/410（已过期），或重试后仍失败的临时故障。这类失败记为缺失，录制继续。
-pub(super) fn missable_http(error: &Error) -> Option<HttpError> {
-    match error {
-        Error::Http { kind, .. }
-            if kind.retryable() || matches!(kind, HttpError::Status(404 | 410)) =>
-        {
-            Some(kind.clone())
-        }
-        _ => None,
-    }
 }

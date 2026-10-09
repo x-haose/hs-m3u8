@@ -732,9 +732,7 @@ async fn a_frozen_track_fails_while_the_other_keeps_going() {
             err,
             Error::LiveStalled {
                 track: 1,
-                cause: StallError::TrackStopped {
-                    playlist_gone: None
-                }
+                cause: StallError::TrackStopped(StallCause::NoNewSegments)
             }
         ),
         "{err}"

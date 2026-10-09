@@ -1,6 +1,7 @@
 //! 直播录制：播放列表按请求次数逐步变化，模拟刷新、窗口滑动、结束、中断与服务器前后矛盾。
 //! 样本 ts_long 为 4 个时间戳连续的 1 秒分片；TARGETDURATION 设为 0.1 秒，刷新间隔随之很短。
 
+mod deciding;
 mod recording;
 mod resume;
 
@@ -17,17 +18,26 @@ use crate::{engine, expected, fixture, request, track};
 
 /// 序号即 ts_long 分片编号的直播播放列表；`indices` 须连续。
 fn playlist(indices: &[u64], end: bool) -> String {
-    playlist_with_target("0.1", indices, end)
+    media_playlist("0.1", "", indices, end)
+}
+
+/// 同 [`playlist`]，分片路径为 `<dir>seg<i>.ts`，与 [`put_long`] 的 `dir` 对应。
+fn playlist_in(dir: &str, indices: &[u64], end: bool) -> String {
+    media_playlist("0.1", dir, indices, end)
 }
 
 /// 同 [`playlist`]，TARGETDURATION 为 `target` 秒。
 fn playlist_with_target(target: &str, indices: &[u64], end: bool) -> String {
+    media_playlist(target, "", indices, end)
+}
+
+fn media_playlist(target: &str, dir: &str, indices: &[u64], end: bool) -> String {
     let mut text = format!(
         "#EXTM3U\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MEDIA-SEQUENCE:{}\n",
         indices.first().copied().unwrap_or(0)
     );
     for i in indices {
-        text += &format!("#EXTINF:1,\nseg{i}.ts\n");
+        text += &format!("#EXTINF:1,\n{dir}seg{i}.ts\n");
     }
     if end {
         text += "#EXT-X-ENDLIST\n";
@@ -135,6 +145,25 @@ fn put_split_master(server: &Server) {
          #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",DEFAULT=YES,URI=\"audio.m3u8\"\n\
          #EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=320x180,AUDIO=\"aud\"\nvideo.m3u8\n",
     );
+}
+
+/// 视频与音频都取自 ts_long 的期望输出：`groups` 的每一项为一组的（视频, 音频）分片编号。
+fn expected_split_long(dir: &Path, groups: &[(&[u64], &[u64])]) -> Vec<u8> {
+    let names =
+        |indices: &[u64]| -> Vec<String> { indices.iter().map(|i| format!("seg{i}.ts")).collect() };
+    let groups: Vec<DiscontinuityGroup> = groups
+        .iter()
+        .map(|(video, audio)| {
+            let tracks = [names(video), names(audio)].map(|names| {
+                let names: Vec<&str> = names.iter().map(String::as_str).collect();
+                track("ts_long", None, &names)
+            });
+            DiscontinuityGroup {
+                tracks: tracks.into(),
+            }
+        })
+        .collect();
+    expected(dir, &[Streams::Video, Streams::Audio], &groups)
 }
 
 /// fmp4_a 视频与音频各取若干个分片、合成一组的期望输出。
