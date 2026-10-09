@@ -72,9 +72,10 @@ async fn window_slide_is_reported_as_missed() {
         (
             last.segments_done,
             last.segments_total,
-            last.segments_missed
+            last.segments_failed,
+            last.segments_expired
         ),
-        (2, 2, 2)
+        (2, 2, 0, 2)
     );
 }
 
@@ -552,9 +553,10 @@ async fn unavailable_new_init_is_missed() {
         (
             last.segments_done,
             last.segments_total,
-            last.segments_missed
+            last.segments_failed,
+            last.segments_expired
         ),
-        (1, 2, 1)
+        (1, 2, 1, 0)
     );
     let tracks = vec![track("fmp4_a/video", Some("init.mp4"), &["seg0.m4s"])];
     let want = expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]);

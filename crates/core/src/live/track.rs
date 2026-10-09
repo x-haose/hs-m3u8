@@ -185,10 +185,14 @@ impl LiveTrack {
         if update.any_new {
             self.last_listed = now;
         }
-        let failure = update.missed.iter().rev().find_map(|m| match &m.reason {
-            MissReason::Failed(kind) | MissReason::InitFailed(kind) => Some(kind),
-            _ => None,
-        });
+        let failure = update
+            .init_failed
+            .iter()
+            .rev()
+            .find_map(|m| match &m.reason {
+                MissReason::InitFailed(kind) => Some(kind),
+                _ => None,
+            });
         if let Some(kind) = failure {
             self.last_download_failure = Some(kind.clone());
         }

@@ -125,7 +125,7 @@ async fn a_full_track_does_not_block_the_decision() {
         max_duration: Some(Duration::from_secs(2)),
         ..req.live.unwrap()
     });
-    interrupt(&req, |p| p.segments_done == 3 && p.segments_missed == 1).await;
+    interrupt(&req, |p| p.segments_done == 3 && p.segments_failed == 1).await;
 
     put_long(&server, "a/", &[1, 2, 3]);
     server.put("video.m3u8", playlist_in("v/", &[], false));

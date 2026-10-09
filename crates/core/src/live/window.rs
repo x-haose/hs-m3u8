@@ -83,7 +83,10 @@ pub(super) struct Update {
     pub items: Vec<Item>,
     /// 新拉到的 init 段：(内容指纹, 内容)，须先于引用它的分片落盘
     pub init_files: Vec<(Fingerprint, Vec<u8>)>,
-    pub missed: Vec<Missed>,
+    /// 上次处理到的与这次窗口起点之间已滑出窗口的分片
+    pub expired: Option<Missed>,
+    /// init 段取不到、记为缺失的新分片，每项一个分片
+    pub init_failed: Vec<Missed>,
     /// 出现了要录的新分片（排入下载或记为缺失）
     pub any_new: bool,
     /// 窗口有变化（出现新分片或窗口前移）；决定下次刷新的时刻
@@ -97,7 +100,8 @@ impl Update {
         Update {
             items: Vec::new(),
             init_files: Vec::new(),
-            missed: Vec::new(),
+            expired: None,
+            init_failed: Vec::new(),
             any_new: false,
             changed: false,
             ended,
@@ -217,7 +221,7 @@ impl Window {
         let window_moved =
             playlist.segments.first().map(|s| s.sequence) != self.previous.keys().min().copied();
         let mut update = Update::unchanged(playlist.ended);
-        update.missed.extend(self.expired(scope, playlist));
+        update.expired = self.expired(scope, playlist);
         let (ready, failed) = split_fetched(fetched)?;
         let listing = match self.walk(scope, playlist, &ready, &failed, &mut update)? {
             ControlFlow::Break(end) => return Ok(ControlFlow::Break(end)),
@@ -368,7 +372,7 @@ impl Window {
             InitState::Absent => None,
             InitState::Ready(fingerprint) => Some(fingerprint),
             InitState::Failed(kind) => {
-                update.missed.push(Missed {
+                update.init_failed.push(Missed {
                     session: scope.session,
                     track: scope.track,
                     first: segment.sequence,
