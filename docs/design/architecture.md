@@ -77,50 +77,55 @@ crates/py ────┼──> crates/core ──> crates/hls
 
 ### 5.1 任务与流水线
 
-一个任务把一个来源 URL 变成一个输出文件：
+一个任务把一个来源 URL 变成一个输出文件，分三条流程，共用合并与收尾：
 
-1. **解析**：取主播放列表，选轨，再取媒体播放列表；可调用 `on_playlist` 回调。
-2. **计划**：规范化后得到每条轨的分片列表，计算计划摘要（见 5.2）。
-3. **下载**：并发拉取分片，取 key，解密并校验，写盘。
-4. **合并**：调用 `remux` 生成临时文件，核对包数后改名为输出文件。
-5. **收尾**：按选项删除或保留任务目录。
+- **点播**：解析（取主播放列表、选轨、取媒体播放列表）→ 计划（各轨分片、不连续段组、计划摘要，下载前确认能够合并）→ 下载 → 合并。
+- **直播录制**：解析 → 按 5.9 录制 → 合并任务目录中已录到的分片。
+- **直播只合并**：不联网，直接合并已录到的分片（`Resume::MergeOnly`）。
+
+合并调用 `remux` 生成临时文件，核对包数后改名为输出文件；之后按选项删除或保留任务目录。
+
+模块：`resolve`（拉取播放列表、选轨）、`plan`（点播计划与摘要，纯计算）、`fetch`（下载队列与单项拉取）、`vod`、`live`、`workdir`、`job`（分派与收尾）、`http`、`crypto`、`verify`。
 
 ### 5.2 任务目录与续传
 
 ```
 <输出名>.hsdl/
-├── job.json                                  见下
-├── lock                                      运行期间的排他锁
+├── job.json                                          见下
+├── lock                                              运行期间的排他锁
 └── tracks/<轨道>/
-    ├── <序号>-<不连续段>-<init 编号|none>.seg  已解密且通过校验的分片
-    └── init-<编号>.mp4                       init 段
+    ├── <录制>-<序号>-<不连续段>-<init>-<时长>.seg     已解密且通过校验的分片
+    └── init-<编号>.mp4                               init 段
 ```
 
-- `job.json` 是序列化契约，带 `format_version`（当前为 2），不认识的版本、未知字段一律拒绝：
-  - 点播：`{"kind": "vod", "format_version": 2, "plan_digest": "<SHA-256>"}`
-  - 直播：`{"kind": "live", "format_version": 2, "source_digest": "<SHA-256>", "tracks": ["video", "audio"]}`，`tracks` 为各轨的取流方式（`all`/`video`/`audio`）。
+- 分片文件名：录制为第几次录制（点播恒为 0），init 为 init 段编号或 `none`，时长为 EXTINF 声明的微秒数。分组信息与时长都在文件名里，只凭目录内容即可合并。
+- `job.json` 是序列化契约，带 `format_version`（当前为 1），不认识的版本、未知字段一律拒绝：
+  - 点播：`{"kind": "vod", "format_version": 1, "plan_digest": "<SHA-256>"}`
+  - 直播：`{"kind": "live", "format_version": 1, "request_digest": "<SHA-256>", "streams": ["video", "audio"]}`；`streams` 为各轨的取流方式（`all`/`video`/`audio`）。
 - 请求配置（请求头、Cookie 等）不写入任务目录，续传时由调用方再次提供同样的请求。
-- **完成的判定只看最终文件名是否存在**：先写 `.part`、fsync 后改名，所以存在即完整（断电也成立），不需要逐片记账。分组信息在文件名里，只凭目录内容即可合并。
-- **计划摘要** = 各分片身份（轨道、序号、去掉查询串的 URL、时长、不连续段序号、字节范围、init 段 URL 与范围）的 SHA-256。不含查询串，因为签名与令牌每次会话不同；不含 key URL 与 IV，因为目录里存的是解密后的分片。续传时重新取播放列表并计算，摘要不同即报 `PlanChanged`，不混用旧分片。
-- 运行期间持有 `lock` 的排他锁，第二个任务打开同一目录时报 `WorkDir`。没有 `job.json` 的非空目录不当作任务目录（成功后整个目录会被删除）。
-- 输出文件已存在：拒绝覆盖，除非调用方明确要求；开始时与合并前各检查一次。
-- 任务目录位置可配置：库的默认位置在输出文件旁，成功后删除，删除失败记在结果的 `cleanup_error` 里；桌面应用放在应用数据目录，不放在下载目录，避免被网盘同步。
-- 日志与错误信息中不输出请求头的值、Cookie 与 key 内容。
+- **完成的判定只看最终文件名是否存在**：先写 `.part`、fsync 后改名，所以存在即完整（断电也成立），不需要逐片记账。
+- **计划摘要**（点播）= 各分片身份（轨道、序号、去掉查询串的 URL、时长、不连续段序号、字节范围、init 段 URL 与范围）的 SHA-256。不含查询串，因为签名与令牌每次会话不同；不含 key URL 与 IV，因为目录里存的是解密后的分片。init 段编号按同一口径（去掉查询串的地址与范围）去重，摘要相同即编号对应同一个 init 段。摘要不同报 `PlanChanged`。
+- **来源摘要**（直播）= 完整来源地址（含查询串，很多直播源靠它区分频道）与选轨偏好的 SHA-256。
+- 记录与当前任务不一致时报错（`PlanChanged` 或 `WorkDir`）；但目录里还没有已完成的分片与 init 段时，直接改为当前任务。没有 `job.json` 的非空目录（`.part` 残留与锁文件除外）不当作任务目录，因为成功后整个目录会被删除。
+- 运行期间持有 `lock` 的排他锁，第二个任务打开同一目录时报 `WorkDir(Locked)`。
+- 输出文件已存在：拒绝覆盖，除非调用方明确要求；开始时与合并前各检查一次。输出所在目录在合并前创建。
+- 任务目录位置可配置：库的默认位置在输出文件旁（`JobRequest::resolved_work_dir`），成功后删除，删除失败记在结果的 `cleanup_error` 里；桌面应用放在应用数据目录，不放在下载目录，避免被网盘同步。
+- 错误信息中不输出请求头的值、Cookie、key 内容与地址的查询串。
 
 ### 5.3 调度、超时、重试、取消
 
-- `Engine` 持有全局上限：所有任务合计的在途 HTTP 请求数（含播放列表与 key）。每次尝试从发出请求到读完响应体占用一个名额，退避等待期间不占。每个任务另有自己的并发数（同时处理的分片数）。
-- 每个请求都有连接超时、读空闲超时和总时长上限。
-- 可重试：连接错误、超时、5xx、408、429（遵守 `Retry-After`）。退避方式为指数加随机抖动，次数可配置。
-- 不可重试：其余 4xx、解密或校验失败、回调报错。
-- 任一分片最终失败：取消该任务所有在途请求，任务以 `Segment { sequence, url, source }` 结束；已完成的分片保留，可以续传。
-- 取消：每个任务一个 `CancellationToken`，按调用逐层传入，不存进对象；暂停就是取消后保留目录，丢弃任务句柄也会取消。所有并发单元由任务的 `JoinSet` 持有，任务结束时全部回收。合并阶段（FFmpeg）不响应取消。
+- `Engine` 持有全局上限：所有任务合计的在途 key、init 段与分片请求数；每次尝试从发出请求到读完响应体占用一个名额，退避等待期间不占。播放列表请求不占名额，以免直播刷新排在其他任务的大批下载之后。每个任务另有自己的并发数（同时下载的分片与 init 段数）。
+- 每个请求都有连接超时、读空闲超时和单次尝试的总时长上限，都不能为 0。
+- 可重试：连接与传输错误、超时、5xx、408、429。退避为指数加随机抖动，次数可配置；服务器要求的等待（Retry-After）超过 `max_delay` 时不再重试。
+- 不可重试：其余 4xx、请求无法构造（含回调给出的不合法地址或请求头）、解密或校验失败、回调报错。
+- 点播任一分片最终失败：取消该任务其余请求，任务以 `Segment` 结束；已完成的分片保留，可以续传。直播的失败处理见 5.9。
+- 取消：每个任务一个 `CancellationToken`，按调用逐层传入每个请求与回调调用；下载队列持有其子令牌，只用来取消自己派出的下载。任务内的下载与刷新由 `JoinSet` 持有，结束前全部等回；回调与文件写入在阻塞线程池中执行，取消时等它们返回。丢弃任务句柄即取消；合并阶段（FFmpeg）不响应取消，已进入合并的任务会在后台完成。
 - 运行时：`core` 不自建 tokio 运行时，使用调用方的（Tauri、`pyo3-async-runtimes` 都基于 tokio）。
 
 ### 5.4 HTTP
 
-- `reqwest` 0.13.5（rustls）。每个任务的请求配置包括请求头、Cookie、User-Agent、代理。
-- 证书校验默认开启；关闭必须显式写 `insecure: true`。0.1.x 依赖的 hssp 默认关闭校验，这里纠正。
+- `reqwest` 0.13.5（rustls）。请求配置包括请求头（Cookie、User-Agent 都经请求头传入）与代理；Cookie 在任务内由响应自动保存。
+- 证书校验默认开启；关闭必须显式写 `insecure: true`。
 - 字节范围分片用 `Range` 请求头；响应必须是 206 且长度一致，否则视为错误。
 - key 按 key URL 去重，只取一次，缓存在任务内存里。
 
@@ -128,12 +133,10 @@ crates/py ────┼──> crates/core ──> crates/hls
 
 - AES-128-CBC 加 PKCS#7，使用分片自己的 key 与 IV（`aes` 0.9.3 + `cbc` 0.2.1）。
 - 校验（不通过即失败，不写盘）：
-  - 有 `Content-Length` 时长度必须一致；
+  - 响应体长度与 `Content-Length`、字节范围一致；
   - 解密后去填充必须合法；key 或 IV 错误时这一步几乎必然失败；
-  - TS 分片：偏移 0 和 188 处都必须是同步字节 `0x47`；
-  - fMP4 分片：开头必须是合法的 box 头（`styp`、`moof` 等）。
-
-0.1.x 的「IV 错了只坏前 16 字节、仍报告成功」这类问题，会在这一层被拦下。
+  - 没有 init 段的分片：MPEG-TS（偏移 0 处、长度够时偏移 188 处为同步字节 `0x47`）、ADTS 音频，或以 ID3 标签开头的打包音频；
+  - fMP4 分片与 init 段：开头必须是合法的 box 头（`styp`、`moof` 等）。
 
 ### 5.6 进度
 
@@ -143,50 +146,46 @@ crates/py ────┼──> crates/core ──> crates/hls
 ### 5.7 扩展点（回调）
 
 ```rust
-// 默认实现均为原样返回；Err 中的字符串为错误说明
+// 默认实现均为原样返回；HookError = Box<dyn std::error::Error + Send + Sync>，原样保存在 Error::Hook 中
 pub trait Hooks: Send + Sync {
-    fn on_playlist(&self, url: &Url, text: String) -> Result<String, String>;
-    fn on_request(&self, req: &mut RequestParts) -> Result<(), String>;   // 可改 URL 与请求头，每次尝试调用一次
-    fn on_key(&self, key_url: &Url, data: Vec<u8>) -> Result<Vec<u8>, String>;
-    fn on_segment(&self, url: &Url, data: Vec<u8>) -> Result<Vec<u8>, String>;
+    fn on_playlist(&self, url: &Url, body: Vec<u8>) -> Result<Vec<u8>, HookError>;        // 结果须为 UTF-8
+    fn on_request(&self, purpose: Purpose, req: &mut RequestParts) -> Result<(), HookError>; // 改地址与请求头，每次尝试调用一次
+    fn on_key(&self, key_url: &Url, data: Vec<u8>) -> Result<Vec<u8>, HookError>;          // 结果须为 16 字节
+    fn on_segment(&self, url: &Url, data: Vec<u8>) -> Result<Vec<u8>, HookError>;          // 解密之前；init 段不经过
 }
 ```
 
-- `on_key` 用于站点自定义 key 加密（如 `qiqiuyun.py` 的 key 变换）。
-- `on_segment` 在解密之前调用，用于去掉分片前的伪装字节（例如伪装成 PNG 的 TS）；init 段不经过它。
-- 回调在阻塞线程池中执行；出错时任务失败，错误不可重试；取消不打断正在执行的回调。
-- 回调持有强引用，不会像 0.1.x（blinker 弱引用）那样被垃圾回收后静默失效。
+- `on_playlist` 收原始字节：加密、压缩或非 UTF-8 编码的播放列表由回调还原。
+- `on_key` 用于站点自定义的 key 变换；`on_segment` 用于去掉分片前的伪装字节（例如伪装成 PNG 的 TS）。
+- 回调在阻塞线程池中执行；出错时任务失败（`Error::Hook`，带出错的是哪个回调），错误不可重试；取消不打断正在执行的回调。
 
 ### 5.8 错误模型
 
-```rust
-pub enum Error {
-    InvalidInput(String), OutputExists(PathBuf),         // 调用方输入错误
-    Playlist { url, source }, Select(SelectError),       // 播放列表写坏或含 DRM/SAMPLE-AES、选轨失败
-    Unsupported(Unsupported),                            // 直播、无分片、无法合并的不连续段布局
-    Http { url, kind: HttpError },                       // 状态码、超时、连接；kind.retryable()
-    Segment { sequence, url, source: Box<Error> },       // 某个分片最终失败
-    KeyLength { url, length }, Integrity { url, kind },  // key 长度、去填充、TS/fMP4 校验、字节范围长度
-    PlanChanged, WorkDir { path, reason },               // 续传与任务目录
-    Hook { purpose, message }, Io { action, path, source }, Remux(remux::Error), Cancelled,
-}
-```
+定义以 `crates/core/src/error.rs` 为准。按调用方的处理方式分类：
 
-`Error::retryable()` 只对外部依赖的临时故障为真（408、429、5xx、超时、连接与传输错误）。
+| 类别 | 变体 | 可否重试 |
+|---|---|---|
+| 调用方输入 | `InvalidInput`、`OutputExists` | 改参数后再试 |
+| 来源内容 | `Playlist`、`NotMediaPlaylist`、`Select`、`Unsupported`（直播被拒、无分片、DRM、SAMPLE-AES、无法合并的布局）、`Integrity`、`KeyLength` | 否 |
+| 外部依赖 | `Http`（`HttpError::retryable`）、`Io`；`Segment`、`Key` 说明出在哪个分片或 key | 看原因 |
+| 任务目录 | `PlanChanged`、`WorkDir`（`WorkDirProblem`）、`NothingRecorded` | 否 |
+| 其他 | `Hook`、`Remux`、`Cancelled` | 否 |
 
-不变量被违反（代码本不该产生的状态）用 panic 中止当次任务，不降级。
+- 错误信息已包含原因，不再经 `source()` 链出同一段文字；地址只显示到路径，不含查询串。
+- 不变量被违反（代码本不该产生的状态）用 panic 中止当次任务，不降级。
 
 ### 5.9 直播录制
 
-- 判定：所选的媒体播放列表有任一没有 `#EXT-X-ENDLIST` 即为直播。`JobRequest::live` 默认录制，为 None 时报 `Unsupported::Live`。
-- 起点：当前播放列表中的全部分片（EVENT 即从头，滑动窗口即从窗口起点）。选轨在开始时确定，不跟随之后的变化。
-- 刷新（RFC 8216 6.3.4）：各轨独立；播放列表有变化后，从开始加载起至少等一个 target duration，没变化时等半个。同一序号的分片地址（去掉查询串）或字节范围与上次不同，视为服务器错误，任务失败（`LiveSegmentChanged`）。刷新失败（网络、播放列表内容）不中止，等下次刷新。
-- 漏段：两次刷新之间已滑出窗口的分片，以及列出了但 404/410 或重试后仍失败的分片，记为漏段，录制继续；进度里计数，结果里给出序号区间与原因。其他失败（403、校验、key、回调、写盘）使任务失败。
-- 漏段不插入不连续标记：保留原时间戳，成片在该处时间线留空，各轨之间的同步不受影响（RFC 8216 6.3.4 不允许用媒体序号在轨间同步，人为切组需要这样做）。FFmpeg 读 fMP4 默认按 `tfdt` 取时间戳，TS 自带时间戳，空档都能保留。
-- init 段：首次出现时拉取，按内容去重（签名地址每次刷新都不同）；同一不连续段内 init 内容变化时任务失败。init 段先落盘，再下载引用它的分片。
-- 结束：所有轨出现 `#EXT-X-ENDLIST`；调用方 `Job::stop`；录到的时长（第 0 条轨已排入的分片声明时长之和）达到 `max_duration`；连续 `stall_timeout`（默认 60 秒）没有新分片，附最后一次刷新失败的原因。之后不再刷新，等在途分片完成后合并，结果的 `LiveReport` 给出结束原因与漏段。
-- 合并：按任务目录中已完成的分片分组，只合并各轨都有的不连续段，其余记为漏段（`Unmergeable`）；一个也没有时报 `NothingRecorded`。
-- 中断：`job.json` 记录来源摘要（去掉查询串的来源地址与选轨偏好）与各轨取流方式。用同样的请求再次运行时不联网，直接合并已录到的分片（结束原因 `Interrupted`，不含上次录制中的漏段）；一个也没录到时重新开始录制。
+- **判定**：所选的媒体播放列表有任一没有 `#EXT-X-ENDLIST` 即为直播；任务目录是同一来源的直播录制时，即使播放列表已结束也按直播继续。`JobRequest::live` 默认录制，为 None 时报 `Unsupported::Live`。
+- **起点**：当前播放列表中的全部分片（EVENT 即从头，滑动窗口即从窗口起点）。选轨在开始时确定，不跟随之后的变化。
+- **刷新**（RFC 8216 6.3.4）：各轨独立；播放列表有变化（出现新分片或窗口前移）后，从开始加载起至少等一个 target duration，没变化时等半个，间隔不短于 100 毫秒。
+- **一致性**：同一序号的分片文件名（地址的最后一段，不含查询串）或字节范围变了，结束录制（`LiveEnd::SegmentChanged`）；媒体序号回退且与上次窗口不重叠，连续两次即结束录制（`LiveEnd::Restarted`，多为编码器重启；一次多半是 CDN 的旧缓存）。服务器不写 `EXT-X-DISCONTINUITY-SEQUENCE` 时，不连续段编号靠与上次重叠的分片校正。
+- **漏段**：两次刷新之间已滑出窗口的分片，以及列出了但 404/410 或重试后仍失败的分片与 init 段，记为漏段，录制继续；进度里计数，结果里给出序号区间与原因。漏段不插入不连续标记：保留原时间戳，成片在该处时间线留空，各轨之间的同步不受影响（RFC 8216 不允许用媒体序号在轨间同步，人为切组需要这样做）。FFmpeg 读 fMP4 默认按 `tfdt` 取时间戳，TS 自带时间戳，空档都能保留。
+- **失败**：刷新取不到（含 404/410）或播放列表语法错误（服务器未写完）时等下次刷新；其他刷新失败（401/403 等、内容不是播放列表、DRM、回调出错）以及分片的 key 失败、校验失败、回调出错、写盘失败，使任务失败。
+- **init 段**：首次出现时拉取，按内容去重（签名地址每次刷新都不同），之前各次录制落盘的 init 段一并参与比对；同一不连续段内 init 内容变化时任务失败。init 段先落盘，再下载引用它的分片。
+- **结束**：所有轨出现 `#EXT-X-ENDLIST`；调用方 `Job::stop`；各轨都录满 `max_duration`（每轨已排入下载的分片声明时长之和）；任一轨连续 `stall_timeout`（默认 60 秒）没有新分片，结果带停滞的轨与原因（无新分片、刷新失败、刷新未返回）；或上述服务器前后矛盾。之后不再刷新，把已列出的分片下完再合并。
+- **中断后再次运行**：`Resume::Continue`（默认）继续录制，作为新的一次录制，与之前的首尾相接（中断期间的内容不在输出中）；`Resume::MergeOnly` 不联网只合并。继续录制与只合并都要求来源摘要一致。
+- **合并**：按（录制次数, 不连续段）分组，只合并各轨都有的组，其余记为漏段（`Unmergeable`）；之前各次录制中序号的空洞记为原因不明的漏段；一个可合并的分片也没有时报 `NothingRecorded`。
 
 ## 6. remux
 

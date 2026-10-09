@@ -6,11 +6,17 @@ use std::sync::Arc;
 
 use aes::cipher::block_padding::Pkcs7;
 use aes::cipher::{BlockModeEncrypt, KeyIvInit};
-use hs_m3u8_core::{Error, Hooks, HttpError, Integrity, RequestParts, Stage, Unsupported, Url};
+use hs_m3u8_core::{
+    Error, HookError, Hooks, HttpError, Integrity, Purpose, RequestParts, Stage, Unsupported, Url,
+    WorkDirProblem,
+};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
 use crate::server::Server;
-use crate::{assert_output, engine, expected, fixture, fixtures, request, run, test_dir, track};
+use crate::{
+    assert_output, engine, expected, expected_long, fixture, fixtures, request, run, test_dir,
+    track,
+};
 
 /// ts_a 的分片（H.264 + AAC 的 TS）。
 const TS_A: [&str; 2] = ["seg0.ts", "seg1.ts"];
@@ -36,28 +42,35 @@ fn hex(bytes: &[u8; 16]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// ts_a 的两个分片，第一个用显式 IV、第二个换了 key 并用媒体序号推出的 IV。
+/// ts_long 的四个分片：第一个用显式 IV，其余三个换了 key 并用媒体序号推出的 IV。
+/// 并发 4 时三个分片同时需要第二个 key，它只被拉取一次。
 #[tokio::test(flavor = "multi_thread")]
 async fn aes128_explicit_and_sequence_iv() {
     let dir = test_dir("aes128");
     let server = Server::start().await;
     let (key0, key1) = ([0x11; 16], [0x22; 16]);
     let iv0 = [0x33; 16];
-    // MEDIA-SEQUENCE 为 7，第二个分片序号 8
-    let iv1 = 8u128.to_be_bytes();
     server.put("k0", key0);
     server.put("k1", key1);
-    server.put("a.ts", encrypt(&fixture("ts_a/seg0.ts"), &key0, &iv0));
-    server.put("b.ts", encrypt(&fixture("ts_a/seg1.ts"), &key1, &iv1));
-    server.put(
-        "index.m3u8",
-        format!(
-            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:7\n\
-             #EXT-X-KEY:METHOD=AES-128,URI=\"k0\",IV=0x{}\n#EXTINF:1,\na.ts\n\
-             #EXT-X-KEY:METHOD=AES-128,URI=\"k1\"\n#EXTINF:1,\nb.ts\n#EXT-X-ENDLIST\n",
-            hex(&iv0)
-        ),
+    // MEDIA-SEQUENCE 为 7：分片 i 的序号为 7 + i
+    let mut playlist = format!(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:7\n\
+         #EXT-X-KEY:METHOD=AES-128,URI=\"k0\",IV=0x{}\n",
+        hex(&iv0)
     );
+    for i in 0..4u64 {
+        let plain = fixture(&format!("ts_long/seg{i}.ts"));
+        let cipher = match i {
+            0 => encrypt(&plain, &key0, &iv0),
+            _ => encrypt(&plain, &key1, &u128::from(7 + i).to_be_bytes()),
+        };
+        server.put(&format!("s{i}.ts"), cipher);
+        if i == 1 {
+            playlist += "#EXT-X-KEY:METHOD=AES-128,URI=\"k1\"\n";
+        }
+        playlist += &format!("#EXTINF:1,\ns{i}.ts\n");
+    }
+    server.put("index.m3u8", playlist + "#EXT-X-ENDLIST\n");
 
     let mut req = request(server.url("index.m3u8"), &dir);
     req.concurrency = NonZeroUsize::new(4).unwrap();
@@ -65,13 +78,12 @@ async fn aes128_explicit_and_sequence_iv() {
     let progress = job.progress();
     let output = job.wait().await.unwrap();
 
-    let want = expected_ts_a(&dir);
-    assert_output(&output, &want);
-    assert_eq!(output.segments, 2);
+    assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
+    assert_eq!(output.segments, 4);
     let last = *progress.borrow();
     assert_eq!(
         (last.stage, last.segments_done, last.segments_total),
-        (Stage::Done, 2, 2)
+        (Stage::Done, 4, 4)
     );
     assert_eq!((server.hits("k0"), server.hits("k1")), (1, 1));
 }
@@ -254,18 +266,19 @@ async fn failure_then_resume() {
     let err = run(req.clone()).await.unwrap_err();
     match err {
         Error::Segment {
+            track: 0,
             sequence: 1,
-            source,
+            cause,
             ..
         } => assert!(
             matches!(
-                *source,
+                *cause,
                 Error::Http {
                     kind: HttpError::Status(404),
                     ..
                 }
             ),
-            "{source}"
+            "{cause}"
         ),
         other => panic!("{other}"),
     }
@@ -296,7 +309,13 @@ async fn cancel_lock_and_resume() {
     gate.arrived.notified().await;
     let second = run(req.clone()).await.unwrap_err();
     assert!(
-        matches!(&second, Error::WorkDir { reason, .. } if reason.contains("另一个任务")),
+        matches!(
+            &second,
+            Error::WorkDir {
+                problem: WorkDirProblem::Locked,
+                ..
+            }
+        ),
         "{second}"
     );
     job.cancel();
@@ -331,19 +350,22 @@ async fn wrong_key_fails_integrity() {
         .await
         .unwrap_err();
     match err {
-        Error::Segment { source, .. } => assert!(
+        Error::Segment { cause, .. } => assert!(
             matches!(
-                *source,
+                *cause,
                 Error::Integrity {
-                    kind: Integrity::Padding | Integrity::NotTs(_),
+                    kind: Integrity::Padding | Integrity::UnrecognizedSegment(_),
                     ..
                 }
             ),
-            "{source}"
+            "{cause}"
         ),
         other => panic!("{other}"),
     }
-    assert!(!dir.join("out.mp4.hsdl/tracks/0/0.seg").exists());
+    let written = std::fs::read_dir(dir.join("out.mp4.hsdl/tracks/0"))
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(written, 0, "校验失败的分片不应写盘");
 }
 
 /// 站点适配：改写播放列表、给每个请求签名、解开变换过的 key、去掉分片前的伪装字节。
@@ -352,23 +374,25 @@ struct SiteHooks;
 const DISGUISE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 impl Hooks for SiteHooks {
-    fn on_playlist(&self, _url: &Url, text: String) -> Result<String, String> {
-        Ok(text.replace("{segment}", "seg"))
+    fn on_playlist(&self, _url: &Url, body: Vec<u8>) -> Result<Vec<u8>, HookError> {
+        Ok(String::from_utf8(body)?
+            .replace("{segment}", "seg")
+            .into_bytes())
     }
 
-    fn on_request(&self, request: &mut RequestParts) -> Result<(), String> {
+    fn on_request(&self, _purpose: Purpose, request: &mut RequestParts) -> Result<(), HookError> {
         request.headers.push(("x-token".into(), "secret".into()));
         Ok(())
     }
 
-    fn on_key(&self, _url: &Url, data: Vec<u8>) -> Result<Vec<u8>, String> {
+    fn on_key(&self, _url: &Url, data: Vec<u8>) -> Result<Vec<u8>, HookError> {
         Ok(data.iter().map(|b| b ^ 0xFF).collect())
     }
 
-    fn on_segment(&self, _url: &Url, data: Vec<u8>) -> Result<Vec<u8>, String> {
+    fn on_segment(&self, _url: &Url, data: Vec<u8>) -> Result<Vec<u8>, HookError> {
         data.strip_prefix(DISGUISE)
             .map(<[u8]>::to_vec)
-            .ok_or_else(|| "缺少伪装前缀".to_owned())
+            .ok_or_else(|| "缺少伪装前缀".into())
     }
 }
 
@@ -397,6 +421,75 @@ async fn hooks_adapt_site() {
 
     let want = expected_ts_a(&dir);
     assert_output(&output, &want);
+}
+
+/// init 段地址的签名每次会话不同：续传时编号仍对应同一个 init 段（按去掉查询串的地址判定，与计划摘要一致）。
+#[tokio::test(flavor = "multi_thread")]
+async fn signed_init_urls_resume_with_the_right_init() {
+    let dir = test_dir("signed_init");
+    let server = Server::start().await;
+    for program in ["fmp4_a", "fmp4_b"] {
+        for name in ["init.mp4", "seg0.m4s", "seg1.m4s"] {
+            if let Ok(data) = std::fs::read(fixtures().join(program).join("video").join(name)) {
+                server.put(&format!("{program}/{name}"), data);
+            }
+        }
+    }
+    // 三组：a、a、b；第 1 次运行两组 a 的 init 签名不同，第 2 次相同
+    let playlist = |sig: [u32; 3]| {
+        let mut text = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:1\n");
+        for (group, (program, segments)) in [("fmp4_a", 2), ("fmp4_a", 2), ("fmp4_b", 1)]
+            .into_iter()
+            .enumerate()
+        {
+            if group > 0 {
+                text += "#EXT-X-DISCONTINUITY\n";
+            }
+            text += &format!("#EXT-X-MAP:URI=\"{program}/init.mp4?s={}\"\n", sig[group]);
+            for i in 0..segments {
+                text += &format!("#EXTINF:1,\n{program}/seg{i}.m4s\n");
+            }
+        }
+        text + "#EXT-X-ENDLIST\n"
+    };
+    server.put("index.m3u8", playlist([1, 2, 1]));
+    server.remove("fmp4_b/seg0.m4s");
+    let req = request(server.url("index.m3u8"), &dir);
+    assert!(run(req.clone()).await.is_err());
+
+    server.put("index.m3u8", playlist([1, 1, 1]));
+    server.put("fmp4_b/seg0.m4s", fixture("fmp4_b/video/seg0.m4s"));
+    let mut req = req;
+    req.keep_work_dir = true;
+    let output = run(req.clone()).await.unwrap();
+
+    // 两个样本的 init 段只差 SPS/PPS，配错时成片也可能逐字节相同，所以直接核对编号对应的内容
+    let init = |index| {
+        std::fs::read(
+            req.resolved_work_dir()
+                .join(format!("tracks/0/init-{index}.mp4")),
+        )
+    };
+    assert_eq!(init(0).unwrap(), fixture("fmp4_a/video/init.mp4"));
+    assert_eq!(init(1).unwrap(), fixture("fmp4_b/video/init.mp4"));
+    let video = |program: &str, segments: &[&str]| DiscontinuityGroup {
+        tracks: vec![track(
+            &format!("{program}/video"),
+            Some("init.mp4"),
+            segments,
+        )],
+    };
+    let a = ["seg0.m4s", "seg1.m4s"];
+    let want = expected(
+        &dir,
+        &[Streams::All],
+        &[
+            video("fmp4_a", &a),
+            video("fmp4_a", &a),
+            video("fmp4_b", &["seg0.m4s"]),
+        ],
+    );
+    assert_eq!(std::fs::read(&output.path).unwrap(), want);
 }
 
 /// 下载前就能判定的失败：输出已存在、不录制直播时遇到直播、各轨不连续段不一致。
