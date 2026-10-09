@@ -3,7 +3,8 @@
 //! 按调用方的处理方式分类：
 //! - 调用方输入：[`Error::InvalidInput`]、[`Error::OutputExists`]，改参数后再试；
 //! - 来源内容：[`Error::Playlist`]、[`Error::NotMediaPlaylist`]、[`Error::Select`]、[`Error::Unsupported`]、
-//!   [`Error::Integrity`]、[`Error::KeyLength`]，同样的来源再试也不会成功；
+//!   [`Error::Integrity`]、[`Error::KeyLength`]，同样的请求再试也不会成功（其中 [`Unsupported::Live`] 开启直播
+//!   录制即可）；
 //! - 外部依赖：[`Error::Http`]（看 [`HttpError::retryable`]）、[`Error::Io`]；
 //!   [`Error::Segment`]、[`Error::Key`] 说明出在哪个分片或 key，[`Error::LiveStalled`] 说明直播哪条轨停滞，
 //!   可否重试看其原因（[`Error::retryable`]）；
@@ -163,9 +164,8 @@ impl Error {
 /// 来源用到了不支持的特性。
 #[derive(Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unsupported {
-    /// [`crate::JobRequest::live`] 为 None 时遇到直播：播放列表没有 EXT-X-ENDLIST，或任务目录里已是这个来源的
-    /// 直播录制（中断期间直播结束了，仍按直播续录）
-    #[error("直播（播放列表没有 EXT-X-ENDLIST，或任务目录里是它的直播录制）")]
+    /// [`crate::JobRequest::live`] 为 None 时遇到直播
+    #[error("直播（播放列表没有 EXT-X-ENDLIST）")]
     Live,
     #[error("播放列表 {} 没有分片", bare_url(.0))]
     EmptyPlaylist(Box<Url>),
@@ -264,7 +264,9 @@ pub enum WorkDirProblem {
     /// job.json 或分片文件无法识别
     #[error("内容无法识别：{0}")]
     Corrupt(String),
-    #[error("记录的是{recorded}任务，当前来源是{current}")]
+    /// 目录里记录的任务类型与本次不同。本次的类型：播放列表没有 EXT-X-ENDLIST，或目录里是这个来源的直播录制且
+    /// 请求开启了直播（[`crate::JobRequest::live`]）时为直播，否则为点播
+    #[error("记录的是{recorded}任务，本次是{current}任务")]
     KindMismatch { recorded: JobType, current: JobType },
     /// 只合并（[`crate::Resume::MergeOnly`]）只用于直播录制，目录里是点播的下载；点播用同样的请求正常运行即可续传
     #[error("目录里是点播的下载，只合并只用于直播录制")]
