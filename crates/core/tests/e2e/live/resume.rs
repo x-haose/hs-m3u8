@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use hs_m3u8_core::{Error, LiveEnd, LiveOptions, MissReason, Resume, Url, WorkDirProblem};
+use hs_m3u8_core::{Error, JobType, LiveEnd, LiveOptions, MissReason, Resume, Url, WorkDirProblem};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
 use super::{
@@ -225,7 +225,38 @@ async fn new_token_continues_only_when_the_window_overlaps() {
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
 }
 
-/// 只合并时目录里是点播任务：明确报类型不符，不当作「没有录到」。
+/// 目录里是直播录制、中断期间直播结束了，续传的请求却没开启直播：按点播运行，报类型不符，目录保留。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_directory_without_live_options_is_a_kind_mismatch() {
+    let dir = test_dir("resume_without_live_options");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1]);
+    server.put("live.m3u8", playlist(&[0, 1], false));
+    let req = live_request(server.url("live.m3u8"), &dir, STALL);
+    interrupt(&req, |p| p.segments_done == 2).await;
+
+    server.put("live.m3u8", playlist(&[0, 1], true));
+    let mut vod = req;
+    vod.live = None;
+    let err = run(vod).await.unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::WorkDir {
+                problem: WorkDirProblem::KindMismatch {
+                    recorded: JobType::Live,
+                    current: JobType::Vod
+                },
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert!(dir.join("out.mp4.hsdl/job.json").exists());
+}
+
+/// 只合并时目录里是点播任务：明确报不是直播录制，不当作「没有录到」。
 #[tokio::test(flavor = "multi_thread")]
 async fn merge_only_rejects_a_vod_directory() {
     let dir = test_dir("resume_merge_vod");

@@ -50,8 +50,8 @@ pub(crate) async fn run(
     }
     let root = request.resolved_work_dir();
     let source = source_digest(&request.url, &request.preference);
-    // 任务目录里有同一来源、可续的记录时，按记录的选轨找回同一条轨；记录的是直播时按直播继续，
-    // 即使播放列表已出现 ENDLIST（中断期间直播结束了）
+    // 任务目录里有同一来源、可续的记录时，按记录的选轨找回同一条轨；记录的是直播且请求开启了直播时按直播继续，
+    // 即使播放列表已出现 ENDLIST（中断期间直播结束了）。没开启直播时按点播运行，由 WorkDir::open 报类型不符
     let recorded = read_resumable(root.clone())
         .await?
         .filter(|r| r.source_digest == source);
@@ -65,7 +65,7 @@ pub(crate) async fn run(
             path: root,
             problem: WorkDirProblem::SelectionGone,
         })?;
-    if continuing_live || resolved.is_live() {
+    if resolved.is_live() || continuing_live && request.live.is_some() {
         run_live(task, source, resolved).await
     } else {
         run_vod(task, source, resolved).await
