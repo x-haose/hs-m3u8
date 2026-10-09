@@ -10,7 +10,7 @@
 //! - 任务目录：[`Error::WorkDir`]、[`Error::NothingRecorded`]；
 //! - 回调：[`Error::Hook`]；合并：[`Error::Remux`]；[`Error::Cancelled`]。
 //!
-//! 错误信息已包含原因，不经 `source()` 重复给出；地址只显示到路径，查询串（常带令牌）不显示。
+//! 错误信息已包含原因，不经 `source()` 重复给出；地址只显示到路径，不含用户名、密码与查询串（常带凭据或令牌）。
 
 use std::fmt;
 use std::io;
@@ -50,7 +50,7 @@ pub enum Error {
         retry_after: Option<Duration>,
     },
     /// 某个分片最终失败；`cause` 为分片请求、回调、解密或校验的错误
-    #[error("第 {track} 条轨分片 {sequence}（{}）失败：{cause}", bare_url(.url))]
+    #[error("第 {track} 条轨分片 {sequence}（{}）失败：{}", bare_url(.url), cause_text(.cause, .url))]
     Segment {
         track: usize,
         sequence: u64,
@@ -58,7 +58,7 @@ pub enum Error {
         cause: Box<Error>,
     },
     /// 取 key 失败；`cause` 为请求或回调的错误
-    #[error("取 key {} 失败：{cause}", bare_url(.url))]
+    #[error("取 key {} 失败：{}", bare_url(.url), cause_text(.cause, .url))]
     Key { url: Box<Url>, cause: Box<Error> },
     #[error("key {} 应为 16 字节，实际 {length} 字节", bare_url(.url))]
     KeyLength { url: Box<Url>, length: usize },
@@ -86,6 +86,29 @@ pub enum Error {
     Remux(Box<hs_m3u8_remux::Error>),
     #[error("任务已取消")]
     Cancelled,
+}
+
+/// 包装的错误里的原因；原因的地址与外层已显示的 `shown` 相同时不再重复（回调改写或重定向后两者会不同，
+/// 那时照常显示）。
+struct CauseText<'a> {
+    cause: &'a Error,
+    shown: &'a Url,
+}
+
+fn cause_text<'a>(cause: &'a Error, shown: &'a Url) -> CauseText<'a> {
+    CauseText { cause, shown }
+}
+
+impl fmt::Display for CauseText<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.cause {
+            Error::Http { url, kind, .. } if **url == *self.shown => write!(f, "{kind}"),
+            Error::Integrity { url, kind } if **url == *self.shown => {
+                write!(f, "数据校验失败：{kind}")
+            }
+            other => write!(f, "{other}"),
+        }
+    }
 }
 
 /// 与 `Display` 相同：派生的写法会带出完整地址（含查询串里的令牌），而 `unwrap`、`{:?}` 与日志都用它。
@@ -142,8 +165,9 @@ impl Error {
 /// 来源用到了不支持的特性。
 #[derive(Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unsupported {
-    /// [`crate::JobRequest::live`] 为 None 时遇到直播
-    #[error("直播（播放列表没有 EXT-X-ENDLIST）")]
+    /// [`crate::JobRequest::live`] 为 None 时遇到直播：播放列表没有 EXT-X-ENDLIST，或任务目录里已是这个来源的
+    /// 直播录制（中断期间直播结束了，仍按直播续录）
+    #[error("直播（播放列表没有 EXT-X-ENDLIST，或任务目录里是它的直播录制）")]
     Live,
     #[error("播放列表 {} 没有分片", bare_url(.0))]
     EmptyPlaylist(Box<Url>),
