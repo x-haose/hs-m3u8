@@ -581,11 +581,176 @@ async fn a_track_that_records_nothing_fails_the_recording() {
             err,
             Error::LiveStalled {
                 track: 1,
-                cause: StallError::Unrecordable
+                cause: StallError::Unrecordable(HttpError::Status(404))
             }
         ),
         "{err}"
     );
+    assert!(!err.retryable());
+}
+
+/// 分片一直 503（CDN 临时故障）：一个都录不到，任务失败，但可以稍后重试（续录）。
+#[tokio::test(flavor = "multi_thread")]
+async fn segments_that_keep_failing_temporarily_are_retryable() {
+    let dir = test_dir("live_segments_503");
+    let server = Server::start().await;
+    let windows: Vec<String> = (0..100u64).map(|n| playlist(&[n, n + 1], false)).collect();
+    for n in 0..=100u64 {
+        server.status(&format!("seg{n}.ts"), StatusCode::SERVICE_UNAVAILABLE);
+    }
+    server.put_sequence("live.m3u8", windows);
+
+    let err = run(live_request(
+        server.url("live.m3u8"),
+        &dir,
+        Duration::from_millis(500),
+    ))
+    .await
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::LiveStalled {
+                track: 0,
+                cause: StallError::Unrecordable(HttpError::Status(503))
+            }
+        ),
+        "{err}"
+    );
+    assert!(err.retryable());
+}
+
+/// 直播收尾时最后列出的一个分片 404，之后播放列表不再更新：按直播已结束收尾，那个分片记为缺失。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_last_segment_does_not_turn_the_end_into_a_failure() {
+    let dir = test_dir("live_last_404");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1]);
+    server.put_sequence(
+        "live.m3u8",
+        vec![playlist(&[0, 1], false), playlist(&[0, 1, 2], false)],
+    );
+
+    let output = run(live_request(
+        server.url("live.m3u8"),
+        &dir,
+        Duration::from_millis(500),
+    ))
+    .await
+    .unwrap();
+
+    assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
+    let end = LiveEnd::Stalled {
+        track: 0,
+        cause: StallCause::NoNewSegments,
+    };
+    let not_found = MissReason::Failed(HttpError::Status(404));
+    assert_eq!(output.live, report(end, 1, vec![missed(2, 2, not_found)]));
+}
+
+/// 音频轨的分片排在视频的一个慢分片后面、迟迟轮不到下载：在等本任务的下载队列，不算停滞。
+#[tokio::test(flavor = "multi_thread")]
+async fn queued_segments_do_not_stall_a_track() {
+    let dir = test_dir("live_queued");
+    let server = Server::start().await;
+    // 音频播放列表刷新十次后多出 seg2 并结束：等到它被排入下载时，已经过了好几个停滞时长
+    let mut audio = vec![(2, 0, false); 10];
+    audio.push((3, 0, true));
+    let (video, audio) = split_source(&server, &[(2, 0, false), (2, 0, true)], &audio);
+    let gate = server.gate("video/seg1.m4s");
+    let job = engine()
+        .start(live_request(
+            server.url("master.m3u8"),
+            &dir,
+            Duration::from_millis(1),
+        ))
+        .unwrap();
+    let mut progress = job.progress();
+    progress.wait_for(|p| p.segments_total == 5).await.unwrap();
+    server.ungate("video/seg1.m4s");
+    drop(gate);
+
+    let output = job.wait().await.unwrap();
+
+    assert_output(&output, &expected_split(&dir, &video, &audio));
+    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+}
+
+/// 视频轨一直有新分片，音频轨的播放列表卡住不再更新（打包器故障）：不当作直播结束，任务失败、目录保留，
+/// 可以续录。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_frozen_track_fails_while_the_other_keeps_going() {
+    let dir = test_dir("live_frozen_track");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1, 2, 3]);
+    server.put_sequence(
+        "video.m3u8",
+        vec![
+            playlist_with_target("0.3", &[0], false),
+            playlist_with_target("0.3", &[0, 1], false),
+            playlist_with_target("0.3", &[0, 1, 2], false),
+            playlist_with_target("0.3", &[0, 1, 2, 3], false),
+        ],
+    );
+    server.put("audio.m3u8", playlist(&[0], false));
+    put_split_master(&server);
+
+    let err = run(live_request(
+        server.url("master.m3u8"),
+        &dir,
+        Duration::from_millis(500),
+    ))
+    .await
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::LiveStalled {
+                track: 1,
+                cause: StallError::TrackStopped {
+                    playlist_gone: None
+                }
+            }
+        ),
+        "{err}"
+    );
+    assert!(err.retryable());
+    assert!(dir.join("out.mp4.hsdl/job.json").exists());
+}
+
+/// 刷新返回 503 并要求等一个无法表示的时长：不再刷新，按刷新失败的停滞结束，不会因时间溢出而崩溃。
+#[tokio::test(flavor = "multi_thread")]
+async fn endless_retry_after_ends_as_a_refresh_failure() {
+    let dir = test_dir("live_retry_after");
+    let server = Server::start().await;
+    put_long(&server, "", &[0]);
+    server.put("live.m3u8", playlist(&[0], false));
+    let job = engine()
+        .start(live_request(
+            server.url("live.m3u8"),
+            &dir,
+            Duration::from_millis(500),
+        ))
+        .unwrap();
+    let mut progress = job.progress();
+    progress.wait_for(|p| p.segments_done == 1).await.unwrap();
+    server.status_retry_after(
+        "live.m3u8",
+        StatusCode::SERVICE_UNAVAILABLE,
+        "18446744073709551615",
+    );
+
+    let err = job.wait().await.unwrap_err();
+
+    match &err {
+        Error::LiveStalled {
+            track: 0,
+            cause: StallError::RefreshFailed(cause),
+        } => assert!(cause.retry_after().is_some(), "{cause}"),
+        other => panic!("{other}"),
+    }
 }
 
 /// TARGETDURATION 比 stall_timeout 长：停滞至少等三个目标时长，正常的刷新节奏不会被误判为停滞。

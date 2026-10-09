@@ -262,10 +262,7 @@ impl Recorder<'_> {
                 _ = stop.cancelled() => return Ok(LiveEnd::Stopped),
                 _ = sleep_until(stall.map(|(at, _)| at)), if stall.is_some() => {
                     let (_, track) = stall.expect("分支只在有停滞时刻时启用");
-                    return match self.tracks[track].stall(Instant::now()) {
-                        Ok(cause) => Ok(LiveEnd::Stalled { track, cause }),
-                        Err(cause) => Err(Error::LiveStalled { track, cause }),
-                    };
+                    return self.stalled(track, Instant::now());
                 }
                 _ = sleep_until(next_due), if next_due.is_some() => {}
                 Some(joined) = refreshes.join_next() => {
@@ -310,6 +307,20 @@ impl Recorder<'_> {
                 request,
                 cancel.clone(),
             ));
+        }
+    }
+
+    /// 第 `track` 条轨停滞时如何结束：看起来直播已结束时正常收尾，否则任务失败。
+    fn stalled(&mut self, track: usize, now: Instant) -> Result<LiveEnd, Error> {
+        let max_us = self.max_us();
+        let others_listing = self
+            .tracks
+            .iter()
+            .enumerate()
+            .any(|(i, t)| i != track && !t.finished(max_us) && t.is_listing(now));
+        match self.tracks[track].stall(now, others_listing) {
+            Ok(cause) => Ok(LiveEnd::Stalled { track, cause }),
+            Err(cause) => Err(Error::LiveStalled { track, cause }),
         }
     }
 
@@ -516,6 +527,7 @@ impl Recorder<'_> {
                     let SessionState::Decided(session) = self.session else {
                         unreachable!("会话定下之前不会排入下载");
                     };
+                    self.tracks[id.track].segment_missed(kind.clone());
                     self.missed.push(Missed {
                         session,
                         track: id.track,

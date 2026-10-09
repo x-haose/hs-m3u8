@@ -16,6 +16,8 @@ enum Entry {
     /// 放入后的第 n 次请求重定向到第 n 个地址，之后一直是最后一个
     Redirect(Vec<String>),
     Status(StatusCode),
+    /// 返回该状态并带 Retry-After 头
+    RetryAfter(StatusCode, String),
 }
 
 /// 收到请求后先通知测试，再等测试放行。
@@ -102,6 +104,16 @@ impl Server {
             .insert(path.into(), entry);
     }
 
+    /// 之后请求该路径返回 `status`，并带 `Retry-After: <retry_after>`。
+    pub(crate) fn status_retry_after(&self, path: &str, status: StatusCode, retry_after: &str) {
+        let entry = Entry::RetryAfter(status, retry_after.into());
+        self.state
+            .entries
+            .lock()
+            .unwrap()
+            .insert(path.into(), entry);
+    }
+
     pub(crate) fn fail(&self, path: &str, times: usize) {
         self.state
             .failures
@@ -170,6 +182,9 @@ async fn serve(State(state): State<Arc<ServerState>>, uri: Uri, headers: HeaderM
     let body = match state.entries.lock().unwrap().get(&path) {
         None => return StatusCode::NOT_FOUND.into_response(),
         Some(Entry::Status(status)) => return status.into_response(),
+        Some(Entry::RetryAfter(status, value)) => {
+            return (*status, [(header::RETRY_AFTER, value.clone())]).into_response();
+        }
         Some(Entry::Redirect(targets)) => {
             let to = &targets[nth(targets.len())];
             return (StatusCode::FOUND, [(header::LOCATION, format!("/{to}"))]).into_response();

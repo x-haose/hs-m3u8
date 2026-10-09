@@ -69,7 +69,7 @@ pub enum LiveEnd {
     Stopped,
     /// 各轨都录满了 [`crate::LiveOptions::max_duration`]
     DurationReached,
-    /// 第 `track` 条轨停滞（见 [`crate::LiveOptions`]），且看起来是直播已结束；
+    /// 第 `track` 条轨停滞（见 [`crate::LiveOptions`]），且看起来是直播已结束：它与其他轨都不再出新分片；
     /// 故障导致的停滞是 [`crate::Error::LiveStalled`]
     Stalled { track: usize, cause: StallCause },
     /// 第 `track` 条轨的媒体序号回退、且与上次的窗口没有重叠（多为编码器重启）；之后的分片未录
