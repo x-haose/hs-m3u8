@@ -75,7 +75,8 @@ async fn store_inits(
         for init in &t.inits {
             let data = fetch_init(http, init, Permit::Required, cancel).await?;
             let len = data.len() as u64;
-            let (fingerprint, _) = workdir::store_init(layout, track, data).await?;
+            let fingerprint = Fingerprint::of_content(&data);
+            workdir::store_init(layout, track, fingerprint, data).await?;
             // 内容相同的 init 段共用一个文件，字节数只计一次
             if !fingerprints.contains(&fingerprint) {
                 progress.send_modify(|p| p.bytes += len);
