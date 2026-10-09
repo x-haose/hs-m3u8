@@ -145,19 +145,28 @@ impl Tasks {
     }
 }
 
-/// 重叠的分片从新到旧取第一个还取得到的，重新下载后与已存的比较。都已取不到（404/410）时无从核对，按接不上算
-/// （它们也录不到，另起会话不会重复）；其余失败（临时故障、key、校验、回调）如实上抛。
+/// 重叠的分片从新到旧逐个试，用第一个取得到的重新下载后与已存的比较；取不到的（404/410，或重试后仍失败的临时
+/// 故障）换更旧的试。都取不到时，有临时故障则如实上抛（可重试）；全是 404/410 则无从核对，按接不上算（它们也录
+/// 不到，另起会话不会重复）。其余失败（403 等、key、校验、回调）如实上抛，与录制时一样。
 async fn check(
     direct: &Direct,
     track: usize,
     overlaps: Vec<Overlap>,
     cancel: &CancellationToken,
 ) -> Result<Verdict, Error> {
+    // 最近一次重试后仍失败的临时故障
+    let mut transient = None;
     for Overlap { segment, stored } in overlaps {
         let data = match direct.fetch(track, &segment, cancel).await {
             Ok(data) => data,
-            Err(e) if matches!(e.missable(), Some(HttpError::Status(404 | 410))) => continue,
-            Err(e) => return Err(e),
+            Err(e) => match e.missable() {
+                Some(HttpError::Status(404 | 410)) => continue,
+                Some(_) => {
+                    transient = Some(e);
+                    continue;
+                }
+                None => return Err(e),
+            },
         };
         return Ok(if same_file(stored, data).await? {
             Verdict::Matches
@@ -165,7 +174,10 @@ async fn check(
             Verdict::Differs
         });
     }
-    Ok(Verdict::Differs)
+    match transient {
+        Some(error) => Err(error),
+        None => Ok(Verdict::Differs),
+    }
 }
 
 /// `data` 与目录中已存的 `stored` 逐字节相同。
