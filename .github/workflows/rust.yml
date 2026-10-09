@@ -68,6 +68,10 @@ jobs:
         if: runner.os == 'Linux'
         run: scripts/check_deps.sh
 
+      - name: 不许用 allow/expect 属性压制检查（Linux）
+        if: runner.os == 'Linux'
+        run: scripts/check_no_suppression.sh
+
       - name: 安装 cargo-deny（Linux）
         if: runner.os == 'Linux'
         uses: taiki-e/install-action@v2
