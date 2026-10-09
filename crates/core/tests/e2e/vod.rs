@@ -1,49 +1,16 @@
-//! core 的端到端测试：测试内起本地 HTTP 服务提供 HLS（分片取自 tests/fixtures/media），跑完整任务。
-//! 输出与直接用 remux 合并同一批样本文件的结果逐字节比较，解密、顺序或分组的任何错误都会暴露。
+//! 点播：解密、分流、字节范围、重试、失败与续传、取消、回调、下载前的拒绝。
 
-use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::path::Path;
+use std::sync::Arc;
 
 use aes::cipher::block_padding::Pkcs7;
 use aes::cipher::{BlockModeEncrypt, KeyIvInit};
-use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, Uri, header};
-use axum::response::{IntoResponse, Response};
-use hs_m3u8_core::{
-    Engine, Error, Hooks, HttpError, Integrity, JobRequest, Output, RequestParts, RetryPolicy,
-    Stage, Unsupported, Url,
-};
-use hs_m3u8_remux::{DiscontinuityGroup, Streams, TrackSegments, remux};
-use tokio::sync::Notify;
+use hs_m3u8_core::{Error, Hooks, HttpError, Integrity, RequestParts, Stage, Unsupported, Url};
+use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
-// ---------- 样本 ----------
-
-fn fixtures() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/media")
-}
-
-fn fixture(path: &str) -> Vec<u8> {
-    std::fs::read(fixtures().join(path)).unwrap()
-}
-
-/// 样本目录中的一条轨：`init` 为 init 段文件名，`segments` 为分片文件名。
-fn track(dir: &str, init: Option<&str>, segments: &[&str]) -> TrackSegments {
-    let dir = fixtures().join(dir);
-    TrackSegments {
-        init: init.map(|i| dir.join(i)),
-        segments: segments.iter().map(|s| dir.join(s)).collect(),
-    }
-}
-
-/// 直接合并样本文件得到的期望输出。
-fn expected(dir: &Path, streams: &[Streams], groups: &[DiscontinuityGroup]) -> Vec<u8> {
-    let path = dir.join("expected.mp4");
-    remux(streams, groups, &path).unwrap();
-    std::fs::read(path).unwrap()
-}
+use crate::server::Server;
+use crate::{assert_output, engine, expected, fixture, fixtures, request, run, test_dir, track};
 
 /// ts_a 的分片（H.264 + AAC 的 TS）。
 const TS_A: [&str; 2] = ["seg0.ts", "seg1.ts"];
@@ -67,191 +34,6 @@ fn encrypt(plain: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Vec<u8> {
 
 fn hex(bytes: &[u8; 16]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// 每个测试独立的空目录。
-fn test_dir(test: &str) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
-        .join("download")
-        .join(test);
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
-
-// ---------- 测试服务 ----------
-
-enum Entry {
-    Body(Vec<u8>),
-    Redirect(String),
-}
-
-/// 收到请求后先通知测试，再等测试放行。
-#[derive(Default)]
-struct Gate {
-    arrived: Notify,
-    release: Notify,
-}
-
-#[derive(Default)]
-struct ServerState {
-    entries: Mutex<HashMap<String, Entry>>,
-    hits: Mutex<HashMap<String, usize>>,
-    /// 路径 → 还要返回 500 的次数
-    failures: Mutex<HashMap<String, usize>>,
-    gates: Mutex<HashMap<String, Arc<Gate>>>,
-    /// 所有请求都必须带的请求头
-    required_header: Mutex<Option<(String, String)>>,
-}
-
-struct Server {
-    base: Url,
-    state: Arc<ServerState>,
-}
-
-impl Server {
-    async fn start() -> Server {
-        let state = Arc::new(ServerState::default());
-        let app = axum::Router::new()
-            .fallback(serve)
-            .with_state(state.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        Server { base, state }
-    }
-
-    fn url(&self, path: &str) -> Url {
-        self.base.join(path).unwrap()
-    }
-
-    fn put(&self, path: &str, body: impl Into<Vec<u8>>) {
-        let entry = Entry::Body(body.into());
-        self.state
-            .entries
-            .lock()
-            .unwrap()
-            .insert(path.into(), entry);
-    }
-
-    fn redirect(&self, from: &str, to: &str) {
-        let entry = Entry::Redirect(to.into());
-        self.state
-            .entries
-            .lock()
-            .unwrap()
-            .insert(from.into(), entry);
-    }
-
-    fn fail(&self, path: &str, times: usize) {
-        self.state
-            .failures
-            .lock()
-            .unwrap()
-            .insert(path.into(), times);
-    }
-
-    fn gate(&self, path: &str) -> Arc<Gate> {
-        let gate = Arc::new(Gate::default());
-        self.state
-            .gates
-            .lock()
-            .unwrap()
-            .insert(path.into(), gate.clone());
-        gate
-    }
-
-    fn ungate(&self, path: &str) {
-        let gate = self.state.gates.lock().unwrap().remove(path).unwrap();
-        gate.release.notify_one();
-    }
-
-    fn require_header(&self, name: &str, value: &str) {
-        *self.state.required_header.lock().unwrap() = Some((name.into(), value.into()));
-    }
-
-    fn hits(&self, path: &str) -> usize {
-        self.state
-            .hits
-            .lock()
-            .unwrap()
-            .get(path)
-            .copied()
-            .unwrap_or(0)
-    }
-}
-
-async fn serve(State(state): State<Arc<ServerState>>, uri: Uri, headers: HeaderMap) -> Response {
-    let path = uri.path().trim_start_matches('/').to_owned();
-    *state.hits.lock().unwrap().entry(path.clone()).or_default() += 1;
-
-    if let Some((name, value)) = state.required_header.lock().unwrap().clone()
-        && headers.get(&name).and_then(|v| v.to_str().ok()) != Some(&value)
-    {
-        return StatusCode::FORBIDDEN.into_response();
-    }
-    let gate = state.gates.lock().unwrap().get(&path).cloned();
-    if let Some(gate) = gate {
-        gate.arrived.notify_one();
-        gate.release.notified().await;
-    }
-    if let Some(left) = state.failures.lock().unwrap().get_mut(&path)
-        && *left > 0
-    {
-        *left -= 1;
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-
-    let body = match state.entries.lock().unwrap().get(&path) {
-        None => return StatusCode::NOT_FOUND.into_response(),
-        Some(Entry::Redirect(to)) => {
-            return (StatusCode::FOUND, [(header::LOCATION, format!("/{to}"))]).into_response();
-        }
-        Some(Entry::Body(body)) => body.clone(),
-    };
-    match headers.get(header::RANGE).and_then(|r| r.to_str().ok()) {
-        None => body.into_response(),
-        Some(range) => {
-            let (start, end) = range
-                .strip_prefix("bytes=")
-                .and_then(|r| r.split_once('-'))
-                .unwrap();
-            let (start, end): (usize, usize) = (start.parse().unwrap(), end.parse().unwrap());
-            (StatusCode::PARTIAL_CONTENT, body[start..=end].to_vec()).into_response()
-        }
-    }
-}
-
-// ---------- 任务 ----------
-
-fn request(url: Url, dir: &Path) -> JobRequest {
-    let mut request = JobRequest::new(url, dir.join("out.mp4"));
-    request.retry = RetryPolicy {
-        attempts: 3,
-        base_delay: Duration::from_millis(1),
-        max_delay: Duration::from_millis(1),
-    };
-    request.concurrency = NonZeroUsize::new(1).unwrap();
-    request
-}
-
-fn engine() -> Engine {
-    Engine::new(NonZeroUsize::new(8).unwrap())
-}
-
-async fn run(request: JobRequest) -> Result<Output, Error> {
-    engine().start(request)?.wait().await
-}
-
-/// 成功的任务：输出与期望逐字节相同，任务目录已删除。
-fn assert_output(output: &Output, expected: &[u8]) {
-    assert_eq!(std::fs::read(&output.path).unwrap(), expected);
-    assert_eq!(output.cleanup_error, None);
-    let mut work_dir = output.path.clone().into_os_string();
-    work_dir.push(".hsdl");
-    assert!(!Path::new(&work_dir).exists());
 }
 
 /// ts_a 的两个分片，第一个用显式 IV、第二个换了 key 并用媒体序号推出的 IV。
@@ -466,7 +248,7 @@ async fn failure_then_resume() {
     let dir = test_dir("resume");
     let server = Server::start().await;
     put_ts_a(&server, "index.m3u8", 1.0);
-    server.state.entries.lock().unwrap().remove("seg1.ts");
+    server.remove("seg1.ts");
     let req = request(server.url("index.m3u8"), &dir);
 
     let err = run(req.clone()).await.unwrap_err();
@@ -617,7 +399,7 @@ async fn hooks_adapt_site() {
     assert_output(&output, &want);
 }
 
-/// 下载前就能判定的失败：输出已存在、直播、各轨不连续段不一致。
+/// 下载前就能判定的失败：输出已存在、不录制直播时遇到直播、各轨不连续段不一致。
 #[tokio::test(flavor = "multi_thread")]
 async fn rejected_before_download() {
     let dir = test_dir("rejected");
@@ -635,9 +417,9 @@ async fn rejected_before_download() {
         "live.m3u8",
         "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n",
     );
-    let err = run(request(server.url("live.m3u8"), &dir))
-        .await
-        .unwrap_err();
+    let mut req = request(server.url("live.m3u8"), &dir);
+    req.live = None;
+    let err = run(req).await.unwrap_err();
     assert!(
         matches!(err, Error::Unsupported(Unsupported::Live)),
         "{err}"

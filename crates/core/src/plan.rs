@@ -1,17 +1,32 @@
-//! 下载计划：解析播放列表、选轨，得到每条轨的分片与不连续段组，并在下载前确认能够合并。
+//! 解析与计划：拉取播放列表、选轨；点播在此得到每条轨的分片与不连续段组，并在下载前确认能够合并。
 
 use std::ops::Range;
 
-use hs_m3u8_hls::{self as hls, InitSection, Playlist, Segment};
+use std::sync::Arc;
+
+use hs_m3u8_hls::{self as hls, InitSection, MediaPlaylist, Playlist, Segment};
 use hs_m3u8_remux::Streams;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::http::Http;
-use crate::{Error, JobRequest, Purpose, Unsupported, run_hook};
+use crate::{Error, Hooks, JobRequest, Purpose, Unsupported, run_hook};
 
-/// 一条轨：第 0 条为所选变体（视频，可能混有音频），第 1 条为独立的音频 rendition。
+/// 解析得到的一条轨：媒体播放列表的地址、取流方式与首次拉到的内容。
+/// 第 0 条为所选变体，第 1 条（若有）为独立的音频 rendition。
+pub(crate) struct Source {
+    pub url: Url,
+    pub streams: Streams,
+    pub playlist: MediaPlaylist,
+}
+
+/// 有任一条轨的播放列表没有 EXT-X-ENDLIST 即为直播。
+pub(crate) fn is_live(sources: &[Source]) -> bool {
+    sources.iter().any(|s| !s.playlist.ended)
+}
+
+/// 点播计划中的一条轨。
 pub(crate) struct Track {
     pub segments: Vec<Segment>,
     /// 本轨用到的 init 段，按首次出现的顺序去重；下标即任务目录中的编号
@@ -50,7 +65,19 @@ pub(crate) struct Plan {
 }
 
 impl Plan {
-    fn new(tracks: Vec<Track>) -> Result<Self, Error> {
+    /// 点播计划；每条轨都必须有分片。
+    pub(crate) fn new(sources: Vec<Source>) -> Result<Self, Error> {
+        let tracks = sources
+            .into_iter()
+            .map(|s| {
+                if s.playlist.segments.is_empty() {
+                    return Err(Error::Unsupported(Unsupported::EmptyPlaylist(Box::new(
+                        s.url,
+                    ))));
+                }
+                Ok(Track::new(s.playlist.segments, s.streams))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let groups = groups(&tracks)?;
         Ok(Plan { tracks, groups })
     }
@@ -87,16 +114,28 @@ impl Plan {
                 ));
             }
         }
-        hasher
-            .finalize()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        hex(&hasher.finalize())
     }
 }
 
+/// 直播任务目录用的来源摘要（SHA-256 十六进制）：去掉查询串的来源地址与选轨偏好。
+pub(crate) fn source_digest(request: &JobRequest) -> String {
+    let preference = &request.preference;
+    let text = format!(
+        "{}\n{:?}\n{:?}",
+        identity(&request.url),
+        preference.variant,
+        preference.audio_language
+    );
+    hex(&Sha256::digest(text))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// 去掉查询串与片段后的地址。
-fn identity(url: &Url) -> String {
+pub(crate) fn identity(url: &Url) -> String {
     let mut url = url.clone();
     url.set_query(None);
     url.set_fragment(None);
@@ -147,13 +186,19 @@ fn runs(index: usize, track: &Track) -> Result<Vec<(u64, Range<usize>)>, Error> 
     Ok(runs)
 }
 
+/// 拉取来源播放列表；是主播放列表时选轨，再拉取所选变体与音频 rendition 的媒体播放列表。
 pub(crate) async fn resolve(
     http: &Http,
     request: &JobRequest,
     cancel: &CancellationToken,
-) -> Result<Plan, Error> {
-    let tracks = match fetch(http, request, &request.url, cancel).await? {
-        Playlist::Media(media) => vec![track(media, &request.url, Streams::ALL)?],
+) -> Result<Vec<Source>, Error> {
+    let hooks = &request.hooks;
+    Ok(match fetch(http, hooks, &request.url, cancel).await? {
+        Playlist::Media(playlist) => vec![Source {
+            url: request.url.clone(),
+            streams: Streams::ALL,
+            playlist,
+        }],
         Playlist::Master(master) => {
             let selection = hls::select(&master, &request.preference)?;
             // 选了独立音频 rendition 时，变体里混着的音频不用，与播放器的行为一致
@@ -161,49 +206,46 @@ pub(crate) async fn resolve(
                 Some(_) => Streams::VIDEO,
                 None => Streams::ALL,
             };
-            let variant = &selection.variant.uri;
-            let mut tracks = vec![media_track(http, request, variant, main, cancel).await?];
+            let url = selection.variant.uri;
+            let playlist = fetch_media(http, hooks, &url, cancel).await?;
+            let mut sources = vec![Source {
+                url,
+                streams: main,
+                playlist,
+            }];
             if let Some(audio) = selection.audio {
-                let uri = audio.uri.expect("select 只返回带 URI 的 rendition");
-                tracks.push(media_track(http, request, &uri, Streams::AUDIO, cancel).await?);
+                let url = audio.uri.expect("select 只返回带 URI 的 rendition");
+                let playlist = fetch_media(http, hooks, &url, cancel).await?;
+                sources.push(Source {
+                    url,
+                    streams: Streams::AUDIO,
+                    playlist,
+                });
             }
-            tracks
+            sources
         }
-    };
-    Plan::new(tracks)
+    })
 }
 
-async fn media_track(
+/// 拉取并解析媒体播放列表（刷新直播播放列表也用它）。
+pub(crate) async fn fetch_media(
     http: &Http,
-    request: &JobRequest,
+    hooks: &Arc<dyn Hooks>,
     url: &Url,
-    streams: Streams,
     cancel: &CancellationToken,
-) -> Result<Track, Error> {
-    match fetch(http, request, url, cancel).await? {
-        Playlist::Media(media) => track(media, url, streams),
+) -> Result<MediaPlaylist, Error> {
+    match fetch(http, hooks, url, cancel).await? {
+        Playlist::Media(media) => Ok(media),
         Playlist::Master(_) => Err(Error::InvalidInput(format!(
             "变体 {url} 指向的是主播放列表，不是媒体播放列表"
         ))),
     }
 }
 
-fn track(media: hls::MediaPlaylist, url: &Url, streams: Streams) -> Result<Track, Error> {
-    if !media.ended {
-        return Err(Error::Unsupported(Unsupported::Live));
-    }
-    if media.segments.is_empty() {
-        return Err(Error::Unsupported(Unsupported::EmptyPlaylist(Box::new(
-            url.clone(),
-        ))));
-    }
-    Ok(Track::new(media.segments, streams))
-}
-
 /// 拉取并解析播放列表；相对地址按重定向之后的最终地址解析。
 async fn fetch(
     http: &Http,
-    request: &JobRequest,
+    hooks: &Arc<dyn Hooks>,
     url: &Url,
     cancel: &CancellationToken,
 ) -> Result<Playlist, Error> {
@@ -214,7 +256,7 @@ async fn fetch(
         source: Box::new(hls::Error::NotAPlaylist),
     })?;
     let hook_url = final_url.clone();
-    let text = run_hook(&request.hooks, Purpose::Playlist, move |hooks| {
+    let text = run_hook(hooks, Purpose::Playlist, move |hooks| {
         hooks.on_playlist(&hook_url, text)
     })
     .await?;

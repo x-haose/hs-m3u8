@@ -4,6 +4,8 @@
 //! 与已完成的分片；分片先写 `.part`、落盘后原子改名，因此「最终文件存在」即「该分片完整」，
 //! 中断后用同样的请求再次运行即可续传。播放列表变化（计划摘要不同）时拒绝续传。
 //!
+//! 直播（播放列表没有 EXT-X-ENDLIST）按 [`LiveOptions`] 录制，结束后合并录到的部分，见 [`LiveReport`]。
+//!
 //! 失败一律经 [`Job::wait`] 的 `Err` 返回；任务失败或取消时不生成输出文件，任务目录保留以便续传。
 
 mod crypto;
@@ -11,6 +13,7 @@ mod error;
 mod fetch;
 mod http;
 mod job;
+mod live;
 mod plan;
 mod workdir;
 
@@ -49,10 +52,18 @@ impl Engine {
         request.validate()?;
         let http = Http::new(&request, self.requests.clone())?;
         let cancel = CancellationToken::new();
+        let stop = CancellationToken::new();
         let (progress_tx, progress) = watch::channel(Progress::default());
-        let task = tokio::spawn(job::run(request, http, cancel.clone(), progress_tx));
+        let task = tokio::spawn(job::run(
+            request,
+            http,
+            cancel.clone(),
+            stop.clone(),
+            progress_tx,
+        ));
         Ok(Job {
             cancel: cancel.clone(),
+            stop,
             progress,
             task,
             _guard: cancel.drop_guard(),
@@ -84,6 +95,8 @@ pub struct JobRequest {
     pub overwrite: bool,
     /// 成功后保留任务目录
     pub keep_work_dir: bool,
+    /// 直播的录制方式；None 时拒绝直播（[`Unsupported::Live`]）
+    pub live: Option<LiveOptions>,
     pub hooks: Arc<dyn Hooks>,
 }
 
@@ -102,6 +115,7 @@ impl JobRequest {
             insecure: false,
             overwrite: false,
             keep_work_dir: false,
+            live: Some(LiveOptions::default()),
             hooks: Arc::new(NoHooks),
         }
     }
@@ -130,6 +144,9 @@ impl JobRequest {
         if self.retry.attempts == 0 {
             return Err(Error::InvalidInput("重试次数至少为 1（含首次请求）".into()));
         }
+        if self.live.is_some_and(|l| l.stall_timeout.is_zero()) {
+            return Err(Error::InvalidInput("直播的 stall_timeout 不能为 0".into()));
+        }
         if self.output.file_name().is_none() {
             return Err(Error::InvalidInput(format!(
                 "输出路径没有文件名：{}",
@@ -151,6 +168,30 @@ fn check_output(output: &std::path::Path, overwrite: bool) -> Result<(), Error> 
         return Err(Error::OutputExists(output.to_path_buf()));
     }
     Ok(())
+}
+
+/// 直播录制方式。
+///
+/// 录制从当前播放列表里的全部分片开始，按 RFC 8216 6.3.4 的节奏刷新，直到所有轨出现 EXT-X-ENDLIST、
+/// 调用 [`Job::stop`]、达到 `max_duration`，或连续 `stall_timeout` 没有新分片。
+/// 窗口已滑过或重试后仍取不到（404/410、超时、5xx）的分片记为漏段，录制继续；成片保留原时间戳，
+/// 漏段处时间线留空，各轨同步不受影响。其他失败（如 403、校验失败）使任务失败。
+/// 中断后用同样的请求再次运行时不联网，直接合并已录到的分片。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveOptions {
+    /// 录到的时长（第 0 条轨已排入下载的分片声明时长之和）达到此值即停止；None 不限
+    pub max_duration: Option<Duration>,
+    /// 持续这么久没有新分片（含刷新失败）即认为直播已结束，不能为 0
+    pub stall_timeout: Duration,
+}
+
+impl Default for LiveOptions {
+    fn default() -> Self {
+        LiveOptions {
+            max_duration: None,
+            stall_timeout: Duration::from_secs(60),
+        }
+    }
 }
 
 /// 单个请求的重试策略：可重试的失败按指数退避重试。
@@ -249,7 +290,10 @@ pub struct Progress {
     pub stage: Stage,
     /// 各轨合计；含续传前已完成的
     pub segments_done: usize,
+    /// 直播时为目前已发现的分片数，随录制增长
     pub segments_total: usize,
+    /// 直播的漏段数（窗口已滑过或取不到的分片）；点播恒为 0
+    pub segments_missed: usize,
     /// 任务目录中已完成的分片与 init 段的字节数（解密后）；含续传前已完成的
     pub bytes: u64,
 }
@@ -259,6 +303,8 @@ pub enum Stage {
     #[default]
     Resolving,
     Downloading,
+    /// 直播录制中
+    Recording,
     Merging,
     Done,
 }
@@ -275,6 +321,50 @@ pub struct Output {
     /// 删除任务目录失败的原因（含路径）；输出文件不受影响，残留目录由调用方处理。
     /// 未删除（`keep_work_dir`）或删除成功时为 None
     pub cleanup_error: Option<String>,
+    /// 直播的录制结果；点播为 None
+    pub live: Option<LiveReport>,
+}
+
+/// 直播的录制结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveReport {
+    pub end: LiveEnd,
+    /// 漏段，按轨道与序号排列。中断后再次运行合并时，只含合并时发现的漏段
+    pub missed: Vec<Missed>,
+}
+
+/// 录制结束的原因。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveEnd {
+    /// 所有轨出现 EXT-X-ENDLIST
+    EndList,
+    /// 调用了 [`Job::stop`]
+    Stopped,
+    /// 达到 [`LiveOptions::max_duration`]
+    MaxDuration,
+    /// 连续 [`LiveOptions::stall_timeout`] 没有新分片；附最后一次刷新失败的原因（刷新都成功时为 None）
+    Stalled { last_error: Option<String> },
+    /// 上次录制被中断，本次只合并已录到的分片
+    Interrupted,
+}
+
+/// 一段连续的漏段：第 `track` 条轨序号 `first..=last` 的分片不在输出中。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Missed {
+    pub track: usize,
+    pub first: u64,
+    pub last: u64,
+    pub reason: MissReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MissReason {
+    /// 两次刷新之间已滑出播放列表窗口，没有被列出过
+    Expired,
+    /// 列出了，但重试后仍未取到；附错误说明
+    Failed(String),
+    /// 所在不连续段不是每条轨都录到，无法合并
+    Unmergeable,
 }
 
 /// 在阻塞线程池中执行 `f`。`f` panic 时原样传播；运行时关闭导致它被取消时返回 [`Error::Cancelled`]。
@@ -309,6 +399,7 @@ where
 /// 运行中的任务。丢弃句柄即取消任务。
 pub struct Job {
     cancel: CancellationToken,
+    stop: CancellationToken,
     progress: watch::Receiver<Progress>,
     task: JoinHandle<Result<Output, Error>>,
     _guard: DropGuard,
@@ -323,6 +414,11 @@ impl Job {
     /// 合并阶段不响应取消：已进入合并的任务照常完成。
     pub fn cancel(&self) {
         self.cancel.cancel();
+    }
+
+    /// 直播：停止录制，等在途分片完成后合并，[`Job::wait`] 返回录到的部分。点播不受影响。
+    pub fn stop(&self) {
+        self.stop.cancel();
     }
 
     /// 等待任务结束。任务内部 panic（不变量被违反）原样传播；运行时关闭导致任务被取消时返回 [`Error::Cancelled`]。
