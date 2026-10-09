@@ -1,0 +1,63 @@
+name: rust
+
+on:
+  push:
+    branches: [rewrite/rust]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: MSVC 环境（Windows）
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: MSYS2（Windows）
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          path-type: inherit
+          update: false
+          install: make diffutils xz
+
+      - name: 缓存 FFmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@v6
+        with:
+          path: third_party/ffmpeg/dist
+          key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('third_party/ffmpeg/build.sh') }}
+
+      - name: 编译 FFmpeg（Windows）
+        if: runner.os == 'Windows' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: |
+          # MSYS2 coreutils 的 link.exe 会遮住 MSVC 的链接器
+          if [ -f /usr/bin/link.exe ]; then mv /usr/bin/link.exe /usr/bin/link.exe.msys; fi
+          third_party/ffmpeg/build.sh
+
+      - name: 编译 FFmpeg（macOS / Linux）
+        if: runner.os != 'Windows' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: third_party/ffmpeg/build.sh
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 格式
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 测试
+        run: cargo test --workspace

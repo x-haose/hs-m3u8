@@ -13,15 +13,18 @@
 - Rust 侧用 `ffmpeg-next` 9.0.0，通过 `FFMPEG_DIR` 指向自建的静态库（不用其 `build` 特性：它克隆 `release/<版本>` 分支并编译完整库，无法传入自定义 configure 参数）。
 - FFmpeg 相关代码集中在单独的 crate（见架构设计 `remux`），是全项目唯一的 FFI 边界。
 
-configure 参数（验证原型实际使用）：
+configure 参数以 `third_party/ffmpeg/build.sh` 为准，要点：
 
 ```
 --enable-static --disable-shared --disable-programs --disable-doc --disable-autodetect --disable-network
+--disable-asm --enable-pic
 --disable-everything --disable-avdevice --disable-avfilter --disable-swscale --disable-swresample
 --enable-protocol=file --enable-demuxer=mpegts,mov,aac --enable-muxer=mp4
 --enable-parser=h264,hevc,aac --enable-decoder=h264,hevc,aac
---enable-bsf=aac_adtstoasc,extract_extradata --enable-pic
+--enable-bsf=aac_adtstoasc,extract_extradata
 ```
+
+`--disable-asm`：转封装不经过编解码的热点路径，汇编优化无收益，关闭后各平台都不依赖 nasm。源码取官方发布 tarball 并固定 SHA-256（该 tarball 已用 FFmpeg 发布签名密钥验签）；configure 得出的许可证不是 LGPL 2.1+ 时构建失败。
 
 ## 考虑过的方案
 

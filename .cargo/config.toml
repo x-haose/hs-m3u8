@@ -1,0 +1,3 @@
+[env]
+# ffmpeg-sys-next 从这里找静态 FFmpeg；由 third_party/ffmpeg/build.sh 生成
+FFMPEG_DIR = { value = "third_party/ffmpeg/dist", relative = true }

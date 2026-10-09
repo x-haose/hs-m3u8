@@ -23,3 +23,8 @@ res/ffmpeg_win.exe
 
 # Mac
 .DS_Store
+
+# rust
+target/
+
+# third_party/ffmpeg 的源码与产物由 build.sh 生成（build/、dist/ 已被上面的规则忽略）

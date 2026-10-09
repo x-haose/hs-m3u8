@@ -1,0 +1,18 @@
+[package]
+name = "hs-m3u8-remux"
+version = "0.0.0"
+description = "Stream-copy HLS track files (TS / fMP4) into a single MP4 via a statically linked FFmpeg"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+ffmpeg-next.workspace = true
+thiserror.workspace = true
+
+[lints.rust]
+# 本 crate 是 FFmpeg 的 FFI 边界：ffmpeg-next 没有设置输出流 codec tag 的安全接口，需直接写 AVCodecParameters 字段。
+# unsafe 只出现在 set_codec_tag 一处；其余 crate 继承 workspace 的 forbid。
+unsafe_code = "allow"
