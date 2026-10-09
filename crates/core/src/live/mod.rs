@@ -91,56 +91,16 @@ pub(crate) async fn record(
     options: LiveOptions,
     job: &JobRecord,
 ) -> Result<Recording, Error> {
-    let Context {
-        http,
-        hooks,
-        dir,
-        fetcher,
-        progress,
-        cancel,
-        stop,
-    } = ctx;
+    let (dir, progress, cancel) = (ctx.dir, ctx.progress, ctx.cancel);
     progress.send_modify(|p| p.stage = Stage::Recording);
     let stored = dir.scan(tracks.len()).await?;
     count_stored(&stored, progress);
-    let now = Instant::now();
-    let live_tracks = tracks
-        .iter()
-        .zip(&stored.segments)
-        .map(|(track, files)| {
-            let recorded_us = files
-                .iter()
-                .map(|f| f.name.duration_us)
-                .fold(0u64, u64::saturating_add);
-            LiveTrack::new(track.url.clone(), &track.playlist, recorded_us, now)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let session = match stored
-        .segments
-        .iter()
-        .flatten()
-        .map(|f| f.name.session)
-        .max()
-    {
-        Some(last) => {
-            let earlier = stored
-                .segments
-                .iter()
-                .map(|files| Earlier::of(files, last))
-                .collect();
-            SessionState::Deciding(Deciding::new(last, earlier))
-        }
-        None => {
-            // 没有录过的分片：没有要核对的内容，地址变了直接改记
-            if dir.url_changed(job) {
-                dir.save(job).await?;
-            }
-            SessionState::Decided(0)
-        }
-    };
+    // 先建各轨（可能因缺少目标时长失败），再定会话（可能改写记录）：失败时记录不变
+    let live_tracks = live_tracks(&tracks, &stored, Instant::now())?;
+    let session = initial_session(dir, job, &stored).await?;
     let mut recorder = Recorder {
-        http,
-        hooks,
+        http: ctx.http,
+        hooks: ctx.hooks,
         dir,
         job,
         progress,
@@ -149,9 +109,9 @@ pub(crate) async fn record(
         tracks: live_tracks,
         missed: Vec::new(),
     };
-
     let refresh_cancel = cancel.child_token();
     let mut refreshes = JoinSet::new();
+    let fetcher = ctx.fetcher;
     let result = recorder
         .record(
             tracks,
@@ -159,7 +119,7 @@ pub(crate) async fn record(
             &mut refreshes,
             &refresh_cancel,
             cancel,
-            stop,
+            ctx.stop,
         )
         .await;
     // 刷新任务协作取消：等在途的回调返回后才结束，不直接中止
@@ -171,19 +131,46 @@ pub(crate) async fn record(
             std::panic::resume_unwind(e.into_panic());
         }
     }
-    match result {
-        Ok(end) => {
-            fetcher.drain(|id, r| recorder.on_finished(id, r)).await?;
-            Ok(Recording {
-                end,
-                missed: recorder.missed,
-            })
+    recorder.settle(result, fetcher).await
+}
+
+/// 各轨的录制状态；之前各会话已录到的时长计入 max_duration。
+fn live_tracks(
+    tracks: &[ResolvedTrack],
+    stored: &Stored,
+    now: Instant,
+) -> Result<Vec<LiveTrack>, Error> {
+    tracks
+        .iter()
+        .zip(&stored.segments)
+        .map(|(track, files)| {
+            let recorded_us = files
+                .iter()
+                .map(|f| f.name.duration_us)
+                .fold(0u64, u64::saturating_add);
+            LiveTrack::new(track.url.clone(), &track.playlist, recorded_us, now)
+        })
+        .collect()
+}
+
+/// 录进哪个会话：目录里有录过的分片时先判定（见 [`session`]），否则就是第 0 个。没有录过的分片时没有要核对的
+/// 内容，地址变了直接改记。
+async fn initial_session(
+    dir: &WorkDir,
+    job: &JobRecord,
+    stored: &Stored,
+) -> Result<SessionState, Error> {
+    let segments = &stored.segments;
+    match segments.iter().flatten().map(|f| f.name.session).max() {
+        Some(last) => {
+            let earlier = segments.iter().map(|f| Earlier::of(f, last)).collect();
+            Ok(SessionState::Deciding(Deciding::new(last, earlier)))
         }
-        Err(e) => {
-            fetcher.abort();
-            // 在途的项随后以 Cancelled 结束，只等它们收尾，不再处理结果
-            while fetcher.next().await.is_some() {}
-            Err(e)
+        None => {
+            if dir.url_changed(job) {
+                dir.save(job).await?;
+            }
+            Ok(SessionState::Decided(0))
         }
     }
 }
@@ -200,6 +187,29 @@ pub(crate) fn count_stored(stored: &Stored, progress: &watch::Sender<Progress>) 
 }
 
 impl Recorder<'_> {
+    /// 录制结束后收尾：正常结束时等已列出的分片下完；失败时取消其余下载、等它们退出。
+    async fn settle(
+        mut self,
+        result: Result<LiveEnd, Error>,
+        fetcher: &mut Fetcher,
+    ) -> Result<Recording, Error> {
+        match result {
+            Ok(end) => {
+                fetcher.drain(|id, r| self.on_finished(id, r)).await?;
+                Ok(Recording {
+                    end,
+                    missed: self.missed,
+                })
+            }
+            Err(e) => {
+                fetcher.abort();
+                // 在途的项随后以 Cancelled 结束，只等它们收尾，不再处理结果
+                while fetcher.next().await.is_some() {}
+                Err(e)
+            }
+        }
+    }
+
     /// 处理首次拉到的播放列表，再按节奏刷新直到满足结束条件。
     async fn record(
         &mut self,
