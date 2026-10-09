@@ -55,14 +55,14 @@ ts_segments ts_b "${b_src[@]}" "${h264[@]}" "${aac[@]}"
 fmp4_split fmp4_a "${a_src[@]}"
 fmp4_split fmp4_b "${b_src[@]}"
 
-# 反例：分辨率与第一组不同；HEVC；MP3 音频
+# 编码与参数：分辨率与前面的组不同（合并应报参数变化）；HEVC（支持）；MP3 音频（不支持）
 read -r -a small_src <<< "$(source_args testsrc2 160x90 440 1)"
 ts_segments ts_small "${small_src[@]}" "${h264[@]}" "${aac[@]}"
 read -r -a one_src <<< "$(source_args testsrc2 320x180 440 1)"
 ts_segments ts_hevc "${one_src[@]}" -c:v libx265 -preset ultrafast -x265-params log-level=error -g 25 -b:v 150k "${aac[@]}"
 ts_segments ts_mp3 "${one_src[@]}" "${h264[@]}" -c:a libmp3lame -b:a 64k
 
-# 直播录制：4 秒、时间戳连续的节目，用于逐段放出、窗口滑动与漏段
+# 直播录制：4 秒、时间戳连续的节目，用于逐段放出、窗口滑动与缺失的分片
 read -r -a long_src <<< "$(source_args testsrc2 160x90 440 4)"
 ts_segments ts_long "${long_src[@]}" "${h264[@]}" "${aac[@]}"
 

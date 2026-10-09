@@ -27,4 +27,6 @@ res/ffmpeg_win.exe
 # rust
 target/
 
-# third_party/ffmpeg 的源码与产物由 build.sh 生成（build/、dist/ 已被上面的规则忽略）
+# FFmpeg 的源码与静态库，由 third_party/ffmpeg/build.sh 生成
+third_party/ffmpeg/build/
+third_party/ffmpeg/dist/
