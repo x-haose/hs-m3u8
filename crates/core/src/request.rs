@@ -8,6 +8,7 @@ use std::time::Duration;
 use url::Url;
 
 use crate::hooks::{Hooks, NoHooks};
+use crate::ident::bare_url;
 use crate::{Error, hls};
 
 /// 一个下载任务的配置。用 [`JobRequest::new`] 取默认值后按需修改字段。
@@ -75,7 +76,7 @@ impl JobRequest {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         let invalid = |message: String| Err(Error::InvalidInput(message));
         if !matches!(self.url.scheme(), "http" | "https") {
-            return invalid(format!("只支持 http/https 地址：{}", self.url));
+            return invalid(format!("只支持 http/https 地址：{}", bare_url(&self.url)));
         }
         for (name, value) in &self.headers {
             check_header(name, value).map_err(Error::InvalidInput)?;

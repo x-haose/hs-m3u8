@@ -626,6 +626,43 @@ async fn inits_differing_only_in_query_are_distinct() {
     );
 }
 
+/// 来源地址带用户名、密码与令牌时，错误信息与调试输出里都不出现它们（`unwrap` 与日志会打印后者）。
+#[tokio::test(flavor = "multi_thread")]
+async fn errors_do_not_reveal_credentials_or_tokens() {
+    let dir = test_dir("redaction");
+    let server = Server::start().await;
+    let mut url = server.url("gone.m3u8?token=SECRET");
+    url.set_username("user").unwrap();
+    url.set_password(Some("PASSWD")).unwrap();
+    let err = run(request(url, &dir)).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Http {
+                kind: HttpError::Status(404),
+                ..
+            }
+        ),
+        "{err}"
+    );
+
+    let unsupported = Url::parse("ftp://user:PASSWD@h.example/x?token=SECRET").unwrap();
+    let Err(invalid) = engine().start(request(unsupported, &dir)) else {
+        panic!("ftp 地址应被拒绝");
+    };
+    for text in [
+        err.to_string(),
+        format!("{err:?}"),
+        invalid.to_string(),
+        format!("{invalid:?}"),
+    ] {
+        assert!(
+            !text.contains("PASSWD") && !text.contains("SECRET"),
+            "{text}"
+        );
+    }
+}
+
 /// 下载前就能判定的失败：输出已存在、不录制直播时遇到直播、各轨不连续段不一致。
 #[tokio::test(flavor = "multi_thread")]
 async fn rejected_before_download() {

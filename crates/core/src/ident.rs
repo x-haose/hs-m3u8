@@ -45,8 +45,8 @@ impl fmt::Display for Fingerprint {
     }
 }
 
-/// 来源摘要（SHA-256 十六进制）：去掉查询串的地址与选轨偏好。查询串常带每次会话不同的令牌，不计入；
-/// 语言代码与选轨一样不区分 ASCII 大小写。每项一行、地址里不会有换行，编码没有歧义。
+/// 来源摘要（SHA-256 十六进制）：去掉凭据与查询串的地址（见 [`bare_url`]）与选轨偏好。查询串常带每次会话
+/// 不同的令牌，不计入；语言代码与选轨一样不区分 ASCII 大小写。每项一行、地址里不会有换行，编码没有歧义。
 pub(crate) fn source_digest(url: &Url, preference: &Preference) -> String {
     let variant = match preference.variant {
         VariantChoice::Best => "best".to_owned(),
@@ -59,7 +59,7 @@ pub(crate) fn source_digest(url: &Url, preference: &Preference) -> String {
         .unwrap_or_default();
     digest_hex(format!(
         "url {}\nvariant {variant}\naudio {audio}\n",
-        strip_query(url)
+        bare_url(url)
     ))
 }
 
@@ -78,12 +78,15 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// 去掉查询串与片段后的地址；错误信息与摘要都用它，查询串常带令牌。
-pub(crate) fn strip_query(url: &Url) -> String {
-    let mut url = url.clone();
-    url.set_query(None);
-    url.set_fragment(None);
-    url.into()
+/// 去掉用户名、密码、查询串与片段后的地址；错误信息与摘要都用它，这些部分常带凭据或令牌。
+pub(crate) fn bare_url(url: &Url) -> String {
+    match url.host_str() {
+        Some(host) => {
+            let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
+            format!("{}://{host}{port}{}", url.scheme(), url.path())
+        }
+        None => format!("{}:{}", url.scheme(), url.path()),
+    }
 }
 
 /// 地址路径的最后一段，不含查询串。
@@ -134,6 +137,16 @@ mod tests {
             Fingerprint::of_segment(&a, None),
             Fingerprint::of_segment(&a, Some(range))
         );
+    }
+
+    #[test]
+    fn bare_url_drops_credentials_query_and_fragment() {
+        let url = Url::parse("https://user:pass@a.example:8443/v/x.m3u8?token=1#t").unwrap();
+        assert_eq!(bare_url(&url), "https://a.example:8443/v/x.m3u8");
+        let default_port = Url::parse("http://a.example:80/x").unwrap();
+        assert_eq!(bare_url(&default_port), "http://a.example/x");
+        let ipv6 = Url::parse("http://[::1]:9/x?k=v").unwrap();
+        assert_eq!(bare_url(&ipv6), "http://[::1]:9/x");
     }
 
     #[test]

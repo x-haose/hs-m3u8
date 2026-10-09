@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::hooks::{HookKind, Hooks, Purpose, RequestParts, run_hook};
-use crate::ident::strip_query;
+use crate::ident::bare_url;
 use crate::request::{JobRequest, RetryPolicy, check_header};
 use crate::{Error, HttpError, Integrity};
 
@@ -56,7 +56,7 @@ impl Http {
             let proxy = reqwest::Proxy::all(proxy.as_str()).map_err(|e| {
                 Error::InvalidInput(format!(
                     "代理地址不可用 {}：{}",
-                    proxy_text(proxy),
+                    bare_url(proxy),
                     e.without_url()
                 ))
             })?;
@@ -145,7 +145,7 @@ impl Http {
         if !matches!(parts.url.scheme(), "http" | "https") {
             return Err(invalid(format!(
                 "只支持 http/https 地址：{}",
-                strip_query(&parts.url)
+                bare_url(&parts.url)
             )));
         }
         for (name, value) in &parts.headers {
@@ -199,15 +199,10 @@ impl Http {
         Ok(response)
     }
 
-    /// 第 `attempt` 次失败后的等待：base × 2^(attempt-1)，不超过 max，再乘以 [0.75, 1.25) 的抖动。
+    /// 第 `attempt` 次失败后的等待，抖动由地址与次数的哈希决定。
     fn backoff(&self, url: &Url, attempt: u32) -> Duration {
-        let exponential = self
-            .retry
-            .base_delay
-            .saturating_mul(1u32 << (attempt - 1).min(20));
-        let capped = exponential.min(self.retry.max_delay);
         let permille = 750 + (self.jitter.hash_one((url.as_str(), attempt)) % 500) as u32;
-        capped * permille / 1000
+        backoff_delay(&self.retry, attempt, permille)
     }
 }
 
@@ -261,6 +256,16 @@ fn http_error(url: &Url, kind: HttpError) -> Error {
     }
 }
 
+/// 第 `attempt`（从 1 起）次失败后的等待：base × 2^(attempt-1)，不超过 max，再乘以 `permille`‰ 的抖动
+/// （750..1250）。各步饱和运算：调用方用极大的时长表示「不封顶」时不溢出。
+fn backoff_delay(retry: &RetryPolicy, attempt: u32, permille: u32) -> Duration {
+    let exponential = retry
+        .base_delay
+        .saturating_mul(1u32 << (attempt - 1).min(20));
+    let capped = exponential.min(retry.max_delay);
+    (capped / 1000).saturating_mul(permille)
+}
+
 /// 归类传输错误；说明文字不含地址（调用方的错误已带去掉查询串的地址）。
 fn classify(error: reqwest::Error) -> HttpError {
     if error.is_timeout() {
@@ -274,11 +279,28 @@ fn classify(error: reqwest::Error) -> HttpError {
     }
 }
 
-/// 代理地址去掉用户名、密码与路径后的写法，用于错误信息。
-fn proxy_text(proxy: &Url) -> String {
-    let host = proxy.host_str().unwrap_or_default();
-    match proxy.port() {
-        Some(port) => format!("{}://{host}:{port}", proxy.scheme()),
-        None => format!("{}://{host}", proxy.scheme()),
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroU32;
+
+    use super::*;
+
+    #[test]
+    fn backoff_grows_exponentially_up_to_the_cap_and_never_overflows() {
+        let retry = RetryPolicy {
+            attempts: NonZeroU32::new(8).unwrap(),
+            base_delay: Duration::from_millis(500),
+            max_delay: Duration::from_secs(3),
+        };
+        assert_eq!(backoff_delay(&retry, 1, 1000), Duration::from_millis(500));
+        assert_eq!(backoff_delay(&retry, 3, 1000), Duration::from_secs(2));
+        assert_eq!(backoff_delay(&retry, 4, 1000), Duration::from_secs(3));
+        assert_eq!(backoff_delay(&retry, 4, 750), Duration::from_millis(2250));
+        let unbounded = RetryPolicy {
+            attempts: NonZeroU32::new(8).unwrap(),
+            base_delay: Duration::MAX,
+            max_delay: Duration::MAX,
+        };
+        assert_eq!(backoff_delay(&unbounded, 8, 1249), Duration::MAX);
     }
 }
