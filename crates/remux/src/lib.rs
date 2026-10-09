@@ -9,7 +9,7 @@
 //! - 只接受 H.264、HEVC 视频与 AAC 音频，与 FFmpeg 构建启用的组件一致。
 //!
 //! 输出先写 `<输出>.part`，写完回读核对每路流的包数后改名；任一步失败都删除临时文件并返回错误。
-//! 已存在的输出文件会被替换。错误信息已包含原因，不再经 `source()` 链出同一段文字。
+//! 已存在的输出文件会被替换。错误信息已包含原因，不经 `source()` 重复给出。
 
 mod chain;
 mod ffi;
@@ -134,7 +134,7 @@ pub struct StreamReport {
     pub packets: u64,
     /// 输入中没有 DTS、因而未写入的包数
     pub skipped_without_dts: u64,
-    /// 输出时间线上从最早的呈现时刻到最晚的结束时刻，微秒；含组内漏段留下的空档
+    /// 输出时间线上从最早的呈现时刻到最晚的结束时刻，微秒；含组内时间戳间断（如缺失的分片）留下的空档
     pub duration_us: u64,
 }
 
@@ -417,12 +417,12 @@ struct TrackOutput {
     out: usize,
 }
 
-/// 输入流到输出流的对应。
+/// 一路输入流对应的输出流。
 #[derive(Clone, Copy)]
 struct Mapping {
-    input: usize,
-    time_base: Rational,
     output: usize,
+    /// 输入流的时间基
+    time_base: Rational,
 }
 
 struct Source {
@@ -431,28 +431,29 @@ struct Source {
     ictx: format::context::Input,
     /// 读分片文件出错时的路径与原因
     failure: chain::Failure,
-    /// 输入流下标 → 输出流下标；None 表示该流不进输出
-    map: Vec<Option<usize>>,
-    time_bases: Vec<Rational>,
-    /// 已读出、待写入的包及其输出流下标；包一定带 DTS
-    queue: VecDeque<(Packet, usize)>,
+    /// 按输入流下标；None 表示该流不进输出
+    map: Vec<Option<Mapping>>,
+    /// 已读出、待写入的包及其映射；包一定带 DTS
+    queue: VecDeque<(Packet, Mapping)>,
     finished: bool,
 }
 
 impl Source {
+    /// `outputs[i]` 为 `selected[i]` 对应的输出流下标。
     fn new(
         group: usize,
         track: usize,
         ictx: format::context::Input,
         failure: chain::Failure,
-        mappings: &[Mapping],
+        selected: &[Selected],
+        outputs: &[usize],
     ) -> Self {
-        let n = ictx.nb_streams() as usize;
-        let mut map = vec![None; n];
-        let mut time_bases = vec![Rational(0, 1); n];
-        for m in mappings {
-            map[m.input] = Some(m.output);
-            time_bases[m.input] = m.time_base;
+        let mut map = vec![None; ictx.nb_streams() as usize];
+        for (s, &output) in selected.iter().zip(outputs) {
+            map[s.index] = Some(Mapping {
+                output,
+                time_base: s.time_base,
+            });
         }
         Source {
             group,
@@ -460,14 +461,13 @@ impl Source {
             ictx,
             failure,
             map,
-            time_bases,
             queue: VecDeque::new(),
             finished: false,
         }
     }
 
     /// 读下一个要写出的包。跳过未映射流的包；没有 DTS 的包计入该输出流的 `skipped`。读到末尾返回 `None`。
-    fn read_next(&mut self, outs: &mut [OutStream]) -> Result<Option<(Packet, usize)>, Error> {
+    fn read_next(&mut self, outs: &mut [OutStream]) -> Result<Option<(Packet, Mapping)>, Error> {
         loop {
             let mut packet = Packet::empty();
             match packet.read(&mut self.ictx) {
@@ -482,24 +482,24 @@ impl Source {
                 }
             }
             // TS 可能在文件中途出现新流，其下标超出建立映射时的流数
-            let Some(out) = self.map.get(packet.stream()).copied().flatten() else {
+            let Some(mapping) = self.map.get(packet.stream()).copied().flatten() else {
                 continue;
             };
             if packet.dts().is_none() {
-                outs[out].skipped += 1;
+                outs[mapping.output].skipped += 1;
                 continue;
             }
-            return Ok(Some((packet, out)));
+            return Ok(Some((packet, mapping)));
         }
     }
 
     /// 读到每路映射流都至少有一个包排队（或读到末尾），用于确定本组各流的首个 DTS 与最早的 PTS。
     fn prime(&mut self, outs: &mut [OutStream]) -> Result<(), Error> {
-        let mapped: Vec<usize> = self.map.iter().flatten().copied().collect();
+        let mapped: Vec<usize> = self.map.iter().flatten().map(|m| m.output).collect();
         while !self.finished
             && !mapped
                 .iter()
-                .all(|out| self.queue.iter().any(|(_, o)| o == out))
+                .all(|&out| self.queue.iter().any(|(_, m)| m.output == out))
         {
             match self.read_next(outs)? {
                 Some(item) => self.queue.push_back(item),
@@ -510,9 +510,9 @@ impl Source {
     }
 
     fn front_dts_us(&self) -> Option<i64> {
-        let (packet, _) = self.queue.front()?;
+        let (packet, mapping) = self.queue.front()?;
         let dts = packet.dts().expect("队列中的包都带 DTS");
-        Some(dts.rescale(self.time_bases[packet.stream()], MICROS))
+        Some(dts.rescale(mapping.time_base, MICROS))
     }
 }
 
@@ -560,13 +560,10 @@ fn write_verified(
         .max()
         .expect("第 0 组至少有一路输出流");
 
-    let mut sources = Some(first_sources);
-    for group in 0..groups.len() {
-        let group_sources = match sources.take() {
-            Some(s) => s,
-            None => open_group(streams, groups, group, &layout)?,
-        };
-        write_group(group, group_sources, &mut octx, &mut outs, margin_us)?;
+    write_group(0, first_sources, &mut octx, &mut outs, margin_us)?;
+    for group in 1..groups.len() {
+        let sources = open_group(streams, groups, group, &layout)?;
+        write_group(group, sources, &mut octx, &mut outs, margin_us)?;
     }
     octx.write_trailer().map_err(|e| Error::Mux(e.into()))?;
     drop(octx);
@@ -602,7 +599,6 @@ fn create_outputs(
             return Err(Error::NoStreams { track });
         }
         let mut outputs = Vec::new();
-        let mut mappings = Vec::new();
         for s in &selected {
             let kind = s.shape.kind();
             if layout.iter().flatten().any(|o| o.shape.kind() == kind) {
@@ -618,14 +614,10 @@ fn create_outputs(
                 shape: s.shape,
                 out: ost.index(),
             });
-            mappings.push(Mapping {
-                input: s.index,
-                time_base: s.time_base,
-                output: ost.index(),
-            });
         }
+        let indices: Vec<usize> = outputs.iter().map(|o| o.out).collect();
+        sources.push(Source::new(0, track, ictx, failure, &selected, &indices));
         layout.push(outputs);
-        sources.push(Source::new(0, track, ictx, failure, &mappings));
     }
     Ok((layout, sources))
 }
@@ -666,7 +658,6 @@ fn open_group(
         {
             return Err(Error::LayoutChanged { group, track });
         }
-        let mut mappings = Vec::new();
         for (s, e) in selected.iter().zip(expected) {
             if s.shape != e.shape {
                 return Err(Error::ParamsChanged {
@@ -677,13 +668,11 @@ fn open_group(
                     found: s.shape,
                 });
             }
-            mappings.push(Mapping {
-                input: s.index,
-                time_base: s.time_base,
-                output: e.out,
-            });
         }
-        sources.push(Source::new(group, track, ictx, failure, &mappings));
+        let indices: Vec<usize> = expected.iter().map(|e| e.out).collect();
+        sources.push(Source::new(
+            group, track, ictx, failure, &selected, &indices,
+        ));
     }
     Ok(sources)
 }
@@ -703,14 +692,14 @@ fn write_group(
     let mut first_dts_us: Vec<Option<i64>> = vec![None; outs.len()];
     let mut min_pts_us: Option<i64> = None;
     for source in &sources {
-        for (packet, out) in &source.queue {
-            let tb = source.time_bases[packet.stream()];
+        for (packet, mapping) in &source.queue {
+            let tb = mapping.time_base;
             let dts = packet
                 .dts()
                 .expect("队列中的包都带 DTS")
                 .rescale(tb, MICROS);
             let pts = packet.pts().map_or(dts, |pts| pts.rescale(tb, MICROS));
-            first_dts_us[*out].get_or_insert(dts);
+            first_dts_us[mapping.output].get_or_insert(dts);
             min_pts_us = Some(min_pts_us.map_or(pts, |m| m.min(pts)));
         }
     }
@@ -737,10 +726,10 @@ fn write_group(
         let Some((i, _)) = next else { break };
 
         let source = &mut sources[i];
-        let (mut packet, out) = source.queue.pop_front().expect("next 只指向有待写包的输入");
-        let in_tb = source.time_bases[packet.stream()];
+        let (mut packet, mapping) = source.queue.pop_front().expect("next 只指向有待写包的输入");
+        let out = mapping.output;
         let o = &mut outs[out];
-        let t = retime(&mut packet, in_tb, o.time_base, offset_us);
+        let t = retime(&mut packet, mapping.time_base, o.time_base, offset_us);
         o.start_us = Some(o.start_us.map_or(t.pts_us, |s| s.min(t.pts_us)));
         o.end_us = Some(o.end_us.map_or(t.end_us, |e| e.max(t.end_us)));
         o.last_dts_us = Some(t.dts_us);
