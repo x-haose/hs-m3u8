@@ -257,13 +257,17 @@ fn http_error(url: &Url, kind: HttpError) -> Error {
 }
 
 /// 第 `attempt`（从 1 起）次失败后的等待：base × 2^(attempt-1)，不超过 max，再乘以 `permille`‰ 的抖动
-/// （750..1250）。各步饱和运算：调用方用极大的时长表示「不封顶」时不溢出。
+/// （750..1250）。逐次翻倍、到 max 即止，Duration 至多约 2^94 纳秒，翻倍不超过 94 次；各步饱和运算，
+/// 调用方用极大的时长表示「不封顶」时不溢出。
 fn backoff_delay(retry: &RetryPolicy, attempt: u32, permille: u32) -> Duration {
-    let exponential = retry
-        .base_delay
-        .saturating_mul(1u32 << (attempt - 1).min(20));
-    let capped = exponential.min(retry.max_delay);
-    (capped / 1000).saturating_mul(permille)
+    let mut delay = retry.base_delay;
+    for _ in 1..attempt {
+        if delay >= retry.max_delay || delay.is_zero() {
+            break;
+        }
+        delay = delay.saturating_mul(2);
+    }
+    (delay.min(retry.max_delay) / 1000).saturating_mul(permille)
 }
 
 /// 归类传输错误；说明文字不含地址（调用方的错误已带去掉查询串的地址）。
@@ -302,5 +306,24 @@ mod tests {
             max_delay: Duration::MAX,
         };
         assert_eq!(backoff_delay(&unbounded, 8, 1249), Duration::MAX);
+        // 上限是基础间隔的 2^20 倍以上时照样翻倍到上限
+        let patient = RetryPolicy {
+            attempts: NonZeroU32::MAX,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_secs(3600),
+        };
+        assert_eq!(
+            backoff_delay(&patient, 22, 1000),
+            Duration::from_millis(1 << 21)
+        );
+        assert_eq!(
+            backoff_delay(&patient, u32::MAX, 1000),
+            Duration::from_secs(3600)
+        );
+        let immediate = RetryPolicy {
+            base_delay: Duration::ZERO,
+            ..patient
+        };
+        assert_eq!(backoff_delay(&immediate, u32::MAX, 1000), Duration::ZERO);
     }
 }
