@@ -23,7 +23,6 @@ pub(super) enum Start {
 }
 
 /// 一条轨最近一次有分片的会话中已录完的分片。
-#[derive(Clone)]
 pub(super) struct Recorded {
     session: u32,
     /// 序号 → 文件名记录的信息
@@ -105,8 +104,8 @@ pub(super) struct Deciding {
 /// 判定结果。
 pub(super) struct Decision {
     pub session: u32,
-    /// 来源地址（含查询串）变了时可以改记当前地址：接着上一个会话录（内容核对一致），或目录里还没有录过的分片
-    pub may_switch_source: bool,
+    /// 完整来源地址变了时可以改记当前地址：接着上一个会话录（内容核对一致），或目录里还没有录过的分片
+    pub may_adopt_url: bool,
     /// 各轨的起点与暂存的播放列表
     pub tracks: Vec<(Start, Candidate)>,
 }
@@ -127,7 +126,7 @@ impl Decision {
             .collect();
         Decision {
             session: 0,
-            may_switch_source: true,
+            may_adopt_url: true,
             tracks,
         }
     }
@@ -193,7 +192,7 @@ impl Deciding {
             .collect();
         Some(Decision {
             session,
-            may_switch_source: continued,
+            may_adopt_url: continued,
             tracks,
         })
     }

@@ -85,7 +85,7 @@ async fn run_live(task: Task, source: String, resolved: Resolved) -> Result<Outp
             url_digest: url_digest(&task.request.url),
         },
     };
-    let dir = WorkDir::open(task.request.resolved_work_dir(), record.clone()).await?;
+    let dir = WorkDir::open(task.request.resolved_work_dir(), record).await?;
     let mut fetcher = task.fetcher();
     let ctx = Context {
         http: task.http.clone(),
@@ -96,8 +96,8 @@ async fn run_live(task: Task, source: String, resolved: Resolved) -> Result<Outp
         cancel: &task.cancel,
         stop: &task.stop,
     };
-    let recording = live::record(ctx, resolved.tracks, options, &record).await?;
-    let streams = record.streams();
+    let recording = live::record(ctx, resolved.tracks, options).await?;
+    let streams = dir.record().streams();
     let stored = dir.scan(streams.len()).await?;
     let input = merge_live(&dir, &stored, streams, Some(recording))?;
     task.finish(dir, input).await
@@ -115,7 +115,7 @@ async fn run_vod(task: Task, source: String, resolved: Resolved) -> Result<Outpu
             plan_digest: plan.digest(),
         },
     };
-    let dir = WorkDir::open(task.request.resolved_work_dir(), record.clone()).await?;
+    let dir = WorkDir::open(task.request.resolved_work_dir(), record).await?;
     let mut fetcher = task.fetcher();
     let groups = vod::download(
         &task.http,
@@ -154,8 +154,8 @@ async fn merge_only(task: Task) -> Result<Output, Error> {
             problem: WorkDirProblem::SourceMismatch,
         });
     }
-    let dir = WorkDir::open(root, record.clone()).await?;
-    let streams = record.streams();
+    let dir = WorkDir::open(root, record).await?;
+    let streams = dir.record().streams();
     let stored = dir.scan(streams.len()).await?;
     live::count_stored(&stored, &task.progress);
     let input = merge_live(&dir, &stored, streams, None)?;

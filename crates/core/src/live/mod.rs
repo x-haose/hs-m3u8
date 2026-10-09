@@ -32,7 +32,7 @@ use crate::hooks::Hooks;
 use crate::http::{Http, Permit};
 use crate::request::LiveOptions;
 use crate::resolve::{self, ResolvedTrack};
-use crate::workdir::{self, JobRecord, Stored, StoredInit, WorkDir};
+use crate::workdir::{self, Stored, StoredInit, WorkDir};
 use crate::{
     Error, HttpError, LiveEnd, MissReason, Missed, Progress, Stage, WorkDirProblem, blocking,
 };
@@ -89,8 +89,6 @@ struct Recorder<'a> {
     http: Arc<Http>,
     hooks: Arc<dyn Hooks>,
     dir: &'a WorkDir,
-    /// 当前请求的任务记录
-    job: &'a JobRecord,
     progress: &'a watch::Sender<Progress>,
     options: LiveOptions,
     tracks: Vec<LiveTrack>,
@@ -105,13 +103,12 @@ struct Recorder<'a> {
 
 /// 录制：定下会话，从首次拉到的播放列表开始，直到满足结束条件，并等已列出的分片下完。
 ///
-/// `job` 为当前请求的任务记录。目录里记录的来源地址（含查询串）与它不同时，有已录的分片就须接着上一个会话录才继续，
+/// 目录里记录的完整来源地址与本次的不同时（见 [`WorkDir::url_changed`]），有已录的分片就须接着上一个会话录才继续，
 /// 并改为记录当前地址；接不上报 [`WorkDirProblem::SourceUnverified`]。
 pub(crate) async fn record(
     ctx: Context<'_>,
     tracks: Vec<ResolvedTrack>,
     options: LiveOptions,
-    job: &JobRecord,
 ) -> Result<Recording, Error> {
     let (dir, progress) = (ctx.dir, ctx.progress);
     progress.send_modify(|p| p.stage = Stage::Recording);
@@ -121,7 +118,6 @@ pub(crate) async fn record(
         http: ctx.http,
         hooks: ctx.hooks,
         dir,
-        job,
         progress,
         options,
         tracks: live_tracks(&tracks, &stored, Instant::now())?,
@@ -293,7 +289,7 @@ impl Recorder<'_> {
         for segment in overlaps(recorded, playlist) {
             let data = match fetcher.fetch(track, segment).await {
                 Ok(data) => data,
-                Err(e) if matches!(missable(&e), Some(HttpError::Status(404 | 410))) => continue,
+                Err(e) if matches!(e.missable(), Some(HttpError::Status(404 | 410))) => continue,
                 Err(e) => return Err(e),
             };
             let stored = self
@@ -317,13 +313,13 @@ impl Recorder<'_> {
         fetcher: &mut Fetcher,
     ) -> Result<Option<LiveEnd>, Error> {
         if self.dir.url_changed() {
-            if !decision.may_switch_source {
+            if !decision.may_adopt_url {
                 return Err(Error::WorkDir {
                     path: self.dir.layout().root().to_path_buf(),
                     problem: WorkDirProblem::SourceUnverified,
                 });
             }
-            self.dir.save(self.job).await?;
+            self.dir.adopt_url().await?;
         }
         let now = Instant::now();
         for (track, (start, candidate)) in decision.tracks.into_iter().enumerate() {
@@ -565,7 +561,7 @@ impl Recorder<'_> {
             }
             Err(error) => error,
         };
-        let Some(kind) = missable(&error) else {
+        let Some(kind) = error.missable() else {
             return Err(error);
         };
         self.tracks[id.track].segment_missed(kind.clone());
@@ -645,20 +641,6 @@ async fn same_file(stored: PathBuf, data: Vec<u8>) -> Result<bool, Error> {
     .await?
 }
 
-/// 取不到的请求：404/410（已过期），或重试后仍失败的临时故障，可记为缺失、录制继续；分片的失败看其原因。
-/// key、回调、校验等失败不在此列。
-pub(super) fn missable(error: &Error) -> Option<HttpError> {
-    match error {
-        Error::Http { kind, .. }
-            if kind.retryable() || matches!(kind, HttpError::Status(404 | 410)) =>
-        {
-            Some(kind.clone())
-        }
-        Error::Segment { cause, .. } => missable(cause),
-        _ => None,
-    }
-}
-
 /// 刷新失败中可以等下次刷新的：取不到（含 404/410，直播结束时常见）、内容为空或语法错误（服务器没写完）。
 /// 其余（401/403 等、内容不是播放列表、DRM、回调出错）使任务失败。
 fn waitable_refresh_error(error: &Error) -> bool {
@@ -666,7 +648,7 @@ fn waitable_refresh_error(error: &Error) -> bool {
         Error::Playlist { cause, .. } => {
             matches!(**cause, hls::Error::Syntax { .. } | hls::Error::Empty)
         }
-        _ => missable(error).is_some(),
+        _ => error.missable().is_some(),
     }
 }
 
