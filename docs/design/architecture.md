@@ -326,12 +326,11 @@ hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
 
 ## 12. 待验证风险与待定问题
 
-开工后按顺序验证：
+按顺序验证（Windows 静态构建与链接已于 2026-10-09 在 CI 通过，见 ADR-0002）：
 
-1. Windows 上 FFmpeg 静态构建与链接（MSYS2 + MSVC）。
-2. 不连续段时间戳偏移，以及 concat 协议或自定义 AVIO 的读取方式。
-3. 高并发下 Python 回调的 GIL 竞争（`on_segment` 每个分片调用一次）。
-4. 资源嗅探的注入脚本（GUI 阶段）。
+1. 不连续段时间戳偏移，以及 concat 协议或自定义 AVIO 的读取方式。
+2. 高并发下 Python 回调的 GIL 竞争（`on_segment` 每个分片调用一次）。
+3. 资源嗅探的注入脚本（GUI 阶段）。
 
 待定：
 
