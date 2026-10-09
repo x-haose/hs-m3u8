@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 生成 remux 测试样本：ffmpeg 合成画面与正弦音，按 1 秒切成 HLS 分片，不含第三方内容。
+# 生成 remux 与 core 的测试样本：ffmpeg 合成画面与正弦音，按 1 秒切成 HLS 分片，不含第三方内容。
 # 每个目录是一条轨在一个不连续段组里的分片（fMP4 另带 init.mp4）；各节目的时间戳都从头开始，
 # 前后拼接即构成 EXT-X-DISCONTINUITY。需要带 libx264、libx265、libmp3lame 的 ffmpeg 命令行。
 # 产物已提交到仓库，仅在需要重建时运行。
@@ -61,5 +61,9 @@ ts_segments ts_small "${small_src[@]}" "${h264[@]}" "${aac[@]}"
 read -r -a one_src <<< "$(source_args testsrc2 320x180 440 1)"
 ts_segments ts_hevc "${one_src[@]}" -c:v libx265 -preset ultrafast -x265-params log-level=error -g 25 -b:v 150k "${aac[@]}"
 ts_segments ts_mp3 "${one_src[@]}" "${h264[@]}" -c:a libmp3lame -b:a 64k
+
+# 直播录制：4 秒、时间戳连续的节目，用于逐段放出、窗口滑动与漏段
+read -r -a long_src <<< "$(source_args testsrc2 160x90 440 4)"
+ts_segments ts_long "${long_src[@]}" "${h264[@]}" "${aac[@]}"
 
 find "$DIR" -type f ! -name generate.sh | sort | xargs ls -l

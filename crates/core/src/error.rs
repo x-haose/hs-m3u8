@@ -36,6 +36,10 @@ pub enum Error {
     Integrity { url: Box<Url>, kind: Integrity },
     #[error("播放列表的分片与任务目录记录的不一致，不能续传")]
     PlanChanged,
+    #[error("直播播放列表 {url} 中序号 {sequence} 的分片与上次刷新时不同（服务器错误）")]
+    LiveSegmentChanged { url: Box<Url>, sequence: u64 },
+    #[error("直播没有录到可合并的分片")]
+    NothingRecorded,
     #[error("任务目录 {path} 无法使用：{reason}")]
     WorkDir { path: PathBuf, reason: String },
     #[error("{purpose:?} 回调出错：{message}")]
@@ -75,6 +79,8 @@ pub enum Unsupported {
     Live,
     #[error("播放列表 {0} 没有分片")]
     EmptyPlaylist(Box<Url>),
+    #[error("直播播放列表 {0} 既没有 EXT-X-TARGETDURATION 也没有分片，无法确定刷新间隔")]
+    NoTargetDuration(Box<Url>),
     #[error("同一不连续段内 EXT-X-MAP 发生变化（第 {track} 条轨，不连续段 {discontinuity}）")]
     InitChangesWithinGroup { track: usize, discontinuity: u64 },
     #[error("各轨的不连续段不一致：第 0 条轨 {first:?}，第 {track} 条轨 {found:?}")]
