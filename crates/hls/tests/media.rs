@@ -234,44 +234,6 @@ fn byte_ranges_without_offset_continue_the_previous_sub_range() {
 }
 
 #[test]
-fn unparsable_uri_is_kept_without_credentials_query_or_fragment() {
-    for (written, kept) in [
-        (
-            "https://user:p@ss@a.example:99999/seg.ts?token=abc#t",
-            "https://a.example:99999/seg.ts",
-        ),
-        (
-            "http:user:secret@a.example:99999/seg.ts",
-            "http:a.example:99999/seg.ts",
-        ),
-        (
-            "//user:secret@a.example:99999/seg.ts",
-            "//a.example:99999/seg.ts",
-        ),
-        (
-            r"http:\\user:secret@a.example:99999\seg.ts",
-            r"http:\\a.example:99999\seg.ts",
-        ),
-        (
-            "https://a.example:99999/seg.ts",
-            "https://a.example:99999/seg.ts",
-        ),
-    ] {
-        let err = error(&format!(
-            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\n{written}\n"
-        ));
-        let Error::Syntax {
-            kind: SyntaxError::Url { uri, .. },
-            ..
-        } = &err
-        else {
-            panic!("{err}");
-        };
-        assert_eq!(uri, kept);
-    }
-}
-
-#[test]
 fn byte_range_without_offset_after_another_resource_is_an_error() {
     let err = error(
         "#EXTM3U\n#EXT-X-BYTERANGE:1000@0\n#EXTINF:4,\na.ts\n#EXT-X-BYTERANGE:500\n#EXTINF:4,\nb.ts\n",

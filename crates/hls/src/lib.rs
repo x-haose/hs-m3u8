@@ -67,9 +67,9 @@ pub enum SyntaxError {
     UriWithoutInfo { expected: &'static str },
     #[error("{tag} 之后缺少 URI 行")]
     InfoWithoutUri { tag: &'static str },
-    /// `uri` 为播放列表中的原文去掉用户名、密码、查询串与片段（常带凭据或令牌）
-    #[error("无法解析为 URL：{uri:?}（{reason}）")]
-    Url { uri: String, reason: String },
+    /// 原因；不含地址原文（常带凭据或令牌，脱敏的写法无法可靠地切分一个解析不了的地址）
+    #[error("无法解析为 URL：{0}")]
+    Url(String),
     #[error("EXT-X-MEDIA 的 TYPE 无法识别：{0:?}")]
     RenditionType(String),
     #[error("EXT-X-MEDIA-SEQUENCE / EXT-X-DISCONTINUITY-SEQUENCE 必须出现在第一个分片之前")]
@@ -115,37 +115,7 @@ pub fn parse(text: &str, url: &Url) -> Result<Playlist, Error> {
 
 /// 把 `uri` 按 `base` 解析为绝对 URL。
 fn resolve(base: &Url, uri: &str) -> Result<Url, SyntaxError> {
-    base.join(uri).map_err(|e| SyntaxError::Url {
-        uri: redact(uri),
-        reason: e.to_string(),
-    })
-}
-
-/// 地址原文去掉用户名与密码、查询串与片段。按 WHATWG URL 的切分找主机部分：scheme 之后（没有 scheme 时
-/// 从开头）跳过所有 `/` 与 `\`，到下一个 `/` 或 `\` 为止，其中最后一个 `@` 及之前的都去掉。不是主机部分
-/// 而含 `@` 的（相对路径的第一段）也会去掉，只多去、不漏。
-fn redact(uri: &str) -> String {
-    let uri = uri.split(['?', '#']).next().unwrap_or_default();
-    let after_scheme = match uri.split_once(':') {
-        Some((scheme, rest)) if is_scheme(scheme) => rest,
-        _ => uri,
-    };
-    let authority = after_scheme.trim_start_matches(['/', '\\']);
-    let end = authority.find(['/', '\\']).unwrap_or(authority.len());
-    match authority[..end].rfind('@') {
-        Some(at) => {
-            let head = &uri[..uri.len() - authority.len()];
-            format!("{head}{}", &authority[at + 1..])
-        }
-        None => uri.to_owned(),
-    }
-}
-
-/// RFC 3986 的 scheme：字母开头，之后为字母、数字、`+`、`-`、`.`。
-fn is_scheme(s: &str) -> bool {
-    s.starts_with(|c: char| c.is_ascii_alphabetic())
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    base.join(uri).map_err(|e| SyntaxError::Url(e.to_string()))
 }
 
 /// 十进制非负整数。
