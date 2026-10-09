@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/remux"]
+members = ["crates/hls", "crates/remux"]
 
 [workspace.package]
 edition = "2024"
@@ -14,6 +14,7 @@ unsafe_code = "forbid"
 [workspace.dependencies]
 ffmpeg-next = { version = "9.0.0", default-features = false, features = ["format", "static"] }
 thiserror = "2.0.21"
+url = "2.5.8"
 
 [patch.crates-io]
 # 去掉 macOS 已移除的 QTKit，见 third_party/ffmpeg-sys-next/PATCHED.md

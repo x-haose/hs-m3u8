@@ -31,6 +31,8 @@ rs_check:
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo test --workspace
+	@cargo llvm-cov --version >/dev/null 2>&1 || { echo "缺少 cargo-llvm-cov：cargo install cargo-llvm-cov --version 0.9.1 --locked"; exit 1; }
+	cargo llvm-cov -p hs-m3u8-hls --fail-under-lines 80 --summary-only
 
 check_i:
 	uv run pre-commit install

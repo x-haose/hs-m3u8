@@ -1,0 +1,16 @@
+[package]
+name = "hs-m3u8-hls"
+version = "0.0.0"
+description = "Lenient HLS playlist parser that normalizes keys, IVs, init sections and byte ranges per segment"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+thiserror.workspace = true
+url.workspace = true
+
+[lints]
+workspace = true

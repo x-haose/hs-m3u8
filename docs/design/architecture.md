@@ -2,7 +2,7 @@
 
 - 状态：已采纳
 - 日期：2026-10-09
-- 相关决定：ADR-0001（技术路线）、ADR-0002（FFmpeg）、ADR-0003（仓库与迁移）、ADR-0004（产品范围）、ADR-0005（前端技术栈）
+- 相关决定：ADR-0001（技术路线）、ADR-0002（FFmpeg）、ADR-0003（仓库与迁移）、ADR-0004（产品范围）、ADR-0005（前端技术栈）、ADR-0006（播放列表解析）
 
 ## 1. 目标与非目标
 
@@ -55,50 +55,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 
 只做纯计算：输入播放列表文本和它的最终 URL（跟随重定向之后），输出规范化模型。
 
-```rust
-// 草案
-pub struct MasterPlaylist {
-    pub variants: Vec<Variant>,
-    pub renditions: Vec<Rendition>,   // EXT-X-MEDIA
-}
-
-pub struct Variant {
-    pub uri: Url,
-    pub bandwidth: u64,               // bit/s，取自 BANDWIDTH
-    pub resolution: Option<(u32, u32)>,
-    pub codecs: Vec<String>,
-    pub audio_group: Option<String>,  // AUDIO 属性
-}
-
-pub struct Rendition {
-    pub kind: RenditionKind,          // Audio / Subtitles / ClosedCaptions
-    pub group_id: String,
-    pub name: String,
-    pub language: Option<String>,
-    pub default: bool,
-    pub uri: Option<Url>,             // None 表示该 rendition 混在变体流里
-}
-
-pub struct MediaPlaylist {
-    pub segments: Vec<Segment>,
-    pub ended: bool,                  // 是否有 EXT-X-ENDLIST
-}
-
-pub struct Segment {
-    pub sequence: u64,                // 媒体序号 = EXT-X-MEDIA-SEQUENCE + 下标
-    pub uri: Url,                     // 已按播放列表最终 URL 解析为绝对地址
-    pub byte_range: Option<ByteRange>,// 起止偏移已算好
-    pub duration_ms: u64,
-    pub discontinuity: u32,           // 不连续段序号
-    pub key: Option<SegmentKey>,      // None 表示不加密
-    pub init: Option<InitSection>,    // fMP4 的 EXT-X-MAP
-}
-
-pub struct SegmentKey {
-    pub uri: Url,
-    pub iv: [u8; 16],                 // 已定值：显式 IV，或缺省时的媒体序号大端编码
-}
-```
+类型定义见 `crates/hls/src`（`MasterPlaylist`、`Variant`、`Rendition`、`MediaPlaylist`、`Segment`、`SegmentKey`、`InitSection`）。约定：所有 URI 均为绝对地址；时长为整数微秒；每个分片自带已定值的 key 与 IV、init 段、字节范围与不连续段序号。
 
 规范化规则（RFC 8216，全部有纯计算测试）：
 
@@ -109,17 +66,12 @@ pub struct SegmentKey {
 - `EXT-X-BYTERANGE` 省略偏移量时，接着同一资源上一个子区间往后取。
 - 所有 URI 按**该播放列表的最终 URL**（跟随重定向之后）解析。
 
-选轨：
+选轨（`select`）：
 
-```rust
-pub fn select(master: &MasterPlaylist, pref: &Preference) -> Result<Selection, SelectError>;
-pub struct Selection { pub video: Variant, pub audio: Option<Rendition> }
-```
-
-- 默认取最高分辨率，同分辨率取最高码率；用户可以指定。
+- 默认取最高分辨率，同分辨率取最高带宽；有带分辨率的变体时不考虑纯音频变体；用户可按下标指定。
 - 变体带 `AUDIO` 组、且组内 rendition 有 URI 时，选 `DEFAULT=YES` 的那个，或按用户指定的语言选；这就是音视频分流的情况。
 
-解析层：用 `m3u8-rs`（6.0.1）做标签与属性的词法解析，规范化与上述规则自己实现。注意：`m3u8-rs` 只把 KEY 和 MAP 挂在标签后的第一个分片上，往后传播必须由本层完成，并由测试守住。
+解析层自行实现（ADR-0006）：现成的 m3u8-rs 会静默丢失 key，hls_m3u8 拒绝真实网站常见的不规范写法。
 
 ## 5. core：下载任务
 
@@ -311,7 +263,7 @@ hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
 6. Python：maturin 构建 + 端到端冒烟
 7. 前端（GUI 阶段）：`tsc --noEmit`、lint、构建
 
-覆盖率：`hls` 与 `core` 行覆盖 ≥ 80%。
+覆盖率：`hls` 与 `core` 行覆盖 ≥ 80%，由 cargo-llvm-cov 在 `make check` 与 CI 中检查。
 
 ## 11. CI 与发布
 
