@@ -20,36 +20,36 @@ use std::time::Duration;
 use url::Url;
 
 use crate::hooks::{HookError, HookKind};
-use crate::ident::strip_query;
+use crate::ident::bare_url;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 pub enum Error {
     #[error("参数错误：{0}")]
     InvalidInput(String),
     #[error("输出文件已存在：{}", .0.display())]
     OutputExists(PathBuf),
     /// 不是播放列表或语法错误
-    #[error("解析播放列表 {} 失败：{cause}", strip_query(.url))]
+    #[error("解析播放列表 {} 失败：{cause}", bare_url(.url))]
     Playlist {
         url: Box<Url>,
         cause: Box<hs_m3u8_hls::Error>,
     },
     /// 应为媒体播放列表的地址（变体、音频 rendition）返回了主播放列表
-    #[error("{} 应为媒体播放列表，实际是主播放列表", strip_query(.url))]
+    #[error("{} 应为媒体播放列表，实际是主播放列表", bare_url(.url))]
     NotMediaPlaylist { url: Box<Url> },
     #[error("选轨失败：{0}")]
     Select(hs_m3u8_hls::SelectError),
     #[error("不支持：{0}")]
     Unsupported(Unsupported),
     /// `retry_after` 为服务器在 429/503 中要求（Retry-After）的最短等待
-    #[error("请求 {} 失败：{kind}", strip_query(.url))]
+    #[error("请求 {} 失败：{kind}", bare_url(.url))]
     Http {
         url: Box<Url>,
         kind: HttpError,
         retry_after: Option<Duration>,
     },
     /// 某个分片最终失败；`cause` 为分片请求、回调、解密或校验的错误
-    #[error("第 {track} 条轨分片 {sequence}（{}）失败：{cause}", strip_query(.url))]
+    #[error("第 {track} 条轨分片 {sequence}（{}）失败：{cause}", bare_url(.url))]
     Segment {
         track: usize,
         sequence: u64,
@@ -57,11 +57,11 @@ pub enum Error {
         cause: Box<Error>,
     },
     /// 取 key 失败；`cause` 为请求或回调的错误
-    #[error("取 key {} 失败：{cause}", strip_query(.url))]
+    #[error("取 key {} 失败：{cause}", bare_url(.url))]
     Key { url: Box<Url>, cause: Box<Error> },
-    #[error("key {} 应为 16 字节，实际 {length} 字节", strip_query(.url))]
+    #[error("key {} 应为 16 字节，实际 {length} 字节", bare_url(.url))]
     KeyLength { url: Box<Url>, length: usize },
-    #[error("数据校验失败（{}）：{kind}", strip_query(.url))]
+    #[error("数据校验失败（{}）：{kind}", bare_url(.url))]
     Integrity { url: Box<Url>, kind: Integrity },
     #[error("任务目录 {} 无法使用：{problem}", .path.display())]
     WorkDir {
@@ -85,6 +85,20 @@ pub enum Error {
     Remux(Box<hs_m3u8_remux::Error>),
     #[error("任务已取消")]
     Cancelled,
+}
+
+/// 与 `Display` 相同：派生的写法会带出完整地址（含查询串里的令牌），而 `unwrap`、`{:?}` 与日志都用它。
+impl fmt::Debug for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
+
+/// 同 [`Error`] 的 `Debug`。
+impl fmt::Debug for Unsupported {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
 }
 
 impl From<hs_m3u8_remux::Error> for Error {
@@ -124,14 +138,14 @@ impl Error {
 }
 
 /// 来源用到了不支持的特性。
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unsupported {
     /// [`crate::JobRequest::live`] 为 None 时遇到直播
     #[error("直播（播放列表没有 EXT-X-ENDLIST）")]
     Live,
-    #[error("播放列表 {} 没有分片", strip_query(.0))]
+    #[error("播放列表 {} 没有分片", bare_url(.0))]
     EmptyPlaylist(Box<Url>),
-    #[error("直播播放列表 {} 既没有 EXT-X-TARGETDURATION 也没有分片，无法确定刷新间隔", strip_query(.0))]
+    #[error("直播播放列表 {} 既没有 EXT-X-TARGETDURATION 也没有分片，无法确定刷新间隔", bare_url(.0))]
     NoTargetDuration(Box<Url>),
     #[error("DRM 加密（KEYFORMAT={keyformat}）")]
     Drm { keyformat: String },

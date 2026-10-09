@@ -45,6 +45,7 @@ pub enum Error {
 pub enum SyntaxError {
     #[error("{tag} 缺少值")]
     MissingValue { tag: &'static str },
+    /// 原因；不含属性原文
     #[error("属性列表无法解析：{0}")]
     Attributes(String),
     #[error("{tag} 缺少属性 {name}")]

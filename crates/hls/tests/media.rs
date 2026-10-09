@@ -325,13 +325,17 @@ fn malformed_input_is_reported_with_its_line() {
             }
         }
     );
+    let unclosed =
+        error("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k?token=secret\n#EXTINF:4,\na.ts\n");
     assert!(matches!(
-        error("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\n#EXTINF:4,\na.ts\n"),
+        unclosed,
         Error::Syntax {
             line: 2,
             kind: SyntaxError::Attributes(_)
         }
     ));
+    // 错误信息不带属性原文：其中常有带令牌的地址
+    assert!(!unclosed.to_string().contains("secret"), "{unclosed}");
     assert_eq!(
         error("#EXTM3U\n#EXTINF:4,\na.ts\n#EXT-X-MEDIA-SEQUENCE:3\n"),
         Error::Syntax {

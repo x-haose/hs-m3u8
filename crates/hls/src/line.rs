@@ -55,7 +55,8 @@ pub(crate) struct Attributes<'a> {
 impl<'a> Attributes<'a> {
     /// VALUE 为带引号的字符串（可含逗号）或到下一个逗号为止的裸值。属性名重复时报错。
     pub(crate) fn parse(text: &'a str) -> Result<Self, SyntaxError> {
-        let bad = |reason: &str| SyntaxError::Attributes(format!("{reason}：{text}"));
+        // 只记原因、不带原文：属性里常有带令牌的地址；出错的行号由调用方给出
+        let bad = |reason: &str| SyntaxError::Attributes(reason.to_owned());
         let mut items: Vec<(String, &'a str)> = Vec::new();
         let mut rest = text.trim_start();
         while !rest.is_empty() {
