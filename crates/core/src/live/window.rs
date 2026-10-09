@@ -38,20 +38,26 @@ enum Overlap {
 pub(super) struct Processed {
     /// 已处理（排入下载或记为缺失）的最大序号
     last: Option<u64>,
-    /// 续录时会话中已录完的序号：大于 `refill_after`、不超过 `last` 而不在其中的分片还要补录；
-    /// 处理完第一份非空播放列表即清空
-    refill: BTreeSet<u64>,
-    /// 补录的下界（不含），见 [`Recorded`]
-    refill_after: Option<u64>,
+    /// 续录时接着的会话里还要补录的；处理完第一份非空播放列表即为 None
+    refill: Option<Refill>,
+}
+
+/// 续录时补录的范围：窗口里不超过已处理的最大序号、大于 `skipped_through`、不在 `done` 中的分片。
+#[derive(Debug, Clone)]
+struct Refill {
+    /// 这个会话开始时跳过到的序号，见 [`Recorded::skipped_through`]
+    skipped_through: Option<u64>,
+    /// 已录完的序号
+    done: BTreeSet<u64>,
 }
 
 impl Processed {
     /// 序号为 `sequence` 的分片是否要录：比已处理的都新，或是续录时会话里没录完的。
     pub(super) fn is_new(&self, sequence: u64) -> bool {
         self.last.is_none_or(|last| sequence > last)
-            || (!self.refill.is_empty()
-                && self.refill_after.is_none_or(|after| sequence > after)
-                && !self.refill.contains(&sequence))
+            || self.refill.as_ref().is_some_and(|r| {
+                r.skipped_through.is_none_or(|s| sequence > s) && !r.done.contains(&sequence)
+            })
     }
 }
 
@@ -184,7 +190,10 @@ impl Window {
         }
         self.max_discontinuity = recorded.segments().values().map(|n| n.discontinuity).max();
         self.processed.last = Some(recorded.last());
-        (self.processed.refill_after, self.processed.refill) = recorded.refill();
+        self.processed.refill = Some(Refill {
+            skipped_through: recorded.skipped_through(),
+            done: recorded.segments().keys().copied().collect(),
+        });
     }
 
     pub(super) fn processed(&self) -> &Processed {
@@ -234,7 +243,7 @@ impl Window {
         update.changed = update.any_new || window_moved;
         self.previous = listing.listed;
         self.inits = listing.inits;
-        self.processed.refill.clear();
+        self.processed.refill = None;
         Ok(ControlFlow::Continue(update))
     }
 

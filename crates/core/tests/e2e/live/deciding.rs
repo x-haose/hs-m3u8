@@ -5,8 +5,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use hs_m3u8_core::{
-    Error, HttpError, LiveEnd, LiveOptions, MissReason, Missed, RetryPolicy, StallCause,
-    StallError, Url,
+    Error, HttpError, LiveEnd, LiveOptions, RetryPolicy, StallCause, StallError, Url,
 };
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
@@ -71,43 +70,6 @@ async fn a_held_track_counts_as_live() {
         "{err}"
     );
     assert!(dir.join("out.mp4.hsdl/job.json").exists());
-}
-
-/// 视频在最近一个会话里没有分片（另起会话时它没有新内容）：判定时对照它自己最近有分片的会话，
-/// 跳过录过的序号，不把更早会话的内容再录一遍。
-#[tokio::test(flavor = "multi_thread")]
-async fn a_track_without_segments_in_the_last_session_is_not_rerecorded() {
-    let dir = test_dir("deciding_per_track_session");
-    let server = Server::start().await;
-    put_split_master(&server);
-    put_long(&server, "v/", &[0, 1, 2, 3]);
-    put_long(&server, "a/", &[0, 1, 2, 3]);
-    server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
-    server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
-    let req = live_request(server.url("master.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 4).await;
-
-    // 运行 2：音频 seg1 的内容换了，接不上 → 会话 1，音频重录 0、1；视频跳过 0、1，没有新分片
-    server.put("a/seg1.ts", fixture("ts_long/seg3.ts"));
-    interrupt(&req, |p| p.segments_done == 6).await;
-    let video_hits = server.hits("v/seg0.ts");
-
-    // 运行 3：视频最近有分片的是会话 0、音频是会话 1，不在同一个会话 → 会话 2，两轨都跳过录过的
-    server.put("video.m3u8", playlist_in("v/", &[0, 1, 2, 3], true));
-    server.put("audio.m3u8", playlist_in("a/", &[0, 1, 2, 3], true));
-    let output = run(req).await.unwrap();
-
-    assert_eq!(server.hits("v/seg0.ts"), video_hits);
-    let want = expected_split_long(&dir, &[(&[0, 1], &[0, 1]), (&[2, 3], &[2, 3])]);
-    assert_output(&output, &want);
-    let audio_only = Missed {
-        session: 1,
-        track: 1,
-        first: 0,
-        last: 1,
-        reason: MissReason::Unmergeable,
-    };
-    assert_eq!(output.live, report(LiveEnd::EndList, 2, vec![audio_only]));
 }
 
 /// 视频此前已录满 max_duration、这次第一份播放列表恰好没有分片：它不参与判定，音频接着原会话补满时长。

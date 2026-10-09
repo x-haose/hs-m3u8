@@ -5,6 +5,7 @@ mod consistency;
 mod deciding;
 mod recording;
 mod resume;
+mod sessions;
 mod stall;
 
 use std::path::Path;

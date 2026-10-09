@@ -24,7 +24,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use self::merge::{merge_plan, report_missed};
-use self::session::{Candidate, Deciding, Decision, Recorded, Verdict};
+use self::session::{Candidate, Deciding, Decision, NewUrl, Recorded, TrackPlan, Verdict};
 use self::track::{LiveTrack, RefreshRequest};
 use self::window::{NewInits, Processed, Scope, overlaps};
 use crate::fetch::{self, Fetcher, ItemId, count_done};
@@ -103,8 +103,7 @@ struct Recorder<'a> {
 
 /// 录制：定下会话，从首次拉到的播放列表开始，直到满足结束条件，并等已列出的分片下完。
 ///
-/// 目录里记录的完整来源地址与本次的不同时（见 [`WorkDir::url_changed`]），有已录的分片就须接着上一个会话录才继续，
-/// 并改为记录当前地址；接不上报 [`WorkDirProblem::SourceUnverified`]。
+/// 目录里记录的完整来源地址与本次的不同时（见 [`WorkDir::url_changed`]），处理见 [`NewUrl`]。
 pub(crate) async fn record(
     ctx: Context<'_>,
     tracks: Vec<ResolvedTrack>,
@@ -172,7 +171,7 @@ impl Recorder<'_> {
         stored: &Stored,
         fetcher: &mut Fetcher,
     ) -> Result<(Option<u32>, LiveEnd), Error> {
-        let decision = match Deciding::new(&stored.segments) {
+        let decision = match Deciding::new(stored) {
             Some(deciding) => match self.decide(deciding, first, fetcher).await? {
                 ControlFlow::Break(end) => return Ok((None, end)),
                 ControlFlow::Continue(decision) => decision,
@@ -264,12 +263,7 @@ impl Recorder<'_> {
             }
         };
         self.tracks[track].hold(&playlist);
-        let candidate = Candidate {
-            playlist,
-            started,
-            verdict,
-        };
-        deciding.offer(track, candidate);
+        deciding.offer(track, Candidate { playlist, started }, verdict);
         Ok(ControlFlow::Continue(()))
     }
 
@@ -305,24 +299,40 @@ impl Recorder<'_> {
         Ok(Verdict::Differs)
     }
 
-    /// 定下会话：地址变了时须接得上（或目录里还没有录过的分片）才继续，并改记新地址；各轨按判定的起点建窗口，拉要录的分片引用的 init 段，
-    /// 再处理暂存的播放列表。期间要求停止或服务器前后矛盾时返回结束原因。
+    /// 定下会话：完整来源地址变了时按 [`NewUrl`] 处理；记下各轨的起点，再按起点建窗口，拉要录的分片引用的
+    /// init 段，处理暂存的播放列表。已录满的轨不录。期间要求停止或服务器前后矛盾时返回结束原因。
     async fn begin(
         &mut self,
         decision: Decision,
         fetcher: &mut Fetcher,
     ) -> Result<Option<LiveEnd>, Error> {
         if self.dir.url_changed() {
-            if !decision.may_adopt_url {
-                return Err(Error::WorkDir {
-                    path: self.dir.layout().root().to_path_buf(),
-                    problem: WorkDirProblem::SourceUnverified,
-                });
+            match decision.new_url {
+                NewUrl::Adopt => self.dir.adopt_url().await?,
+                NewUrl::Keep => {}
+                NewUrl::Unverified => {
+                    return Err(Error::WorkDir {
+                        path: self.dir.layout().root().to_path_buf(),
+                        problem: WorkDirProblem::SourceUnverified,
+                    });
+                }
             }
-            self.dir.adopt_url().await?;
+        }
+        // 起点先于这个会话的分片落盘：续录时有分片的会话一定有起点
+        for (track, plan) in decision.tracks.iter().enumerate() {
+            if let TrackPlan::Record(start, _) = plan
+                && let Some(start) = start.to_record()
+            {
+                self.dir
+                    .record_start(track, decision.session, start)
+                    .await?;
+            }
         }
         let now = Instant::now();
-        for (track, (start, candidate)) in decision.tracks.into_iter().enumerate() {
+        for (track, plan) in decision.tracks.into_iter().enumerate() {
+            let TrackPlan::Record(start, candidate) = plan else {
+                continue;
+            };
             self.tracks[track].begin(start, now);
             let window = self.tracks[track].window();
             let known = window.known_inits();
