@@ -54,7 +54,8 @@ flags=(
   --enable-bsf=aac_adtstoasc,extract_extradata
 )
 if [[ $PLATFORM == windows ]]; then
-  flags+=(--toolchain=msvc --target-os=win64 --arch=x86_64)
+  # -MD：与 Rust MSVC 目标一致使用动态 C 运行库；cl 默认 /MT，混用两套 C 运行库会让跨库的堆与文件句柄失效
+  flags+=(--toolchain=msvc --target-os=win64 --arch=x86_64 --extra-cflags=-MD)
 fi
 
 cd "$SRC"
