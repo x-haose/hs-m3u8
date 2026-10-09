@@ -4,7 +4,7 @@ use url::Url;
 
 use crate::{MasterPlaylist, Rendition, RenditionKind, Variant};
 
-/// 选轨偏好。
+/// 调用方对选轨的要求；默认取最高画质的变体与其音频组里的默认 rendition。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Preference {
     pub variant: VariantChoice,
@@ -14,14 +14,14 @@ pub struct Preference {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VariantChoice {
-    /// 分辨率最高者，同分辨率取带宽最高；有带分辨率的变体时不考虑纯音频变体
+    /// 分辨率最高者，同分辨率取带宽最高；有带 RESOLUTION 的变体时，不考虑没有 RESOLUTION 的（多为纯音频）
     #[default]
     Best,
     /// `MasterPlaylist::variants` 中的下标
     Index(usize),
 }
 
-/// 选轨结果。
+/// 选轨结果：所选变体，以及（音频不在变体里时）独立的音频 rendition。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Selection {
     pub variant: Variant,

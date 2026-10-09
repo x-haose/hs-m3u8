@@ -34,7 +34,8 @@ pub struct Resolution {
 pub struct Rendition {
     pub kind: RenditionKind,
     pub group_id: String,
-    pub name: String,
+    /// NAME；规范要求必填，缺失时为 None
+    pub name: Option<String>,
     pub language: Option<String>,
     pub default: bool,
     /// None 表示该 rendition 的媒体混在变体流里
@@ -66,12 +67,7 @@ pub(crate) fn parse(text: &str, url: &Url) -> Result<MasterPlaylist, Error> {
             LineKind::Tag { name, value } => match name.as_str() {
                 "EXT-X-STREAM-INF" => {
                     if let Some((line, _)) = pending {
-                        return Err(Error::Syntax {
-                            line,
-                            kind: SyntaxError::InfoWithoutUri {
-                                tag: "EXT-X-STREAM-INF",
-                            },
-                        });
+                        return Err(stream_inf_without_uri(line));
                     }
                     let value = value.ok_or(at(SyntaxError::MissingValue {
                         tag: "EXT-X-STREAM-INF",
@@ -102,14 +98,18 @@ pub(crate) fn parse(text: &str, url: &Url) -> Result<MasterPlaylist, Error> {
         }
     }
     if let Some((line, _)) = pending {
-        return Err(Error::Syntax {
-            line,
-            kind: SyntaxError::InfoWithoutUri {
-                tag: "EXT-X-STREAM-INF",
-            },
-        });
+        return Err(stream_inf_without_uri(line));
     }
     Ok(playlist)
+}
+
+fn stream_inf_without_uri(line: usize) -> Error {
+    Error::Syntax {
+        line,
+        kind: SyntaxError::InfoWithoutUri {
+            tag: "EXT-X-STREAM-INF",
+        },
+    }
 }
 
 /// EXT-X-STREAM-INF 的属性，字段含义同 [`Variant`]。
@@ -155,7 +155,7 @@ fn parse_media(value: &str, url: &Url) -> Result<Rendition, SyntaxError> {
     Ok(Rendition {
         kind,
         group_id: attrs.require("EXT-X-MEDIA", "GROUP-ID")?.to_owned(),
-        name: attrs.get("NAME").unwrap_or_default().to_owned(),
+        name: attrs.get("NAME").map(str::to_owned),
         language: attrs.get("LANGUAGE").map(str::to_owned),
         default: attrs
             .get("DEFAULT")

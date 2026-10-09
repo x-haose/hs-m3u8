@@ -28,6 +28,9 @@ pub enum Playlist {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
+    /// 内容为空或只有空白（如服务器还没写完）
+    #[error("播放列表为空")]
+    Empty,
     #[error("不是 HLS 播放列表：第一行应为 #EXTM3U")]
     NotAPlaylist,
     #[error("同时含有主播放列表（EXT-X-STREAM-INF）与媒体播放列表（EXTINF）的标签")]
@@ -63,7 +66,8 @@ pub enum SyntaxError {
     UriWithoutInfo { expected: &'static str },
     #[error("{tag} 之后缺少 URI 行")]
     InfoWithoutUri { tag: &'static str },
-    #[error("无法解析为 URL：{uri:?}（{reason}）")]
+    /// `uri` 为播放列表中的原文；信息中只显示查询串之前的部分（查询串常带令牌）
+    #[error("无法解析为 URL：{:?}（{reason}）", without_query(.uri))]
     Url { uri: String, reason: String },
     #[error("EXT-X-MEDIA 的 TYPE 无法识别：{0:?}")]
     RenditionType(String),
@@ -85,6 +89,9 @@ pub enum Unsupported {
 
 /// 解析播放列表。`url` 为该播放列表的最终 URL（跟随重定向之后），所有相对 URI 按它解析。
 pub fn parse(text: &str, url: &Url) -> Result<Playlist, Error> {
+    if text.trim_start_matches('\u{FEFF}').trim().is_empty() {
+        return Err(Error::Empty);
+    }
     let mut iter = lines(text);
     match iter.next() {
         Some(first) if matches!(&first.kind, LineKind::Tag { name, .. } if name == "EXTM3U") => {}
@@ -103,6 +110,11 @@ pub fn parse(text: &str, url: &Url) -> Result<Playlist, Error> {
         (true, false) => master::parse(text, url).map(Playlist::Master),
         (false, _) => media::parse(text, url).map(Playlist::Media),
     }
+}
+
+/// 地址原文中查询串与片段之前的部分。
+fn without_query(uri: &str) -> &str {
+    uri.split(['?', '#']).next().unwrap_or_default()
 }
 
 /// 把 `uri` 按 `base` 解析为绝对 URL。

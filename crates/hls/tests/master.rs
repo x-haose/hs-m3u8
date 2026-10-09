@@ -14,7 +14,7 @@ fn master(text: &str) -> MasterPlaylist {
     }
 }
 
-/// 音视频分流（视频与音频是两条媒体播放列表）的主播放列表，另带一个纯音频变体与一个 I 帧变体。
+/// 音视频分离（视频与音频是两条媒体播放列表）的主播放列表，另带一个纯音频变体与一个 I 帧变体。
 const SPLIT: &str = "#EXTM3U\n#EXT-X-VERSION:6\n#EXT-X-INDEPENDENT-SEGMENTS\n\
     #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"English\",LANGUAGE=\"en\",DEFAULT=NO,URI=\"/aud/en/index.m3u8\"\n\
     #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"中文\",LANGUAGE=\"zh\",DEFAULT=YES,URI=\"/aud/zh/index.m3u8\"\n\
@@ -56,10 +56,10 @@ fn variants_and_renditions_are_parsed() {
     assert_eq!(
         (
             zh.group_id.as_str(),
-            zh.name.as_str(),
+            zh.name.as_deref(),
             zh.language.as_deref()
         ),
-        ("aud", "中文", Some("zh"))
+        ("aud", Some("中文"), Some("zh"))
     );
     assert!(zh.default);
     assert_eq!(
@@ -126,7 +126,7 @@ fn audio_rendition_is_chosen_by_default_flag_or_language() {
         audio_language: Some("EN".into()),
     };
     let audio = select(&m, &english).unwrap().audio.unwrap();
-    assert_eq!(audio.rendition.name, "English");
+    assert_eq!(audio.rendition.name.as_deref(), Some("English"));
 
     let missing = Preference {
         variant: VariantChoice::Best,

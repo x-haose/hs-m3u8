@@ -260,6 +260,18 @@ fn discontinuity_numbers_start_from_the_discontinuity_sequence() {
             .collect::<Vec<_>>(),
         [3, 4, 4, 5]
     );
+    assert_eq!(m.discontinuity_sequence, Some(3));
+    // 没写 DISCONTINUITY-SEQUENCE 时从 0 数起，并标明编号只在本次播放列表内有意义
+    let relative = media("#EXTM3U\n#EXTINF:4,\na.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:4,\nb.ts\n");
+    assert_eq!(relative.discontinuity_sequence, None);
+    assert_eq!(
+        relative
+            .segments
+            .iter()
+            .map(|s| s.discontinuity)
+            .collect::<Vec<_>>(),
+        [0, 1]
+    );
 }
 
 #[test]
@@ -277,6 +289,13 @@ fn malformed_input_is_reported_with_its_line() {
         error("<html><body>403 Forbidden</body></html>"),
         Error::NotAPlaylist
     );
+    // 空内容与「不是播放列表」分开：前者多为服务器还没写完
+    for empty in ["", " \r\n", "\u{FEFF}\n"] {
+        assert_eq!(error(empty), Error::Empty);
+    }
+    // 解析失败的地址只显示查询串之前的部分
+    let bad_uri = error("#EXTM3U\n#EXTINF:4,\nhttp://[bad/a.ts?token=secret\n");
+    assert!(!bad_uri.to_string().contains("secret"), "{bad_uri}");
     assert_eq!(
         error("#EXTM3U\n#EXTINF:4,\na.ts\n#EXTINF:4,\n"),
         Error::Syntax {
