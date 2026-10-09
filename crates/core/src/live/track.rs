@@ -1,5 +1,6 @@
-//! 录制中的一条轨：刷新的节奏、停滞的判定，以及它的窗口。
+//! 录制中的一条轨：刷新的节奏、拉到还没处理的播放列表、停滞的判定，以及会话定下后的窗口。
 
+use std::collections::VecDeque;
 use std::ops::ControlFlow;
 use std::time::Duration;
 
@@ -8,6 +9,7 @@ use tokio::time::Instant;
 use url::Url;
 
 use super::session::Start;
+use super::tasks::Fetched;
 use super::window::{NewInits, Processed, Scope, Update, Window};
 use crate::{Error, HttpError, LiveEnd, MissReason, StallCause, StallError, Unsupported};
 
@@ -27,22 +29,38 @@ enum Refresh {
     InFlight {
         started: Instant,
     },
-    /// 续录判定会话期间已拿到候选，等其他轨；`live` 为候选的播放列表还没有结束
-    Held {
-        live: bool,
+    /// 在为暂存的播放列表拉 init 段；处理完暂存的才再刷新
+    Loading {
+        started: Instant,
     },
     /// 服务器要求的等待长到无法表示：不再刷新，由停滞判定或停止结束录制
     Suspended,
+    /// 出现了 EXT-X-ENDLIST，或这条轨不再刷新、不再处理
     Ended,
+}
+
+/// 这条轨处在录制的哪个阶段。
+enum Stage {
+    /// 会话还没定下；`candidate` 为已拿到第一份有分片（或已结束）的播放列表，在等核对或等其他轨
+    Undecided { candidate: bool },
+    /// 按定下的会话录
+    Recording(Box<Window>),
+    /// 这次不录：已录满 max_duration，或判定期间看起来已结束
+    Idle,
 }
 
 /// 发起一次刷新需要的信息。
 pub(super) struct RefreshRequest {
     pub url: Url,
+    /// 会话还没定下时为 None：不知道哪些分片要录，不拉 init 段
+    pub inits: Option<InitsToFetch>,
+}
+
+/// 拉哪些新 init 段：要录的分片（见 [`Processed::is_new`]）引用、又不在 `known` 中的。
+pub(super) struct InitsToFetch {
     /// 上一份播放列表引用、内容已知的 init 段
     pub known: Vec<InitSection>,
-    /// 已处理到哪里；会话还没定下时为 None，这时不知道哪些分片要录，不拉 init 段
-    pub processed: Option<Processed>,
+    pub processed: Processed,
 }
 
 /// 录制中的一条轨。
@@ -51,12 +69,16 @@ pub(super) struct LiveTrack {
     /// 刷新间隔的基准：TARGETDURATION，为 0 或缺失时取播放列表中最长的分片时长
     target: Duration,
     refresh: Refresh,
-    window: Window,
-    /// 会话已定下，窗口按会话的起点建好
-    begun: bool,
-    /// 最近一次有分片下载成功的时刻（或会话定下的时刻）
+    stage: Stage,
+    /// 拉到、还没处理的播放列表，按拉到的先后：会话定下之前暂存，定下后逐份拉好 init 段再处理
+    pending: VecDeque<Fetched>,
+    /// 之前各会话已录到的时长，微秒
+    recorded_us: u64,
+    /// 会话定下之前见过的分片序号范围（首, 尾）
+    seen: Option<(u64, u64)>,
+    /// 最近一次有分片下载成功的时刻（或录制开始、会话定下的时刻）
     last_recorded: Instant,
-    /// 最近一次列出要录的新分片的时刻（或录制开始）
+    /// 最近一次列出新分片的时刻（或录制开始、会话定下的时刻）
     last_listed: Instant,
     /// 排入下载、还没有结果的分片数
     outstanding: usize,
@@ -81,8 +103,10 @@ impl LiveTrack {
             url,
             target,
             refresh: Refresh::Due(now),
-            window: Window::new(Start::Fresh, recorded_us),
-            begun: false,
+            stage: Stage::Undecided { candidate: false },
+            pending: VecDeque::new(),
+            recorded_us,
+            seen: None,
             last_recorded: now,
             last_listed: now,
             outstanding: 0,
@@ -91,38 +115,69 @@ impl LiveTrack {
         })
     }
 
-    /// 会话定下：按 `start` 重建窗口，停滞计时从 `now` 重新起算（判定会话花的时间不算）。
-    pub(super) fn begin(&mut self, start: Start, now: Instant) {
-        self.window = Window::new(start, self.window.recorded_us());
-        self.begun = true;
+    /// 会话定下：`start` 为 Some 时按它建窗口录，停滞与「仍在出」的计时从 `now` 重新起算；None 时这次不录。
+    pub(super) fn begin(&mut self, start: Option<Start>, now: Instant) {
+        self.stage = match start {
+            Some(start) => Stage::Recording(Box::new(Window::new(start, self.recorded_us))),
+            None => {
+                self.pending.clear();
+                Stage::Idle
+            }
+        };
         self.last_recorded = now;
+        self.last_listed = now;
     }
 
-    pub(super) fn window(&self) -> &Window {
-        &self.window
+    /// 判定期间看起来已结束：不再刷新，这次不录。
+    pub(super) fn end_undecided(&mut self) {
+        self.refresh = Refresh::Ended;
+        self.pending.clear();
+        self.stage = Stage::Idle;
+    }
+
+    /// 会话定下之前拿到了第一份有分片（或已结束）的播放列表。
+    pub(super) fn has_candidate(&self) -> bool {
+        matches!(self.stage, Stage::Undecided { candidate: true })
+    }
+
+    pub(super) fn mark_candidate(&mut self) {
+        self.stage = Stage::Undecided { candidate: true };
+    }
+
+    pub(super) fn is_undecided(&self) -> bool {
+        matches!(self.stage, Stage::Undecided { .. })
+    }
+
+    /// 按定下的会话录时的窗口。
+    pub(super) fn window(&self) -> Option<&Window> {
+        match &self.stage {
+            Stage::Recording(window) => Some(window),
+            Stage::Undecided { .. } | Stage::Idle => None,
+        }
     }
 
     /// 已录满 `max_us`。
     pub(super) fn is_full(&self, max_us: Option<u64>) -> bool {
-        max_us.is_some_and(|max| self.window.recorded_us() >= max)
+        let recorded = self.window().map_or(self.recorded_us, Window::recorded_us);
+        max_us.is_some_and(|max| recorded >= max)
     }
 
-    /// 出现了 EXT-X-ENDLIST。
+    /// 出现了 EXT-X-ENDLIST，或这条轨不再刷新、不再处理（判定期间看起来已结束、服务器前后矛盾、编码器重启）。
     pub(super) fn is_ended(&self) -> bool {
         matches!(self.refresh, Refresh::Ended)
     }
 
-    /// 还要刷新：没有出现 ENDLIST，也没有录满 `max_us`。
+    /// 还要刷新：没有结束，也没有录满 `max_us`。
     pub(super) fn needs_refresh(&self, max_us: Option<u64>) -> bool {
         !self.is_ended() && !self.is_full(max_us)
     }
 
-    /// 下次刷新的时刻；在途、暂停或已结束时为 None。
+    /// 下次刷新的时刻；在途、在拉 init 段、暂停或已结束时为 None。
     pub(super) fn due_at(&self) -> Option<Instant> {
         match self.refresh {
             Refresh::Due(at) => Some(at),
             Refresh::InFlight { .. }
-            | Refresh::Held { .. }
+            | Refresh::Loading { .. }
             | Refresh::Suspended
             | Refresh::Ended => None,
         }
@@ -133,13 +188,16 @@ impl LiveTrack {
         self.refresh = Refresh::InFlight { started: now };
         RefreshRequest {
             url: self.url.clone(),
-            known: self.window.known_inits(),
-            processed: self.begun.then(|| self.window.processed().clone()),
+            inits: self.window().map(|w| InitsToFetch {
+                known: w.known_inits(),
+                processed: w.processed().clone(),
+            }),
         }
     }
 
-    /// 刷新拿到了播放列表。
-    pub(super) fn refreshed(&mut self) {
+    /// 刷新拿到了播放列表；处理它时再安排下次刷新。
+    pub(super) fn refreshed(&mut self, now: Instant) {
+        self.refresh = Refresh::Due(now);
         self.last_refresh_error = None;
     }
 
@@ -154,19 +212,75 @@ impl LiveTrack {
         self.last_refresh_error = Some(error);
     }
 
-    /// 播放列表没有变化（如续录判定期间拿到空的）：半个目标时长后再刷新（RFC 8216 6.3.4）。
-    pub(super) fn wait_unchanged(&mut self, now: Instant) {
-        self.refresh = Refresh::Due(now + self.half_target());
+    /// 会话定下之前拿到一份播放列表：记下是否列出了新分片（判断它是否仍在出），安排下次刷新。
+    /// `started` 为这次加载开始的时刻。
+    pub(super) fn note_undecided(
+        &mut self,
+        playlist: &MediaPlaylist,
+        started: Instant,
+        now: Instant,
+    ) {
+        if let Some(target) = target(playlist) {
+            self.target = target;
+        }
+        let range = playlist
+            .segments
+            .first()
+            .zip(playlist.segments.last())
+            .map(|(first, last)| (first.sequence, last.sequence));
+        if let Some((_, last)) = range
+            && self.seen.is_none_or(|(_, seen)| last > seen)
+        {
+            self.last_listed = now;
+        }
+        let changed = range.is_some() && range != self.seen;
+        if range.is_some() {
+            self.seen = range;
+        }
+        self.schedule(changed, playlist.ended, started, now);
     }
 
-    /// 续录判定会话期间暂停刷新；`playlist` 为拿到的候选。
-    pub(super) fn hold(&mut self, playlist: &MediaPlaylist) {
-        self.refresh = Refresh::Held {
-            live: !playlist.ended,
+    /// 暂存一份拉到的播放列表；与上一份暂存的相同时不再存。
+    pub(super) fn hold(&mut self, fetched: Fetched) {
+        if self
+            .pending
+            .back()
+            .is_none_or(|last| last.playlist != fetched.playlist)
+        {
+            self.pending.push_back(fetched);
+        }
+    }
+
+    /// 取出最早暂存的播放列表，开始为它拉 init 段；刷新或拉 init 段在途、或没有暂存的时为 None。
+    pub(super) fn start_loading(&mut self, now: Instant) -> Option<(Fetched, InitsToFetch)> {
+        if matches!(
+            self.refresh,
+            Refresh::InFlight { .. } | Refresh::Loading { .. }
+        ) {
+            return None;
+        }
+        let window = self.window()?;
+        let inits = InitsToFetch {
+            known: window.known_inits(),
+            processed: window.processed().clone(),
         };
+        let fetched = self.pending.pop_front()?;
+        self.refresh = Refresh::Loading { started: now };
+        Some((fetched, inits))
     }
 
-    /// 处理一份播放列表并安排下次刷新；`started` 为这次加载开始的时刻。见 [`Window::update`]。
+    /// 有暂存还没处理完的播放列表（含正在拉 init 段的）。
+    pub(super) fn is_loading(&self) -> bool {
+        !self.pending.is_empty() || matches!(self.refresh, Refresh::Loading { .. })
+    }
+
+    /// 之后不再刷新、不再处理这条轨（服务器前后矛盾、编码器重启）。
+    pub(super) fn stop_processing(&mut self) {
+        self.refresh = Refresh::Ended;
+        self.pending.clear();
+    }
+
+    /// 按定下的会话处理一份播放列表并安排下次刷新；`started` 为这次加载开始的时刻。见 [`Window::update`]。
     pub(super) fn apply(
         &mut self,
         scope: &Scope<'_>,
@@ -175,7 +289,10 @@ impl LiveTrack {
         started: Instant,
         now: Instant,
     ) -> Result<ControlFlow<LiveEnd, Update>, Error> {
-        let update = match self.window.update(scope, playlist, fetched)? {
+        let Stage::Recording(window) = &mut self.stage else {
+            panic!("只有按定下的会话录的轨才处理播放列表");
+        };
+        let update = match window.update(scope, playlist, fetched)? {
             ControlFlow::Break(end) => return Ok(ControlFlow::Break(end)),
             ControlFlow::Continue(update) => update,
         };
@@ -197,14 +314,7 @@ impl LiveTrack {
             self.last_download_failure = Some(kind.clone());
         }
         self.outstanding += update.items.len();
-        self.refresh = if update.ended {
-            Refresh::Ended
-        } else if update.changed {
-            // RFC 8216 6.3.4：有变化后从开始加载起至少等一个目标时长，没变化时等半个
-            Refresh::Due((started + self.target).max(now + MIN_REFRESH))
-        } else {
-            Refresh::Due(now + self.half_target())
-        };
+        self.schedule(update.changed, update.ended, started, now);
         Ok(ControlFlow::Continue(update))
     }
 
@@ -220,28 +330,36 @@ impl LiveTrack {
         self.last_download_failure = Some(kind);
     }
 
+    /// 处理完一份播放列表后安排下次刷新（RFC 8216 6.3.4）：有变化后从开始加载起至少等一个目标时长，没变化时等半个。
+    fn schedule(&mut self, changed: bool, ended: bool, started: Instant, now: Instant) {
+        self.refresh = if ended {
+            Refresh::Ended
+        } else if changed {
+            Refresh::Due((started + self.target).max(now + MIN_REFRESH))
+        } else {
+            Refresh::Due(now + self.half_target())
+        };
+    }
+
     fn half_target(&self) -> Duration {
         (self.target / 2).max(MIN_REFRESH)
     }
 
-    /// 播放列表仍在列出要录的新分片。
-    fn is_listing(&self, now: Instant) -> bool {
+    /// 播放列表仍在出新分片：最近 [`LISTING_TARGETS`] 个目标时长内列出过。
+    pub(super) fn is_live(&self, now: Instant) -> bool {
         now.duration_since(self.last_listed) < self.target.saturating_mul(LISTING_TARGETS)
     }
 
-    /// 播放列表还在出：仍在列出新分片，或续录判定期间暂停时候选还没结束（暂停是在等本任务，不是它停了）。
-    pub(super) fn is_live(&self, now: Instant) -> bool {
-        match self.refresh {
-            Refresh::Held { live } => live,
-            _ => self.is_listing(now),
-        }
-    }
-
-    /// 停滞的时刻：最近一次录到分片（或会话定下）之后，持续 `stall_timeout`（至少 [`STALL_TARGETS`] 个
-    /// 目标时长）。续录判定期间暂停，或有分片排着队、在下载时，是在等本任务，不算停滞，为 None；
+    /// 停滞的时刻：最近一次录到分片（或录制开始、会话定下）之后，持续 `stall_timeout`（至少 [`STALL_TARGETS`]
+    /// 个目标时长）。在等本任务的时为 None：会话定下之前已有候选（在等核对或其他轨），或有分片排着队、在下载；
     /// 时长大到无法表示时也为 None。
     pub(super) fn stall_at(&self, stall_timeout: Duration) -> Option<Instant> {
-        if matches!(self.refresh, Refresh::Held { .. }) || self.outstanding > 0 {
+        let waiting = match self.stage {
+            Stage::Undecided { candidate } => candidate,
+            Stage::Recording(_) => self.outstanding > 0,
+            Stage::Idle => true,
+        };
+        if waiting {
             return None;
         }
         self.last_recorded
@@ -255,7 +373,7 @@ impl LiveTrack {
         now: Instant,
         others_live: bool,
     ) -> Result<StallCause, StallError> {
-        if let Refresh::InFlight { started } = self.refresh
+        if let Refresh::InFlight { started } | Refresh::Loading { started } = self.refresh
             && now.duration_since(started) >= self.target
         {
             return Err(StallError::RefreshPending);
@@ -266,7 +384,7 @@ impl LiveTrack {
                 ..
             }) => StallCause::PlaylistGone(status),
             Some(error) => return Err(StallError::RefreshFailed(Box::new(error))),
-            None if self.is_listing(now) => {
+            None if self.is_live(now) => {
                 let kind = self.last_download_failure.clone().expect(
                     "仍在列出新分片、没有在途的下载又没有录到：新分片都记了缺失，有失败原因",
                 );

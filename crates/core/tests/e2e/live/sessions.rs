@@ -167,18 +167,20 @@ async fn a_full_track_fetches_no_init() {
     let dir = test_dir("sessions_full_track_init");
     let server = Server::start().await;
     let (video, audio) = split_source(&server, &[(2, 0, false)], &[(3, 0, false)]);
+    server.remove("audio/seg1.m4s");
     let mut req = live_request(server.url("master.m3u8"), &dir, STALL);
     req.live = Some(LiveOptions {
         max_duration: Some(Duration::from_secs(2)),
         ..req.live.unwrap()
     });
-    let gate = server.gate("audio/seg1.m4s");
-    let job = engine().start(req.clone()).unwrap();
-    gate.arrived.notified().await;
-    job.cancel();
-    assert!(matches!(job.wait().await, Err(Error::Cancelled)));
-    server.ungate("audio/seg1.m4s");
+    // 第一次运行两轨都满 2 秒（音频 seg1 取不到也计入）即结束；保留任务目录、删掉输出，再续录
+    let mut first = req.clone();
+    first.keep_work_dir = true;
+    let output = run(first).await.unwrap();
+    assert_eq!(output.live.unwrap().end, LiveEnd::DurationReached);
+    std::fs::remove_file(&req.output).unwrap();
 
+    server.put("audio/seg1.m4s", fixture("fmp4_a/audio/seg1.m4s"));
     server.status("video/init.mp4", StatusCode::FORBIDDEN);
     let init_hits = server.hits("video/init.mp4");
     let output = run(req).await.unwrap();

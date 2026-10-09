@@ -262,11 +262,13 @@ async fn a_missing_last_segment_does_not_turn_the_end_into_a_failure() {
 async fn queued_segments_do_not_stall_a_track() {
     let dir = test_dir("live_queued");
     let server = Server::start().await;
-    // 音频播放列表刷新十次后多出 seg2 并结束：等到它被排入下载时，已经过了好几个停滞时长
-    let mut audio = vec![(2, 0, false); 10];
+    // 音频第一份没有分片，视频的 seg0 先占住唯一的下载名额；音频随后列出的分片都排在它后面。
+    // 音频刷新十次后多出 seg2 并结束：等到它被排入下载时，已经过了好几个停滞时长
+    let mut audio = vec![(0, 0, false)];
+    audio.extend([(2, 0, false); 10]);
     audio.push((3, 0, true));
     let (video, audio) = split_source(&server, &[(2, 0, false), (2, 0, true)], &audio);
-    let gate = server.gate("video/seg1.m4s");
+    let gate = server.gate("video/seg0.m4s");
     let job = engine()
         .start(live_request(
             server.url("master.m3u8"),
@@ -276,7 +278,7 @@ async fn queued_segments_do_not_stall_a_track() {
         .unwrap();
     let mut progress = job.progress();
     progress.wait_for(|p| p.segments_total == 5).await.unwrap();
-    server.ungate("video/seg1.m4s");
+    server.ungate("video/seg0.m4s");
     drop(gate);
 
     let output = job.wait().await.unwrap();

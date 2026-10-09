@@ -89,12 +89,11 @@ impl Fetcher {
         })
     }
 
-    /// 立即拉取第 `track` 条轨的一个分片（经回调、解密、校验），不排队、不写盘；用于续录时核对内容。
-    /// 失败同排队下载的分片一样包装为 [`Error::Segment`]（取消除外）。
-    pub(crate) async fn fetch(&self, track: usize, segment: &Segment) -> Result<Vec<u8>, Error> {
-        fetch_segment(&self.ctx, segment, &self.abort)
-            .await
-            .map_err(|e| segment_error(track, segment, e))
+    /// 不排队、不写盘地拉取分片的句柄，与本下载器共用 key 缓存。
+    pub(crate) fn direct(&self) -> Direct {
+        Direct {
+            ctx: self.ctx.clone(),
+        }
     }
 
     /// 丢弃排队的项并取消在途的项；在途的项随后以 [`Error::Cancelled`] 结束。
@@ -128,6 +127,26 @@ impl Fetcher {
             self.running
                 .spawn(run(self.ctx.clone(), item, self.abort.clone()));
         }
+    }
+}
+
+/// 立即拉取分片（经回调、解密、校验）的句柄，可交给后台任务；用于续录时核对内容。
+#[derive(Clone)]
+pub(crate) struct Direct {
+    ctx: Arc<Ctx>,
+}
+
+impl Direct {
+    /// 拉取第 `track` 条轨的一个分片，不写盘。失败同排队下载的分片一样包装为 [`Error::Segment`]（取消除外）。
+    pub(crate) async fn fetch(
+        &self,
+        track: usize,
+        segment: &Segment,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<u8>, Error> {
+        fetch_segment(&self.ctx, segment, cancel)
+            .await
+            .map_err(|e| segment_error(track, segment, e))
     }
 }
 

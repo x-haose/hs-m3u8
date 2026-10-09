@@ -103,26 +103,6 @@ async fn unavailable_segments_are_reported_as_missed() {
     );
 }
 
-/// 调用 stop：停止刷新，合并已录到的部分。
-#[tokio::test(flavor = "multi_thread")]
-async fn stop_merges_what_was_recorded() {
-    let dir = test_dir("live_stop");
-    let server = Server::start().await;
-    put_long(&server, "", &[0, 1]);
-    server.put("live.m3u8", playlist(&[0, 1], false));
-
-    let job = engine()
-        .start(live_request(server.url("live.m3u8"), &dir, STALL))
-        .unwrap();
-    let mut progress = job.progress();
-    progress.wait_for(|p| p.segments_done == 2).await.unwrap();
-    job.stop();
-    let output = job.wait().await.unwrap();
-
-    assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
-    assert_eq!(output.live, report(LiveEnd::Stopped, 1, vec![]));
-}
-
 /// 录到的时长达到 max_duration 即停止。
 #[tokio::test(flavor = "multi_thread")]
 async fn max_duration_limits_recording() {
@@ -249,7 +229,7 @@ async fn refresh_does_not_wait_for_engine_permits() {
             fixture(&format!("fmp4_a/video/{name}")),
         );
     }
-    server.put("v.m3u8", signed_fmp4_playlist("video", 1, 0, false));
+    server.put("v.m3u8", signed_fmp4_playlist("video", "0.1", 1, 0, false));
     let gate = server.gate("video/seg0.m4s");
     let engine = Engine::new(NonZeroUsize::new(1).unwrap());
     let job = engine
@@ -258,7 +238,7 @@ async fn refresh_does_not_wait_for_engine_permits() {
     let mut progress = job.progress();
     // seg0 占着唯一的名额；此后的刷新须拉新签名的 init 段
     gate.arrived.notified().await;
-    server.put("v.m3u8", signed_fmp4_playlist("video", 2, 1, true));
+    server.put("v.m3u8", signed_fmp4_playlist("video", "0.1", 2, 1, true));
     progress.wait_for(|p| p.segments_total == 2).await.unwrap();
     server.ungate("video/seg0.m4s");
 

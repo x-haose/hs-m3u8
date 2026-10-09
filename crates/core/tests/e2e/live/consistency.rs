@@ -1,10 +1,13 @@
 //! 服务器前后不一致：重定向、不连续段重新编号、旧缓存、序号回退、分片被替换、空的刷新。
 
-use hs_m3u8_core::{LiveEnd, MissReason};
+use std::num::NonZeroU32;
+use std::time::Duration;
 
-use super::{STALL, live_request, missed, playlist, put_long, report};
+use hs_m3u8_core::{LiveEnd, MissReason, RetryPolicy};
+
+use super::{STALL, interrupt, live_request, missed, playlist, put_long, report};
 use crate::server::Server;
-use crate::{assert_output, expected_long, run, test_dir};
+use crate::{assert_output, expected_long, fixture, run, test_dir};
 
 /// 每次刷新都被 302 到不同的路径（CDN 调度），分片用相对地址：同一分片的地址随之变化，但文件名相同，不算服务器错误。
 #[tokio::test(flavor = "multi_thread")]
@@ -193,4 +196,42 @@ async fn changed_segment_ends_recording() {
             sequence: 1
         }
     );
+}
+
+/// 判定期间暂存的第二份播放列表与第一份矛盾（同一序号换了分片）：会话定下后处理到它即结束录制，
+/// 合并之前的部分，不卡住。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_held_playlist_that_contradicts_ends_recording() {
+    let dir = test_dir("live_held_inconsistent");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1, 2, 3]);
+    server.put("live.m3u8", playlist(&[0, 1], false));
+    let mut req = live_request(server.url("live.m3u8"), &dir, STALL);
+    interrupt(&req, |p| p.segments_done == 2).await;
+
+    // 核对 seg1 先失败两次（退避 300 毫秒），其间刷新拿到序号 2 换了分片的一份
+    req.retry = RetryPolicy {
+        attempts: NonZeroU32::new(3).unwrap(),
+        base_delay: Duration::from_millis(300),
+        max_delay: Duration::from_millis(300),
+    };
+    server.fail("seg1.ts", 2);
+    server.put("other2.ts", fixture("ts_long/seg2.ts"));
+    let contradicting = "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MEDIA-SEQUENCE:0\n\
+                         #EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n#EXTINF:1,\nother2.ts\n";
+    server.put_sequence(
+        "live.m3u8",
+        vec![playlist(&[0, 1, 2], false), contradicting.into()],
+    );
+    let output = tokio::time::timeout(Duration::from_secs(10), run(req))
+        .await
+        .expect("处理到矛盾的播放列表应结束录制")
+        .unwrap();
+
+    assert_output(&output, &expected_long(&dir, &[0, 1, 2], &[3]));
+    let end = LiveEnd::Inconsistent {
+        track: 0,
+        sequence: 2,
+    };
+    assert_eq!(output.live, report(end, 1, vec![]));
 }
