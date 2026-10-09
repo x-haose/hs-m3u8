@@ -10,7 +10,6 @@
 2. bindgen 排除 `malloc`、`realloc`、`memcmp`、`memcpy`、`memmove`、`memset`、`strlen`、`bcmp`。这些 libc
    符号经 FFmpeg 头文件间接引入，生成的声明把 `size_t` 写成 `u64`，与标准库的定义（`usize`）不一致，
    触发 `suspicious_runtime_symbol_definitions`；上游作为 crates.io 依赖时该警告被 cargo 压下，改为本地路径依赖后才出现。
-
 3. `FFMPEG_DIR` 模式下对 `$FFMPEG_DIR/lib` 与 `$FFMPEG_DIR/include` 声明 `rerun-if-changed`。上游只声明了
    `rerun-if-env-changed=FFMPEG_DIR`，而静态库会被打包进本 crate 的 rlib：FFmpeg 重新编译后（如增减组件）
    构建脚本不重跑，链接进去的仍是旧库，表现为运行时找不到新启用的协议或组件。

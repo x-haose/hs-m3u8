@@ -60,46 +60,26 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: 格式
-        run: cargo fmt --all --check
-
-      # 依赖图与平台无关（各自已覆盖全部发布平台），只在 Linux 上查
-      - name: 依赖方向（Linux）
-        if: runner.os == 'Linux'
-        run: scripts/check_deps.sh
-
-      - name: 不许用 allow/expect 属性压制检查（Linux）
-        if: runner.os == 'Linux'
-        run: scripts/check_no_suppression.sh
-
-      - name: 安装 cargo-deny（Linux）
+      # 检查项定义在 Makefile 的 rs_* 目标里。依赖图、许可证与覆盖率与平台无关，只在 Linux 上查
+      - name: 安装 cargo-deny 与 cargo-llvm-cov（Linux）
         if: runner.os == 'Linux'
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny@0.20.2
+          tool: cargo-deny@0.20.2,cargo-llvm-cov@0.9.1
 
-      - name: 安全公告、许可证、禁用包与来源（Linux）
+      - name: 全部检查（Linux）
         if: runner.os == 'Linux'
-        run: cargo deny --locked check
+        run: make rs_check
 
-      - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: 格式、clippy、测试（macOS）
+        if: runner.os == 'macOS'
+        run: make rs_fmt rs_clippy rs_test
 
-      - name: 测试
-        run: cargo test --workspace
-
-      # 数据正确性模块（hls、core、remux）的行覆盖门槛，各自不低于 80%；覆盖率与平台无关，只在 Linux 上量
-      - name: 安装 cargo-llvm-cov（Linux）
-        if: runner.os == 'Linux'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov@0.9.1
-
-      - name: 行覆盖（Linux）
-        if: runner.os == 'Linux'
+      # Windows 的 make 只在 MSYS2 里，而 MSYS2 的 link.exe 会遮住 MSVC 的链接器，所以直接运行
+      # 与 Makefile 的 rs_fmt、rs_clippy、rs_test 相同的命令
+      - name: 格式、clippy、测试（Windows）
+        if: runner.os == 'Windows'
         run: |
-          # 缓存恢复的旧插桩产物会混进统计，先清掉
-          cargo llvm-cov clean --workspace
-          cargo llvm-cov -p hs-m3u8-hls --fail-under-lines 80 --summary-only
-          cargo llvm-cov -p hs-m3u8-core --fail-under-lines 80 --summary-only
-          cargo llvm-cov -p hs-m3u8-remux --fail-under-lines 80 --summary-only
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace

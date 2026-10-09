@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 下载并编译本项目使用的精简 FFmpeg 静态库，安装到 third_party/ffmpeg/dist（可用第一个参数改安装目录）。
+# 下载并编译本项目使用的精简 FFmpeg 静态库，安装到 third_party/ffmpeg/dist（可用第一个参数改安装目录，
+# 该目录会被整个删除重建，所以只接受不存在、为空或由本脚本装过的目录）。
 # 组件只含转封装所需（docs/adr/0002）；configure 得出的许可证不是 LGPL 时失败。
 # Windows：在已加载 MSVC 环境的 MSYS2 bash 中运行，产物为 MSVC 静态库（*.lib）。
 set -euo pipefail
@@ -10,6 +11,10 @@ SHA256=8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
 
 ROOT=$(cd "$(dirname "$0")" && pwd)
 PREFIX=${1:-$ROOT/dist}
+# configure 在源码目录里运行，安装目录须为绝对路径
+[[ "$PREFIX" == /* ]] || PREFIX=$PWD/$PREFIX
+# 本脚本装好后在安装目录里放的标记
+MARKER=.hs-m3u8-ffmpeg
 WORK=$ROOT/build
 TARBALL=$WORK/ffmpeg-$VERSION.tar.xz
 SRC=$WORK/ffmpeg-$VERSION
@@ -24,6 +29,18 @@ esac
 sha256_of() {
   if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
 }
+
+if [[ "$PREFIX" != "$ROOT/dist" && -e "$PREFIX" && ! -f "$PREFIX/$MARKER" ]]; then
+  if [[ ! -d "$PREFIX" ]]; then
+    echo "安装目录 $PREFIX 不是目录" >&2
+    exit 1
+  fi
+  entries=$(find "$PREFIX" -mindepth 1 -maxdepth 1 -print -quit)
+  if [[ -n "$entries" ]]; then
+    echo "安装目录 $PREFIX 非空，且不是本脚本装的；换一个目录或先自行清空" >&2
+    exit 1
+  fi
+fi
 
 mkdir -p "$WORK"
 if [[ ! -f "$TARBALL" ]] || [[ "$(sha256_of "$TARBALL")" != "$SHA256" ]]; then
@@ -82,4 +99,5 @@ for lib in "${libs[@]}"; do
   fi
 done
 
+echo "$VERSION" > "$PREFIX/$MARKER"
 echo "FFmpeg $VERSION 已安装到 $PREFIX"

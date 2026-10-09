@@ -61,7 +61,7 @@ configure 参数以 `third_party/ffmpeg/build.sh` 为准，要点：
 ## 后果
 
 - CI 为每个目标平台构建并缓存 FFmpeg 静态库（缓存键为构建脚本的哈希）。三平台已在 CI 验证（2026-10-09：macos-26 arm64、windows-2025 x64 + MSVC 14.51、ubuntu-24.04 x64）。Windows 要点：在 MSYS2 中用 `--toolchain=msvc` 编译，产物直接为 `*.lib`；需 `--extra-cflags=-MD` 与 Rust 一致使用动态 C 运行库；`ffmpeg-sys-next` 在 `FFMPEG_DIR` 模式下不链接 FFmpeg 依赖的系统库（如 bcrypt），由 remux 的构建脚本从 FFmpeg 生成的 `.pc` 文件读出补齐。
-- `ffmpeg-sys-next` 使用本地修改版（`third_party/ffmpeg-sys-next/PATCHED.md`）：去掉 macOS 已移除的 QTKit，bindgen 排除 8 个 libc 运行时符号。
+- `ffmpeg-sys-next` 使用本地修改版，与上游的差异及删除条件见 `third_party/ffmpeg-sys-next/PATCHED.md`。
 - 静态链接 LGPL 库：需满足 LGPL 2.1 第 6 节「用户能用修改过的库重新链接」。应用以 MIT 开源并提供 FFmpeg 构建脚本可满足，发布前按条款核对。
 
 ## 依据的版本
