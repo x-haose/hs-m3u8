@@ -1158,6 +1158,9 @@ fn main() {
     // Use prebuilt library
     else if let Ok(ffmpeg_dir) = env::var("FFMPEG_DIR") {
         let ffmpeg_dir = PathBuf::from(ffmpeg_dir);
+        // 静态库会被打包进本 crate 的 rlib、头文件决定绑定：两者变化时都要重新运行，否则沿用旧库
+        println!("cargo:rerun-if-changed={}", ffmpeg_dir.join("lib").display());
+        println!("cargo:rerun-if-changed={}", ffmpeg_dir.join("include").display());
         if ffmpeg_dir.join("lib/amd64").exists()
             && env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("x86_64")
         {

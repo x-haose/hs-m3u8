@@ -234,21 +234,16 @@ pub enum Error {
 ## 6. remux
 
 ```rust
-// 草案
-pub struct TrackInput {
-    pub kind: TrackKind,                 // Video / Audio
-    pub pieces: Vec<Piece>,              // 按播放顺序
-}
-pub struct Piece {
-    pub discontinuity: u32,
-    pub init: Option<PathBuf>,           // fMP4 init 段
-    pub segments: Vec<PathBuf>,
-}
-pub fn remux(tracks: &[TrackInput], output_tmp: &Path) -> Result<RemuxReport, RemuxError>;
+pub struct TrackSegments { pub init: Option<PathBuf>, pub segments: Vec<PathBuf> }   // 一条轨在一组内的分片
+pub struct DiscontinuityGroup { pub tracks: Vec<TrackSegments> }                     // 各组轨道顺序一致
+pub fn remux(groups: &[DiscontinuityGroup], output: &Path) -> Result<Report, Error>;
 ```
 
-- 遵守 ADR-0002 的实现约束：用 `Packet::read`、不连续段累加时间戳偏移、HEVC 标 `hvc1`、moov 前置、核对包数。
-- 分片读取方式待原型确定：FFmpeg `concat` 协议，或自定义 `AVIOContext` 顺序读取。目标是不先拼成一个大文件（0.1.x 需要双倍磁盘空间）。
+- 组内：分片经 FFmpeg `concatf` 协议按字节顺序读取（fMP4 时 init 段在前），不先拼成大文件。列表文件写在输出旁、打开后即删除；每行写成单引号包裹的 `file:` URL，以免 Windows 路径的反斜杠被当成转义符。
+- 组间：整组共用一个时间偏移，保留组内各轨（视频与独立音频 rendition）原有的相对时序。偏移取两个下限中较大者：本组最早的 PTS 不早于此前所有流的最晚结束时刻；每路流本组首个 DTS 严格大于上一组末个 DTS（加一个输出时间基 tick 的余量吸收舍入）。按呈现而非 DTS 对齐，B 帧的解码提前量不会在组边界留下空隙。
+- 每条轨贡献第一路视频和（或）第一路音频，同类流只能来自一条轨；后续组的流种类与编码参数（编码、宽高、采样率、声道数）必须与第 0 组一致，否则报 `ParamsChanged`，由 core 决定如何处理（例如分辨率不同的广告段）。
+- 只接受 H.264、HEVC 与 AAC，其余编码报 `UnsupportedCodec`。
+- 其余约束见 ADR-0002：`Packet::read`、HEVC 标 `hvc1`、moov 前置、写临时文件后改名、回读核对包数。
 
 ## 7. Python 绑定
 
@@ -326,11 +321,10 @@ hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
 
 ## 12. 待验证风险与待定问题
 
-按顺序验证（Windows 静态构建与链接已于 2026-10-09 在 CI 通过，见 ADR-0002）：
+按顺序验证（Windows 静态构建与链接、不连续段与分片读取已于 2026-10-09 完成）：
 
-1. 不连续段时间戳偏移，以及 concat 协议或自定义 AVIO 的读取方式。
-2. 高并发下 Python 回调的 GIL 竞争（`on_segment` 每个分片调用一次）。
-3. 资源嗅探的注入脚本（GUI 阶段）。
+1. 高并发下 Python 回调的 GIL 竞争（`on_segment` 每个分片调用一次）。
+2. 资源嗅探的注入脚本（GUI 阶段）。
 
 待定：
 
