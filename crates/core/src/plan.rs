@@ -214,7 +214,7 @@ pub(crate) async fn resolve(
                 playlist,
             }];
             if let Some(audio) = selection.audio {
-                let url = audio.uri.expect("select 只返回带 URI 的 rendition");
+                let url = audio.uri;
                 let playlist = fetch_media(http, hooks, &url, cancel).await?;
                 sources.push(Source {
                     url,

@@ -57,7 +57,7 @@ pub struct InitSection {
     pub byte_range: Option<ByteRange>,
 }
 
-/// 资源中的一段字节：[offset, offset + length)。
+/// 资源中的一段字节：[offset, offset + length)。解析结果保证 length ≥ 1 且 offset + length 不溢出。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ByteRange {
     pub offset: u64,
@@ -72,183 +72,220 @@ struct KeyTag {
     iv: Option<[u8; 16]>,
 }
 
-pub(crate) fn parse(text: &str, url: &Url) -> Result<MediaPlaylist, Error> {
-    let mut playlist = MediaPlaylist {
-        target_duration_us: None,
-        media_sequence: 0,
-        ended: false,
-        playlist_type: None,
-        segments: Vec::new(),
-    };
-    let mut discontinuity = 0u64;
-    // 当前生效的 key，按 KEYFORMAT 区分（RFC 8216 4.3.2.4）
-    let mut keys: BTreeMap<String, KeyTag> = BTreeMap::new();
-    let mut init: Option<InitSection> = None;
-    let mut pending_duration: Option<(usize, u64)> = None;
-    let mut pending_range: Option<(usize, u64, Option<u64>)> = None;
-    let mut pending_discontinuity = false;
-    // 上一个带字节范围的分片：(资源, 结束偏移)，供省略偏移的 BYTERANGE 接续
-    let mut last_range: Option<(Url, u64)> = None;
+/// 已读到、等待 URI 行的分片属性。
+#[derive(Default)]
+struct Pending {
+    /// (EXTINF 所在行, 时长微秒)
+    duration: Option<(usize, u64)>,
+    /// (EXT-X-BYTERANGE 所在行, 长度, 偏移)
+    range: Option<(usize, u64, Option<u64>)>,
+    discontinuity: bool,
+}
 
+/// 逐行解析时的状态：各标签的作用范围持续到被下一个同类标签替换。
+struct Parser<'u> {
+    url: &'u Url,
+    playlist: MediaPlaylist,
+    discontinuity: u64,
+    /// 当前生效的 key，按 KEYFORMAT 区分（RFC 8216 4.3.2.4）
+    keys: BTreeMap<String, KeyTag>,
+    init: Option<InitSection>,
+    pending: Pending,
+    /// 上一个带字节范围的分片：(资源, 结束偏移)，供省略偏移的 BYTERANGE 接续
+    last_range: Option<(Url, u64)>,
+}
+
+pub(crate) fn parse(text: &str, url: &Url) -> Result<MediaPlaylist, Error> {
+    let mut parser = Parser {
+        url,
+        playlist: MediaPlaylist {
+            target_duration_us: None,
+            media_sequence: 0,
+            ended: false,
+            playlist_type: None,
+            segments: Vec::new(),
+        },
+        discontinuity: 0,
+        keys: BTreeMap::new(),
+        init: None,
+        pending: Pending::default(),
+        last_range: None,
+    };
     for line in lines(text).skip(1) {
-        let at = |kind| Error::Syntax {
-            line: line.number,
-            kind,
-        };
         match line.kind {
-            LineKind::Tag { name, value } => match name.as_str() {
-                "EXTINF" => {
-                    let value = value.ok_or(at(SyntaxError::MissingValue { tag: "EXTINF" }))?;
-                    let duration = value.split_once(',').map_or(value, |(d, _)| d);
-                    pending_duration = Some((
-                        line.number,
-                        parse_seconds_us("EXTINF", duration).map_err(at)?,
-                    ));
-                }
-                "EXT-X-BYTERANGE" => {
-                    let value = value.ok_or(at(SyntaxError::MissingValue {
-                        tag: "EXT-X-BYTERANGE",
-                    }))?;
-                    let (length, offset) = parse_byte_range(value).map_err(at)?;
-                    pending_range = Some((line.number, length, offset));
-                }
-                "EXT-X-DISCONTINUITY" => pending_discontinuity = true,
-                "EXT-X-KEY" => {
-                    let value = value.ok_or(at(SyntaxError::MissingValue { tag: "EXT-X-KEY" }))?;
-                    let attrs = Attributes::parse(value).map_err(at)?;
-                    let method = attrs
-                        .require("EXT-X-KEY", "METHOD")
-                        .map_err(at)?
-                        .to_ascii_uppercase();
-                    if method == "NONE" {
-                        keys.clear();
-                    } else {
-                        let uri = resolve(url, attrs.require("EXT-X-KEY", "URI").map_err(at)?)
-                            .map_err(at)?;
-                        let iv = attrs.get("IV").map(parse_iv).transpose().map_err(at)?;
-                        let format = attrs
-                            .get("KEYFORMAT")
-                            .unwrap_or("identity")
-                            .to_ascii_lowercase();
-                        keys.insert(
-                            format,
-                            KeyTag {
-                                line: line.number,
-                                method,
-                                uri,
-                                iv,
-                            },
-                        );
-                    }
-                }
-                "EXT-X-MAP" => {
-                    let value = value.ok_or(at(SyntaxError::MissingValue { tag: "EXT-X-MAP" }))?;
-                    let attrs = Attributes::parse(value).map_err(at)?;
-                    let uri =
-                        resolve(url, attrs.require("EXT-X-MAP", "URI").map_err(at)?).map_err(at)?;
-                    let byte_range = match attrs.get("BYTERANGE") {
-                        Some(range) => match parse_byte_range(range).map_err(at)? {
-                            (length, Some(offset)) => Some(ByteRange { offset, length }),
-                            // EXT-X-MAP 的 BYTERANGE 必须带偏移（RFC 8216 4.3.2.5）
-                            (_, None) => return Err(at(SyntaxError::ByteRange(range.to_owned()))),
-                        },
-                        None => None,
-                    };
-                    init = Some(InitSection { uri, byte_range });
-                }
-                "EXT-X-MEDIA-SEQUENCE" | "EXT-X-DISCONTINUITY-SEQUENCE" => {
-                    if !playlist.segments.is_empty() {
-                        return Err(at(SyntaxError::SequenceAfterSegments));
-                    }
-                    let tag = if name == "EXT-X-MEDIA-SEQUENCE" {
-                        "EXT-X-MEDIA-SEQUENCE"
-                    } else {
-                        "EXT-X-DISCONTINUITY-SEQUENCE"
-                    };
-                    let number =
-                        parse_u64(tag, value.ok_or(at(SyntaxError::MissingValue { tag }))?)
-                            .map_err(at)?;
-                    if tag == "EXT-X-MEDIA-SEQUENCE" {
-                        playlist.media_sequence = number;
-                    } else {
-                        discontinuity = number;
-                    }
-                }
-                "EXT-X-TARGETDURATION" => {
-                    let value = value.ok_or(at(SyntaxError::MissingValue {
-                        tag: "EXT-X-TARGETDURATION",
-                    }))?;
-                    playlist.target_duration_us =
-                        Some(parse_seconds_us("EXT-X-TARGETDURATION", value).map_err(at)?);
-                }
-                "EXT-X-ENDLIST" => playlist.ended = true,
-                "EXT-X-PLAYLIST-TYPE" => {
-                    playlist.playlist_type = match value.map(str::to_ascii_uppercase).as_deref() {
-                        Some("VOD") => Some(PlaylistType::Vod),
-                        Some("EVENT") => Some(PlaylistType::Event),
-                        _ => None,
-                    };
-                }
-                _ => {}
-            },
-            LineKind::Uri(uri) => {
-                let (_, duration_us) = pending_duration
-                    .take()
-                    .ok_or(at(SyntaxError::UriWithoutInfo { expected: "EXTINF" }))?;
-                let sequence = playlist.media_sequence + playlist.segments.len() as u64;
-                let uri = resolve(url, uri).map_err(at)?;
-                if std::mem::take(&mut pending_discontinuity) {
-                    discontinuity += 1;
-                }
-                let byte_range = match pending_range.take() {
-                    Some((range_line, length, offset)) => {
-                        let offset = match offset {
-                            Some(offset) => offset,
-                            None => match &last_range {
-                                Some((resource, end)) if *resource == uri => *end,
-                                _ => {
-                                    return Err(Error::Syntax {
-                                        line: range_line,
-                                        kind: SyntaxError::ByteRangeWithoutOffset,
-                                    });
-                                }
-                            },
-                        };
-                        last_range = Some((uri.clone(), offset + length));
-                        Some(ByteRange { offset, length })
-                    }
-                    None => {
-                        last_range = None;
-                        None
-                    }
-                };
-                playlist.segments.push(Segment {
-                    sequence,
-                    duration_us,
-                    byte_range,
-                    discontinuity,
-                    key: segment_key(&keys, sequence)?,
-                    init: init.clone(),
-                    uri,
-                });
-            }
+            LineKind::Tag { name, value } => parser.tag(line.number, &name, value)?,
+            LineKind::Uri(uri) => parser.uri(line.number, uri)?,
         }
     }
-    if let Some((line, _)) = pending_duration {
-        return Err(Error::Syntax {
-            line,
-            kind: SyntaxError::InfoWithoutUri { tag: "EXTINF" },
-        });
+    parser.finish()
+}
+
+impl Parser<'_> {
+    fn tag(&mut self, line: usize, name: &str, value: Option<&str>) -> Result<(), Error> {
+        let at = |kind| Error::Syntax { line, kind };
+        let required = |tag| value.ok_or(at(SyntaxError::MissingValue { tag }));
+        match name {
+            "EXTINF" => {
+                let value = required("EXTINF")?;
+                let duration = value.split_once(',').map_or(value, |(d, _)| d);
+                let us = parse_seconds_us("EXTINF", duration).map_err(at)?;
+                self.pending.duration = Some((line, us));
+            }
+            "EXT-X-BYTERANGE" => {
+                let (length, offset) =
+                    parse_byte_range(required("EXT-X-BYTERANGE")?).map_err(at)?;
+                self.pending.range = Some((line, length, offset));
+            }
+            "EXT-X-DISCONTINUITY" => self.pending.discontinuity = true,
+            "EXT-X-KEY" => self.key(line, required("EXT-X-KEY")?).map_err(at)?,
+            "EXT-X-MAP" => self.map(required("EXT-X-MAP")?).map_err(at)?,
+            "EXT-X-MEDIA-SEQUENCE" => {
+                let tag = "EXT-X-MEDIA-SEQUENCE";
+                self.playlist.media_sequence = self.sequence_tag(tag, value).map_err(at)?;
+            }
+            "EXT-X-DISCONTINUITY-SEQUENCE" => {
+                let tag = "EXT-X-DISCONTINUITY-SEQUENCE";
+                self.discontinuity = self.sequence_tag(tag, value).map_err(at)?;
+            }
+            "EXT-X-TARGETDURATION" => {
+                let value = required("EXT-X-TARGETDURATION")?;
+                let us = parse_seconds_us("EXT-X-TARGETDURATION", value).map_err(at)?;
+                self.playlist.target_duration_us = Some(us);
+            }
+            "EXT-X-ENDLIST" => self.playlist.ended = true,
+            "EXT-X-PLAYLIST-TYPE" => {
+                self.playlist.playlist_type = match value.map(str::to_ascii_uppercase).as_deref() {
+                    Some("VOD") => Some(PlaylistType::Vod),
+                    Some("EVENT") => Some(PlaylistType::Event),
+                    _ => None,
+                };
+            }
+            _ => {}
+        }
+        Ok(())
     }
-    if let Some((line, _, _)) = pending_range {
-        return Err(Error::Syntax {
-            line,
-            kind: SyntaxError::InfoWithoutUri {
-                tag: "EXT-X-BYTERANGE",
+
+    /// EXT-X-KEY：METHOD=NONE 清除全部 key，否则按 KEYFORMAT（缺省 identity）记录。
+    fn key(&mut self, line: usize, value: &str) -> Result<(), SyntaxError> {
+        let attrs = Attributes::parse(value)?;
+        let method = attrs.require("EXT-X-KEY", "METHOD")?.to_ascii_uppercase();
+        if method == "NONE" {
+            self.keys.clear();
+            return Ok(());
+        }
+        let uri = resolve(self.url, attrs.require("EXT-X-KEY", "URI")?)?;
+        let iv = attrs.get("IV").map(parse_iv).transpose()?;
+        let format = attrs
+            .get("KEYFORMAT")
+            .unwrap_or("identity")
+            .to_ascii_lowercase();
+        self.keys.insert(
+            format,
+            KeyTag {
+                line,
+                method,
+                uri,
+                iv,
             },
-        });
+        );
+        Ok(())
     }
-    Ok(playlist)
+
+    /// EXT-X-MAP；其 BYTERANGE 必须带偏移（RFC 8216 4.3.2.5）。
+    fn map(&mut self, value: &str) -> Result<(), SyntaxError> {
+        let attrs = Attributes::parse(value)?;
+        let uri = resolve(self.url, attrs.require("EXT-X-MAP", "URI")?)?;
+        let byte_range = match attrs.get("BYTERANGE") {
+            Some(range) => match parse_byte_range(range)? {
+                (length, Some(offset)) if offset.checked_add(length).is_some() => {
+                    Some(ByteRange { offset, length })
+                }
+                _ => return Err(SyntaxError::ByteRange(range.to_owned())),
+            },
+            None => None,
+        };
+        self.init = Some(InitSection { uri, byte_range });
+        Ok(())
+    }
+
+    /// EXT-X-MEDIA-SEQUENCE / EXT-X-DISCONTINUITY-SEQUENCE 的值；必须出现在第一个分片之前。
+    fn sequence_tag(&self, tag: &'static str, value: Option<&str>) -> Result<u64, SyntaxError> {
+        if !self.playlist.segments.is_empty() {
+            return Err(SyntaxError::SequenceAfterSegments);
+        }
+        parse_u64(tag, value.ok_or(SyntaxError::MissingValue { tag })?)
+    }
+
+    /// URI 行：用此前读到的属性与当前生效的 key、init 段组成一个分片。
+    fn uri(&mut self, line: usize, uri: &str) -> Result<(), Error> {
+        let at = |kind| Error::Syntax { line, kind };
+        let (_, duration_us) = self
+            .pending
+            .duration
+            .take()
+            .ok_or(at(SyntaxError::UriWithoutInfo { expected: "EXTINF" }))?;
+        let index = u64::try_from(self.playlist.segments.len()).expect("分片数不超过 u64");
+        let sequence = self
+            .playlist
+            .media_sequence
+            .checked_add(index)
+            .ok_or(at(SyntaxError::SequenceOverflow))?;
+        let uri = resolve(self.url, uri).map_err(at)?;
+        if std::mem::take(&mut self.pending.discontinuity) {
+            self.discontinuity = self
+                .discontinuity
+                .checked_add(1)
+                .ok_or(at(SyntaxError::SequenceOverflow))?;
+        }
+        let byte_range = self.byte_range(&uri)?;
+        let key = segment_key(&self.keys, sequence)?;
+        self.playlist.segments.push(Segment {
+            sequence,
+            duration_us,
+            byte_range,
+            discontinuity: self.discontinuity,
+            key,
+            init: self.init.clone(),
+            uri,
+        });
+        Ok(())
+    }
+
+    /// 本分片的字节范围；省略偏移时接着同一资源上一个子区间往后取。
+    fn byte_range(&mut self, uri: &Url) -> Result<Option<ByteRange>, Error> {
+        let Some((line, length, offset)) = self.pending.range.take() else {
+            self.last_range = None;
+            return Ok(None);
+        };
+        let at = |kind| Error::Syntax { line, kind };
+        let offset = match offset {
+            Some(offset) => offset,
+            None => match &self.last_range {
+                Some((resource, end)) if resource == uri => *end,
+                _ => return Err(at(SyntaxError::ByteRangeWithoutOffset)),
+            },
+        };
+        let end = offset
+            .checked_add(length)
+            .ok_or(at(SyntaxError::ByteRange(format!("{length}@{offset}"))))?;
+        self.last_range = Some((uri.clone(), end));
+        Ok(Some(ByteRange { offset, length }))
+    }
+
+    /// 末尾不能留下没有 URI 行的 EXTINF 或 BYTERANGE。
+    fn finish(self) -> Result<MediaPlaylist, Error> {
+        let dangling = |line, tag| Error::Syntax {
+            line,
+            kind: SyntaxError::InfoWithoutUri { tag },
+        };
+        if let Some((line, _)) = self.pending.duration {
+            return Err(dangling(line, "EXTINF"));
+        }
+        if let Some((line, _, _)) = self.pending.range {
+            return Err(dangling(line, "EXT-X-BYTERANGE"));
+        }
+        Ok(self.playlist)
+    }
 }
 
 /// 分片使用的 key：有 identity 格式的 key 就用它；只有其他 KEYFORMAT（DRM）时不支持。
@@ -257,9 +294,9 @@ fn segment_key(
     sequence: u64,
 ) -> Result<Option<SegmentKey>, Error> {
     let Some(identity) = keys.get("identity") else {
-        return match keys.keys().next() {
-            Some(format) => Err(Error::Unsupported {
-                line: keys[format].line,
+        return match keys.iter().next() {
+            Some((format, tag)) => Err(Error::Unsupported {
+                line: tag.line,
                 what: Unsupported::Drm {
                     keyformat: format.clone(),
                 },

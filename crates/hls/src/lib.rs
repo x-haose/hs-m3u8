@@ -14,7 +14,7 @@ mod select;
 
 pub use master::{MasterPlaylist, Rendition, RenditionKind, Resolution, Variant};
 pub use media::{ByteRange, InitSection, MediaPlaylist, PlaylistType, Segment, SegmentKey};
-pub use select::{Preference, SelectError, Selection, VariantChoice, select};
+pub use select::{Preference, SelectError, SelectedAudio, Selection, VariantChoice, select};
 pub use url::Url;
 
 use line::{LineKind, lines};
@@ -34,7 +34,7 @@ pub enum Error {
     Mixed,
     #[error("第 {line} 行：{kind}")]
     Syntax { line: usize, kind: SyntaxError },
-    #[error("第 {line} 行的分片：{what}")]
+    #[error("第 {line} 行的 EXT-X-KEY：{what}")]
     Unsupported { line: usize, what: Unsupported },
 }
 
@@ -69,6 +69,8 @@ pub enum SyntaxError {
     RenditionType(String),
     #[error("EXT-X-MEDIA-SEQUENCE / EXT-X-DISCONTINUITY-SEQUENCE 必须出现在第一个分片之前")]
     SequenceAfterSegments,
+    #[error("媒体序号或不连续段序号超出 64 位整数范围")]
+    SequenceOverflow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

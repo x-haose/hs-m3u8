@@ -114,13 +114,19 @@ fn equal_resolutions_fall_back_to_bandwidth() {
 fn audio_rendition_is_chosen_by_default_flag_or_language() {
     let m = master(SPLIT);
     let default = select(&m, &Preference::default()).unwrap();
-    assert_eq!(default.audio.unwrap().language.as_deref(), Some("zh"));
+    let audio = default.audio.unwrap();
+    assert_eq!(audio.rendition.language.as_deref(), Some("zh"));
+    assert_eq!(
+        audio.uri.as_str(),
+        "https://video.example.com/aud/zh/index.m3u8"
+    );
 
     let english = Preference {
         variant: VariantChoice::Best,
         audio_language: Some("EN".into()),
     };
-    assert_eq!(select(&m, &english).unwrap().audio.unwrap().name, "English");
+    let audio = select(&m, &english).unwrap().audio.unwrap();
+    assert_eq!(audio.rendition.name, "English");
 
     let missing = Preference {
         variant: VariantChoice::Best,
