@@ -76,8 +76,9 @@ impl Layout {
 /// 已打开并加锁的任务目录；锁在 drop 时释放。
 pub(crate) struct WorkDir {
     layout: Layout,
-    previous: Option<JobRecord>,
-    _lock: File,
+    /// 见 [`WorkDir::url_changed`]
+    url_changed: bool,
+    lock: File,
 }
 
 impl WorkDir {
@@ -96,9 +97,10 @@ impl WorkDir {
         &self.layout
     }
 
-    /// 目录里原有的记录与 `current` 不同。[`WorkDir::open`] 已排除其他不符，不同之处只可能是直播的完整地址。
-    pub(crate) fn url_changed(&self, current: &JobRecord) -> bool {
-        self.previous.as_ref().is_some_and(|p| p != current)
+    /// 沿用了目录里原有的直播记录，而其中的完整来源地址（含查询串）与打开时给的不同；记录的其余各项
+    /// [`WorkDir::open`] 已核对一致。新建或改为当前任务时为 false。
+    pub(crate) fn url_changed(&self) -> bool {
+        self.url_changed
     }
 
     /// 用 `record` 替换 `job.json` 中的记录。
@@ -137,7 +139,7 @@ impl WorkDir {
     /// 先删内容保证它看到的不会是删到一半的任务；锁文件也在持锁时删，别的任务打开的是新建的锁文件，
     /// 不会锁上本任务还持有的那个。std 打开文件时允许删除，Windows 上持有句柄也能删。
     pub(crate) async fn remove(self) -> Result<(), Error> {
-        let WorkDir { layout, _lock, .. } = self;
+        let WorkDir { layout, lock, .. } = self;
         blocking(move || {
             let root = &layout.root;
             for entry in fs::read_dir(root).map_err(io_error("读取", root))? {
@@ -154,9 +156,9 @@ impl WorkDir {
                 };
                 removed.map_err(io_error("删除", &path))?;
             }
-            let lock = root.join(LOCK_FILE);
-            fs::remove_file(&lock).map_err(io_error("删除", &lock))?;
-            drop(_lock);
+            let lock_path = root.join(LOCK_FILE);
+            fs::remove_file(&lock_path).map_err(io_error("删除", &lock_path))?;
+            drop(lock);
             match fs::remove_dir(root) {
                 Ok(()) => Ok(()),
                 // 释放锁后另一个任务已开始使用这个目录：本任务的内容已删完，目录留给它
@@ -212,10 +214,11 @@ fn open(root: PathBuf, record: JobRecord) -> Result<WorkDir, Error> {
         remove_if_exists(&root.join(TRACKS_DIR))?;
         write_atomic(&job_path, &encode(&record))?;
     }
+    let url_changed = previous.is_some_and(|p| p.url_digest() != record.url_digest());
     Ok(WorkDir {
         layout,
-        previous,
-        _lock: lock,
+        url_changed,
+        lock,
     })
 }
 

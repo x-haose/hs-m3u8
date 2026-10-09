@@ -44,6 +44,14 @@ impl JobRecord {
         track_streams(self.selection.as_ref())
     }
 
+    /// 直播记录的完整来源地址摘要；点播为 None。
+    pub(super) fn url_digest(&self) -> Option<&str> {
+        match &self.kind {
+            RecordKind::Vod { .. } => None,
+            RecordKind::Live { url_digest } => Some(url_digest),
+        }
+    }
+
     fn job_type(&self) -> JobType {
         match self.kind {
             RecordKind::Vod { .. } => JobType::Vod,
