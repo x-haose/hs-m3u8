@@ -53,25 +53,25 @@ crates/py ────┼──> crates/core ──> crates/hls
 
 ## 4. hls：数据模型与规范化
 
-只做纯计算：输入播放列表文本和它的最终 URL（跟随重定向之后），输出规范化模型。
+只做纯计算：输入播放列表文本和它的最终 URL（跟随重定向之后），输出规范化模型。解析器自行实现，理由见 ADR-0006。
 
 类型定义见 `crates/hls/src`（`MasterPlaylist`、`Variant`、`Rendition`、`MediaPlaylist`、`Segment`、`SegmentKey`、`InitSection`）。约定：所有 URI 均为绝对地址；时长为整数微秒；每个分片自带已定值的 key 与 IV、init 段、字节范围与不连续段序号。
 
 规范化规则（RFC 8216，全部有纯计算测试）：
 
-- `EXT-X-KEY` 作用于其后所有分片，直到下一个 `EXT-X-KEY`；`METHOD=NONE` 清除。每个分片都带自己的 key 与 IV。
-- 缺省 IV 时用该分片媒体序号的 16 字节大端编码。
+- `EXT-X-KEY` 作用于其后所有分片，直到下一个 `EXT-X-KEY`；`METHOD=NONE` 清除。缺省 IV 时用该分片媒体序号的 16 字节大端编码。
 - 同一位置有多个 `EXT-X-KEY` 时，只取 `KEYFORMAT` 缺省或为 `identity` 的那个；只剩 DRM 的 KEYFORMAT 时报 `Unsupported(Drm)`；`SAMPLE-AES` 报 `Unsupported(SampleAes)`。
 - `EXT-X-MAP` 作用于其后所有分片，直到下一个 `EXT-X-MAP`。
 - `EXT-X-BYTERANGE` 省略偏移量时，接着同一资源上一个子区间往后取。
+- 不连续段序号 = `EXT-X-DISCONTINUITY-SEQUENCE`（缺省 0）加上此前出现的 `EXT-X-DISCONTINUITY` 个数；`MediaPlaylist::discontinuity_sequence` 记录该标签是否写了，没写时编号只在本次播放列表内有意义。
+- 媒体序号、不连续段序号、字节范围的结束位置超出 64 位整数时报错。
 - 所有 URI 按**该播放列表的最终 URL**（跟随重定向之后）解析。
+- 内容为空报 `Empty`，首行不是 `#EXTM3U` 报 `NotAPlaylist`。
 
 选轨（`select`）：
 
-- 默认取最高分辨率，同分辨率取最高带宽；有带分辨率的变体时不考虑纯音频变体；用户可按下标指定。
-- 变体带 `AUDIO` 组、且组内 rendition 有 URI 时，选 `DEFAULT=YES` 的那个，或按用户指定的语言选；这就是音视频分流的情况。此时只取变体的视频，变体里即使混有音频也不用，与播放器的行为一致。
-
-解析层自行实现（ADR-0006）：现成的 m3u8-rs 会静默丢失 key，hls_m3u8 拒绝真实网站常见的不规范写法。
+- 默认取最高分辨率，同分辨率取最高带宽；有带 `RESOLUTION` 的变体时，不考虑没有它的（多为纯音频）；也可按下标指定。
+- 变体带 `AUDIO` 组、且组内 rendition 有 URI 时，按指定的语言选，未指定时选 `DEFAULT=YES` 的，没有则取组内第一个；这就是音频独立成一条媒体播放列表的情况。此时只取变体的视频，变体里即使混有音频也不用，与播放器的行为一致。
 
 ## 5. core：下载任务
 
