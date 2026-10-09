@@ -334,16 +334,8 @@ async fn resume_survives_tokens_in_the_path() {
 async fn resume_finds_the_same_redundant_variant() {
     let dir = test_dir("resume_redundant");
     let server = Server::start().await;
-    for host in ["a", "b"] {
-        for name in TS_A {
-            server.put(&format!("{host}/{name}"), fixture(&format!("ts_a/{name}")));
-        }
-        server.put(
-            &format!("{host}/v.m3u8"),
-            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n\
-             #EXT-X-ENDLIST\n",
-        );
-    }
+    put_ts_a_variant(&server, "a");
+    put_ts_a_variant(&server, "b");
     server.put(
         "master.m3u8",
         "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=160x90\na/v.m3u8\n\
@@ -364,6 +356,49 @@ async fn resume_finds_the_same_redundant_variant() {
     assert_output(&output, &want);
     // b/seg1 第一次运行时到达过一次（挂住后取消），续传时再下一次
     assert_eq!((server.hits("a/seg1.ts"), server.hits("b/seg1.ts")), (0, 2));
+}
+
+/// 上次一个分片都没下完就中断：目录里没有可续的内容，不按记录的选轨找回（那个变体已从主播放列表里删掉），
+/// 按偏好重新选。
+#[tokio::test(flavor = "multi_thread")]
+async fn selection_is_not_kept_without_completed_segments() {
+    let dir = test_dir("resume_nothing_completed");
+    let server = Server::start().await;
+    put_ts_a_variant(&server, "a");
+    put_ts_a_variant(&server, "b");
+    let variant = |host: &str, bandwidth: u32| {
+        format!("#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION=160x90\n{host}/v.m3u8\n")
+    };
+    server.put(
+        "master.m3u8",
+        format!("#EXTM3U\n{}{}", variant("a", 1), variant("b", 2)),
+    );
+    let req = request(server.url("master.m3u8"), &dir);
+    // 按最佳选到 b，它的第一个分片还在下载时取消
+    let gate = server.gate("b/seg0.ts");
+    let job = engine().start(req.clone()).unwrap();
+    gate.arrived.notified().await;
+    job.cancel();
+    assert!(matches!(job.wait().await, Err(Error::Cancelled)));
+    server.ungate("b/seg0.ts");
+
+    server.put("master.m3u8", format!("#EXTM3U\n{}", variant("a", 1)));
+    let output = run(req).await.unwrap();
+
+    assert_output(&output, &expected_ts_a(&dir));
+    assert_eq!(server.hits("a/seg0.ts"), 1);
+}
+
+/// 在 `dir` 下放 ts_a 的两个分片，与引用它们的媒体播放列表 `<dir>/v.m3u8`。
+fn put_ts_a_variant(server: &Server, dir: &str) {
+    for name in TS_A {
+        server.put(&format!("{dir}/{name}"), fixture(&format!("ts_a/{name}")));
+    }
+    server.put(
+        &format!("{dir}/v.m3u8"),
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n\
+         #EXT-X-ENDLIST\n",
+    );
 }
 
 /// 取消在途任务；运行期间同一任务目录不能被第二个任务使用；取消后续传。
