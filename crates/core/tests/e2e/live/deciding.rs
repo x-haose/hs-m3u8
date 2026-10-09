@@ -330,6 +330,24 @@ async fn transient_failure_while_checking_is_reported() {
     assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
 }
 
+/// 重叠中最新的分片一直取不到（重试后仍 500），更早的取得到：用更早的核对，接得上就接着原会话录。
+#[tokio::test(flavor = "multi_thread")]
+async fn an_older_overlap_is_checked_when_the_newest_keeps_failing() {
+    let dir = test_dir("deciding_older_overlap");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1, 2, 3]);
+    server.put("live.m3u8", playlist(&[0, 1], false));
+    let req = live_request(server.url("live.m3u8"), &dir, STALL);
+    interrupt(&req, |p| p.segments_done == 2).await;
+
+    server.put("live.m3u8", playlist(&[0, 1, 2, 3], true));
+    server.status("seg1.ts", StatusCode::SERVICE_UNAVAILABLE);
+    let output = run(req).await.unwrap();
+
+    assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
+    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+}
+
 /// 同上，来源地址还换了令牌：报的是取分片的故障（可重试），不是「无法确认是同一个直播」。
 #[tokio::test(flavor = "multi_thread")]
 async fn transient_failure_with_a_new_token_is_not_unverified() {
