@@ -45,8 +45,8 @@ impl fmt::Display for Fingerprint {
     }
 }
 
-/// 来源摘要（SHA-256 十六进制）：去掉凭据与查询串的地址（见 [`bare_url`]）与选轨偏好。查询串常带每次会话
-/// 不同的令牌，不计入；语言代码与选轨一样不区分 ASCII 大小写。每项一行、地址里不会有换行，编码没有歧义。
+/// 来源摘要（SHA-256 十六进制）：来源地址（见 [`source_address`]）与选轨偏好。语言代码与选轨一样不区分
+/// ASCII 大小写。每项一行、地址里不会有换行，编码没有歧义。
 pub(crate) fn source_digest(url: &Url, preference: &Preference) -> String {
     let variant = match preference.variant {
         VariantChoice::Best => "best".to_owned(),
@@ -59,8 +59,20 @@ pub(crate) fn source_digest(url: &Url, preference: &Preference) -> String {
         .unwrap_or_default();
     digest_hex(format!(
         "url {}\nvariant {variant}\naudio {audio}\n",
-        bare_url(url)
+        source_address(url)
     ))
+}
+
+/// 来源摘要里的地址：去掉用户名、密码、查询串与片段，这些部分常带每次会话不同的凭据或令牌。属于任务目录
+/// 格式，输出改变须升 job.json 的格式版本。
+fn source_address(url: &Url) -> String {
+    match url.host_str() {
+        Some(host) => {
+            let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
+            format!("{}://{host}{port}{}", url.scheme(), url.path())
+        }
+        None => format!("{}:{}", url.scheme(), url.path()),
+    }
 }
 
 /// 完整地址（含查询串）的摘要（SHA-256 十六进制）。
@@ -78,8 +90,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// 去掉用户名、密码、查询串与片段后的地址，这些部分常带凭据或令牌。错误信息与来源摘要都用它；
-/// 来源摘要写在 job.json 里，输出改变须升格式版本。
+/// 错误信息里地址的写法：去掉用户名、密码、查询串与片段，这些部分常带凭据或令牌。
 pub(crate) fn bare_url(url: &Url) -> String {
     match url.host_str() {
         Some(host) => {
