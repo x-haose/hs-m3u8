@@ -1,8 +1,8 @@
 //! 直播录制：按 RFC 8216 6.3.4 的节奏刷新各轨的媒体播放列表，新分片交给下载器，直到满足结束条件。
 //!
 //! 录制按会话组织：一个会话是一段时间线连续的录制，分片文件名带会话编号，合并按（会话, 不连续段）分组，
-//! 组内保留原时间戳（缺失的分片处时间线留空），组与组首尾相接。中断后再次运行时接着上一个会话录还是另起一个，
-//! 见 [`session`]。
+//! 组内保留原时间戳（缺失的分片处时间线留空），组与组首尾相接。中断后再次运行时先判定接着上一个会话录还是
+//! 另起一个（见 [`session`]），再开始录。
 //!
 //! 轨道编号：第 0 条为所选变体（或来源本身的媒体播放列表），第 1 条（若有）为独立的音频 rendition。
 
@@ -11,21 +11,23 @@ mod session;
 mod track;
 mod window;
 
+use std::convert::Infallible;
+use std::future::Future;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use hs_m3u8_hls::{self as hls, InitSection, MediaPlaylist, Segment};
+use hs_m3u8_hls::{self as hls, InitSection, MediaPlaylist};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use self::merge::{merge_plan, report_missed};
-use self::session::{Candidate, Deciding, Decision, Earlier};
+use self::session::{Candidate, Deciding, Decision, Recorded, Verdict};
 use self::track::{LiveTrack, RefreshRequest};
-use self::window::{NewInits, Processed, Scope, missable_http, newest_overlap};
-use crate::fetch::{self, Fetcher, ItemId, record_done};
+use self::window::{NewInits, Processed, Scope, overlaps};
+use crate::fetch::{self, Fetcher, ItemId, count_done};
 use crate::hooks::Hooks;
 use crate::http::{Http, Permit};
 use crate::request::LiveOptions;
@@ -61,13 +63,28 @@ struct Refreshed {
     result: Result<(MediaPlaylist, NewInits), Error>,
 }
 
-/// 本次运行录进哪个会话。
-enum SessionState {
-    Decided(u32),
-    /// 续录：等各轨的第一份可用播放列表来判定
-    Deciding(Deciding),
+/// 刷新拿到的播放列表。
+struct Loaded {
+    track: usize,
+    playlist: MediaPlaylist,
+    /// 要录的新分片引用的新 init 段；会话定下之前不拉，为空
+    fetched: NewInits,
+    /// 这次加载开始的时刻
+    started: Instant,
 }
 
+/// 等到的下一件事；`D` 为下载的结果（判定会话期间没有下载，为 [`Infallible`]）。
+enum Event<D> {
+    Stop,
+    /// 该轨停滞
+    Stall(usize),
+    /// 有轨到了刷新的时刻
+    Due,
+    Refreshed(Refreshed),
+    Downloaded(D),
+}
+
+/// 录制的对象，会话判定与录制两个阶段共用。
 struct Recorder<'a> {
     http: Arc<Http>,
     hooks: Arc<dyn Hooks>,
@@ -76,12 +93,17 @@ struct Recorder<'a> {
     job: &'a JobRecord,
     progress: &'a watch::Sender<Progress>,
     options: LiveOptions,
-    session: SessionState,
     tracks: Vec<LiveTrack>,
+    /// 本次运行中记下原因的缺失
     missed: Vec<Missed>,
+    refreshes: JoinSet<Refreshed>,
+    /// 刷新任务的取消令牌：录制结束时取消，等在途的回调返回
+    refresh_cancel: CancellationToken,
+    cancel: CancellationToken,
+    stop: CancellationToken,
 }
 
-/// 录制：从 `tracks` 首次拉到的播放列表开始，直到满足结束条件，并等已列出的分片下完。
+/// 录制：定下会话，从首次拉到的播放列表开始，直到满足结束条件，并等已列出的分片下完。
 ///
 /// `job` 为当前请求的任务记录。目录里记录的来源地址（含查询串）与它不同时，有已录的分片就须接着上一个会话录才继续，
 /// 并改为记录当前地址；接不上报 [`WorkDirProblem::SourceUnverified`]。
@@ -91,13 +113,10 @@ pub(crate) async fn record(
     options: LiveOptions,
     job: &JobRecord,
 ) -> Result<Recording, Error> {
-    let (dir, progress, cancel) = (ctx.dir, ctx.progress, ctx.cancel);
+    let (dir, progress) = (ctx.dir, ctx.progress);
     progress.send_modify(|p| p.stage = Stage::Recording);
     let stored = dir.scan(tracks.len()).await?;
     count_stored(&stored, progress);
-    // 先建各轨（可能因缺少目标时长失败），再定会话（可能改写记录）：失败时记录不变
-    let live_tracks = live_tracks(&tracks, &stored, Instant::now())?;
-    let session = initial_session(dir, job, &stored).await?;
     let mut recorder = Recorder {
         http: ctx.http,
         hooks: ctx.hooks,
@@ -105,32 +124,16 @@ pub(crate) async fn record(
         job,
         progress,
         options,
-        session,
-        tracks: live_tracks,
+        tracks: live_tracks(&tracks, &stored, Instant::now())?,
         missed: Vec::new(),
+        refreshes: JoinSet::new(),
+        refresh_cancel: ctx.cancel.child_token(),
+        cancel: ctx.cancel.clone(),
+        stop: ctx.stop.clone(),
     };
-    let refresh_cancel = cancel.child_token();
-    let mut refreshes = JoinSet::new();
     let fetcher = ctx.fetcher;
-    let result = recorder
-        .record(
-            tracks,
-            fetcher,
-            &mut refreshes,
-            &refresh_cancel,
-            cancel,
-            ctx.stop,
-        )
-        .await;
-    // 刷新任务协作取消：等在途的回调返回后才结束，不直接中止
-    refresh_cancel.cancel();
-    while let Some(joined) = refreshes.join_next().await {
-        if let Err(e) = joined
-            && e.is_panic()
-        {
-            std::panic::resume_unwind(e.into_panic());
-        }
-    }
+    let result = recorder.start(tracks, &stored, fetcher).await;
+    recorder.join_refreshes().await;
     recorder.settle(result, fetcher).await
 }
 
@@ -153,28 +156,6 @@ fn live_tracks(
         .collect()
 }
 
-/// 录进哪个会话：目录里有录过的分片时先判定（见 [`session`]），否则就是第 0 个。没有录过的分片时没有要核对的
-/// 内容，地址变了直接改记。
-async fn initial_session(
-    dir: &WorkDir,
-    job: &JobRecord,
-    stored: &Stored,
-) -> Result<SessionState, Error> {
-    let segments = &stored.segments;
-    match segments.iter().flatten().map(|f| f.name.session).max() {
-        Some(last) => {
-            let earlier = segments.iter().map(|f| Earlier::of(f, last)).collect();
-            Ok(SessionState::Deciding(Deciding::new(last, earlier)))
-        }
-        None => {
-            if dir.url_changed(job) {
-                dir.save(job).await?;
-            }
-            Ok(SessionState::Decided(0))
-        }
-    }
-}
-
 /// 目录里已完成的分片与 init 段计入进度。
 pub(crate) fn count_stored(stored: &Stored, progress: &watch::Sender<Progress>) {
     let done = stored.segments.iter().map(Vec::len).sum();
@@ -187,108 +168,267 @@ pub(crate) fn count_stored(stored: &Stored, progress: &watch::Sender<Progress>) 
 }
 
 impl Recorder<'_> {
-    /// 录制结束后收尾：正常结束时等已列出的分片下完；失败时取消其余下载、等它们退出。
-    async fn settle(
-        mut self,
-        result: Result<LiveEnd, Error>,
+    /// 定下会话（目录里有录过的分片时先判定），处理暂存的播放列表，再按节奏刷新直到满足结束条件。
+    /// 返回录进的会话与结束原因；会话定下之前就结束时会话为 None（没有排入任何下载）。
+    async fn start(
+        &mut self,
+        first: Vec<ResolvedTrack>,
+        stored: &Stored,
         fetcher: &mut Fetcher,
-    ) -> Result<Recording, Error> {
-        match result {
-            Ok(end) => {
-                fetcher.drain(|id, r| self.on_finished(id, r)).await?;
-                Ok(Recording {
-                    end,
-                    missed: self.missed,
-                })
+    ) -> Result<(Option<u32>, LiveEnd), Error> {
+        let decision = match Deciding::new(&stored.segments) {
+            Some(deciding) => match self.decide(deciding, first, fetcher).await? {
+                ControlFlow::Break(end) => return Ok((None, end)),
+                ControlFlow::Continue(decision) => decision,
+            },
+            None => {
+                let playlists = first.into_iter().map(|t| t.playlist).collect();
+                Decision::first(playlists, Instant::now())
             }
-            Err(e) => {
-                fetcher.abort();
-                // 在途的项随后以 Cancelled 结束，只等它们收尾，不再处理结果
-                while fetcher.next().await.is_some() {}
-                Err(e)
-            }
+        };
+        let session = decision.session;
+        if let Some(end) = self.begin(decision, fetcher).await? {
+            return Ok((Some(session), end));
         }
+        let end = self.run(session, fetcher).await?;
+        Ok((Some(session), end))
     }
 
-    /// 处理首次拉到的播放列表，再按节奏刷新直到满足结束条件。
-    async fn record(
+    /// 续录时判定会话：刷新各轨直到都有候选。期间停止、停滞时结束（`Break`）。
+    async fn decide(
         &mut self,
-        tracks: Vec<ResolvedTrack>,
-        fetcher: &mut Fetcher,
-        refreshes: &mut JoinSet<Refreshed>,
-        refresh_cancel: &CancellationToken,
-        cancel: &CancellationToken,
-        stop: &CancellationToken,
-    ) -> Result<LiveEnd, Error> {
+        mut deciding: Deciding,
+        first: Vec<ResolvedTrack>,
+        fetcher: &Fetcher,
+    ) -> Result<ControlFlow<LiveEnd, Decision>, Error> {
         let now = Instant::now();
-        for (index, track) in tracks.into_iter().enumerate() {
-            let window = self.tracks[index].window();
-            let fetched = new_inits(
-                &self.http,
-                &track.playlist,
-                &window.known_inits(),
-                window.processed(),
-                cancel,
-            )
-            .await?;
-            if let Some(end) = self
-                .apply(index, track.playlist, fetched, now, fetcher)
+        for (track, first) in first.into_iter().enumerate() {
+            if let ControlFlow::Break(end) = self
+                .consider(&mut deciding, track, first.playlist, now, fetcher)
                 .await?
             {
-                return Ok(end);
+                return Ok(ControlFlow::Break(end));
             }
         }
-        self.run(fetcher, refreshes, refresh_cancel, cancel, stop)
-            .await
+        while !deciding.is_complete() {
+            let event: Event<Infallible> = self.next_event(std::future::pending()).await?;
+            match event {
+                Event::Stop => return Ok(ControlFlow::Break(LiveEnd::Stopped)),
+                Event::Stall(track) => {
+                    return self.stalled(track, Instant::now()).map(ControlFlow::Break);
+                }
+                Event::Due => {}
+                Event::Refreshed(refreshed) => {
+                    let Some(loaded) = self.refresh_result(refreshed)? else {
+                        continue;
+                    };
+                    if let ControlFlow::Break(end) = self
+                        .consider(
+                            &mut deciding,
+                            loaded.track,
+                            loaded.playlist,
+                            loaded.started,
+                            fetcher,
+                        )
+                        .await?
+                    {
+                        return Ok(ControlFlow::Break(end));
+                    }
+                }
+                Event::Downloaded(never) => match never {},
+            }
+        }
+        let decision = deciding.decide().ok_or_else(|| Error::WorkDir {
+            path: self.dir.layout().root().to_path_buf(),
+            problem: WorkDirProblem::Corrupt("会话编号已达上限".into()),
+        })?;
+        Ok(ControlFlow::Continue(decision))
     }
 
-    async fn run(
+    /// 判定会话期间第 `track` 条轨的一份播放列表：已录满的轨不再录、不影响判定；没有分片时等下次刷新；
+    /// 否则核对能否接着它最近的会话录，记为该轨的候选并暂停刷新。核对期间要求停止时为 `Break`。
+    async fn consider(
         &mut self,
+        deciding: &mut Deciding,
+        track: usize,
+        playlist: MediaPlaylist,
+        started: Instant,
+        fetcher: &Fetcher,
+    ) -> Result<ControlFlow<LiveEnd>, Error> {
+        let verdict = if self.tracks[track].is_full(self.max_us()) {
+            Verdict::Full
+        } else if playlist.segments.is_empty() && !playlist.ended {
+            self.tracks[track].wait_unchanged(Instant::now());
+            return Ok(ControlFlow::Continue(()));
+        } else {
+            let check = self.verify(deciding.recorded(track), track, &playlist, fetcher);
+            match until_stopped(&self.stop, check).await? {
+                Some(verdict) => verdict,
+                None => return Ok(ControlFlow::Break(LiveEnd::Stopped)),
+            }
+        };
+        self.tracks[track].hold(&playlist);
+        let candidate = Candidate {
+            playlist,
+            started,
+            verdict,
+        };
+        deciding.offer(track, candidate);
+        Ok(ControlFlow::Continue(()))
+    }
+
+    /// 第 `track` 条轨的窗口能否接着 `recorded` 录：重叠且一致，并且重叠的分片（从新到旧取第一个还取得到的）
+    /// 重新下载后与已存的相同。重叠的分片都已取不到（404/410）时无从核对，按接不上算——它们也录不到，另起会话
+    /// 不会重复；其余失败（临时故障、key、校验、回调）如实上抛。
+    async fn verify(
+        &self,
+        recorded: Option<&Recorded>,
+        track: usize,
+        playlist: &MediaPlaylist,
+        fetcher: &Fetcher,
+    ) -> Result<Verdict, Error> {
+        let Some(recorded) = recorded else {
+            return Ok(Verdict::Differs);
+        };
+        for segment in overlaps(recorded, playlist) {
+            let data = match fetcher.fetch(track, segment).await {
+                Ok(data) => data,
+                Err(e) if matches!(missable(&e), Some(HttpError::Status(404 | 410))) => continue,
+                Err(e) => return Err(e),
+            };
+            let stored = self
+                .dir
+                .layout()
+                .segment(track, &recorded.segments()[&segment.sequence]);
+            return Ok(if same_file(stored, data).await? {
+                Verdict::Matches
+            } else {
+                Verdict::Differs
+            });
+        }
+        Ok(Verdict::Differs)
+    }
+
+    /// 定下会话：地址变了时须接得上（或目录里还没有录过的分片）才继续，并改记新地址；各轨按判定的起点建窗口，拉要录的分片引用的 init 段，
+    /// 再处理暂存的播放列表。期间要求停止或服务器前后矛盾时返回结束原因。
+    async fn begin(
+        &mut self,
+        decision: Decision,
         fetcher: &mut Fetcher,
-        refreshes: &mut JoinSet<Refreshed>,
-        refresh_cancel: &CancellationToken,
-        cancel: &CancellationToken,
-        stop: &CancellationToken,
-    ) -> Result<LiveEnd, Error> {
+    ) -> Result<Option<LiveEnd>, Error> {
+        if self.dir.url_changed(self.job) {
+            if !decision.may_switch_source {
+                return Err(Error::WorkDir {
+                    path: self.dir.layout().root().to_path_buf(),
+                    problem: WorkDirProblem::SourceUnverified,
+                });
+            }
+            self.dir.save(self.job).await?;
+        }
+        let now = Instant::now();
+        for (track, (start, candidate)) in decision.tracks.into_iter().enumerate() {
+            self.tracks[track].begin(start, now);
+            let window = self.tracks[track].window();
+            let known = window.known_inits();
+            let inits = new_inits(
+                &self.http,
+                &candidate.playlist,
+                &known,
+                window.processed(),
+                &self.cancel,
+            );
+            let Some(fetched) = until_stopped(&self.stop, inits).await? else {
+                return Ok(Some(LiveEnd::Stopped));
+            };
+            let session = decision.session;
+            let playlist = &candidate.playlist;
+            if let Some(end) = self
+                .process(
+                    session,
+                    track,
+                    playlist,
+                    fetched,
+                    candidate.started,
+                    fetcher,
+                )
+                .await?
+            {
+                return Ok(Some(end));
+            }
+        }
+        Ok(None)
+    }
+
+    /// 录制第 `session` 个会话：按节奏刷新，新分片排入下载，直到满足结束条件。
+    async fn run(&mut self, session: u32, fetcher: &mut Fetcher) -> Result<LiveEnd, Error> {
         loop {
             if self.tracks.iter().all(LiveTrack::is_ended) {
                 return Ok(LiveEnd::EndList);
             }
             let max_us = self.max_us();
-            if self.tracks.iter().all(|t| t.finished(max_us)) {
+            if !self.tracks.iter().any(|t| t.needs_refresh(max_us)) {
                 return Ok(LiveEnd::DurationReached);
             }
-            let now = Instant::now();
-            self.start_due_refreshes(now, refreshes, refresh_cancel);
-            let next_due = self
-                .tracks
-                .iter()
-                .filter(|t| !t.finished(max_us))
-                .filter_map(LiveTrack::due_at)
-                .min();
-            let stall = self.next_stall();
-            tokio::select! {
-                _ = cancel.cancelled() => return Err(Error::Cancelled),
-                _ = stop.cancelled() => return Ok(LiveEnd::Stopped),
-                _ = sleep_until(stall.map(|(at, _)| at)), if stall.is_some() => {
-                    let (_, track) = stall.expect("分支只在有停滞时刻时启用");
-                    return self.stalled(track, Instant::now());
+            let downloads = async {
+                match fetcher.next().await {
+                    Some(finished) => finished,
+                    None => std::future::pending().await,
                 }
-                _ = sleep_until(next_due), if next_due.is_some() => {}
-                Some(joined) = refreshes.join_next() => {
-                    let refreshed = match joined {
-                        Ok(refreshed) => refreshed,
-                        Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-                        Err(_) => unreachable!("刷新任务只经协作取消结束，不被中止"),
+            };
+            match self.next_event(downloads).await? {
+                Event::Stop => return Ok(LiveEnd::Stopped),
+                Event::Stall(track) => return self.stalled(track, Instant::now()),
+                Event::Due => {}
+                Event::Refreshed(refreshed) => {
+                    let Some(loaded) = self.refresh_result(refreshed)? else {
+                        continue;
                     };
-                    if let Some(end) = self.on_refresh(refreshed, fetcher).await? {
+                    let Loaded {
+                        track,
+                        playlist,
+                        fetched,
+                        started,
+                    } = loaded;
+                    if let Some(end) = self
+                        .process(session, track, &playlist, fetched, started, fetcher)
+                        .await?
+                    {
                         return Ok(end);
                     }
                 }
-                Some((id, result)) = fetcher.next(), if !fetcher.is_idle() => {
-                    self.on_finished(id, result)?;
-                }
+                Event::Downloaded((id, result)) => self.on_finished(session, id, result)?,
             }
+        }
+    }
+
+    /// 发起到期的刷新，等下一件事。`downloads` 为下一个下载结果。
+    async fn next_event<D>(
+        &mut self,
+        downloads: impl Future<Output = D>,
+    ) -> Result<Event<D>, Error> {
+        let now = Instant::now();
+        self.start_due_refreshes(now);
+        let max_us = self.max_us();
+        let next_due = self
+            .tracks
+            .iter()
+            .filter(|t| t.needs_refresh(max_us))
+            .filter_map(LiveTrack::due_at)
+            .min();
+        let stall = self.next_stall();
+        tokio::select! {
+            _ = self.cancel.cancelled() => Err(Error::Cancelled),
+            _ = self.stop.cancelled() => Ok(Event::Stop),
+            _ = sleep_until(stall.map(|(at, _)| at)), if stall.is_some() => {
+                Ok(Event::Stall(stall.expect("分支只在有停滞时刻时启用").1))
+            }
+            _ = sleep_until(next_due), if next_due.is_some() => Ok(Event::Due),
+            Some(joined) = self.refreshes.join_next() => match joined {
+                Ok(refreshed) => Ok(Event::Refreshed(refreshed)),
+                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                Err(_) => unreachable!("刷新任务只经协作取消结束，不被中止"),
+            },
+            downloaded = downloads => Ok(Event::Downloaded(downloaded)),
         }
     }
 
@@ -298,37 +438,57 @@ impl Recorder<'_> {
             .map(|max| u64::try_from(max.as_micros()).unwrap_or(u64::MAX))
     }
 
-    fn start_due_refreshes(
-        &mut self,
-        now: Instant,
-        refreshes: &mut JoinSet<Refreshed>,
-        cancel: &CancellationToken,
-    ) {
+    fn start_due_refreshes(&mut self, now: Instant) {
         let max_us = self.max_us();
         for (index, t) in self.tracks.iter_mut().enumerate() {
-            if t.finished(max_us) || t.due_at().is_none_or(|at| at > now) {
+            if !t.needs_refresh(max_us) || t.due_at().is_none_or(|at| at > now) {
                 continue;
             }
             let request = t.start_refresh(now);
-            refreshes.spawn(refresh(
+            self.refreshes.spawn(refresh(
                 self.http.clone(),
                 self.hooks.clone(),
                 index,
                 request,
-                cancel.clone(),
+                self.refresh_cancel.clone(),
             ));
+        }
+    }
+
+    /// 刷新的结果：拿到播放列表时返回它；可以再试的失败安排下次刷新、返回 None；其余失败上抛。
+    fn refresh_result(&mut self, refreshed: Refreshed) -> Result<Option<Loaded>, Error> {
+        let Refreshed {
+            track,
+            started,
+            result,
+        } = refreshed;
+        match result {
+            Ok((playlist, fetched)) => {
+                self.tracks[track].refreshed();
+                Ok(Some(Loaded {
+                    track,
+                    playlist,
+                    fetched,
+                    started,
+                }))
+            }
+            Err(e) if waitable_refresh_error(&e) => {
+                self.tracks[track].refresh_failed(e, Instant::now());
+                Ok(None)
+            }
+            Err(e) => Err(e),
         }
     }
 
     /// 第 `track` 条轨停滞时如何结束：看起来直播已结束时正常收尾，否则任务失败。
     fn stalled(&mut self, track: usize, now: Instant) -> Result<LiveEnd, Error> {
         let max_us = self.max_us();
-        let others_listing = self
+        let others_live = self
             .tracks
             .iter()
             .enumerate()
-            .any(|(i, t)| i != track && !t.finished(max_us) && t.is_listing(now));
-        match self.tracks[track].stall(now, others_listing) {
+            .any(|(i, t)| i != track && t.needs_refresh(max_us) && t.is_live(now));
+        match self.tracks[track].stall(now, others_live) {
             Ok(cause) => Ok(LiveEnd::Stalled { track, cause }),
             Err(cause) => Err(Error::LiveStalled { track, cause }),
         }
@@ -340,147 +500,9 @@ impl Recorder<'_> {
         self.tracks
             .iter()
             .enumerate()
-            .filter(|(_, t)| !t.finished(max_us))
+            .filter(|(_, t)| t.needs_refresh(max_us))
             .filter_map(|(i, t)| Some((t.stall_at(self.options.stall_timeout)?, i)))
             .min()
-    }
-
-    async fn on_refresh(
-        &mut self,
-        refreshed: Refreshed,
-        fetcher: &mut Fetcher,
-    ) -> Result<Option<LiveEnd>, Error> {
-        let Refreshed {
-            track,
-            started,
-            result,
-        } = refreshed;
-        match result {
-            Ok((playlist, inits)) => {
-                self.tracks[track].refreshed();
-                self.apply(track, playlist, inits, started, fetcher).await
-            }
-            Err(e) if waitable_refresh_error(&e) => {
-                self.tracks[track].refresh_failed(e, Instant::now());
-                Ok(None)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    /// 处理一份播放列表：会话已定时照常处理，续录判定期间作为候选。`started` 为这次加载开始的时刻。
-    async fn apply(
-        &mut self,
-        track: usize,
-        playlist: MediaPlaylist,
-        fetched: NewInits,
-        started: Instant,
-        fetcher: &mut Fetcher,
-    ) -> Result<Option<LiveEnd>, Error> {
-        match self.session {
-            SessionState::Decided(session) => {
-                self.process(session, track, &playlist, fetched, started, fetcher)
-                    .await
-            }
-            SessionState::Deciding(_) => {
-                self.consider(track, playlist, fetched, started, fetcher)
-                    .await
-            }
-        }
-    }
-
-    /// 续录判定期间的一份播放列表：没有分片时等下次刷新；否则核对能否接着上一个会话录，记为该轨的候选，
-    /// 各轨都有候选后定下会话并处理暂存的播放列表。
-    async fn consider(
-        &mut self,
-        track: usize,
-        playlist: MediaPlaylist,
-        fetched: NewInits,
-        started: Instant,
-        fetcher: &mut Fetcher,
-    ) -> Result<Option<LiveEnd>, Error> {
-        if playlist.segments.is_empty() && !playlist.ended {
-            self.tracks[track].wait_unchanged(Instant::now());
-            return Ok(None);
-        }
-        let fits = self.fits(track, &playlist, fetcher).await?;
-        self.tracks[track].hold();
-        let SessionState::Deciding(deciding) = &mut self.session else {
-            unreachable!("只在判定会话期间调用");
-        };
-        deciding.offer(
-            track,
-            Candidate {
-                playlist,
-                fetched,
-                started,
-                fits,
-            },
-        );
-        if !deciding.is_complete() {
-            return Ok(None);
-        }
-        let decision = deciding.decide().ok_or_else(|| Error::WorkDir {
-            path: self.dir.layout().root().to_path_buf(),
-            problem: WorkDirProblem::Corrupt("会话编号已达上限".into()),
-        })?;
-        self.begin(decision, fetcher).await
-    }
-
-    /// 第 `track` 条轨能否接着上一个会话录：窗口与已录的分片重叠且一致，重叠中最新的分片内容也相同。
-    async fn fits(
-        &self,
-        track: usize,
-        playlist: &MediaPlaylist,
-        fetcher: &Fetcher,
-    ) -> Result<bool, Error> {
-        let SessionState::Deciding(deciding) = &self.session else {
-            unreachable!("只在判定会话期间调用");
-        };
-        let Some(earlier) = deciding.earlier(track) else {
-            return Ok(false);
-        };
-        let Some(segment) = newest_overlap(earlier, playlist) else {
-            return Ok(false);
-        };
-        let name = &earlier.segments()[&segment.sequence];
-        let stored = self.dir.layout().segment(track, name);
-        same_content(fetcher, track, segment, stored).await
-    }
-
-    /// 定下会话：地址变了时须接得上才继续并改记新地址；各轨按判定的起点重建窗口，再处理暂存的播放列表。
-    async fn begin(
-        &mut self,
-        decision: Decision,
-        fetcher: &mut Fetcher,
-    ) -> Result<Option<LiveEnd>, Error> {
-        if self.dir.url_changed(self.job) {
-            if !decision.continued {
-                return Err(Error::WorkDir {
-                    path: self.dir.layout().root().to_path_buf(),
-                    problem: WorkDirProblem::SourceUnverified,
-                });
-            }
-            self.dir.save(self.job).await?;
-        }
-        let session = decision.session;
-        self.session = SessionState::Decided(session);
-        for (track, (start, candidate)) in decision.tracks.into_iter().enumerate() {
-            self.tracks[track].begin(start);
-            let Candidate {
-                playlist,
-                fetched,
-                started,
-                ..
-            } = candidate;
-            if let Some(end) = self
-                .process(session, track, &playlist, fetched, started, fetcher)
-                .await?
-            {
-                return Ok(Some(end));
-            }
-        }
-        Ok(None)
     }
 
     /// 处理第 `session` 个会话的一份播放列表：新 init 段落盘后再把新分片排入下载。
@@ -530,57 +552,89 @@ impl Recorder<'_> {
         Ok(None)
     }
 
-    /// 处理一个分片的下载结果：取不到的记为缺失，其余失败上抛。
-    fn on_finished(&mut self, id: ItemId, result: Result<u64, Error>) -> Result<(), Error> {
-        match result {
+    /// 处理第 `session` 个会话一个分片的下载结果：取不到的记为缺失，其余失败上抛。
+    fn on_finished(
+        &mut self,
+        session: u32,
+        id: ItemId,
+        result: Result<u64, Error>,
+    ) -> Result<(), Error> {
+        let error = match result {
             Ok(len) => {
-                record_done(self.progress, len);
+                count_done(self.progress, len);
                 self.tracks[id.track].segment_recorded(Instant::now());
-                Ok(())
+                return Ok(());
             }
-            Err(e) => match missable_segment(&e) {
-                Some(kind) => {
-                    let SessionState::Decided(session) = self.session else {
-                        unreachable!("会话定下之前不会排入下载");
-                    };
-                    self.tracks[id.track].segment_missed(kind.clone());
-                    self.missed.push(Missed {
-                        session,
-                        track: id.track,
-                        first: id.sequence,
-                        last: id.sequence,
-                        reason: MissReason::Failed(kind),
-                    });
-                    self.progress.send_modify(|p| p.segments_missed += 1);
-                    Ok(())
+            Err(error) => error,
+        };
+        let Some(kind) = missable(&error) else {
+            return Err(error);
+        };
+        self.tracks[id.track].segment_missed(kind.clone());
+        self.missed.push(Missed {
+            session,
+            track: id.track,
+            first: id.sequence,
+            last: id.sequence,
+            reason: MissReason::Failed(kind),
+        });
+        self.progress.send_modify(|p| p.segments_missed += 1);
+        Ok(())
+    }
+
+    /// 取消刷新任务并等它们退出：协作取消，在途的回调返回后才结束，不直接中止。
+    async fn join_refreshes(&mut self) {
+        self.refresh_cancel.cancel();
+        while let Some(joined) = self.refreshes.join_next().await {
+            if let Err(e) = joined
+                && e.is_panic()
+            {
+                std::panic::resume_unwind(e.into_panic());
+            }
+        }
+    }
+
+    /// 录制结束后收尾：正常结束时等已列出的分片下完；失败时取消其余下载、等它们退出。
+    async fn settle(
+        mut self,
+        result: Result<(Option<u32>, LiveEnd), Error>,
+        fetcher: &mut Fetcher,
+    ) -> Result<Recording, Error> {
+        match result {
+            Ok((session, end)) => {
+                if let Some(session) = session {
+                    fetcher
+                        .drain(|id, r| self.on_finished(session, id, r))
+                        .await?;
                 }
-                None => Err(e),
-            },
+                Ok(Recording {
+                    end,
+                    missed: self.missed,
+                })
+            }
+            Err(e) => {
+                fetcher.abort();
+                // 在途的项随后以 Cancelled 结束，只等它们收尾，不再处理结果
+                while fetcher.next().await.is_some() {}
+                Err(e)
+            }
         }
     }
 }
 
-/// 重新下载 `segment` 并与目录中已存的 `stored` 逐字节比较。取不到（404/410、重试后仍失败）时无从核对，
-/// 视为不同；其余失败（key、校验、回调）同下载失败一样使任务失败。
-async fn same_content(
-    fetcher: &Fetcher,
-    track: usize,
-    segment: &Segment,
-    stored: PathBuf,
-) -> Result<bool, Error> {
-    let data = match fetcher.fetch(segment).await {
-        Ok(data) => data,
-        Err(Error::Cancelled) => return Err(Error::Cancelled),
-        Err(e) if missable_http(&e).is_some() => return Ok(false),
-        Err(cause) => {
-            return Err(Error::Segment {
-                track,
-                sequence: segment.sequence,
-                url: Box::new(segment.uri.clone()),
-                cause: Box::new(cause),
-            });
-        }
-    };
+/// 等 `work` 完成；其间调用方要求停止时为 `Ok(None)`，`work` 随之取消。
+async fn until_stopped<T>(
+    stop: &CancellationToken,
+    work: impl Future<Output = Result<T, Error>>,
+) -> Result<Option<T>, Error> {
+    tokio::select! {
+        _ = stop.cancelled() => Ok(None),
+        result = work => result.map(Some),
+    }
+}
+
+/// `data` 与目录中已存的 `stored` 逐字节相同。
+async fn same_file(stored: PathBuf, data: Vec<u8>) -> Result<bool, Error> {
     blocking(move || {
         std::fs::read(&stored)
             .map(|existing| existing == data)
@@ -593,10 +647,16 @@ async fn same_content(
     .await?
 }
 
-/// 分片请求本身取不到时可记为缺失；key、回调、校验等失败不在此列。
-fn missable_segment(error: &Error) -> Option<HttpError> {
+/// 取不到的请求：404/410（已过期），或重试后仍失败的临时故障，可记为缺失、录制继续；分片的失败看其原因。
+/// key、回调、校验等失败不在此列。
+pub(super) fn missable(error: &Error) -> Option<HttpError> {
     match error {
-        Error::Segment { cause, .. } => missable_http(cause),
+        Error::Http { kind, .. }
+            if kind.retryable() || matches!(kind, HttpError::Status(404 | 410)) =>
+        {
+            Some(kind.clone())
+        }
+        Error::Segment { cause, .. } => missable(cause),
         _ => None,
     }
 }
@@ -608,7 +668,7 @@ fn waitable_refresh_error(error: &Error) -> bool {
         Error::Playlist { cause, .. } => {
             matches!(**cause, hls::Error::Syntax { .. } | hls::Error::Empty)
         }
-        _ => missable_http(error).is_some(),
+        _ => missable(error).is_some(),
     }
 }
 
@@ -619,6 +679,7 @@ async fn sleep_until(at: Option<Instant>) {
     }
 }
 
+/// 刷新一条轨：拉播放列表；会话已定时再拉要录的新分片引用的新 init 段。
 async fn refresh(
     http: Arc<Http>,
     hooks: Arc<dyn Hooks>,
@@ -629,14 +690,12 @@ async fn refresh(
     let started = Instant::now();
     let result = async {
         let playlist = resolve::fetch_media(&http, &hooks, &request.url, &cancel).await?;
-        let inits = new_inits(
-            &http,
-            &playlist,
-            &request.known,
-            &request.processed,
-            &cancel,
-        )
-        .await?;
+        let inits = match &request.processed {
+            Some(processed) => {
+                new_inits(&http, &playlist, &request.known, processed, &cancel).await?
+            }
+            None => NewInits::new(),
+        };
         Ok((playlist, inits))
     }
     .await;
