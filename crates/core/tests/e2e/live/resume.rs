@@ -248,7 +248,7 @@ async fn merge_only_rejects_a_vod_directory() {
         matches!(
             err,
             Error::WorkDir {
-                problem: WorkDirProblem::KindMismatch { .. },
+                problem: WorkDirProblem::NotLiveRecording,
                 ..
             }
         ),

@@ -170,7 +170,9 @@ pub enum Resume {
     /// 来源地址只有查询串变了（如换了令牌）时，必须接得上才续录，否则报
     /// [`crate::WorkDirProblem::SourceUnverified`]
     Continue,
-    /// 不联网，只把已录到的分片合并成输出；没有可合并的分片时报 [`Error::NothingRecorded`]
+    /// 不联网，只把已录到的分片合并成输出。目录须是本来源（地址不含查询串、选轨偏好与记录的相同）的直播录制：
+    /// 来源不同报 [`crate::WorkDirProblem::SourceMismatch`]，是点播的下载报
+    /// [`crate::WorkDirProblem::NotLiveRecording`]；没有可合并的分片时报 [`Error::NothingRecorded`]
     MergeOnly,
 }
 
