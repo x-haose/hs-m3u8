@@ -47,7 +47,7 @@ crates/py ────┼──> crates/core ──> crates/hls
               │          └──────> crates/remux
 ```
 
-- `hls` 不依赖 tokio、reqwest、ffmpeg；`core` 不依赖 tauri、pyo3；`remux` 不依赖 `core`。
+- `hls` 不依赖 tokio、reqwest、ffmpeg；`remux` 不依赖 `core`、`hls`、tokio、reqwest；`core` 不依赖 tauri、pyo3。
 - 跨边界一律翻译：`hls` 不暴露第三方解析库的类型；`py` 与 `apps/desktop` 把 `core` 的类型转成各自的表示，`core` 不出现 Python 或前端的概念。
 - 以上由检查命令机器判定（第 10 节），不靠人看。
 
@@ -256,10 +256,10 @@ hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
 检查命令（`make check`，零告警才算通过）：
 
 1. `cargo fmt --check`
-2. `cargo clippy --workspace --all-targets -- -D warnings`
-3. `cargo test --workspace`
-4. `cargo deny check`：许可证白名单（LGPL 只允许 FFmpeg）、安全公告
-5. 依赖边界检查：`cargo tree` 断言第 3 节的依赖方向
+2. 依赖方向：`scripts/check_deps.sh` 用 `cargo tree` 断言第 3 节（含传递依赖与全部目标平台）
+3. `cargo deny check`（`deny.toml`）：安全公告与撤回版本、许可证白名单（只允许宽松许可证；FFmpeg 的 LGPL 由其构建脚本检查）、禁用 OpenSSL、依赖只来自 crates.io
+4. `cargo clippy --workspace --all-targets -- -D warnings`
+5. `cargo test --workspace`
 6. Python：maturin 构建 + 端到端冒烟
 7. 前端（GUI 阶段）：`tsc --noEmit`、lint、构建
 
