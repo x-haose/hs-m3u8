@@ -35,6 +35,8 @@ rs_check:
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo test --workspace
 	@cargo llvm-cov --version >/dev/null 2>&1 || { echo "缺少 cargo-llvm-cov：cargo install cargo-llvm-cov --version 0.9.1 --locked"; exit 1; }
+	# 源码改动后旧的插桩产物会混进统计，先清掉
+	cargo llvm-cov clean --workspace
 	cargo llvm-cov -p hs-m3u8-hls --fail-under-lines 80 --summary-only
 	cargo llvm-cov -p hs-m3u8-core --fail-under-lines 80 --summary-only
 

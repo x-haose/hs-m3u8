@@ -94,5 +94,7 @@ jobs:
       - name: 行覆盖（Linux）
         if: runner.os == 'Linux'
         run: |
+          # 缓存恢复的旧插桩产物会混进统计，先清掉
+          cargo llvm-cov clean --workspace
           cargo llvm-cov -p hs-m3u8-hls --fail-under-lines 80 --summary-only
           cargo llvm-cov -p hs-m3u8-core --fail-under-lines 80 --summary-only
