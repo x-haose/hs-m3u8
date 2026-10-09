@@ -1,0 +1,212 @@
+//! 下载计划：解析播放列表、选轨，得到每条轨的分片与不连续段组，并在下载前确认能够合并。
+
+use std::ops::Range;
+
+use hs_m3u8_hls::{self as hls, InitSection, Playlist, Segment};
+use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
+use url::Url;
+
+use crate::http::Http;
+use crate::{Error, JobRequest, Purpose, Unsupported, run_hook};
+
+/// 一条轨：第 0 条为所选变体（视频，可能混有音频），第 1 条为独立的音频 rendition。
+pub(crate) struct Track {
+    pub segments: Vec<Segment>,
+    /// 本轨用到的 init 段，按首次出现的顺序去重；下标即任务目录中的编号
+    pub inits: Vec<InitSection>,
+}
+
+impl Track {
+    fn new(segments: Vec<Segment>) -> Self {
+        let mut inits: Vec<InitSection> = Vec::new();
+        for init in segments.iter().filter_map(|s| s.init.as_ref()) {
+            if !inits.contains(init) {
+                inits.push(init.clone());
+            }
+        }
+        Track { segments, inits }
+    }
+
+    /// 分片所用 init 段在 `inits` 中的下标；无 init 段时为 None。
+    pub(crate) fn init_index(&self, segment: &Segment) -> Option<usize> {
+        let init = segment.init.as_ref()?;
+        let index = self.inits.iter().position(|i| i == init);
+        Some(index.expect("inits 含本轨所有分片的 init 段"))
+    }
+}
+
+pub(crate) struct Plan {
+    pub tracks: Vec<Track>,
+    /// 不连续段组，按播放顺序；每组为各轨在组内的分片下标范围（轨道顺序同 `tracks`），范围都不为空
+    pub groups: Vec<Vec<Range<usize>>>,
+}
+
+impl Plan {
+    fn new(tracks: Vec<Track>) -> Result<Self, Error> {
+        let groups = groups(&tracks)?;
+        Ok(Plan { tracks, groups })
+    }
+
+    pub(crate) fn segment_count(&self) -> usize {
+        self.tracks.iter().map(|t| t.segments.len()).sum()
+    }
+
+    /// 续传校验用的摘要（SHA-256 十六进制）。
+    ///
+    /// 只覆盖分片的身份：轨道、序号、去掉查询串与片段的地址、时长、不连续段序号、字节范围、init 段地址与范围。
+    /// 不含 key 地址与 IV：任务目录里存的是已解密的分片；也不含查询串：很多站点的签名或令牌每次会话都不同。
+    pub(crate) fn digest(&self) -> String {
+        let range = |r: Option<hls::ByteRange>| {
+            r.map(|r| format!("{}@{}", r.length, r.offset))
+                .unwrap_or_default()
+        };
+        let mut hasher = Sha256::new();
+        for (index, track) in self.tracks.iter().enumerate() {
+            hasher.update(format!("track {index} {}\n", track.segments.len()));
+            for s in &track.segments {
+                let init = s
+                    .init
+                    .as_ref()
+                    .map(|i| format!("{} {}", identity(&i.uri), range(i.byte_range)))
+                    .unwrap_or_default();
+                hasher.update(format!(
+                    "{} {} {} {} {} {init}\n",
+                    s.sequence,
+                    identity(&s.uri),
+                    s.duration_us,
+                    s.discontinuity,
+                    range(s.byte_range),
+                ));
+            }
+        }
+        hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+}
+
+/// 去掉查询串与片段后的地址。
+fn identity(url: &Url) -> String {
+    let mut url = url.clone();
+    url.set_query(None);
+    url.set_fragment(None);
+    url.into()
+}
+
+/// 按不连续段序号切分各轨，并检查能否合并：各轨的不连续段序列相同，同一组内每条轨的 init 段不变。
+fn groups(tracks: &[Track]) -> Result<Vec<Vec<Range<usize>>>, Error> {
+    let runs = tracks
+        .iter()
+        .enumerate()
+        .map(|(index, track)| runs(index, track))
+        .collect::<Result<Vec<_>, _>>()?;
+    let numbers = |runs: &[(u64, Range<usize>)]| runs.iter().map(|(d, _)| *d).collect::<Vec<_>>();
+    let first = numbers(&runs[0]);
+    for (track, track_runs) in runs.iter().enumerate().skip(1) {
+        let found = numbers(track_runs);
+        if found != first {
+            return Err(Error::Unsupported(Unsupported::DiscontinuityMismatch {
+                track,
+                first,
+                found,
+            }));
+        }
+    }
+    Ok((0..first.len())
+        .map(|group| runs.iter().map(|r| r[group].1.clone()).collect())
+        .collect())
+}
+
+/// 一条轨按不连续段序号切成的连续区间。播放列表中的不连续段序号只增不减，所以各区间的序号互不相同。
+fn runs(index: usize, track: &Track) -> Result<Vec<(u64, Range<usize>)>, Error> {
+    let mut runs: Vec<(u64, Range<usize>)> = Vec::new();
+    for (i, s) in track.segments.iter().enumerate() {
+        match runs.last_mut() {
+            Some((discontinuity, range)) if *discontinuity == s.discontinuity => {
+                if track.segments[range.start].init != s.init {
+                    return Err(Error::Unsupported(Unsupported::InitChangesWithinGroup {
+                        track: index,
+                        discontinuity: s.discontinuity,
+                    }));
+                }
+                range.end = i + 1;
+            }
+            _ => runs.push((s.discontinuity, i..i + 1)),
+        }
+    }
+    Ok(runs)
+}
+
+pub(crate) async fn resolve(
+    http: &Http,
+    request: &JobRequest,
+    cancel: &CancellationToken,
+) -> Result<Plan, Error> {
+    let tracks = match fetch(http, request, &request.url, cancel).await? {
+        Playlist::Media(media) => vec![track(media, &request.url)?],
+        Playlist::Master(master) => {
+            let selection = hls::select(&master, &request.preference)?;
+            let mut tracks =
+                vec![media_track(http, request, &selection.variant.uri, cancel).await?];
+            if let Some(audio) = selection.audio {
+                let uri = audio.uri.expect("select 只返回带 URI 的 rendition");
+                tracks.push(media_track(http, request, &uri, cancel).await?);
+            }
+            tracks
+        }
+    };
+    Plan::new(tracks)
+}
+
+async fn media_track(
+    http: &Http,
+    request: &JobRequest,
+    url: &Url,
+    cancel: &CancellationToken,
+) -> Result<Track, Error> {
+    match fetch(http, request, url, cancel).await? {
+        Playlist::Media(media) => track(media, url),
+        Playlist::Master(_) => Err(Error::InvalidInput(format!(
+            "变体 {url} 指向的是主播放列表，不是媒体播放列表"
+        ))),
+    }
+}
+
+fn track(media: hls::MediaPlaylist, url: &Url) -> Result<Track, Error> {
+    if !media.ended {
+        return Err(Error::Unsupported(Unsupported::Live));
+    }
+    if media.segments.is_empty() {
+        return Err(Error::Unsupported(Unsupported::EmptyPlaylist(Box::new(
+            url.clone(),
+        ))));
+    }
+    Ok(Track::new(media.segments))
+}
+
+/// 拉取并解析播放列表；相对地址按重定向之后的最终地址解析。
+async fn fetch(
+    http: &Http,
+    request: &JobRequest,
+    url: &Url,
+    cancel: &CancellationToken,
+) -> Result<Playlist, Error> {
+    let fetched = http.get(Purpose::Playlist, url, None, cancel).await?;
+    let final_url = fetched.url;
+    let text = String::from_utf8(fetched.body).map_err(|_| Error::Playlist {
+        url: Box::new(final_url.clone()),
+        source: Box::new(hls::Error::NotAPlaylist),
+    })?;
+    let hook_url = final_url.clone();
+    let text = run_hook(&request.hooks, Purpose::Playlist, move |hooks| {
+        hooks.on_playlist(&hook_url, text)
+    })
+    .await?;
+    hls::parse(&text, &final_url).map_err(|source| Error::Playlist {
+        url: Box::new(final_url),
+        source: Box::new(source),
+    })
+}

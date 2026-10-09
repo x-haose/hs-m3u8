@@ -1,0 +1,30 @@
+[package]
+name = "hs-m3u8-core"
+version = "0.0.0"
+description = "HLS download engine: planning, concurrent segment fetching, AES-128 decryption with verification, resumable work directories and MP4 remuxing"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+aes.workspace = true
+cbc.workspace = true
+hs-m3u8-hls = { path = "../hls" }
+hs-m3u8-remux = { path = "../remux" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "macros", "rt", "sync", "time"] }
+tokio-util.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
+
+[lints]
+workspace = true
