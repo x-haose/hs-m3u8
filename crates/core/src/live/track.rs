@@ -9,10 +9,18 @@ use url::Url;
 
 use super::session::Start;
 use super::window::{NewInits, Processed, Scope, Update, Window};
-use crate::{Error, HttpError, LiveEnd, StallCause, StallError, Unsupported};
+use crate::{Error, HttpError, LiveEnd, MissReason, StallCause, StallError, Unsupported};
 
 /// 两次刷新之间的最短间隔，防止 TARGETDURATION 为 0 或极小时空转。
 const MIN_REFRESH: Duration = Duration::from_millis(100);
+
+/// 这么多个目标时长内列出过新分片，即认为播放列表仍在更新：分片时长不超过目标时长（RFC 8216 4.3.3.1），
+/// 正常的直播每个目标时长至少出一个新分片，再留一个目标时长给刷新的间隔。
+const LISTING_TARGETS: u32 = 2;
+
+/// 停滞判定至少等这么多个目标时长：比「仍在更新」的判定多一个，正常出分片的直播不会因为 stall_timeout
+/// 设得比目标时长还短而被判为停滞。
+const STALL_TARGETS: u32 = 3;
 
 enum Refresh {
     Due(Instant),
@@ -21,6 +29,8 @@ enum Refresh {
     },
     /// 续录判定会话期间，已拿到可用的播放列表，等其他轨
     Held,
+    /// 服务器要求的等待长到无法表示：不再刷新，由停滞判定或停止结束录制
+    Suspended,
     Ended,
 }
 
@@ -41,8 +51,12 @@ pub(super) struct LiveTrack {
     window: Window,
     /// 最近一次有分片下载成功的时刻（或录制开始）
     last_recorded: Instant,
-    /// 最近一次列出新分片的时刻（或录制开始）
+    /// 最近一次列出要录的新分片的时刻（或录制开始）
     last_listed: Instant,
+    /// 排入下载、还没有结果的分片数
+    outstanding: usize,
+    /// 最近一次取不到分片或 init 段的原因
+    last_failure: Option<HttpError>,
     /// 最近一次刷新失败的原因；刷新成功即清空
     last_error: Option<Error>,
 }
@@ -66,6 +80,8 @@ impl LiveTrack {
             window: Window::new(Start::Fresh, recorded_us),
             last_recorded: now,
             last_listed: now,
+            outstanding: 0,
+            last_failure: None,
             last_error: None,
         })
     }
@@ -93,7 +109,7 @@ impl LiveTrack {
     pub(super) fn due_at(&self) -> Option<Instant> {
         match self.refresh {
             Refresh::Due(at) => Some(at),
-            Refresh::InFlight { .. } | Refresh::Held | Refresh::Ended => None,
+            Refresh::InFlight { .. } | Refresh::Held | Refresh::Suspended | Refresh::Ended => None,
         }
     }
 
@@ -117,7 +133,9 @@ impl LiveTrack {
         let wait = self
             .half_target()
             .max(error.retry_after().unwrap_or_default());
-        self.refresh = Refresh::Due(now + wait);
+        self.refresh = now
+            .checked_add(wait)
+            .map_or(Refresh::Suspended, Refresh::Due);
         self.last_error = Some(error);
     }
 
@@ -150,6 +168,14 @@ impl LiveTrack {
         if update.any_new {
             self.last_listed = now;
         }
+        let failure = update.missed.iter().rev().find_map(|m| match &m.reason {
+            MissReason::Failed(kind) | MissReason::InitFailed(kind) => Some(kind),
+            _ => None,
+        });
+        if let Some(kind) = failure {
+            self.last_failure = Some(kind.clone());
+        }
+        self.outstanding += update.items.len();
         self.refresh = if update.ended {
             Refresh::Ended
         } else if update.changed {
@@ -161,43 +187,71 @@ impl LiveTrack {
         Ok(ControlFlow::Continue(update))
     }
 
-    /// 本轨有分片下载成功。
+    /// 本轨排入下载的一个分片下载成功。
     pub(super) fn segment_recorded(&mut self, now: Instant) {
+        self.outstanding -= 1;
         self.last_recorded = now;
+    }
+
+    /// 本轨排入下载的一个分片取不到，记为缺失。
+    pub(super) fn segment_missed(&mut self, kind: HttpError) {
+        self.outstanding -= 1;
+        self.last_failure = Some(kind);
     }
 
     fn half_target(&self) -> Duration {
         (self.target / 2).max(MIN_REFRESH)
     }
 
-    /// 停滞的时刻；时长大到无法表示时为 None（不会停滞）。
-    pub(super) fn stall_at(&self, stall_timeout: Duration) -> Option<Instant> {
-        // 至少等三个目标时长：目标时长比 stall_timeout 还长时，正常的直播两次出新分片之间也会超过它
-        self.last_recorded
-            .checked_add(stall_timeout.max(self.target.saturating_mul(3)))
+    /// 播放列表仍在列出要录的新分片。
+    pub(super) fn is_listing(&self, now: Instant) -> bool {
+        now.duration_since(self.last_listed) < self.target.saturating_mul(LISTING_TARGETS)
     }
 
-    /// 停滞的结论：`Ok` 为看起来直播已结束，`Err` 为故障。
-    pub(super) fn stall(&mut self, now: Instant) -> Result<StallCause, StallError> {
+    /// 停滞的时刻：最近一次录到分片之后，持续 `stall_timeout`（至少 [`STALL_TARGETS`] 个目标时长）。
+    /// 有分片排着队或在下载时还在等本任务的下载，不算停滞，为 None；时长大到无法表示时也为 None。
+    pub(super) fn stall_at(&self, stall_timeout: Duration) -> Option<Instant> {
+        if self.outstanding > 0 {
+            return None;
+        }
+        self.last_recorded
+            .checked_add(stall_timeout.max(self.target.saturating_mul(STALL_TARGETS)))
+    }
+
+    /// 停滞的结论，取走最近一次刷新失败的原因；只在据此结束录制时调用。`Ok` 为看起来直播已结束，
+    /// `Err` 为故障。`others_listing` 为其他轨仍在列出新分片：这时本轨不再出新分片是本轨的故障。
+    pub(super) fn stall(
+        &mut self,
+        now: Instant,
+        others_listing: bool,
+    ) -> Result<StallCause, StallError> {
         if let Refresh::InFlight { started } = self.refresh
             && now.duration_since(started) >= self.target
         {
             return Err(StallError::RefreshPending);
         }
-        if let Some(error) = self.last_error.take() {
-            return match error {
-                Error::Http {
-                    kind: HttpError::Status(status @ (404 | 410)),
-                    ..
-                } => Ok(StallCause::PlaylistGone(status)),
-                error => Err(StallError::RefreshFailed(Box::new(error))),
+        let ended = match self.last_error.take() {
+            Some(Error::Http {
+                kind: HttpError::Status(status @ (404 | 410)),
+                ..
+            }) => StallCause::PlaylistGone(status),
+            Some(error) => return Err(StallError::RefreshFailed(Box::new(error))),
+            None if self.is_listing(now) => {
+                let kind = self.last_failure.clone().expect(
+                    "仍在列出新分片、没有在途的下载又没有录到：新分片都记了缺失，有失败原因",
+                );
+                return Err(StallError::Unrecordable(kind));
+            }
+            None => StallCause::NoNewSegments,
+        };
+        if others_listing {
+            let playlist_gone = match ended {
+                StallCause::PlaylistGone(status) => Some(status),
+                StallCause::NoNewSegments => None,
             };
+            return Err(StallError::TrackStopped { playlist_gone });
         }
-        if self.last_listed > self.last_recorded {
-            Err(StallError::Unrecordable)
-        } else {
-            Ok(StallCause::NoNewSegments)
-        }
+        Ok(ended)
     }
 }
 

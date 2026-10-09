@@ -115,8 +115,8 @@ impl Error {
             Error::Segment { cause, .. } | Error::Key { cause, .. } => cause.retryable(),
             Error::LiveStalled { cause, .. } => match cause {
                 StallError::RefreshFailed(error) => error.retryable(),
-                StallError::RefreshPending => true,
-                StallError::Unrecordable => false,
+                StallError::RefreshPending | StallError::TrackStopped { .. } => true,
+                StallError::Unrecordable(kind) => kind.retryable(),
             },
             _ => false,
         }
@@ -200,9 +200,16 @@ pub enum StallError {
     /// 刷新请求超过一个目标时长仍未返回
     #[error("刷新播放列表的请求一直没有返回")]
     RefreshPending,
-    /// 播放列表列出了新分片，但一个都没有下载成功（取不到、init 段取不到或一直未下完）
-    #[error("有新分片，但一个都没有下载成功")]
-    Unrecordable,
+    /// 播放列表仍在列出新分片，但一个都没有下载成功；带最近一次取不到分片或 init 段的原因
+    #[error("有新分片，但一个都没有下载成功，最近一次：{0}")]
+    Unrecordable(HttpError),
+    /// 这条轨不再出新分片（`playlist_gone` 为播放列表已被删除时的 HTTP 状态），而其他轨仍在出
+    #[error("这条轨不再出新分片{}，其他轨仍在出", gone_text(*.playlist_gone))]
+    TrackStopped { playlist_gone: Option<u16> },
+}
+
+fn gone_text(status: Option<u16>) -> String {
+    status.map_or_else(String::new, |s| format!("（播放列表返回 HTTP {s}）"))
 }
 
 /// 任务目录不能使用的原因。
