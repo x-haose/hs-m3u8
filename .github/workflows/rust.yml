@@ -69,15 +69,15 @@ jobs:
       - name: 测试
         run: cargo test --workspace
 
-  coverage:
-    # 数据正确性模块的行覆盖门槛；hls 为纯计算，不依赖 FFmpeg，单平台即可
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2
+      # 数据正确性模块（hls、core）的行覆盖门槛，各自不低于 80%；覆盖率与平台无关，只在 Linux 上量
+      - name: 安装 cargo-llvm-cov（Linux）
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov@0.9.1
-      - uses: Swatinem/rust-cache@v2
-      - name: 行覆盖不低于 80%
-        run: cargo llvm-cov -p hs-m3u8-hls --fail-under-lines 80 --summary-only
+
+      - name: 行覆盖（Linux）
+        if: runner.os == 'Linux'
+        run: |
+          cargo llvm-cov -p hs-m3u8-hls --fail-under-lines 80 --summary-only
+          cargo llvm-cov -p hs-m3u8-core --fail-under-lines 80 --summary-only

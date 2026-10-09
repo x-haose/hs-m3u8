@@ -89,30 +89,29 @@ crates/py ────┼──> crates/core ──> crates/hls
 
 ```
 <输出名>.hsdl/
-├── job.json                  任务描述，格式见下
-└── tracks/<轨道>/<序号>.seg   已解密且通过校验的分片
+├── job.json                      {"format_version": 1, "plan_digest": "<SHA-256>"}
+├── lock                          运行期间的排他锁
+└── tracks/<轨道>/
+    ├── <序号>.seg                已解密且通过校验的分片
+    └── init-<编号>.mp4           init 段
 ```
 
-- `job.json` 是序列化契约：自描述 JSON，带 `format_version`；遇到不认识的版本直接拒绝。内容包括来源 URL、选轨结果、请求配置、计划摘要。写入方式是先写临时文件再改名。
-- **分片完成的判定只看最终文件名是否存在**：分片先写 `.part`，校验通过后改名；改名是原子操作，所以存在即完整，不需要逐片记账。
-- **计划摘要** = 规范化计划（分片 URL、字节范围、key URL、IV、init URL）的 SHA-256。续传时重新取播放列表并计算；摘要不同即报 `PlanChanged`，不混用旧分片。
-- 输出文件已存在：拒绝覆盖，除非调用方明确要求。不再出现「看到同名 mp4 就当作完成」的情况。
-- 任务目录位置可配置：库的默认位置在输出文件旁，成功后删除；桌面应用放在应用数据目录，不放在下载目录，避免被网盘同步。
-
-敏感信息（请求头的值、Cookie、自定义 key、URL 中的令牌）：
-
-- 与其他任务配置一起明文写入 `job.json`，文件权限为仅本人可读写（Unix 0600；Windows 用户目录默认如此）。
-- 不加密：密钥若写死在开源代码里等于公开，若随机生成后存在本机，能读到数据的人同样能读到密钥；有效的加密需要系统钥匙串，复杂度不值得。
+- `job.json` 是序列化契约：带 `format_version`，不认识的版本直接拒绝。只含格式版本与计划摘要；请求配置（请求头、Cookie 等）不写入任务目录，续传时由调用方再次提供同样的请求。
+- **完成的判定只看最终文件名是否存在**：先写 `.part`、fsync 后改名，所以存在即完整（断电也成立），不需要逐片记账。
+- **计划摘要** = 各分片身份（轨道、序号、去掉查询串的 URL、时长、不连续段序号、字节范围、init 段 URL 与范围）的 SHA-256。不含查询串，因为签名与令牌每次会话不同；不含 key URL 与 IV，因为目录里存的是解密后的分片。续传时重新取播放列表并计算，摘要不同即报 `PlanChanged`，不混用旧分片。
+- 运行期间持有 `lock` 的排他锁，第二个任务打开同一目录时报 `WorkDir`。没有 `job.json` 的非空目录不当作任务目录（成功后整个目录会被删除）。
+- 输出文件已存在：拒绝覆盖，除非调用方明确要求；开始时与合并前各检查一次。
+- 任务目录位置可配置：库的默认位置在输出文件旁，成功后删除，删除失败记在结果的 `cleanup_error` 里；桌面应用放在应用数据目录，不放在下载目录，避免被网盘同步。
 - 日志与错误信息中不输出请求头的值、Cookie 与 key 内容。
 
 ### 5.3 调度、超时、重试、取消
 
-- `Engine` 持有全局并发上限（跨任务的在途分片数）；每个任务另有自己的上限。信号量覆盖整个分片请求，包括响应体读取。
+- `Engine` 持有全局上限：所有任务合计的在途 HTTP 请求数（含播放列表与 key）。每次尝试从发出请求到读完响应体占用一个名额，退避等待期间不占。每个任务另有自己的并发数（同时处理的分片数）。
 - 每个请求都有连接超时、读空闲超时和总时长上限。
 - 可重试：连接错误、超时、5xx、408、429（遵守 `Retry-After`）。退避方式为指数加随机抖动，次数可配置。
 - 不可重试：其余 4xx、解密或校验失败、回调报错。
-- 任一分片最终失败：取消该任务所有在途请求，任务以 `SegmentFailed { sequence, url, cause }` 结束；已完成的分片保留，可以续传。
-- 取消：每个任务一个 `CancellationToken`，暂停就是取消后保留目录。所有并发单元由任务的 `JoinSet` 持有，任务结束时全部回收。
+- 任一分片最终失败：取消该任务所有在途请求，任务以 `Segment { sequence, url, source }` 结束；已完成的分片保留，可以续传。
+- 取消：每个任务一个 `CancellationToken`，按调用逐层传入，不存进对象；暂停就是取消后保留目录，丢弃任务句柄也会取消。所有并发单元由任务的 `JoinSet` 持有，任务结束时全部回收。合并阶段（FFmpeg）不响应取消。
 - 运行时：`core` 不自建 tokio 运行时，使用调用方的（Tauri、`pyo3-async-runtimes` 都基于 tokio）。
 
 ### 5.4 HTTP
@@ -135,42 +134,42 @@ crates/py ────┼──> crates/core ──> crates/hls
 
 ### 5.6 进度
 
-- `watch` 通道发布进度快照：已完成分片数、总分片数、已下载字节、速度、当前阶段。消费者慢只会跳过中间值，不会阻塞下载。
+- `watch` 通道发布进度快照：当前阶段、已完成分片数、总分片数、已落盘字节数（含续传前已完成的）。速度由消费者按字节数的变化计算。消费者慢只会跳过中间值，不会阻塞下载。
 - 最终结果通过任务句柄的 `Result` 返回，不经进度通道传递。
 
 ### 5.7 扩展点（回调）
 
 ```rust
-// 草案；默认实现均为原样返回
+// 默认实现均为原样返回；Err 中的字符串为错误说明
 pub trait Hooks: Send + Sync {
-    fn on_playlist(&self, url: &Url, text: String) -> Result<String, HookError>;
-    fn on_request(&self, req: &mut RequestParts) -> Result<(), HookError>;   // 可改 URL 与请求头
-    fn on_key(&self, key_url: &Url, data: Vec<u8>) -> Result<Vec<u8>, HookError>;
-    fn on_segment(&self, url: &Url, data: Vec<u8>) -> Result<Vec<u8>, HookError>;
+    fn on_playlist(&self, url: &Url, text: String) -> Result<String, String>;
+    fn on_request(&self, req: &mut RequestParts) -> Result<(), String>;   // 可改 URL 与请求头，每次尝试调用一次
+    fn on_key(&self, key_url: &Url, data: Vec<u8>) -> Result<Vec<u8>, String>;
+    fn on_segment(&self, url: &Url, data: Vec<u8>) -> Result<Vec<u8>, String>;
 }
 ```
 
 - `on_key` 用于站点自定义 key 加密（如 `qiqiuyun.py` 的 key 变换）。
-- `on_segment` 在解密之前调用，用于去掉分片前的伪装字节（例如伪装成 PNG 的 TS）。
-- 回调出错时任务失败，错误不可重试。
+- `on_segment` 在解密之前调用，用于去掉分片前的伪装字节（例如伪装成 PNG 的 TS）；init 段不经过它。
+- 回调在阻塞线程池中执行；出错时任务失败，错误不可重试；取消不打断正在执行的回调。
 - 回调持有强引用，不会像 0.1.x（blinker 弱引用）那样被垃圾回收后静默失效。
 
 ### 5.8 错误模型
 
 ```rust
-// 草案
 pub enum Error {
-    InvalidInput(InvalidInput),          // 调用方输入错误：URL、请求头、选轨偏好、输出路径
-    Unsupported(Unsupported),            // DRM、SAMPLE-AES、无可用轨
-    Upstream { url: Url, cause: UpstreamCause, retryable: bool }, // HTTP 状态、网络、超时
-    SegmentFailed { sequence: u64, url: Url, cause: Box<Error> },
-    Integrity(IntegrityError),           // 长度不符、去填充失败、同步字节错、合并后包数不一致
-    PlanChanged,                         // 续传时播放列表已变
-    Hook(HookError),
-    Io(std::io::Error),
-    Remux(RemuxError),
+    InvalidInput(String), OutputExists(PathBuf),         // 调用方输入错误
+    Playlist { url, source }, Select(SelectError),       // 播放列表写坏或含 DRM/SAMPLE-AES、选轨失败
+    Unsupported(Unsupported),                            // 直播、无分片、无法合并的不连续段布局
+    Http { url, kind: HttpError },                       // 状态码、超时、连接；kind.retryable()
+    Segment { sequence, url, source: Box<Error> },       // 某个分片最终失败
+    KeyLength { url, length }, Integrity { url, kind },  // key 长度、去填充、TS/fMP4 校验、字节范围长度
+    PlanChanged, WorkDir { path, reason },               // 续传与任务目录
+    Hook { purpose, message }, Io { action, path, source }, Remux(remux::Error), Cancelled,
 }
 ```
+
+`Error::retryable()` 只对外部依赖的临时故障为真（408、429、5xx、超时、连接与传输错误）。
 
 不变量被违反（代码本不该产生的状态）用 panic 中止当次任务，不降级。
 
@@ -230,6 +229,7 @@ hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
 ## 8. 桌面应用（GUI 阶段细化）
 
 - Rust 侧持有 `Engine` 和任务存储（SQLite，rusqlite 0.40.2）。命令：新建、暂停、继续、删除、列表；事件：进度，每个任务限频推送。
+- 任务存储保存续传所需的请求配置（请求头、Cookie 等），明文保存，数据库文件仅本人可读写，不加密。
 - 事务边界在应用的领域层；存储层接收已开启的连接或事务，不自己开事务。
 - 前端技术栈见 ADR-0005；界面布局与主题（倾向明亮下载器风）在 GUI 阶段设计。
 - 以后接入外部下载器（ADR-0004）时，多协议任务管理在这一层用任务类型区分，核心库不变。
@@ -284,4 +284,4 @@ hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
 
 ## 依据的版本（2026-10-08 查 crates.io）
 
-tokio 1.53.2、tokio-util 0.7.19、reqwest 0.13.5、m3u8-rs 6.0.1、aes 0.9.3、cbc 0.2.1、url 2.5.8、thiserror 2.0.21、serde 1.0.229、serde_json 1.0.151、sha2 0.11.0、rusqlite 0.40.2、pyo3 0.29.3、pyo3-async-runtimes 0.29.0、maturin 1.15.0、ffmpeg-next 9.0.0、tauri 2.12.1、cargo-deny 0.20.2。
+tokio 1.53.2、tokio-util 0.7.19、reqwest 0.13.5、axum 0.8.9（2026-10-09 查，仅测试用）、m3u8-rs 6.0.1、aes 0.9.3、cbc 0.2.1、url 2.5.8、thiserror 2.0.21、serde 1.0.229、serde_json 1.0.151、sha2 0.11.0、rusqlite 0.40.2、pyo3 0.29.3、pyo3-async-runtimes 0.29.0、maturin 1.15.0、ffmpeg-next 9.0.0、tauri 2.12.1、cargo-deny 0.20.2。
