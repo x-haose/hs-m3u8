@@ -106,6 +106,12 @@ struct FailedInit {
     kind: HttpError,
 }
 
+/// 一份播放列表中各分片的身份与内容已知的 init 段；处理完后成为下一次比对的基准。
+struct Listing {
+    listed: HashMap<u64, Listed>,
+    inits: Vec<(InitSection, Fingerprint)>,
+}
+
 /// 新分片所用的 init 段。
 enum InitState {
     /// 分片不用 init 段
@@ -202,47 +208,62 @@ impl Window {
         let mut update = Update::unchanged(playlist.ended);
         update.missed.extend(self.expired(scope, playlist));
         let (ready, failed) = split_fetched(fetched)?;
-        let mut inits: Vec<(InitSection, Fingerprint)> = Vec::new();
-        let mut listed = HashMap::with_capacity(playlist.segments.len());
+        let listing = match self.walk(scope, playlist, &ready, &failed, &mut update)? {
+            ControlFlow::Break(end) => return Ok(ControlFlow::Break(end)),
+            ControlFlow::Continue(listing) => listing,
+        };
+        for r in ready {
+            if listing.inits.iter().any(|(i, _)| *i == r.init) {
+                update.init_files.push((r.fingerprint, r.data));
+            }
+        }
+        update.changed = update.any_new || window_moved;
+        self.previous = listing.listed;
+        self.inits = listing.inits;
+        self.processed.refill.clear();
+        Ok(ControlFlow::Continue(update))
+    }
+
+    /// 逐个分片记下身份与内容已知的 init 段，新分片排入下载或记为缺失（写进 `update`）。
+    fn walk(
+        &mut self,
+        scope: &Scope<'_>,
+        playlist: &MediaPlaylist,
+        ready: &[ReadyInit],
+        failed: &[FailedInit],
+        update: &mut Update,
+    ) -> Result<ControlFlow<LiveEnd, Listing>, Error> {
+        let mut listing = Listing {
+            listed: HashMap::with_capacity(playlist.segments.len()),
+            inits: Vec::new(),
+        };
         for s in &playlist.segments {
             let number = i128::from(s.discontinuity) + self.offset;
-            let id = Fingerprint::of_segment(&s.uri, s.byte_range);
-            listed.insert(
-                s.sequence,
-                Listed {
-                    id,
-                    discontinuity: number,
-                },
-            );
-            self.note_known_init(s, &ready, &mut inits);
+            let listed = Listed {
+                id: Fingerprint::of_segment(&s.uri, s.byte_range),
+                discontinuity: number,
+            };
+            listing.listed.insert(s.sequence, listed);
+            self.note_known_init(s, ready, &mut listing.inits);
             if !self.processed.is_new(s.sequence) {
                 continue;
             }
             update.any_new = true;
-            self.processed.last = Some(
-                self.processed
-                    .last
-                    .map_or(s.sequence, |l| l.max(s.sequence)),
-            );
+            let last = self
+                .processed
+                .last
+                .map_or(s.sequence, |l| l.max(s.sequence));
+            self.processed.last = Some(last);
             let Ok(discontinuity) = u64::try_from(number) else {
                 return Ok(ControlFlow::Break(LiveEnd::Inconsistent {
                     track: scope.track,
                     sequence: s.sequence,
                 }));
             };
-            let init = new_segment_init(s, &inits, &failed);
-            self.record_new(scope, s, discontinuity, init, &mut update)?;
+            let init = new_segment_init(s, &listing.inits, failed);
+            self.record_new(scope, s, discontinuity, init, update)?;
         }
-        for r in ready {
-            if inits.iter().any(|(i, _)| *i == r.init) {
-                update.init_files.push((r.fingerprint, r.data));
-            }
-        }
-        update.changed = update.any_new || window_moved;
-        self.previous = listed;
-        self.inits = inits;
-        self.processed.refill.clear();
-        Ok(ControlFlow::Continue(update))
+        Ok(ControlFlow::Continue(listing))
     }
 
     /// 与上一份比对并确定本次的编号偏移。`Break(None)` 为疑似编码器重启但还没确认，这份播放列表不处理；
@@ -344,16 +365,7 @@ impl Window {
                 return Ok(());
             }
         };
-        if *self.group_inits.entry(discontinuity).or_insert(init) != init {
-            return Err(Error::Unsupported(Unsupported::InitChangesWithinGroup {
-                track: scope.track,
-                discontinuity,
-            }));
-        }
-        self.max_discontinuity = Some(
-            self.max_discontinuity
-                .map_or(discontinuity, |m| m.max(discontinuity)),
-        );
+        self.claim_group(scope.track, discontinuity, init)?;
         let name = SegmentName {
             session: scope.session,
             sequence: segment.sequence,
@@ -367,6 +379,26 @@ impl Window {
             segment: Box::new(segment.clone()),
             path: scope.layout.segment(scope.track, &name),
         });
+        Ok(())
+    }
+
+    /// 第 `discontinuity` 组用 `init`：同一组内 init 段须不变（合并时一组只用一个 init 段）。
+    fn claim_group(
+        &mut self,
+        track: usize,
+        discontinuity: u64,
+        init: Option<Fingerprint>,
+    ) -> Result<(), Error> {
+        if *self.group_inits.entry(discontinuity).or_insert(init) != init {
+            return Err(Error::Unsupported(Unsupported::InitChangesWithinGroup {
+                track,
+                discontinuity,
+            }));
+        }
+        self.max_discontinuity = Some(
+            self.max_discontinuity
+                .map_or(discontinuity, |m| m.max(discontinuity)),
+        );
         Ok(())
     }
 }

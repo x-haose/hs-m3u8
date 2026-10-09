@@ -21,22 +21,15 @@ pub(crate) struct MergePlan {
     pub holes: Vec<Missed>,
 }
 
+/// 分组的键：（会话, 不连续段）。
+type Key = (u32, u64);
+
+/// 一条轨的分片按组归类。
+type ByGroup<'a> = BTreeMap<Key, Vec<&'a SegmentFile>>;
+
 /// 由任务目录中的分片（各轨按（会话, 序号）排列）得出合并计划。
 pub(crate) fn merge_plan(files: &[Vec<SegmentFile>], layout: &Layout) -> Result<MergePlan, Error> {
-    type Key = (u32, u64);
-    let by_group: Vec<BTreeMap<Key, Vec<&SegmentFile>>> = files
-        .iter()
-        .map(|track| {
-            let mut groups: BTreeMap<Key, Vec<&SegmentFile>> = BTreeMap::new();
-            for file in track {
-                groups
-                    .entry((file.name.session, file.name.discontinuity))
-                    .or_default()
-                    .push(file);
-            }
-            groups
-        })
-        .collect();
+    let by_group: Vec<ByGroup<'_>> = files.iter().map(|track| group_files(track)).collect();
     let common: BTreeSet<Key> = by_group
         .first()
         .map(|first| {
@@ -47,12 +40,40 @@ pub(crate) fn merge_plan(files: &[Vec<SegmentFile>], layout: &Layout) -> Result<
                 .collect()
         })
         .unwrap_or_default();
+    let unmergeable = unmergeable(&by_group, &common);
+    let holes = files
+        .iter()
+        .enumerate()
+        .flat_map(|(track, files)| holes(track, files))
+        .collect();
+    let groups = common
+        .iter()
+        .map(|key| merge_group(*key, &by_group, layout))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(MergePlan {
+        segments: groups
+            .iter()
+            .flat_map(|g| &g.tracks)
+            .map(|t| t.segments.len())
+            .sum(),
+        sessions: common
+            .iter()
+            .map(|(session, _)| session)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        groups,
+        unmergeable,
+        holes,
+    })
+}
 
-    let mut unmergeable = Vec::new();
+/// 所在组不是每条轨都有（不在 `common` 里）的分片。
+fn unmergeable(by_group: &[ByGroup<'_>], common: &BTreeSet<Key>) -> Vec<Missed> {
+    let mut missed = Vec::new();
     for (track, groups) in by_group.iter().enumerate() {
         for (key, files) in groups {
             if !common.contains(key) {
-                unmergeable.extend(
+                missed.extend(
                     files
                         .iter()
                         .map(|f| single(f, track, MissReason::Unmergeable)),
@@ -60,48 +81,46 @@ pub(crate) fn merge_plan(files: &[Vec<SegmentFile>], layout: &Layout) -> Result<
             }
         }
     }
-    let holes = files
-        .iter()
-        .enumerate()
-        .flat_map(|(track, files)| holes(track, files))
-        .collect();
+    missed
+}
 
-    let mut segments = 0;
-    let mut groups = Vec::with_capacity(common.len());
-    for key in &common {
-        let mut tracks = Vec::with_capacity(by_group.len());
-        for (track, by_key) in by_group.iter().enumerate() {
-            let files = &by_key[key];
-            let init = files[0].name.init;
-            if files.iter().any(|f| f.name.init != init) {
-                return Err(Error::WorkDir {
-                    path: layout.root().to_path_buf(),
-                    problem: WorkDirProblem::Corrupt(format!(
-                        "第 {track} 条轨会话 {} 不连续段 {} 内的分片引用了不同的 init 段",
-                        key.0, key.1
-                    )),
-                });
-            }
-            segments += files.len();
-            tracks.push(TrackSegments {
-                init: init.map(|f| layout.init(track, f)),
-                segments: files.iter().map(|f| f.path.clone()).collect(),
+/// 一条轨的分片按（会话, 不连续段）归类，组内保持序号顺序。
+fn group_files(files: &[SegmentFile]) -> ByGroup<'_> {
+    let mut groups = ByGroup::new();
+    for file in files {
+        groups
+            .entry((file.name.session, file.name.discontinuity))
+            .or_default()
+            .push(file);
+    }
+    groups
+}
+
+/// 各轨都有的一组换成合并输入；组内的分片引用了不同的 init 段时目录内容矛盾。
+fn merge_group(
+    key: Key,
+    by_group: &[ByGroup<'_>],
+    layout: &Layout,
+) -> Result<DiscontinuityGroup, Error> {
+    let mut tracks = Vec::with_capacity(by_group.len());
+    for (track, groups) in by_group.iter().enumerate() {
+        let files = &groups[&key];
+        let init = files[0].name.init;
+        if files.iter().any(|f| f.name.init != init) {
+            return Err(Error::WorkDir {
+                path: layout.root().to_path_buf(),
+                problem: WorkDirProblem::Corrupt(format!(
+                    "第 {track} 条轨会话 {} 不连续段 {} 内的分片引用了不同的 init 段",
+                    key.0, key.1
+                )),
             });
         }
-        groups.push(DiscontinuityGroup { tracks });
+        tracks.push(TrackSegments {
+            init: init.map(|f| layout.init(track, f)),
+            segments: files.iter().map(|f| f.path.clone()).collect(),
+        });
     }
-    let sessions = common
-        .iter()
-        .map(|(session, _)| session)
-        .collect::<BTreeSet<_>>()
-        .len();
-    Ok(MergePlan {
-        groups,
-        segments,
-        sessions,
-        unmergeable,
-        holes,
-    })
+    Ok(DiscontinuityGroup { tracks })
 }
 
 /// 报告中的缺失分片：`known` 为本次运行记下原因的，加上无法合并的，以及空洞中其余的（原因不明），

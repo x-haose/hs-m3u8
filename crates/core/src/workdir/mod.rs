@@ -189,36 +189,9 @@ fn open(root: PathBuf, record: JobRecord) -> Result<WorkDir, Error> {
     fs::create_dir_all(&root).map_err(io_error("创建", &root))?;
     let job_path = root.join(JOB_FILE);
     if !exists(&job_path)? {
-        for entry in fs::read_dir(&root).map_err(io_error("读取", &root))? {
-            let name = entry.map_err(io_error("读取", &root))?.file_name();
-            let name = name.to_string_lossy();
-            if name != LOCK_FILE && !name.ends_with(".part") {
-                return Err(Error::WorkDir {
-                    path: root,
-                    problem: WorkDirProblem::NotEmpty,
-                });
-            }
-        }
+        ensure_empty(&root)?;
     }
-
-    let lock_path = root.join(LOCK_FILE);
-    let lock = File::options()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .map_err(io_error("创建", &lock_path))?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(TryLockError::WouldBlock) => {
-            return Err(Error::WorkDir {
-                path: root,
-                problem: WorkDirProblem::Locked,
-            });
-        }
-        Err(TryLockError::Error(cause)) => return Err(io_error("锁定", &lock_path)(cause)),
-    }
-
+    let lock = lock(&root)?;
     let layout = Layout { root: root.clone() };
     let previous = match read_job(&root)? {
         None => None,
@@ -237,6 +210,40 @@ fn open(root: PathBuf, record: JobRecord) -> Result<WorkDir, Error> {
         previous,
         _lock: lock,
     })
+}
+
+/// 没有 `job.json` 的目录只能是空的（`.part` 残留与锁文件除外），否则不是本库建立的任务目录。
+fn ensure_empty(root: &Path) -> Result<(), Error> {
+    for entry in fs::read_dir(root).map_err(io_error("读取", root))? {
+        let name = entry.map_err(io_error("读取", root))?.file_name();
+        let name = name.to_string_lossy();
+        if name != LOCK_FILE && !name.ends_with(".part") {
+            return Err(Error::WorkDir {
+                path: root.to_path_buf(),
+                problem: WorkDirProblem::NotEmpty,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// 打开锁文件并加排他锁；已被别的任务锁住时报 [`WorkDirProblem::Locked`]。
+fn lock(root: &Path) -> Result<File, Error> {
+    let path = root.join(LOCK_FILE);
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(io_error("创建", &path))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(Error::WorkDir {
+            path: root.to_path_buf(),
+            problem: WorkDirProblem::Locked,
+        }),
+        Err(TryLockError::Error(cause)) => Err(io_error("锁定", &path)(cause)),
+    }
 }
 
 /// 目录里有没有已完成的分片。只有 init 段时不算：它们随时可以重新拉取，没有可丢的内容。
