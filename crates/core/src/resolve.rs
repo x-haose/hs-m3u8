@@ -8,10 +8,10 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::hooks::{HookKind, Hooks, Purpose, run_hook};
-use crate::http::{Http, Priority};
+use crate::http::{Http, Permit};
 use crate::request::JobRequest;
 use crate::selection::SelectionKey;
-use crate::{Error, Unsupported, WorkDirProblem};
+use crate::{Error, Unsupported};
 
 /// 解析得到的一条轨：媒体播放列表的地址、取流方式与首次拉到的内容。
 /// 第 0 条为所选变体，第 1 条（若有）为独立的音频 rendition。
@@ -33,18 +33,23 @@ impl Resolved {
     pub(crate) fn is_live(&self) -> bool {
         self.tracks.iter().any(|t| !t.playlist.ended)
     }
+
+    /// 各轨的取流方式。
+    pub(crate) fn streams(&self) -> Vec<Streams> {
+        self.tracks.iter().map(|t| t.streams).collect()
+    }
 }
 
-/// 拉取来源并选轨。`recorded` 为任务目录记录的选轨：有记录时按它找回同一条轨，不按偏好重新选，
-/// 找不到时报 [`WorkDirProblem::SelectionGone`]。
+/// 拉取来源并选轨。`recorded` 为任务目录记录的选轨：有记录时按它找回同一条轨，不按偏好重新选；
+/// 主播放列表里找不到它时为 `Ok(None)`。
 pub(crate) async fn resolve(
     http: &Http,
     request: &JobRequest,
     recorded: Option<&SelectionKey>,
     cancel: &CancellationToken,
-) -> Result<Resolved, Error> {
+) -> Result<Option<Resolved>, Error> {
     let hooks = &request.hooks;
-    Ok(
+    Ok(Some(
         match load_playlist(http, hooks, &request.url, cancel).await? {
             Playlist::Media(playlist) => Resolved {
                 tracks: vec![ResolvedTrack {
@@ -56,10 +61,10 @@ pub(crate) async fn resolve(
             },
             Playlist::Master(master) => {
                 let selection = match recorded {
-                    Some(key) => key.find(&master).ok_or_else(|| Error::WorkDir {
-                        path: request.resolved_work_dir(),
-                        problem: WorkDirProblem::SelectionGone,
-                    })?,
+                    Some(key) => match key.find(&master) {
+                        Some(selection) => selection,
+                        None => return Ok(None),
+                    },
                     None => hls::select(&master, &request.preference)?,
                 };
                 let key = SelectionKey::of(&selection);
@@ -89,7 +94,7 @@ pub(crate) async fn resolve(
                 }
             }
         },
-    )
+    ))
 }
 
 /// 拉取并解析媒体播放列表（刷新直播播放列表也用它）。
@@ -115,7 +120,7 @@ async fn load_playlist(
     cancel: &CancellationToken,
 ) -> Result<Playlist, Error> {
     let response = http
-        .get(Purpose::Playlist, url, None, Priority::Urgent, cancel)
+        .get(Purpose::Playlist, url, None, Permit::Exempt, cancel)
         .await?;
     let final_url = response.url;
     let hook_url = final_url.clone();

@@ -7,7 +7,7 @@
 //! - 外部依赖：[`Error::Http`]（看 [`HttpError::retryable`]）、[`Error::Io`]；
 //!   [`Error::Segment`]、[`Error::Key`] 说明出在哪个分片或 key，可否重试看其原因；
 //! - 直播录制停滞：[`Error::LiveStalled`]，任务目录保留，可稍后续录；
-//! - 任务目录：[`Error::PlanChanged`]、[`Error::WorkDir`]、[`Error::NothingRecorded`]；
+//! - 任务目录：[`Error::WorkDir`]、[`Error::NothingRecorded`]；
 //! - 回调：[`Error::Hook`]；合并：[`Error::Remux`]；[`Error::Cancelled`]。
 //!
 //! 错误信息已包含原因，不经 `source()` 重复给出；地址只显示到路径，查询串（常带令牌）不显示。
@@ -63,8 +63,6 @@ pub enum Error {
     KeyLength { url: Box<Url>, length: usize },
     #[error("数据校验失败（{}）：{kind}", strip_query(.url))]
     Integrity { url: Box<Url>, kind: Integrity },
-    #[error("播放列表的分片与任务目录记录的不一致，不能续传")]
-    PlanChanged,
     #[error("任务目录 {} 无法使用：{problem}", .path.display())]
     WorkDir {
         path: PathBuf,
@@ -102,6 +100,14 @@ impl From<hs_m3u8_hls::SelectError> for Error {
 }
 
 impl Error {
+    /// 服务器在 429/503 中要求（Retry-After）的最短等待；其他错误为 None。
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Error::Http { retry_after, .. } => *retry_after,
+            _ => None,
+        }
+    }
+
     /// 外部依赖的临时故障，重试可能成功。
     pub fn retryable(&self) -> bool {
         match self {
@@ -218,6 +224,9 @@ pub enum WorkDirProblem {
     /// 来源的轨道（所选变体、有无独立音频）与记录的不同
     #[error("来源的轨道与记录的不同")]
     TracksMismatch,
+    /// 点播：播放列表的分片与记录的不一致
+    #[error("播放列表的分片与记录的不一致，不能续传")]
+    PlanChanged,
     /// 记录的变体或音频 rendition 已不在主播放列表中
     #[error("记录的变体或音频已不在主播放列表中")]
     SelectionGone,

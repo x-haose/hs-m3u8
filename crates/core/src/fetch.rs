@@ -16,7 +16,7 @@ use url::Url;
 
 use crate::crypto::decrypt;
 use crate::hooks::{HookKind, Hooks, Purpose, run_hook};
-use crate::http::{Http, Priority};
+use crate::http::{Http, Permit};
 use crate::verify::{check_fmp4, check_standalone_segment};
 use crate::{Error, Integrity, Progress, workdir};
 
@@ -170,11 +170,11 @@ async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
 pub(crate) async fn fetch_init(
     http: &Http,
     init: &InitSection,
-    priority: Priority,
+    permit: Permit,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>, Error> {
     let data = http
-        .get(Purpose::Init, &init.uri, init.byte_range, priority, cancel)
+        .get(Purpose::Init, &init.uri, init.byte_range, permit, cancel)
         .await?
         .body;
     check_fmp4(&data).map_err(|kind| Error::Integrity {
@@ -200,7 +200,7 @@ async fn fetch_segment(
             Purpose::Segment,
             &segment.uri,
             segment.byte_range,
-            Priority::Normal,
+            Permit::Required,
             cancel,
         )
         .await?
@@ -247,7 +247,7 @@ async fn key_for(ctx: &Ctx, url: &Url, cancel: &CancellationToken) -> Result<[u8
             };
             let body = ctx
                 .http
-                .get(Purpose::Key, url, None, Priority::Normal, cancel)
+                .get(Purpose::Key, url, None, Permit::Required, cancel)
                 .await
                 .map_err(wrap)?
                 .body;

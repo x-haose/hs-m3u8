@@ -15,7 +15,6 @@ mod http;
 mod ident;
 mod job;
 mod live;
-mod plan;
 mod report;
 mod request;
 mod resolve;

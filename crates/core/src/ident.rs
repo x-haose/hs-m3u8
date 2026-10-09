@@ -66,7 +66,7 @@ pub(crate) fn url_digest(url: &Url) -> String {
 }
 
 /// SHA-256 的十六进制。
-pub(crate) fn digest_hex(data: impl AsRef<[u8]>) -> String {
+fn digest_hex(data: impl AsRef<[u8]>) -> String {
     hex(&Sha256::digest(data))
 }
 

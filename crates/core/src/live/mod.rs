@@ -27,7 +27,7 @@ use self::track::{
 };
 use crate::fetch::{self, Fetcher, ItemId, record_done};
 use crate::hooks::Hooks;
-use crate::http::{Http, Priority};
+use crate::http::{Http, Permit};
 use crate::request::LiveOptions;
 use crate::resolve::{self, ResolvedTrack};
 use crate::workdir::{self, JobRecord, SegmentFile, Stored, WorkDir};
@@ -384,10 +384,7 @@ impl Recorder<'_> {
             }
             Err(e) if waitable_refresh_error(&e) => {
                 let t = &mut self.tracks[track];
-                let asked = match &e {
-                    Error::Http { retry_after, .. } => retry_after.unwrap_or_default(),
-                    _ => Duration::ZERO,
-                };
+                let asked = e.retry_after().unwrap_or_default();
                 t.refresh =
                     Refresh::Due(Instant::now() + (t.target / 2).max(MIN_REFRESH).max(asked));
                 t.last_error = Some(e);
@@ -543,7 +540,7 @@ async fn new_inits(
             && !known.contains(init)
             && !fetched.iter().any(|(i, _)| i == init)
         {
-            match fetch::fetch_init(http, init, Priority::Urgent, cancel).await {
+            match fetch::fetch_init(http, init, Permit::Exempt, cancel).await {
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
                 result => fetched.push((init.clone(), result)),
             }

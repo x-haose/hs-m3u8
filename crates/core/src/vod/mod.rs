@@ -1,14 +1,16 @@
 //! 点播：拉取 init 段并检查分组，下载尚未完成的分片，再按计划组织合并输入。
 
+mod plan;
+
 use hs_m3u8_hls::Segment;
 use hs_m3u8_remux::{DiscontinuityGroup, TrackSegments};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+pub(crate) use self::plan::Plan;
 use crate::fetch::{Fetcher, Item, fetch_init, record_done};
-use crate::http::{Http, Priority};
+use crate::http::{Http, Permit};
 use crate::ident::Fingerprint;
-use crate::plan::Plan;
 use crate::workdir::{self, Layout, SegmentName};
 use crate::{Error, Progress, Stage, blocking};
 
@@ -71,7 +73,7 @@ async fn store_inits(
     for (track, t) in plan.tracks.iter().enumerate() {
         let mut fingerprints: Vec<Fingerprint> = Vec::with_capacity(t.inits.len());
         for init in &t.inits {
-            let data = fetch_init(http, init, Priority::Normal, cancel).await?;
+            let data = fetch_init(http, init, Permit::Required, cancel).await?;
             let len = data.len() as u64;
             let (fingerprint, _) = workdir::store_init(layout, track, data).await?;
             // 内容相同的 init 段共用一个文件，字节数只计一次
