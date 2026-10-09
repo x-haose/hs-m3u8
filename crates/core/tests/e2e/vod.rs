@@ -328,7 +328,8 @@ async fn resume_survives_tokens_in_the_path() {
     assert_eq!(server.hits("tok2/seg0.ts"), 0);
 }
 
-/// 主播放列表里有两个属性完全相同的变体（冗余流）：续传选回上次那个，不会因为换了一个而判定计划变了。
+/// 主播放列表里有两个属性完全相同的变体（冗余流）：续传按排位选回上次那个。两者分片文件名相同、计划摘要
+/// 也相同，选错了不会报错，只能看续传时的请求落在哪个变体上。
 #[tokio::test(flavor = "multi_thread")]
 async fn resume_finds_the_same_redundant_variant() {
     let dir = test_dir("resume_redundant");
@@ -361,7 +362,8 @@ async fn resume_finds_the_same_redundant_variant() {
 
     let want = expected_ts_a(&dir);
     assert_output(&output, &want);
-    assert_eq!((server.hits("a/seg0.ts"), server.hits("b/seg0.ts")), (0, 1));
+    // b/seg1 第一次运行时到达过一次（挂住后取消），续传时再下一次
+    assert_eq!((server.hits("a/seg1.ts"), server.hits("b/seg1.ts")), (0, 2));
 }
 
 /// 取消在途任务；运行期间同一任务目录不能被第二个任务使用；取消后续传。

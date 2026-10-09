@@ -142,3 +142,30 @@ fn runs(track: &Track) -> Vec<(u64, Range<usize>)> {
     }
     runs
 }
+
+#[cfg(test)]
+mod tests {
+    use hs_m3u8_hls::{Playlist, Url, parse};
+
+    use super::*;
+
+    /// 计划摘要写在 job.json 里，值变了即任务目录格式变了，须升格式版本。期望值是按 [`Plan::digest`] 文档
+    /// 所述的编码，用另一个 SHA-256 实现算出的。
+    #[test]
+    fn digest_is_fixed() {
+        let url = Url::parse("https://cdn.example/v/index.m3u8?token=1").unwrap();
+        let text = "#EXTM3U\n#EXT-X-TARGETDURATION:10\n\
+                    #EXT-X-MAP:URI=\"init.mp4\",BYTERANGE=\"100@0\"\n\
+                    #EXT-X-BYTERANGE:500@100\n#EXTINF:10,\nseg0.m4s\n\
+                    #EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"init2.mp4\"\n\
+                    #EXTINF:9.5,\nhttps://cdn2.example/x/seg1.m4s?sig=1\n#EXT-X-ENDLIST\n";
+        let Ok(Playlist::Media(playlist)) = parse(text, &url) else {
+            panic!("应解析为媒体播放列表");
+        };
+        let plan = Plan::new(vec![ResolvedTrack { url, playlist }]).unwrap();
+        assert_eq!(
+            plan.digest(),
+            "9709cf9cb7943aae405f447022a77b9764cd6b8dca71c76e459631f92ccb162f"
+        );
+    }
+}
