@@ -22,9 +22,10 @@ pub struct JobRequest {
     pub work_dir: Option<PathBuf>,
     /// 附加到所有请求的请求头
     pub headers: Vec<(String, String)>,
-    /// 选轨偏好；任务目录里已有本来源的记录时，按记录的变体与音频找回同一条轨，不重新选
+    /// 选轨偏好。它与来源地址一起决定「是不是同一个任务」：任务目录里有已完成的分片、而记录的偏好与它不同时报
+    /// [`crate::WorkDirProblem::SourceMismatch`]。相同时按记录的变体与音频找回同一条轨，不重新选
     pub preference: hls::Preference,
-    /// 本任务同时下载的分片与 init 段数
+    /// 本任务同时下载的分片数
     pub concurrency: NonZeroUsize,
     pub retry: RetryPolicy,
     pub timeouts: Timeouts,
@@ -139,8 +140,8 @@ pub(crate) fn check_output(output: &Path, overwrite: bool) -> Result<(), Error> 
 /// 任务中断后用同样的请求再次运行，按 `resume` 续录或只合并已录到的部分。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveOptions {
-    /// 每条轨录到的分片（含中断前录到的，以及列出了但取不到的）声明时长之和达到此值后不再录；
-    /// 各轨都达到即结束。None 不限，不能为 0
+    /// 每条轨的分片声明时长之和达到此值后不再录，各轨都达到即结束；计入之前各会话已录到的、本次排入下载的、
+    /// 本次列出了但取不到的，不计窗口已滑过的（时长未知）与之前运行里缺失的。None 不限，不能为 0
     pub max_duration: Option<Duration>,
     /// 停滞判定的时长，不能为 0；实际至少等三个目标时长（目标时长比它还长时，正常的直播两次出新分片之间
     /// 也会超过它）。大到无法表示的时长视为不限

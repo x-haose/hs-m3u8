@@ -5,6 +5,9 @@
 //! 中断后用同样的请求再次运行：点播续传缺的分片（播放列表变了则拒绝），直播按 [`Resume`] 继续录制或只合并。
 //!
 //! 失败一律经 [`Job::wait`] 的 `Err` 返回；任务失败或取消时不生成输出文件，任务目录保留以便续传。
+//!
+//! 结果与错误里的轨道编号（`track`）：第 0 条为所选变体（来源本身是媒体播放列表时即它），第 1 条（若有）为
+//! 独立的音频 rendition。
 
 mod blocking;
 mod crypto;
@@ -49,8 +52,8 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// `max_requests`：所有任务合计同时在途的 key、init 段与分片请求数；播放列表请求不占名额，
-    /// 以免直播刷新排在其他任务的大批下载之后。
+    /// `max_requests`：所有任务合计同时在途的 key、分片与点播 init 段请求数。播放列表与直播刷新时新出现的
+    /// init 段不占名额，以免直播刷新排在其他任务的大批下载之后。
     pub fn new(max_requests: NonZeroUsize) -> Self {
         Engine {
             requests: Arc::new(Semaphore::new(max_requests.get())),
