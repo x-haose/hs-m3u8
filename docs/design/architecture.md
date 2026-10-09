@@ -193,8 +193,9 @@ pub enum Error {
 ```rust
 pub struct TrackSegments { pub init: Option<PathBuf>, pub segments: Vec<PathBuf> }   // 一条轨在一组内的分片
 pub struct DiscontinuityGroup { pub tracks: Vec<TrackSegments> }                     // 各组轨道顺序一致
-pub struct Streams { pub video: bool, pub audio: bool }                              // 一条轨贡献的流种类，各组相同
-pub fn remux(tracks: &[Streams], groups: &[DiscontinuityGroup], output: &Path) -> Result<Report, Error>;
+pub enum Streams { All, Video, Audio }                                               // 一条轨贡献的流种类，各组相同
+pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) -> Result<Report, Error>;
+// Report：每路输出流的编码参数（编码、宽高或采样率与声道）、包数与呈现时长
 ```
 
 - 组内：分片经 FFmpeg `concatf` 协议按字节顺序读取（fMP4 时 init 段在前），不先拼成大文件。列表文件写在输出旁、打开后即删除；每行写成单引号包裹的 `file:` URL，以免 Windows 路径的反斜杠被当成转义符。

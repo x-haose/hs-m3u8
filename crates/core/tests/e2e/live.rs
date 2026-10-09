@@ -16,7 +16,7 @@ fn expected_long(dir: &std::path::Path, indices: &[u64]) -> Vec<u8> {
     let names: Vec<String> = indices.iter().map(|i| format!("seg{i}.ts")).collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
     let tracks = vec![track("ts_long", None, &names)];
-    expected(dir, &[Streams::ALL], &[DiscontinuityGroup { tracks }])
+    expected(dir, &[Streams::All], &[DiscontinuityGroup { tracks }])
 }
 
 /// 序号即 ts_long 分片编号的直播播放列表；`indices` 须连续。
@@ -283,7 +283,7 @@ async fn split_tracks_with_signed_init_urls() {
     ];
     let want = expected(
         &dir,
-        &[Streams::VIDEO, Streams::AUDIO],
+        &[Streams::Video, Streams::Audio],
         &[DiscontinuityGroup { tracks }],
     );
     assert_output(&output, &want);
