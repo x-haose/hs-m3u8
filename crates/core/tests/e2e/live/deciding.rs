@@ -125,7 +125,13 @@ async fn a_full_track_does_not_block_the_decision() {
         max_duration: Some(Duration::from_secs(2)),
         ..req.live.unwrap()
     });
-    interrupt(&req, |p| p.segments_done == 3 && p.segments_failed == 1).await;
+    // 第一次运行两轨处理完第一份播放列表就都满了 2 秒（音频 seg1 取不到也计入），自行结束；
+    // 保留任务目录、删掉输出，再续录
+    let mut first = req.clone();
+    first.keep_work_dir = true;
+    let output = run(first).await.unwrap();
+    assert_eq!(output.live.unwrap().end, LiveEnd::DurationReached);
+    std::fs::remove_file(&req.output).unwrap();
 
     put_long(&server, "a/", &[1, 2, 3]);
     server.put("video.m3u8", playlist_in("v/", &[], false));

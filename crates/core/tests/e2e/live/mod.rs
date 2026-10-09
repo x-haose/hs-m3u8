@@ -1,9 +1,11 @@
 //! 直播录制：播放列表按请求次数逐步变化，模拟刷新、窗口滑动、结束、中断与服务器前后矛盾。
 //! 样本 ts_long 为 4 个时间戳连续的 1 秒分片；TARGETDURATION 设为 0.1 秒，刷新间隔随之很短。
 
+mod consistency;
 mod deciding;
 mod recording;
 mod resume;
+mod stall;
 
 use std::path::Path;
 use std::time::Duration;
@@ -114,16 +116,7 @@ fn split_source(
         }
     }
     let media = |kind: &str, &(count, sig, end): &(usize, u32, bool)| {
-        let mut text = format!(
-            "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MAP:URI=\"{kind}/init.mp4?sig={sig}\"\n"
-        );
-        for i in 0..count {
-            text += &format!("#EXTINF:1,\n{kind}/seg{i}.m4s\n");
-        }
-        if end {
-            text += "#EXT-X-ENDLIST\n";
-        }
-        text
+        signed_fmp4_playlist(kind, count, sig, end)
     };
     server.put_sequence(
         "video.m3u8",
@@ -135,6 +128,21 @@ fn split_source(
     );
     put_split_master(server);
     (video_segments, audio_segments)
+}
+
+/// `dir/seg<i>.m4s`（`i` 为 `0..count`）组成的直播播放列表，init 段为 `dir/init.mp4?sig=<sig>`：签名每次
+/// 刷新可以不同，内容相同。
+fn signed_fmp4_playlist(dir: &str, count: usize, sig: u32, end: bool) -> String {
+    let mut text = format!(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MAP:URI=\"{dir}/init.mp4?sig={sig}\"\n"
+    );
+    for i in 0..count {
+        text += &format!("#EXTINF:1,\n{dir}/seg{i}.m4s\n");
+    }
+    if end {
+        text += "#EXT-X-ENDLIST\n";
+    }
+    text
 }
 
 /// 主播放列表：一个视频变体 video.m3u8，音频 rendition audio.m3u8。

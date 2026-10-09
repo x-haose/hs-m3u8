@@ -141,16 +141,7 @@ async fn continue_finds_the_recorded_variant() {
             fixture(&format!("ts_a/seg{i}.ts")),
         );
     }
-    let media = |dir: &str, end: bool| {
-        let mut text = "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n".to_owned();
-        for i in 0..2 {
-            text += &format!("#EXTINF:1,\n{dir}/seg{i}.ts\n");
-        }
-        if end {
-            text += "#EXT-X-ENDLIST\n";
-        }
-        text
-    };
+    let media = |dir: &str, end: bool| playlist_in(&format!("{dir}/"), &[0, 1], end);
     server.put("lo.m3u8", media("lo", false));
     server.put("hi.m3u8", media("hi", true));
     let lo = "#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=160x90\nlo.m3u8\n";
