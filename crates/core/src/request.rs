@@ -21,6 +21,7 @@ pub struct JobRequest {
     pub work_dir: Option<PathBuf>,
     /// 附加到所有请求的请求头
     pub headers: Vec<(String, String)>,
+    /// 选轨偏好；任务目录里已有本来源的记录时，按记录的变体与音频找回同一条轨，不重新选
     pub preference: hls::Preference,
     /// 本任务同时下载的分片与 init 段数
     pub concurrency: NonZeroUsize,
@@ -123,20 +124,24 @@ pub(crate) fn check_output(output: &Path, overwrite: bool) -> Result<(), Error> 
 /// 直播录制方式。
 ///
 /// 录制从当前播放列表里的全部分片开始，按 RFC 8216 6.3.4 的节奏刷新，直到所有轨出现 EXT-X-ENDLIST、
-/// 调用 [`crate::Job::stop`]、各轨都录满 `max_duration`、任一轨连续 `stall_timeout` 没有新分片，
-/// 或服务器的播放列表前后矛盾（序号回退、同一序号换了分片）。结束后把已列出的分片下完再合并，
-/// 结束原因见 [`crate::LiveEnd`]。
+/// 调用 [`crate::Job::stop`]、各轨都录满 `max_duration`、任一轨停滞，或服务器的播放列表前后矛盾
+/// （序号回退、同一序号换了分片）。结束后把已列出的分片下完再合并，结束原因见 [`crate::LiveEnd`]。
 ///
-/// 同一次录制内，窗口已滑过或取不到（404/410、重试后仍失败的临时故障）的分片记为漏段，录制继续；
-/// 成片保留原时间戳，漏段处时间线留空，各轨同步不受影响。其他失败（如 403、key 失败、校验失败）使任务失败。
+/// 停滞：任一轨持续 `stall_timeout` 没有录到新分片。刷新照常但不再出新分片、或播放列表已被删除（404/410），
+/// 视为直播已结束，照常合并；刷新一直失败、一直不返回，或有新分片却一个都下载不成功，任务失败
+/// （[`crate::Error::LiveStalled`]），任务目录保留，可稍后续录。
 ///
-/// 任务中断后用同样的请求再次运行，按 `resume` 继续录制或只合并已录到的部分。
+/// 窗口已滑过或取不到（404/410、重试后仍失败的临时故障）的分片记为缺失，录制继续；成片保留原时间戳，
+/// 缺失处时间线留空，各轨同步不受影响。其他失败（如 403、key 失败、校验失败）使任务失败。
+///
+/// 任务中断后用同样的请求再次运行，按 `resume` 续录或只合并已录到的部分。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveOptions {
-    /// 每条轨已排入下载的分片声明时长之和达到此值后不再排入；各轨都达到即结束。None 不限，不能为 0
+    /// 每条轨录到的分片（含中断前录到的，以及列出了但取不到的）声明时长之和达到此值后不再录；
+    /// 各轨都达到即结束。None 不限，不能为 0
     pub max_duration: Option<Duration>,
-    /// 任一轨持续这么久没有新分片（含刷新失败、刷新未返回）即结束录制，不能为 0；
-    /// 大到无法表示的时长视为不限
+    /// 停滞判定的时长，不能为 0；实际至少等三个目标时长（目标时长比它还长时，正常的直播两次出新分片之间
+    /// 也会超过它）。大到无法表示的时长视为不限
     pub stall_timeout: Duration,
     pub resume: Resume,
 }
@@ -157,7 +162,10 @@ impl Default for LiveOptions {
 /// 任务目录里已有本来源的直播录制时怎么办。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resume {
-    /// 继续录制：新的录制与之前的首尾相接（中断期间的内容不在输出中），最后一并合并
+    /// 续录。各轨当前的窗口都与之前录到的接得上时，接着录，并补上窗口内之前没录完的分片，时间线连续；
+    /// 否则另起一段，与之前的首尾相接（中断期间的内容不在输出中），之前录过的分片不重录。最后一并合并。
+    /// 来源地址只有查询串变了（如换了令牌）时，必须接得上才续录，否则报
+    /// [`crate::WorkDirProblem::SourceUnverified`]
     Continue,
     /// 不联网，只把已录到的分片合并成输出；没有可合并的分片时报 [`Error::NothingRecorded`]
     MergeOnly,

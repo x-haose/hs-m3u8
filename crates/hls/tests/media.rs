@@ -260,10 +260,8 @@ fn discontinuity_numbers_start_from_the_discontinuity_sequence() {
             .collect::<Vec<_>>(),
         [3, 4, 4, 5]
     );
-    assert_eq!(m.discontinuity_sequence, Some(3));
-    // 没写 DISCONTINUITY-SEQUENCE 时从 0 数起，并标明编号只在本次播放列表内有意义
+    // 没写 DISCONTINUITY-SEQUENCE 时从 0 数起（RFC 8216 4.3.3.3）
     let relative = media("#EXTM3U\n#EXTINF:4,\na.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:4,\nb.ts\n");
-    assert_eq!(relative.discontinuity_sequence, None);
     assert_eq!(
         relative
             .segments

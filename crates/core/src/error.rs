@@ -6,19 +6,21 @@
 //!   [`Error::Integrity`]、[`Error::KeyLength`]，同样的来源再试也不会成功；
 //! - 外部依赖：[`Error::Http`]（看 [`HttpError::retryable`]）、[`Error::Io`]；
 //!   [`Error::Segment`]、[`Error::Key`] 说明出在哪个分片或 key，可否重试看其原因；
+//! - 直播录制停滞：[`Error::LiveStalled`]，任务目录保留，可稍后续录；
 //! - 任务目录：[`Error::PlanChanged`]、[`Error::WorkDir`]、[`Error::NothingRecorded`]；
 //! - 回调：[`Error::Hook`]；合并：[`Error::Remux`]；[`Error::Cancelled`]。
 //!
-//! 错误信息已包含原因，不再经 `source()` 链出同一段文字；地址只显示到路径，查询串（常带令牌）不显示。
+//! 错误信息已包含原因，不经 `source()` 重复给出；地址只显示到路径，查询串（常带令牌）不显示。
 
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use url::Url;
 
 use crate::hooks::{HookError, HookKind};
-use crate::plan::strip_query;
+use crate::ident::strip_query;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -39,8 +41,13 @@ pub enum Error {
     Select(hs_m3u8_hls::SelectError),
     #[error("不支持：{0}")]
     Unsupported(Unsupported),
+    /// `retry_after` 为服务器在 429/503 中要求（Retry-After）的最短等待
     #[error("请求 {} 失败：{kind}", strip_query(.url))]
-    Http { url: Box<Url>, kind: HttpError },
+    Http {
+        url: Box<Url>,
+        kind: HttpError,
+        retry_after: Option<Duration>,
+    },
     /// 某个分片最终失败；`cause` 为分片请求、回调、解密或校验的错误
     #[error("第 {track} 条轨分片 {sequence}（{}）失败：{cause}", strip_query(.url))]
     Segment {
@@ -65,6 +72,9 @@ pub enum Error {
     },
     #[error("直播没有录到可合并的分片")]
     NothingRecorded,
+    /// 第 `track` 条轨长时间没有录到新分片，且不是直播正常结束（见 [`crate::StallCause`]）
+    #[error("直播第 {track} 条轨停滞：{cause}")]
+    LiveStalled { track: usize, cause: StallError },
     #[error("{hook}回调出错：{cause}")]
     Hook { hook: HookKind, cause: HookError },
     #[error("{action} {} 失败：{cause}", .path.display())]
@@ -97,6 +107,11 @@ impl Error {
         match self {
             Error::Http { kind, .. } => kind.retryable(),
             Error::Segment { cause, .. } | Error::Key { cause, .. } => cause.retryable(),
+            Error::LiveStalled { cause, .. } => match cause {
+                StallError::RefreshFailed(error) => error.retryable(),
+                StallError::RefreshPending => true,
+                StallError::Unrecordable => false,
+            },
             _ => false,
         }
     }
@@ -170,6 +185,20 @@ pub enum Integrity {
     NotFmp4(String),
 }
 
+/// 直播停滞的故障原因。
+#[derive(Debug, thiserror::Error)]
+pub enum StallError {
+    /// 刷新播放列表一直失败（404/410 之外的可重试错误，或内容不完整）
+    #[error("刷新播放列表一直失败，最近一次：{0}")]
+    RefreshFailed(Box<Error>),
+    /// 刷新请求超过一个目标时长仍未返回
+    #[error("刷新播放列表的请求一直没有返回")]
+    RefreshPending,
+    /// 播放列表列出了新分片，但一个都没有下载成功（取不到、init 段取不到或一直未下完）
+    #[error("有新分片，但一个都没有下载成功")]
+    Unrecordable,
+}
+
 /// 任务目录不能使用的原因。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WorkDirProblem {
@@ -183,12 +212,18 @@ pub enum WorkDirProblem {
     Corrupt(String),
     #[error("记录的是{recorded}任务，当前来源是{current}")]
     KindMismatch { recorded: JobType, current: JobType },
-    /// 直播：来源地址（含查询串）或选轨偏好与记录的不同
-    #[error("记录的是另一个直播来源或选轨偏好")]
+    /// 来源地址（不含查询串）或选轨偏好与记录的不同
+    #[error("记录的是另一个来源或选轨偏好")]
     SourceMismatch,
-    /// 直播：主播放列表的轨道布局（有无独立音频）与记录的不同
-    #[error("来源的轨道布局与记录的不同")]
-    StreamsMismatch,
+    /// 来源的轨道（所选变体、有无独立音频）与记录的不同
+    #[error("来源的轨道与记录的不同")]
+    TracksMismatch,
+    /// 记录的变体或音频 rendition 已不在主播放列表中
+    #[error("记录的变体或音频已不在主播放列表中")]
+    SelectionGone,
+    /// 直播：地址的查询串与记录的不同，且当前窗口与已录的分片接不上，无法确认是同一个直播
+    #[error("地址与记录的不同，且当前内容与已录的接不上，无法确认是同一个直播")]
+    SourceUnverified,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

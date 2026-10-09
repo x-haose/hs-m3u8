@@ -1,4 +1,4 @@
-//! 点播：解密、分流、字节范围、重试、失败与续传、取消、回调、下载前的拒绝。
+//! 点播：解密、音视频分离、字节范围、重试、失败与续传、取消、回调、下载前的拒绝。
 
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -423,7 +423,7 @@ async fn hooks_adapt_site() {
     assert_output(&output, &want);
 }
 
-/// init 段地址的签名每次会话不同：续传时编号仍对应同一个 init 段（按去掉查询串的地址判定，与计划摘要一致）。
+/// init 段地址的签名每次会话不同：续传时分片仍对应同一个 init 段（init 段按内容命名）。
 #[tokio::test(flavor = "multi_thread")]
 async fn signed_init_urls_resume_with_the_right_init() {
     let dir = test_dir("signed_init");
@@ -463,15 +463,20 @@ async fn signed_init_urls_resume_with_the_right_init() {
     req.keep_work_dir = true;
     let output = run(req.clone()).await.unwrap();
 
-    // 两个样本的 init 段只差 SPS/PPS，配错时成片也可能逐字节相同，所以直接核对编号对应的内容
-    let init = |index| {
-        std::fs::read(
-            req.resolved_work_dir()
-                .join(format!("tracks/0/init-{index}.mp4")),
-        )
-    };
-    assert_eq!(init(0).unwrap(), fixture("fmp4_a/video/init.mp4"));
-    assert_eq!(init(1).unwrap(), fixture("fmp4_b/video/init.mp4"));
+    // 两个样本的 init 段只差 SPS/PPS，配错时成片也可能逐字节相同，所以另核对目录里的 init 段
+    let mut inits: Vec<Vec<u8>> = std::fs::read_dir(req.resolved_work_dir().join("tracks/0"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "mp4"))
+        .map(|p| std::fs::read(p).unwrap())
+        .collect();
+    inits.sort();
+    let mut want_inits = vec![
+        fixture("fmp4_a/video/init.mp4"),
+        fixture("fmp4_b/video/init.mp4"),
+    ];
+    want_inits.sort();
+    assert_eq!(inits, want_inits);
     let video = |program: &str, segments: &[&str]| DiscontinuityGroup {
         tracks: vec![track(
             &format!("{program}/video"),
@@ -490,6 +495,66 @@ async fn signed_init_urls_resume_with_the_right_init() {
         ],
     );
     assert_eq!(std::fs::read(&output.path).unwrap(), want);
+}
+
+/// 两个 init 段的地址只差查询串（站点按查询串区分内容）：各拉各的，不当成同一个。
+struct InitByQuery;
+
+impl Hooks for InitByQuery {
+    fn on_request(&self, purpose: Purpose, request: &mut RequestParts) -> Result<(), HookError> {
+        if purpose == Purpose::Init
+            && let Some(program) = request.url.query().and_then(|q| q.strip_prefix("p="))
+        {
+            request.url = request.url.join(&format!("{program}/init.mp4"))?;
+            request.url.set_query(None);
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn inits_differing_only_in_query_are_distinct() {
+    let dir = test_dir("init_query");
+    let server = Server::start().await;
+    for program in ["fmp4_a", "fmp4_b"] {
+        for name in ["init.mp4", "seg0.m4s"] {
+            server.put(
+                &format!("{program}/{name}"),
+                fixture(&format!("{program}/video/{name}")),
+            );
+        }
+    }
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"init?p=fmp4_a\"\n\
+         #EXTINF:1,\nfmp4_a/seg0.m4s\n#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"init?p=fmp4_b\"\n\
+         #EXTINF:1,\nfmp4_b/seg0.m4s\n#EXT-X-ENDLIST\n",
+    );
+    let mut req = request(server.url("index.m3u8"), &dir);
+    req.hooks = Arc::new(InitByQuery);
+
+    let output = run(req).await.unwrap();
+
+    let program = |name: &str| DiscontinuityGroup {
+        tracks: vec![track(
+            &format!("{name}/video"),
+            Some("init.mp4"),
+            &["seg0.m4s"],
+        )],
+    };
+    let want = expected(
+        &dir,
+        &[Streams::All],
+        &[program("fmp4_a"), program("fmp4_b")],
+    );
+    assert_output(&output, &want);
+    assert_eq!(
+        (
+            server.hits("fmp4_a/init.mp4"),
+            server.hits("fmp4_b/init.mp4")
+        ),
+        (1, 1)
+    );
 }
 
 /// 下载前就能判定的失败：输出已存在、不录制直播时遇到直播、各轨不连续段不一致。

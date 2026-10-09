@@ -1,6 +1,6 @@
-//! 下载器：拉取 init 段与分片，解密、校验后写入任务目录。
+//! 下载器：拉取分片，解密、校验后写入任务目录；另提供拉取 init 段的函数。
 //!
-//! 项可以随时加入（点播一次加入全部，直播随刷新加入）；同时在途的项不超过任务的并发数，其余排队。
+//! 分片可以随时加入（点播一次加入全部，直播随刷新加入）；同时在途的不超过任务的并发数，其余排队。
 //! 每项完成后由驱动方取走结果（[`Fetcher::next`] / [`Fetcher::drain`]），据此更新进度、决定失败如何处理。
 
 use std::collections::{HashMap, VecDeque};
@@ -16,32 +16,25 @@ use url::Url;
 
 use crate::crypto::decrypt;
 use crate::hooks::{HookKind, Hooks, Purpose, run_hook};
-use crate::http::Http;
+use crate::http::{Http, Priority};
 use crate::verify::{check_fmp4, check_standalone_segment};
 use crate::{Error, Integrity, Progress, workdir};
 
-/// 一项下载，`path` 为写入任务目录的位置。
-pub(crate) enum Item {
-    Init {
-        track: usize,
-        init: InitSection,
-        path: PathBuf,
-    },
-    Segment {
-        track: usize,
-        segment: Box<Segment>,
-        path: PathBuf,
-    },
+/// 一项下载：第 `track` 条轨的分片，`path` 为写入任务目录的位置。
+pub(crate) struct Item {
+    pub track: usize,
+    pub segment: Box<Segment>,
+    pub path: PathBuf,
 }
 
 /// 随结果返回的项标识。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ItemId {
-    Init { track: usize },
-    Segment { track: usize, sequence: u64 },
+pub(crate) struct ItemId {
+    pub track: usize,
+    pub sequence: u64,
 }
 
-/// 一项的结果：成功时为写入的字节数。分片失败包装为 [`Error::Segment`]（取消除外）。
+/// 一项的结果：成功时为写入的字节数。失败包装为 [`Error::Segment`]（取消除外）。
 pub(crate) type Finished = (ItemId, Result<u64, Error>);
 
 struct Ctx {
@@ -134,68 +127,54 @@ impl Fetcher {
     }
 }
 
-/// 一项成功后更新进度：字节数都计入，分片另计完成数。
-pub(crate) fn record_done(progress: &watch::Sender<Progress>, id: ItemId, len: u64) {
+/// 一个分片成功后更新进度。
+pub(crate) fn record_done(progress: &watch::Sender<Progress>, len: u64) {
     progress.send_modify(|p| {
         p.bytes += len;
-        if matches!(id, ItemId::Segment { .. }) {
-            p.segments_done += 1;
-        }
+        p.segments_done += 1;
     });
 }
 
 async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
-    match item {
-        Item::Init { track, init, path } => {
-            let result = async {
-                let data = fetch_init(&ctx.http, &init, &cancel).await?;
-                write(path, data).await
-            };
-            (ItemId::Init { track }, result.await)
-        }
-        Item::Segment {
-            track,
-            segment,
-            path,
-        } => {
-            let id = ItemId::Segment {
+    let Item {
+        track,
+        segment,
+        path,
+    } = item;
+    let id = ItemId {
+        track,
+        sequence: segment.sequence,
+    };
+    let data = fetch_segment(&ctx, &segment, &cancel)
+        .await
+        .map_err(|e| match e {
+            Error::Cancelled => Error::Cancelled,
+            e => Error::Segment {
                 track,
                 sequence: segment.sequence,
-            };
-            let data = fetch_segment(&ctx, &segment, &cancel)
-                .await
-                .map_err(|e| match e {
-                    Error::Cancelled => Error::Cancelled,
-                    e => Error::Segment {
-                        track,
-                        sequence: segment.sequence,
-                        url: Box::new(segment.uri.clone()),
-                        cause: Box::new(e),
-                    },
-                });
-            let result = match data {
-                Ok(data) => write(path, data).await,
-                Err(e) => Err(e),
-            };
-            (id, result)
+                url: Box::new(segment.uri.clone()),
+                cause: Box::new(e),
+            },
+        });
+    let result = match data {
+        Ok(data) => {
+            let len = data.len() as u64;
+            workdir::write(path, data).await.map(|()| len)
         }
-    }
-}
-
-async fn write(path: PathBuf, data: Vec<u8>) -> Result<u64, Error> {
-    let len = data.len() as u64;
-    workdir::write(path, data).await?;
-    Ok(len)
+        Err(e) => Err(e),
+    };
+    (id, result)
 }
 
 /// 拉取 init 段并校验是 fMP4。
 pub(crate) async fn fetch_init(
     http: &Http,
     init: &InitSection,
+    priority: Priority,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>, Error> {
     let data = http
-        .get(Purpose::Init, &init.uri, init.byte_range, cancel)
+        .get(Purpose::Init, &init.uri, init.byte_range, priority, cancel)
         .await?
         .body;
     check_fmp4(&data).map_err(|kind| Error::Integrity {
@@ -217,7 +196,13 @@ async fn fetch_segment(
     };
     let body = ctx
         .http
-        .get(Purpose::Segment, &segment.uri, segment.byte_range, cancel)
+        .get(
+            Purpose::Segment,
+            &segment.uri,
+            segment.byte_range,
+            Priority::Normal,
+            cancel,
+        )
         .await?
         .body;
     let url = segment.uri.clone();
@@ -262,7 +247,7 @@ async fn key_for(ctx: &Ctx, url: &Url, cancel: &CancellationToken) -> Result<[u8
             };
             let body = ctx
                 .http
-                .get(Purpose::Key, url, None, cancel)
+                .get(Purpose::Key, url, None, Priority::Normal, cancel)
                 .await
                 .map_err(wrap)?
                 .body;

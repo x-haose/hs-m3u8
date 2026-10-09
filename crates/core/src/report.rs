@@ -12,7 +12,7 @@ pub struct Progress {
     pub segments_done: usize,
     /// 分片总数；直播时为目前已发现的分片数，随录制增长
     pub segments_total: usize,
-    /// 直播的漏段数（窗口已滑过或取不到的分片）；点播恒为 0
+    /// 直播本次运行中缺失的分片数（窗口已滑过、取不到、init 段取不到）；点播恒为 0
     pub segments_missed: usize,
     /// 任务目录中已完成的分片与 init 段的字节数（解密后）；含续传前已完成的
     pub bytes: u64,
@@ -53,9 +53,10 @@ pub struct Output {
 pub struct LiveReport {
     /// 本次运行的录制如何结束
     pub end: LiveEnd,
-    /// 合并进输出的录制次数（中断后继续录制会多出一次）
-    pub sessions: u32,
-    /// 不在输出中的分片，按录制次数、轨道、序号排列，相接且原因相同的合成一个区间
+    /// 合并进输出的录制会话数。会话是一段时间线连续的录制：中断后续录时，若各轨都与之前录到的内容接得上，
+    /// 仍是同一个会话；否则另起一个，与之前的首尾相接
+    pub session_count: usize,
+    /// 不在输出中的分片，按会话、轨道、序号排列，相接且原因相同的合成一个区间
     pub missed: Vec<Missed>,
 }
 
@@ -67,32 +68,32 @@ pub enum LiveEnd {
     /// 调用了 [`crate::Job::stop`]
     Stopped,
     /// 各轨都录满了 [`crate::LiveOptions::max_duration`]
-    MaxDuration,
-    /// 第 `track` 条轨连续 [`crate::LiveOptions::stall_timeout`] 没有新分片
+    DurationReached,
+    /// 第 `track` 条轨停滞（见 [`crate::LiveOptions`]），且看起来是直播已结束；
+    /// 故障导致的停滞是 [`crate::Error::LiveStalled`]
     Stalled { track: usize, cause: StallCause },
     /// 第 `track` 条轨的媒体序号回退、且与上次的窗口没有重叠（多为编码器重启）；之后的分片未录
     Restarted { track: usize },
-    /// 第 `track` 条轨序号 `sequence` 的分片与上次刷新时不同（服务器错误，RFC 8216 6.3.4）；之后的分片未录
-    SegmentChanged { track: usize, sequence: u64 },
+    /// 第 `track` 条轨在序号 `sequence` 处与之前刷新得到的播放列表矛盾：同一序号换了分片，或不连续段编号
+    /// 对不上（服务器错误，RFC 8216 6.2.2）；之后的分片未录
+    Inconsistent { track: usize, sequence: u64 },
     /// 按 [`crate::Resume::MergeOnly`] 只合并了已录到的分片
     MergeOnly,
 }
 
-/// 判定停滞时该轨的状况。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// 直播看起来已结束的停滞。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StallCause {
-    /// 刷新成功，但没有新分片
+    /// 刷新成功，但不再出现新分片
     NoNewSegments,
-    /// 最近一次刷新失败
-    RefreshFailed(String),
-    /// 刷新请求一直没有返回
-    RefreshPending,
+    /// 播放列表已被删除：最近一次刷新返回此 HTTP 状态（404 或 410）
+    PlaylistGone(u16),
 }
 
-/// 一段连续的漏段：第 `session` 次录制中第 `track` 条轨序号 `first..=last` 的分片不在输出中。
+/// 一段连续的缺失分片：第 `session` 个会话中第 `track` 条轨序号 `first..=last` 的分片不在输出中。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Missed {
-    /// 第几次录制，从 0 开始
+    /// 会话编号，从 0 开始
     pub session: u32,
     pub track: usize,
     pub first: u64,
@@ -106,8 +107,10 @@ pub enum MissReason {
     Expired,
     /// 列出了，但重试后仍未取到
     Failed(HttpError),
+    /// 列出了，但它的 init 段重试后仍未取到
+    InitFailed(HttpError),
     /// 所在不连续段不是每条轨都录到，无法合并
     Unmergeable,
-    /// 之前某次录制中缺失，原因没有记录
+    /// 之前的运行中缺失，原因没有记录
     Unknown,
 }

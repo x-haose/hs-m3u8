@@ -8,11 +8,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::fetch::Fetcher;
 use crate::http::Http;
+use crate::ident::{source_digest, url_digest};
 use crate::live::{self, Context, Recording};
-use crate::plan::{Plan, request_digest};
+use crate::plan::Plan;
 use crate::request::{JobRequest, Resume, check_output};
-use crate::resolve::{self, ResolvedTrack};
-use crate::workdir::{JobKind, WorkDir, read_kind};
+use crate::resolve::{self, Resolved};
+use crate::workdir::{JobRecord, RecordKind, Stored, WorkDir, read_record};
 use crate::{
     Error, LiveEnd, LiveReport, Output, Progress, Stage, Unsupported, WorkDirProblem, blocking, vod,
 };
@@ -30,94 +31,79 @@ pub(crate) async fn run(
     {
         return merge_only(request, &cancel, &progress).await;
     }
-    // 任务目录是同一来源的直播录制时按直播继续，即使播放列表已出现 ENDLIST（中断期间直播结束了）
-    let continuing_live = matches!(
-        read_kind(request.resolved_work_dir()).await?,
-        Some(JobKind::Live { request_digest: recorded, .. }) if recorded == request_digest(&request)
-    );
+    let source = source_digest(&request.url, &request.preference);
+    // 任务目录里有同一来源的记录时，按记录的选轨找回同一条轨；记录的是直播时按直播继续，
+    // 即使播放列表已出现 ENDLIST（中断期间直播结束了）
+    let recorded = read_record(request.resolved_work_dir())
+        .await?
+        .filter(|r| r.source == source);
+    let continuing_live = recorded
+        .as_ref()
+        .is_some_and(|r| matches!(r.kind, RecordKind::Live { .. }));
     let http = Arc::new(http);
-    let tracks = resolve::resolve(&http, &request, &cancel).await?;
+    let selection = recorded.as_ref().and_then(|r| r.selection.as_ref());
+    let resolved = resolve::resolve(&http, &request, selection, &cancel).await?;
     let mut fetcher = Fetcher::new(
         http.clone(),
         request.hooks.clone(),
         request.concurrency,
         &cancel,
     );
-    if continuing_live || resolve::is_live(&tracks) {
-        record_live(
-            request,
+    if continuing_live || resolved.is_live() {
+        let options = request.live.ok_or(Error::Unsupported(Unsupported::Live))?;
+        let record = job_record(
+            source,
+            &resolved,
+            RecordKind::Live {
+                url: url_digest(&request.url),
+            },
+        );
+        let dir = WorkDir::open(request.resolved_work_dir(), record.clone()).await?;
+        let ctx = Context {
             http,
-            tracks,
-            &mut fetcher,
-            &cancel,
-            &stop,
-            &progress,
-        )
-        .await
+            hooks: request.hooks.clone(),
+            dir: &dir,
+            fetcher: &mut fetcher,
+            progress: &progress,
+            cancel: &cancel,
+            stop: &stop,
+        };
+        let recording = live::record(ctx, resolved.tracks, options, &record).await?;
+        let stored = dir.scan(record.streams.len()).await?;
+        let merge = merge_live(&dir, &stored, record.streams, Some(recording))?;
+        finish(request, dir, merge, &cancel, &progress).await
     } else {
-        download_vod(request, tracks, &mut fetcher, &cancel, &progress).await
+        let streams = resolved.tracks.iter().map(|t| t.streams).collect();
+        let selection = resolved.selection.clone();
+        let plan = Plan::new(resolved.tracks)?;
+        let record = JobRecord {
+            source,
+            selection,
+            streams,
+            kind: RecordKind::Vod {
+                plan: plan.digest(),
+            },
+        };
+        let dir = WorkDir::open(request.resolved_work_dir(), record.clone()).await?;
+        let groups =
+            vod::download(&http, &mut fetcher, &plan, dir.layout(), &progress, &cancel).await?;
+        let merge = Merge {
+            streams: record.streams,
+            groups,
+            segments: plan.segment_count(),
+            live: None,
+        };
+        finish(request, dir, merge, &cancel, &progress).await
     }
 }
 
-async fn download_vod(
-    request: JobRequest,
-    tracks: Vec<ResolvedTrack>,
-    fetcher: &mut Fetcher,
-    cancel: &CancellationToken,
-    progress: &watch::Sender<Progress>,
-) -> Result<Output, Error> {
-    let plan = Arc::new(Plan::new(tracks)?);
-    let kind = JobKind::Vod {
-        plan_digest: plan.digest(),
-    };
-    let dir = WorkDir::open(request.resolved_work_dir(), kind).await?;
-    vod::download(fetcher, plan.clone(), dir.layout(), progress).await?;
-    let input = MergeInput {
-        streams: plan.tracks.iter().map(|t| t.streams).collect(),
-        groups: vod::merge_input(&plan, dir.layout()),
-        segments: plan.segment_count(),
-        live: None,
-    };
-    finish(request, dir, input, cancel, progress).await
-}
-
-async fn record_live(
-    request: JobRequest,
-    http: Arc<Http>,
-    tracks: Vec<ResolvedTrack>,
-    fetcher: &mut Fetcher,
-    cancel: &CancellationToken,
-    stop: &CancellationToken,
-    progress: &watch::Sender<Progress>,
-) -> Result<Output, Error> {
-    let options = request.live.ok_or(Error::Unsupported(Unsupported::Live))?;
-    let streams: Vec<Streams> = tracks.iter().map(|t| t.streams).collect();
-    let kind = JobKind::Live {
-        request_digest: request_digest(&request),
-        streams: streams.clone(),
-    };
-    let dir = WorkDir::open(request.resolved_work_dir(), kind).await?;
-    let layout = dir.layout();
-    let earlier = layout.completed_segments(streams.len()).await?;
-    let inits = layout.completed_inits(streams.len()).await?;
-    count_existing(&earlier, &inits, progress);
-    let session = earlier
-        .iter()
-        .flatten()
-        .map(|f| f.name.session + 1)
-        .max()
-        .unwrap_or(0);
-    let ctx = Context {
-        http,
-        hooks: request.hooks.clone(),
-        layout,
-        fetcher,
-        progress,
-        cancel,
-        stop,
-    };
-    let recording = live::record(ctx, tracks, options, session, inits).await?;
-    merge_live(request, dir, streams, Some(recording), cancel, progress).await
+fn job_record(source: String, resolved: &Resolved, kind: RecordKind) -> JobRecord {
+    JobRecord {
+        source,
+        selection: resolved.selection.clone(),
+        streams: resolved.tracks.iter().map(|t| t.streams).collect(),
+        kind,
+    }
 }
 
 /// 不联网，只合并任务目录中已录到的直播分片。
@@ -127,89 +113,55 @@ async fn merge_only(
     progress: &watch::Sender<Progress>,
 ) -> Result<Output, Error> {
     let root = request.resolved_work_dir();
-    let Some(kind @ JobKind::Live { .. }) = read_kind(root.clone()).await? else {
+    let Some(record) = read_record(root.clone())
+        .await?
+        .filter(|r| matches!(r.kind, RecordKind::Live { .. }))
+    else {
         return Err(Error::NothingRecorded);
     };
-    let JobKind::Live {
-        request_digest: recorded,
-        streams,
-    } = &kind
-    else {
-        unreachable!("上面已匹配为直播")
-    };
-    if *recorded != request_digest(&request) {
+    if record.source != source_digest(&request.url, &request.preference) {
         return Err(Error::WorkDir {
             path: root,
             problem: WorkDirProblem::SourceMismatch,
         });
     }
-    let streams = streams.clone();
-    let dir = WorkDir::open(root, kind).await?;
-    let layout = dir.layout();
-    let files = layout.completed_segments(streams.len()).await?;
-    let inits = layout.completed_inits(streams.len()).await?;
-    count_existing(&files, &inits, progress);
-    merge_live(request, dir, streams, None, cancel, progress).await
-}
-
-/// 续传前已完成的分片与 init 段计入进度。
-fn count_existing(
-    segments: &[Vec<crate::workdir::SegmentFile>],
-    inits: &[Vec<crate::workdir::InitFile>],
-    progress: &watch::Sender<Progress>,
-) {
-    let done = segments.iter().map(Vec::len).sum();
-    let bytes = segments.iter().flatten().map(|f| f.len).sum::<u64>()
-        + inits.iter().flatten().map(|f| f.len).sum::<u64>();
-    progress.send_modify(|p| {
-        p.segments_done = done;
-        p.segments_total = done;
-        p.bytes = bytes;
-    });
+    let dir = WorkDir::open(root, record.clone()).await?;
+    let stored = dir.scan(record.streams.len()).await?;
+    live::count_stored(&stored, progress);
+    let merge = merge_live(&dir, &stored, record.streams, None)?;
+    finish(request, dir, merge, cancel, progress).await
 }
 
 /// 合并直播录到的分片；`recording` 为本次运行的录制，只合并时为 None。
-async fn merge_live(
-    request: JobRequest,
-    dir: WorkDir,
+fn merge_live(
+    dir: &WorkDir,
+    stored: &Stored,
     streams: Vec<Streams>,
     recording: Option<Recording>,
-    cancel: &CancellationToken,
-    progress: &watch::Sender<Progress>,
-) -> Result<Output, Error> {
-    let files = dir.layout().completed_segments(streams.len()).await?;
-    let current = recording.as_ref().map(|r| r.session);
-    let (groups, mut missed) = live::merge_input(&files, dir.layout(), current)?;
-    if groups.is_empty() {
+) -> Result<Merge, Error> {
+    let plan = live::merge_plan(&stored.segments, dir.layout())?;
+    if plan.groups.is_empty() {
         return Err(Error::NothingRecorded);
     }
-    let (end, recorded_missed) = match recording {
+    let (end, known) = match recording {
         Some(r) => (r.end, r.missed),
         None => (LiveEnd::MergeOnly, Vec::new()),
     };
-    missed.extend(recorded_missed);
-    let sessions: std::collections::BTreeSet<u32> =
-        files.iter().flatten().map(|f| f.name.session).collect();
     let report = LiveReport {
         end,
-        sessions: u32::try_from(sessions.len()).expect("录制次数不超过 u32"),
-        missed: live::merge_ranges(missed),
+        session_count: plan.sessions,
+        missed: live::report_missed(&plan, known),
     };
-    let input = MergeInput {
-        segments: groups
-            .iter()
-            .flat_map(|g| &g.tracks)
-            .map(|t| t.segments.len())
-            .sum(),
+    Ok(Merge {
         streams,
-        groups,
+        segments: plan.segments,
+        groups: plan.groups,
         live: Some(report),
-    };
-    finish(request, dir, input, cancel, progress).await
+    })
 }
 
 /// 交给合并的内容。
-struct MergeInput {
+struct Merge {
     streams: Vec<Streams>,
     groups: Vec<DiscontinuityGroup>,
     /// 合并进输出的分片数，各轨合计
@@ -221,16 +173,16 @@ struct MergeInput {
 async fn finish(
     request: JobRequest,
     dir: WorkDir,
-    input: MergeInput,
+    merge: Merge,
     cancel: &CancellationToken,
     progress: &watch::Sender<Progress>,
 ) -> Result<Output, Error> {
-    let MergeInput {
+    let Merge {
         streams,
         groups,
         segments,
         live,
-    } = input;
+    } = merge;
     // 简化：合并阶段不响应取消（remux 不可中断），合并耗时成为问题时给 remux 加 FFmpeg 中断回调。
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);

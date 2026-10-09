@@ -1,50 +1,38 @@
-//! 点播计划与摘要（纯计算）：每条轨的分片与不连续段组，下载前确认能够合并。
+//! 点播计划与摘要（纯计算）：每条轨的分片、init 段与不连续段组。
 
 use std::ops::Range;
 
 use hs_m3u8_hls::{ByteRange, InitSection, Segment};
-use hs_m3u8_remux::Streams;
 use sha2::{Digest, Sha256};
-use url::Url;
 
-use crate::request::JobRequest;
+use crate::ident::{Fingerprint, hex, strip_query};
 use crate::resolve::ResolvedTrack;
 use crate::{Error, Unsupported};
 
 /// 点播计划中的一条轨。
 pub(crate) struct Track {
     pub segments: Vec<Segment>,
-    /// 本轨用到的 init 段，按 [`init_key`] 去重、按首次出现排序；下标即任务目录中的编号
+    /// 本轨用到的 init 段，按完整地址与字节范围去重、按首次出现排序
     pub inits: Vec<InitSection>,
-    pub streams: Streams,
 }
 
 impl Track {
-    fn new(segments: Vec<Segment>, streams: Streams) -> Self {
+    fn new(segments: Vec<Segment>) -> Self {
         let mut inits: Vec<InitSection> = Vec::new();
         for init in segments.iter().filter_map(|s| s.init.as_ref()) {
-            if !inits.iter().any(|i| init_key(i) == init_key(init)) {
+            if !inits.contains(init) {
                 inits.push(init.clone());
             }
         }
-        Track {
-            segments,
-            inits,
-            streams,
-        }
+        Track { segments, inits }
     }
 
     /// 分片所用 init 段在 `inits` 中的下标；无 init 段时为 None。
     pub(crate) fn init_index(&self, segment: &Segment) -> Option<usize> {
-        let key = init_key(segment.init.as_ref()?);
-        let index = self.inits.iter().position(|i| init_key(i) == key);
+        let init = segment.init.as_ref()?;
+        let index = self.inits.iter().position(|i| i == init);
         Some(index.expect("inits 含本轨所有分片的 init 段"))
     }
-}
-
-/// init 段的身份：与计划摘要的口径一致（不含查询串），摘要相同即保证编号对应同一个 init 段。
-fn init_key(init: &InitSection) -> (String, Option<ByteRange>) {
-    (strip_query(&init.uri), init.byte_range)
 }
 
 pub(crate) struct Plan {
@@ -54,7 +42,7 @@ pub(crate) struct Plan {
 }
 
 impl Plan {
-    /// 点播计划；每条轨都必须有分片。
+    /// 点播计划；每条轨都必须有分片，各轨的不连续段序列必须相同。
     pub(crate) fn new(tracks: Vec<ResolvedTrack>) -> Result<Self, Error> {
         let tracks = tracks
             .into_iter()
@@ -64,7 +52,7 @@ impl Plan {
                         t.url,
                     ))));
                 }
-                Ok(Track::new(t.playlist.segments, t.streams))
+                Ok(Track::new(t.playlist.segments))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let groups = groups(&tracks)?;
@@ -73,6 +61,26 @@ impl Plan {
 
     pub(crate) fn segment_count(&self) -> usize {
         self.tracks.iter().map(|t| t.segments.len()).sum()
+    }
+
+    /// 检查同一组内每条轨的 init 段内容不变（地址可以不同）。`inits[t][i]` 为第 t 条轨
+    /// `inits[i]` 的内容指纹。
+    pub(crate) fn check_inits(&self, inits: &[Vec<Fingerprint>]) -> Result<(), Error> {
+        for group in &self.groups {
+            for (index, range) in group.iter().enumerate() {
+                let track = &self.tracks[index];
+                let content = |s: &Segment| track.init_index(s).map(|i| inits[index][i]);
+                let segments = &track.segments[range.clone()];
+                let first = content(&segments[0]);
+                if segments.iter().any(|s| content(s) != first) {
+                    return Err(Error::Unsupported(Unsupported::InitChangesWithinGroup {
+                        track: index,
+                        discontinuity: segments[0].discontinuity,
+                    }));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// 续传校验用的摘要（SHA-256 十六进制）。
@@ -107,36 +115,9 @@ impl Plan {
     }
 }
 
-/// 直播任务目录用的来源摘要（SHA-256 十六进制）：完整的来源地址（含查询串）与选轨偏好。
-/// 含查询串：很多直播源靠查询串区分频道；继续录制时须用同一个地址。
-pub(crate) fn request_digest(request: &JobRequest) -> String {
-    let preference = &request.preference;
-    let text = format!(
-        "{}\n{:?}\n{:?}",
-        request.url, preference.variant, preference.audio_language
-    );
-    hex(&Sha256::digest(text))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// 去掉查询串与片段后的地址。
-pub(crate) fn strip_query(url: &Url) -> String {
-    let mut url = url.clone();
-    url.set_query(None);
-    url.set_fragment(None);
-    url.into()
-}
-
-/// 按不连续段序号切分各轨，并检查能否合并：各轨的不连续段序列相同，同一组内每条轨的 init 段不变。
+/// 按不连续段序号切分各轨，并检查各轨的不连续段序列相同。
 fn groups(tracks: &[Track]) -> Result<Vec<Vec<Range<usize>>>, Error> {
-    let runs = tracks
-        .iter()
-        .enumerate()
-        .map(|(index, track)| runs(index, track))
-        .collect::<Result<Vec<_>, _>>()?;
+    let runs: Vec<Vec<(u64, Range<usize>)>> = tracks.iter().map(runs).collect();
     let numbers = |runs: &[(u64, Range<usize>)]| runs.iter().map(|(d, _)| *d).collect::<Vec<_>>();
     let first = numbers(&runs[0]);
     for (track, track_runs) in runs.iter().enumerate().skip(1) {
@@ -155,21 +136,13 @@ fn groups(tracks: &[Track]) -> Result<Vec<Vec<Range<usize>>>, Error> {
 }
 
 /// 一条轨按不连续段序号切成的连续区间。播放列表中的不连续段序号只增不减，所以各区间的序号互不相同。
-fn runs(index: usize, track: &Track) -> Result<Vec<(u64, Range<usize>)>, Error> {
+fn runs(track: &Track) -> Vec<(u64, Range<usize>)> {
     let mut runs: Vec<(u64, Range<usize>)> = Vec::new();
     for (i, s) in track.segments.iter().enumerate() {
         match runs.last_mut() {
-            Some((discontinuity, range)) if *discontinuity == s.discontinuity => {
-                if track.init_index(&track.segments[range.start]) != track.init_index(s) {
-                    return Err(Error::Unsupported(Unsupported::InitChangesWithinGroup {
-                        track: index,
-                        discontinuity: s.discontinuity,
-                    }));
-                }
-                range.end = i + 1;
-            }
+            Some((discontinuity, range)) if *discontinuity == s.discontinuity => range.end = i + 1,
             _ => runs.push((s.discontinuity, i..i + 1)),
         }
     }
-    Ok(runs)
+    runs
 }

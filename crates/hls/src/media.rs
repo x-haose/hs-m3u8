@@ -14,9 +14,6 @@ pub struct MediaPlaylist {
     pub target_duration_us: Option<u64>,
     /// 第一个分片的媒体序号（EXT-X-MEDIA-SEQUENCE，缺省 0）
     pub media_sequence: u64,
-    /// EXT-X-DISCONTINUITY-SEQUENCE；None 表示没写，此时各分片的不连续段序号只在本次播放列表内有意义
-    /// （窗口前移、带 DISCONTINUITY 的分片滑出后编号会整体变小）
-    pub discontinuity_sequence: Option<u64>,
     /// 是否有 EXT-X-ENDLIST；没有即为直播
     pub ended: bool,
     pub playlist_type: Option<PlaylistType>,
@@ -104,7 +101,6 @@ pub(crate) fn parse(text: &str, url: &Url) -> Result<MediaPlaylist, Error> {
         playlist: MediaPlaylist {
             target_duration_us: None,
             media_sequence: 0,
-            discontinuity_sequence: None,
             ended: false,
             playlist_type: None,
             segments: Vec::new(),
@@ -150,7 +146,6 @@ impl Parser<'_> {
             "EXT-X-DISCONTINUITY-SEQUENCE" => {
                 let tag = "EXT-X-DISCONTINUITY-SEQUENCE";
                 self.discontinuity = self.sequence_tag(tag, value).map_err(at)?;
-                self.playlist.discontinuity_sequence = Some(self.discontinuity);
             }
             "EXT-X-TARGETDURATION" => {
                 let value = required("EXT-X-TARGETDURATION")?;
