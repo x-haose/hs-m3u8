@@ -21,7 +21,7 @@ impl Recorder<'_> {
             for (track, fetched) in first.into_iter().enumerate() {
                 self.tracks[track].hold(fetched);
             }
-            return self.begin(Decision::first(tracks)).await;
+            return self.enter_session(Decision::first(tracks)).await;
         }
         let max_us = self.max_us();
         for (track, fetched) in first.into_iter().enumerate() {
@@ -118,12 +118,12 @@ impl Recorder<'_> {
             path: self.dir.layout().root().to_path_buf(),
             problem: WorkDirProblem::Corrupt("会话编号已达上限".into()),
         })?;
-        self.begin(decision).await
+        self.enter_session(decision).await
     }
 
     /// 定下会话：完整来源地址变了时按 [`NewUrl`] 处理；记下要录的轨的起点；各轨按起点建窗口（这次不录的不建），
     /// 开始逐份处理暂存的播放列表。
-    async fn begin(&mut self, decision: Decision) -> Result<(), Error> {
+    async fn enter_session(&mut self, decision: Decision) -> Result<(), Error> {
         if self.dir.url_changed() {
             match decision.new_url {
                 NewUrl::Adopt => self.dir.adopt_url().await?,
@@ -149,7 +149,7 @@ impl Recorder<'_> {
         };
         let now = Instant::now();
         for (track, start) in decision.tracks.into_iter().enumerate() {
-            self.tracks[track].begin(start, now);
+            self.tracks[track].enter_session(start, now);
             self.load_next(track);
         }
         Ok(())

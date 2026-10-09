@@ -85,7 +85,8 @@ pub enum LiveEnd {
     MergeOnly,
 }
 
-/// 直播看起来已结束的停滞。
+/// 一条轨停滞时看起来已结束的原因：用于 [`LiveEnd::Stalled`]（各轨都已结束），也用于
+/// [`crate::StallError::TrackStopped`]（只有这条轨结束了）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StallCause {
     /// 刷新成功，但不再出现新分片

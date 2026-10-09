@@ -116,7 +116,7 @@ impl LiveTrack {
     }
 
     /// 会话定下：`start` 为 Some 时按它建窗口录，停滞与「仍在出」的计时从 `now` 重新起算；None 时这次不录。
-    pub(super) fn begin(&mut self, start: Option<Start>, now: Instant) {
+    pub(super) fn enter_session(&mut self, start: Option<Start>, now: Instant) {
         self.stage = match start {
             Some(start) => Stage::Recording(Box::new(Window::new(start, self.recorded_us))),
             None => {

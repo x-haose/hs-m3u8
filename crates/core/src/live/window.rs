@@ -5,7 +5,7 @@ use std::ops::ControlFlow;
 
 use hs_m3u8_hls::{InitSection, MediaPlaylist, Segment};
 
-use super::session::{Recorded, Start};
+use super::session::{LatestSession, Start};
 use crate::fetch::Item;
 use crate::ident::Fingerprint;
 use crate::workdir::{Layout, SegmentName};
@@ -45,7 +45,7 @@ pub(super) struct Processed {
 /// 续录时补录的范围：窗口里不超过已处理的最大序号、大于 `skipped_through`、不在 `done` 中的分片。
 #[derive(Debug, Clone)]
 struct Refill {
-    /// 这个会话开始时跳过到的序号，见 [`Recorded::skipped_through`]
+    /// 这个会话开始时跳过到的序号，见 [`LatestSession::skipped_through`]
     skipped_through: Option<u64>,
     /// 已录完的序号
     done: BTreeSet<u64>,
@@ -183,7 +183,7 @@ impl Window {
     }
 
     /// 接着之前的会话：比对基准、编号与各组的 init 段都沿用它的分片。
-    fn continue_from(&mut self, recorded: &Recorded) {
+    fn continue_from(&mut self, recorded: &LatestSession) {
         self.previous = listed_of(recorded);
         for name in recorded.segments().values() {
             self.group_inits.insert(name.discontinuity, name.init);
@@ -480,7 +480,7 @@ fn compare(
 }
 
 /// 之前会话已录的分片作为比对基准。
-fn listed_of(recorded: &Recorded) -> HashMap<u64, Listed> {
+fn listed_of(recorded: &LatestSession) -> HashMap<u64, Listed> {
     recorded
         .segments()
         .iter()
@@ -495,7 +495,10 @@ fn listed_of(recorded: &Recorded) -> HashMap<u64, Listed> {
 }
 
 /// `playlist` 与 `recorded` 重叠、身份与编号都一致时，重叠的分片，序号从大到小；有矛盾或没有重叠时为空。
-pub(super) fn overlaps<'p>(recorded: &Recorded, playlist: &'p MediaPlaylist) -> Vec<&'p Segment> {
+pub(super) fn overlaps<'p>(
+    recorded: &LatestSession,
+    playlist: &'p MediaPlaylist,
+) -> Vec<&'p Segment> {
     let previous = listed_of(recorded);
     match compare(&previous, Some(recorded.last()), playlist) {
         Overlap::Matched(_) => playlist
