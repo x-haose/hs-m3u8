@@ -270,7 +270,7 @@ fn backoff_delay(retry: &RetryPolicy, attempt: u32, permille: u32) -> Duration {
     (delay.min(retry.max_delay) / 1000).saturating_mul(permille)
 }
 
-/// 归类传输错误；说明文字不含地址（调用方的错误已带去掉查询串的地址）。
+/// 归类传输错误；说明文字不含地址（外层的 [`Error::Http`] 已带只到路径的地址）。
 fn classify(error: reqwest::Error) -> HttpError {
     if error.is_timeout() {
         HttpError::Timeout
