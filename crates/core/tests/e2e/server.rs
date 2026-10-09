@@ -11,9 +11,9 @@ use tokio::sync::Notify;
 
 enum Entry {
     Body(Vec<u8>),
-    /// 第 n 次请求返回第 n 个，之后一直返回最后一个
+    /// 放入后的第 n 次请求返回第 n 个，之后一直返回最后一个
     Sequence(Vec<Vec<u8>>),
-    /// 第 n 次请求重定向到第 n 个地址，之后一直是最后一个
+    /// 放入后的第 n 次请求重定向到第 n 个地址，之后一直是最后一个
     Redirect(Vec<String>),
     Status(StatusCode),
 }
@@ -65,14 +65,10 @@ impl Server {
             .insert(path.into(), entry);
     }
 
-    /// 依次返回 `bodies`：第 n 次请求得到第 n 个，之后一直是最后一个。
+    /// 依次返回 `bodies`：放入后的第 n 次请求得到第 n 个，之后一直是最后一个。
     pub(crate) fn put_sequence(&self, path: &str, bodies: Vec<String>) {
         let entry = Entry::Sequence(bodies.into_iter().map(String::into_bytes).collect());
-        self.state
-            .entries
-            .lock()
-            .unwrap()
-            .insert(path.into(), entry);
+        self.insert_counted(path, entry);
     }
 
     /// 之后请求该路径返回 404。
@@ -84,14 +80,16 @@ impl Server {
         self.redirect_sequence(from, vec![to.into()]);
     }
 
-    /// 第 n 次请求 `from` 重定向到 `targets` 的第 n 个，之后一直是最后一个。
+    /// 放入后第 n 次请求 `from` 重定向到 `targets` 的第 n 个，之后一直是最后一个。
     pub(crate) fn redirect_sequence(&self, from: &str, targets: Vec<String>) {
-        let entry = Entry::Redirect(targets);
-        self.state
-            .entries
-            .lock()
-            .unwrap()
-            .insert(from.into(), entry);
+        self.insert_counted(from, Entry::Redirect(targets));
+    }
+
+    /// 放入按请求次数变化的内容，请求次数从此刻重新计。
+    fn insert_counted(&self, path: &str, entry: Entry) {
+        let mut entries = self.state.entries.lock().unwrap();
+        self.state.hits.lock().unwrap().remove(path);
+        entries.insert(path.into(), entry);
     }
 
     /// 之后请求该路径返回 `status`。

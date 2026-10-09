@@ -3,10 +3,11 @@
 use std::time::Duration;
 
 use hs_m3u8_core::{Error, LiveEnd, LiveOptions, MissReason, Resume, Url, WorkDirProblem};
+use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
-use super::{STALL, interrupt, live_request, missed, playlist, put_long, report};
+use super::{STALL, interrupt, live_request, missed, playlist, put_long, put_split_master, report};
 use crate::server::Server;
-use crate::{assert_output, expected_long, fixture, run, test_dir};
+use crate::{assert_output, engine, expected, expected_long, fixture, run, test_dir, track};
 
 /// 中断期间窗口滑过了已录的部分（与之前没有重叠）：另起一个会话，与之前的首尾相接。
 /// 中断期间直播已结束（播放列表出现 ENDLIST），仍按直播收尾。
@@ -41,7 +42,8 @@ async fn overlapping_window_continues_the_session() {
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
     assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
-    assert_eq!((server.hits("seg0.ts"), server.hits("seg1.ts")), (1, 1));
+    // 重叠中最新的 seg1 再下载一次，与已存的比对内容
+    assert_eq!((server.hits("seg0.ts"), server.hits("seg1.ts")), (1, 2));
 }
 
 /// EVENT 型（从头列出全部分片）：续录不把之前录过的再录一遍。
@@ -243,4 +245,146 @@ async fn changed_preference_is_rejected() {
         ),
         "{err}"
     );
+}
+
+/// 中断期间编码器重启，序号与文件名都从 0 重来、内容换了：与已录的「同序号、同文件名」，但重新下载核对内容不同，
+/// 另起会话录新内容，不跳过、也不混进旧的组。
+#[tokio::test(flavor = "multi_thread")]
+async fn encoder_restart_with_reused_names_starts_a_new_session() {
+    let dir = test_dir("resume_restart");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1, 2, 3]);
+    server.put("live.m3u8", playlist(&[0, 1, 2, 3], false));
+    let req = live_request(server.url("live.m3u8"), &dir, STALL);
+    interrupt(&req, |p| p.segments_done == 4).await;
+
+    // 重启后的新节目：seg0、seg1 是另两段内容
+    server.put("seg0.ts", fixture("ts_long/seg2.ts"));
+    server.put("seg1.ts", fixture("ts_long/seg3.ts"));
+    server.put("live.m3u8", playlist(&[0, 1], true));
+    let output = run(req).await.unwrap();
+
+    assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3, 2, 3], &[4, 2]));
+    assert_eq!(output.live, report(LiveEnd::EndList, 2, vec![]));
+}
+
+/// 视频与独立音频：第二次运行视频接得上、音频接不上，另起会话、视频跳过已录的序号；第三次运行两轨都接得上会话 1，
+/// 补录只补会话 1 起点之后的缺口，不把第二次跳过的序号当成没录完再录一遍。
+#[tokio::test(flavor = "multi_thread")]
+async fn skipped_segments_are_not_refilled_later() {
+    let dir = test_dir("resume_after_then_continue");
+    let server = Server::start().await;
+    let media = |kind: &str, first: u64, last: u64, end: bool| {
+        let mut text =
+            format!("#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MEDIA-SEQUENCE:{first}\n");
+        for i in first..=last {
+            text += &format!("#EXTINF:1,\n{kind}/seg{i}.ts\n");
+        }
+        if end {
+            text += "#EXT-X-ENDLIST\n";
+        }
+        text
+    };
+    put_split_master(&server);
+    put_long(&server, "v/", &[0, 1, 2, 3]);
+    put_long(&server, "a/", &[0]);
+    // 运行 1：窗口 [0,1]，音频 seg1 取不到
+    server.put("video.m3u8", media("v", 0, 1, false));
+    server.put("audio.m3u8", media("a", 0, 1, false));
+    let req = live_request(server.url("master.m3u8"), &dir, STALL);
+    interrupt(&req, |p| p.segments_done == 3 && p.segments_missed == 1).await;
+
+    // 运行 2：窗口 [1,2]；视频与会话 0 重叠，音频没有 → 会话 1，视频只录 2，音频录 1、2
+    put_long(&server, "a/", &[1, 2, 3]);
+    server.put("video.m3u8", media("v", 1, 2, false));
+    server.put("audio.m3u8", media("a", 1, 2, false));
+    interrupt(&req, |p| p.segments_done == 6).await;
+
+    // 运行 3：窗口 [1,2,3] 并结束；两轨都接得上会话 1
+    server.put("video.m3u8", media("v", 1, 3, true));
+    server.put("audio.m3u8", media("a", 1, 3, true));
+    let output = run(req).await.unwrap();
+
+    let group = |video: &[&str], audio: &[&str]| DiscontinuityGroup {
+        tracks: vec![track("ts_long", None, video), track("ts_long", None, audio)],
+    };
+    let want = expected(
+        &dir,
+        &[Streams::Video, Streams::Audio],
+        &[
+            group(&["seg0.ts", "seg1.ts"], &["seg0.ts"]),
+            group(&["seg2.ts", "seg3.ts"], &["seg1.ts", "seg2.ts", "seg3.ts"]),
+        ],
+    );
+    assert_output(&output, &want);
+    assert_eq!(output.segments, 8);
+}
+
+/// 续录时第一份播放列表恰好没有分片（服务器正在重写）：等到有分片的再判定，不另起会话重录。
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_first_playlist_does_not_decide_the_session() {
+    let dir = test_dir("resume_empty_first");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1, 2, 3]);
+    server.put("live.m3u8", playlist(&[0, 1], false));
+    let req = live_request(server.url("live.m3u8"), &dir, STALL);
+    interrupt(&req, |p| p.segments_done == 2).await;
+
+    server.put_sequence(
+        "live.m3u8",
+        vec![playlist(&[], false), playlist(&[1, 2, 3], true)],
+    );
+    let output = run(req).await.unwrap();
+
+    assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
+    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+}
+
+/// 上次只落盘了 init 段、一个分片都没录到：换了令牌照常录，不要求「接得上」。
+#[tokio::test(flavor = "multi_thread")]
+async fn init_only_directory_accepts_a_new_token() {
+    let dir = test_dir("resume_init_only");
+    let server = Server::start().await;
+    for name in ["init.mp4", "seg0.m4s", "seg1.m4s"] {
+        server.put(
+            &format!("video/{name}"),
+            fixture(&format!("fmp4_a/video/{name}")),
+        );
+    }
+    let media = |end: bool| {
+        let mut text = String::from(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MAP:URI=\"video/init.mp4\"\n\
+             #EXTINF:1,\nvideo/seg0.m4s\n#EXTINF:1,\nvideo/seg1.m4s\n",
+        );
+        if end {
+            text += "#EXT-X-ENDLIST\n";
+        }
+        text
+    };
+    server.put("live.m3u8", media(false));
+    let with_token = |token: u32| {
+        live_request(
+            Url::parse(&format!("{}?token={token}", server.url("live.m3u8"))).unwrap(),
+            &dir,
+            STALL,
+        )
+    };
+    let gate = server.gate("video/seg0.m4s");
+    let job = engine().start(with_token(1)).unwrap();
+    // init 段先于分片落盘；分片的请求到达时 init 段已在目录里
+    gate.arrived.notified().await;
+    job.cancel();
+    assert!(matches!(job.wait().await, Err(Error::Cancelled)));
+    server.ungate("video/seg0.m4s");
+
+    server.put("live.m3u8", media(true));
+    let output = run(with_token(2)).await.unwrap();
+
+    let tracks = vec![track(
+        "fmp4_a/video",
+        Some("init.mp4"),
+        &["seg0.m4s", "seg1.m4s"],
+    )];
+    let want = expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]);
+    assert_output(&output, &want);
 }
