@@ -5,7 +5,6 @@ use std::ops::ControlFlow;
 
 use hs_m3u8_hls::{InitSection, MediaPlaylist, Segment};
 
-use super::missable;
 use super::session::{Recorded, Start};
 use crate::fetch::Item;
 use crate::ident::Fingerprint;
@@ -511,7 +510,7 @@ fn split_fetched(fetched: NewInits) -> Result<(Vec<ReadyInit>, Vec<FailedInit>),
                 fingerprint: Fingerprint::of_content(&data),
                 data,
             }),
-            Err(e) => match missable(&e) {
+            Err(e) => match e.missable() {
                 Some(kind) => failed.push(FailedInit { init, kind }),
                 None => return Err(e),
             },

@@ -137,6 +137,20 @@ impl From<hs_m3u8_hls::SelectError> for Error {
 }
 
 impl Error {
+    /// 取不到：404/410（已过期），或重试后仍失败的临时故障时返回原因；分片的失败看其原因。key、回调、校验等
+    /// 失败为 None。
+    pub(crate) fn missable(&self) -> Option<HttpError> {
+        match self {
+            Error::Http { kind, .. }
+                if kind.retryable() || matches!(kind, HttpError::Status(404 | 410)) =>
+            {
+                Some(kind.clone())
+            }
+            Error::Segment { cause, .. } => cause.missable(),
+            _ => None,
+        }
+    }
+
     /// 服务器在 429/503 中要求（Retry-After）的最短等待；其他错误为 None。
     pub fn retry_after(&self) -> Option<Duration> {
         match self {

@@ -76,6 +76,8 @@ impl Layout {
 /// 已打开并加锁的任务目录；锁在 drop 时释放。
 pub(crate) struct WorkDir {
     layout: Layout,
+    /// 打开时给的记录，即本次任务
+    record: JobRecord,
     /// 见 [`WorkDir::url_changed`]
     url_changed: bool,
     lock: File,
@@ -97,16 +99,21 @@ impl WorkDir {
         &self.layout
     }
 
+    /// 本次任务的记录（打开时给的）。
+    pub(crate) fn record(&self) -> &JobRecord {
+        &self.record
+    }
+
     /// 沿用了目录里原有的直播记录，而其中的完整来源地址（含查询串）与打开时给的不同；记录的其余各项
     /// [`WorkDir::open`] 已核对一致。新建或改为当前任务时为 false。
     pub(crate) fn url_changed(&self) -> bool {
         self.url_changed
     }
 
-    /// 用 `record` 替换 `job.json` 中的记录。
-    pub(crate) async fn save(&self, record: &JobRecord) -> Result<(), Error> {
+    /// 把 `job.json` 中的记录换成本次的：直播确认是同一个直播后，改记当前的完整来源地址。
+    pub(crate) async fn adopt_url(&self) -> Result<(), Error> {
         let path = self.layout.root.join(JOB_FILE);
-        let bytes = encode(record);
+        let bytes = encode(&self.record);
         blocking(move || write_atomic(&path, &bytes)).await?
     }
 
@@ -217,6 +224,7 @@ fn open(root: PathBuf, record: JobRecord) -> Result<WorkDir, Error> {
     let url_changed = previous.is_some_and(|p| p.url_digest() != record.url_digest());
     Ok(WorkDir {
         layout,
+        record,
         url_changed,
         lock,
     })
