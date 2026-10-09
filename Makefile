@@ -30,6 +30,7 @@ rs_check:
 	@test -d $(FFMPEG_DIST)/include || { echo "缺少 $(FFMPEG_DIST)，先运行 make ffmpeg"; exit 1; }
 	cargo fmt --all --check
 	scripts/check_deps.sh
+	scripts/check_no_suppression.sh
 	@cargo deny --version >/dev/null 2>&1 || { echo "缺少 cargo-deny：cargo install cargo-deny --version 0.20.2 --locked"; exit 1; }
 	cargo deny --locked check
 	cargo clippy --workspace --all-targets -- -D warnings
