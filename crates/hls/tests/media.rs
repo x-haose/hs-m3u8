@@ -326,4 +326,12 @@ fn malformed_input_is_reported_with_its_line() {
         error("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nv.m3u8\n#EXTINF:4,\na.ts\n"),
         Error::Mixed
     );
+    // 长度为 0 的字节范围拼不出合法的 Range 请求
+    assert_eq!(
+        error("#EXTM3U\n#EXT-X-BYTERANGE:0@10\n#EXTINF:4,\na.ts\n"),
+        Error::Syntax {
+            line: 2,
+            kind: SyntaxError::ByteRange("0@10".into())
+        }
+    );
 }
