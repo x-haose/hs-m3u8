@@ -1,58 +1,54 @@
 # hs-m3u8
 
-m3u8 视频下载工具。支持大部分的m3u8视频下载。后续增加UI界面。
+HLS（m3u8）下载器。本分支是 Rust 重写：Rust 库、Python 包（`hs-m3u8` 1.0）与桌面应用共用同一个下载引擎。已发布的 Python 0.1.x 在 `master` 分支。
 
-## 功能
+## 现状
 
-- aes解密
-- 自动选择高分辨m3u8
-- 合并MP4
-- 可选择保留ts文件
-- 合并使用 PyAV（wheel 内置 FFmpeg），无需另装 ffmpeg
+| 部分 | 状态 |
+|---|---|
+| `crates/hls`：播放列表解析、规范化、选轨 | 可用 |
+| `crates/core`：下载、解密与校验、续传、直播录制、合并 | 可用，公开 API 未定型 |
+| `crates/remux`：转封装为 MP4（静态链接的精简 FFmpeg） | 可用 |
+| Python 绑定（PyO3） | 未开始 |
+| 桌面应用（Tauri） | 未开始 |
 
-## 计划
+设计见 [docs/design/architecture.md](docs/design/architecture.md)，主要取舍见 [docs/adr](docs/adr)。
 
-- 增加cli功能，通过终端执行命令去下载
-- 增加支持curl参数功能。直接在curl里面读取请求头及cookie
-- 编写详细文档
-- 选择一个合适的技术栈，增加UI界面
+## 核心库能力
 
-## 安装
+- 点播：TS 与 fMP4 分片、AES-128、字节范围、不连续段，视频与独立音频 rendition 合并为一个 MP4，不重编码。
+- 续传：分片落盘即完整，中断后再次运行只补缺的；播放列表变了时明确拒绝。
+- 直播录制：按 RFC 8216 的节奏刷新，窗口滑过或取不到的分片在结果里如实报告；中断后续录。
+- 站点适配回调：改写播放列表、修改请求、变换 key、变换分片。
+- DRM 与 SAMPLE-AES 不支持，遇到即明确报错。
 
-### pip包安装
+## 用法（Rust，API 未定型）
 
-```shell
-pip install hs-m3u8
+```rust
+use std::num::NonZeroUsize;
+
+use hs_m3u8_core::{Engine, JobRequest, Url};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let engine = Engine::new(NonZeroUsize::new(32).unwrap());
+    let url = Url::parse("https://example.com/master.m3u8")?;
+    let job = engine.start(JobRequest::new(url, "downloads/video.mp4".into()))?;
+    let output = job.wait().await?;
+    println!("已保存到 {}", output.path.display());
+    Ok(())
+}
 ```
-
-### 克隆代码安装
-
-见下面开发文档
-
-## 使用
-
-```python
-url = "https://surrit.com/6d3bb2b2-d707-4b79-adf0-89542cb1383c/playlist.m3u8"
-name = "SDAB-129"
-dl = M3u8Downloader(
-    m3u8_url=url,
-    save_path=f"downloads/{name}",
-    max_workers=64
-)
-await dl.run(del_hls=False, merge=True)
-```
-
-- del_hls 为True时会删除ts、m3u8、key等文件，否则会经过处理后保留，以便直接使用
-- merge 为True时会自动合并为mp4
 
 ## 开发
 
-### 先安装uv
-
-uv网站：https://docs.astral.sh/uv/
-
-### 使用uv 安装包及虚拟环境
+需要：Rust（版本由 `rust-toolchain.toml` 固定）、cargo-deny 0.20.2、cargo-llvm-cov 0.9.1；macOS 另需 Xcode 命令行工具。
 
 ```bash
-uv sync
+make ffmpeg     # 下载并编译精简 FFmpeg 静态库到 third_party/ffmpeg/dist，只需一次
+make rs_check   # 格式、依赖方向、禁止压制属性、cargo-deny、clippy、测试、覆盖率
 ```
+
+Windows：在已加载 MSVC 环境的 MSYS2 中运行 `third_party/ffmpeg/build.sh`，其余步骤见 `.github/workflows/rust.yml`。
+
+Python 0.1.x 部分用 [uv](https://docs.astral.sh/uv/)：`uv sync` 安装依赖，`make py_check` 检查。
