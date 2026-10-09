@@ -244,6 +244,9 @@ pub enum WorkDirProblem {
     Corrupt(String),
     #[error("记录的是{recorded}任务，当前来源是{current}")]
     KindMismatch { recorded: JobType, current: JobType },
+    /// 只合并（[`crate::Resume::MergeOnly`]）只用于直播录制，目录里是点播的下载；点播用同样的请求正常运行即可续传
+    #[error("目录里是点播的下载，只合并只用于直播录制")]
+    NotLiveRecording,
     /// 来源地址（不含查询串）或选轨偏好与记录的不同
     #[error("记录的是另一个来源或选轨偏好")]
     SourceMismatch,

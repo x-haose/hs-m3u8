@@ -15,8 +15,7 @@ use crate::resolve::{self, Resolved};
 use crate::vod::{self, Plan};
 use crate::workdir::{JobRecord, RecordKind, Stored, WorkDir, read_resumable};
 use crate::{
-    Error, JobType, LiveEnd, LiveReport, Output, Progress, Stage, Unsupported, WorkDirProblem,
-    blocking,
+    Error, LiveEnd, LiveReport, Output, Progress, Stage, Unsupported, WorkDirProblem, blocking,
 };
 
 /// 一次运行用到的共享对象。
@@ -146,10 +145,7 @@ async fn merge_only(task: Task) -> Result<Output, Error> {
     if let RecordKind::Vod { .. } = record.kind {
         return Err(Error::WorkDir {
             path: root,
-            problem: WorkDirProblem::KindMismatch {
-                recorded: JobType::Vod,
-                current: JobType::Live,
-            },
+            problem: WorkDirProblem::NotLiveRecording,
         });
     }
     if record.source_digest != source_digest(&request.url, &request.preference) {
