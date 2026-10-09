@@ -78,7 +78,8 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// 去掉用户名、密码、查询串与片段后的地址；错误信息与摘要都用它，这些部分常带凭据或令牌。
+/// 去掉用户名、密码、查询串与片段后的地址，这些部分常带凭据或令牌。错误信息与来源摘要都用它；
+/// 来源摘要写在 job.json 里，输出改变须升格式版本。
 pub(crate) fn bare_url(url: &Url) -> String {
     match url.host_str() {
         Some(host) => {
@@ -136,6 +137,49 @@ mod tests {
         assert_ne!(
             Fingerprint::of_segment(&a, None),
             Fingerprint::of_segment(&a, Some(range))
+        );
+    }
+
+    /// 指纹与摘要写在文件名与 job.json 里，值变了即任务目录格式变了，须升格式版本。期望值是按各函数文档
+    /// 所述的编码，用另一个 SHA-256 实现算出的。
+    #[test]
+    fn fingerprints_and_digests_are_fixed() {
+        let segment = Url::parse("https://edge.cdn/tok/v/seg100.ts?sig=1").unwrap();
+        let range = ByteRange {
+            offset: 0,
+            length: 10,
+        };
+        assert_eq!(
+            Fingerprint::of_segment(&segment, None).to_string(),
+            "16f512ec546fd802"
+        );
+        assert_eq!(
+            Fingerprint::of_segment(&segment, Some(range)).to_string(),
+            "9d32d5f86c96c5d9"
+        );
+
+        let source = Url::parse("https://user:pw@a.example:8443/live.m3u8?token=1").unwrap();
+        let best = Preference {
+            variant: VariantChoice::Best,
+            audio_language: Some("EN".into()),
+        };
+        assert_eq!(
+            source_digest(&source, &best),
+            "1035beb86fc0aa0203d7faf9972cbc41ec60faf6761111c4d51afdc5d101f8c3"
+        );
+        let index = Preference {
+            variant: VariantChoice::Index(2),
+            audio_language: None,
+        };
+        assert_eq!(
+            source_digest(&source, &index),
+            "013a317cdea31c36099ad2a357b4ab403aa998de523ec1725a9574c498dcb5c2"
+        );
+
+        let live = Url::parse("https://a.example:8443/live.m3u8?token=1").unwrap();
+        assert_eq!(
+            url_digest(&live),
+            "afd3a584486c3d8f1240bf03a547070da7f147f4a8dd68e49a419956c1b2e743"
         );
     }
 
