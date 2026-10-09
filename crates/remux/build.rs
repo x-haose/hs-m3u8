@@ -19,7 +19,7 @@ fn main() {
         let pc = dir.join("lib/pkgconfig").join(format!("lib{lib}.pc"));
         println!("cargo:rerun-if-changed={}", pc.display());
         let text =
-            fs::read_to_string(&pc).unwrap_or_else(|e| panic!("读取 {} 失败: {e}", pc.display()));
+            fs::read_to_string(&pc).unwrap_or_else(|e| panic!("读取 {} 失败：{e}", pc.display()));
 
         for line in text.lines() {
             let Some(rest) = line

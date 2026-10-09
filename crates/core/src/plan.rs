@@ -196,15 +196,15 @@ pub(crate) async fn resolve(
     Ok(match fetch(http, hooks, &request.url, cancel).await? {
         Playlist::Media(playlist) => vec![Source {
             url: request.url.clone(),
-            streams: Streams::ALL,
+            streams: Streams::All,
             playlist,
         }],
         Playlist::Master(master) => {
             let selection = hls::select(&master, &request.preference)?;
             // 选了独立音频 rendition 时，变体里混着的音频不用，与播放器的行为一致
             let main = match selection.audio {
-                Some(_) => Streams::VIDEO,
-                None => Streams::ALL,
+                Some(_) => Streams::Video,
+                None => Streams::All,
             };
             let url = selection.variant.uri;
             let playlist = fetch_media(http, hooks, &url, cancel).await?;
@@ -218,7 +218,7 @@ pub(crate) async fn resolve(
                 let playlist = fetch_media(http, hooks, &url, cancel).await?;
                 sources.push(Source {
                     url,
-                    streams: Streams::AUDIO,
+                    streams: Streams::Audio,
                     playlist,
                 });
             }

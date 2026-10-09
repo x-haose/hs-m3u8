@@ -207,11 +207,10 @@ fn encode(kind: &JobKind) -> Vec<u8> {
             source_digest: source_digest.clone(),
             tracks: tracks
                 .iter()
-                .map(|s| match (s.video, s.audio) {
-                    (true, true) => "all",
-                    (true, false) => "video",
-                    (false, true) => "audio",
-                    (false, false) => panic!("每条轨至少贡献一种流"),
+                .map(|s| match s {
+                    Streams::All => "all",
+                    Streams::Video => "video",
+                    Streams::Audio => "audio",
                 })
                 .map(str::to_owned)
                 .collect(),
@@ -241,9 +240,9 @@ fn decode(bytes: &[u8]) -> Result<JobKind, String> {
             tracks: tracks
                 .iter()
                 .map(|t| match t.as_str() {
-                    "all" => Ok(Streams::ALL),
-                    "video" => Ok(Streams::VIDEO),
-                    "audio" => Ok(Streams::AUDIO),
+                    "all" => Ok(Streams::All),
+                    "video" => Ok(Streams::Video),
+                    "audio" => Ok(Streams::Audio),
                     other => Err(format!("job.json 中轨的取流方式无法识别：{other:?}")),
                 })
                 .collect::<Result<_, _>>()?,

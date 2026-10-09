@@ -18,7 +18,7 @@ const TS_A: [&str; 2] = ["seg0.ts", "seg1.ts"];
 /// ts_a 两个分片单轨合并的期望输出。
 fn expected_ts_a(dir: &Path) -> Vec<u8> {
     let tracks = vec![track("ts_a", None, &TS_A)];
-    expected(dir, &[Streams::ALL], &[DiscontinuityGroup { tracks }])
+    expected(dir, &[Streams::All], &[DiscontinuityGroup { tracks }])
 }
 
 fn encrypt(plain: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Vec<u8> {
@@ -125,7 +125,7 @@ async fn split_audio_video_with_redirect_and_discontinuity() {
     };
     let want = expected(
         &dir,
-        &[Streams::VIDEO, Streams::AUDIO],
+        &[Streams::Video, Streams::Audio],
         &[
             program(
                 "fmp4_a",
@@ -173,7 +173,7 @@ async fn selected_audio_rendition_replaces_muxed_audio() {
     ];
     let want = expected(
         &dir,
-        &[Streams::VIDEO, Streams::AUDIO],
+        &[Streams::Video, Streams::Audio],
         &[DiscontinuityGroup { tracks }],
     );
     assert_output(&output, &want);
@@ -200,7 +200,7 @@ async fn byte_ranges() {
 
     let want = expected(
         &dir,
-        &[Streams::ALL],
+        &[Streams::All],
         &[DiscontinuityGroup {
             tracks: vec![track(
                 "fmp4_a/video",

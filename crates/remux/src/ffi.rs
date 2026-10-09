@@ -4,38 +4,24 @@ use ffmpeg::codec;
 use ffmpeg::format::stream::{Stream, StreamMut};
 use ffmpeg_next as ffmpeg;
 
-use crate::StreamKind;
-
-/// 一路流放进 MP4 轨时必须前后一致的编码参数；不同不连续段组的同一条轨之间按此比较。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Shape {
-    Video {
-        codec: &'static str,
-        width: i32,
-        height: i32,
-    },
-    Audio {
-        codec: &'static str,
-        sample_rate: i32,
-        channels: i32,
-    },
-}
+use crate::{Shape, StreamKind};
 
 pub(crate) fn shape(stream: &Stream<'_>, kind: StreamKind) -> Shape {
     let params = stream.parameters();
     let codec = params.id().name();
     // SAFETY: 指针指向该流的 codecpar，由所属输入上下文分配，在 params 存活期间有效且非空；此处只读。
     let p = unsafe { &*params.as_ptr() };
+    let unsigned = |value: i32| u32::try_from(value).expect("FFmpeg 的宽高、采样率、声道数非负");
     match kind {
         StreamKind::Video => Shape::Video {
             codec,
-            width: p.width,
-            height: p.height,
+            width: unsigned(p.width),
+            height: unsigned(p.height),
         },
         StreamKind::Audio => Shape::Audio {
             codec,
-            sample_rate: p.sample_rate,
-            channels: p.ch_layout.nb_channels,
+            sample_rate: unsigned(p.sample_rate),
+            channels: unsigned(p.ch_layout.nb_channels),
         },
     }
 }
