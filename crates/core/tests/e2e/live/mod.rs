@@ -7,6 +7,7 @@ mod recording;
 mod resume;
 mod sessions;
 mod stall;
+mod stop;
 
 use std::path::Path;
 use std::time::Duration;
@@ -117,7 +118,7 @@ fn split_source(
         }
     }
     let media = |kind: &str, &(count, sig, end): &(usize, u32, bool)| {
-        signed_fmp4_playlist(kind, count, sig, end)
+        signed_fmp4_playlist(kind, "0.1", count, sig, end)
     };
     server.put_sequence(
         "video.m3u8",
@@ -131,11 +132,11 @@ fn split_source(
     (video_segments, audio_segments)
 }
 
-/// `dir/seg<i>.m4s`（`i` 为 `0..count`）组成的直播播放列表，init 段为 `dir/init.mp4?sig=<sig>`：签名每次
-/// 刷新可以不同，内容相同。
-fn signed_fmp4_playlist(dir: &str, count: usize, sig: u32, end: bool) -> String {
+/// `dir/seg<i>.m4s`（`i` 为 `0..count`）组成的直播播放列表，TARGETDURATION 为 `target` 秒，init 段为
+/// `dir/init.mp4?sig=<sig>`：签名每次刷新可以不同，内容相同。
+fn signed_fmp4_playlist(dir: &str, target: &str, count: usize, sig: u32, end: bool) -> String {
     let mut text = format!(
-        "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MAP:URI=\"{dir}/init.mp4?sig={sig}\"\n"
+        "#EXTM3U\n#EXT-X-TARGETDURATION:{target}\n#EXT-X-MAP:URI=\"{dir}/init.mp4?sig={sig}\"\n"
     );
     for i in 0..count {
         text += &format!("#EXTINF:1,\n{dir}/seg{i}.m4s\n");

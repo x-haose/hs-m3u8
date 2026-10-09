@@ -1,14 +1,12 @@
-//! 续录时的会话判定：由各轨的核对结论定下会话编号、各轨的起点，以及完整来源地址变了时怎么办（纯计算）。
+//! 续录时的会话判定：由各轨的结论定下会话编号、各轨的起点，以及完整来源地址变了时怎么办（纯计算；
+//! 等候选与核对内容见 `deciding` 模块）。
 //!
 //! 一条轨的窗口与它最近一次有分片的会话重叠（身份与编号一致），且重叠的分片重新下载后与已存的逐字节相同，
-//! 才算接得上；编码器重启后序号与文件名都可能从头再来，只看文件名分不出是不是同一段内容。各轨（已录满
-//! max_duration 的除外）都接得上各自最近的会话时，接着目录里最近的会话录：最近的会话就是它的轨补录没录完的
-//! 分片，其余的轨跳过录过的序号并入；否则另起一个会话，接得上的轨跳过录过的序号。
+//! 才算接得上；编码器重启后序号与文件名都可能从头再来，只看文件名分不出是不是同一段内容。要录的各轨都接得上
+//! 各自最近的会话时，接着目录里最近的会话录：最近的会话就是它的轨补录没录完的分片，其余的轨跳过录过的序号
+//! 并入；否则另起一个会话，接得上的轨跳过录过的序号。
 
 use std::collections::BTreeMap;
-
-use hs_m3u8_hls::MediaPlaylist;
-use tokio::time::Instant;
 
 use crate::workdir::{SegmentFile, SegmentName, SessionStart, Stored};
 
@@ -85,7 +83,7 @@ impl Recorded {
     }
 }
 
-/// 一条轨能否接着它最近的会话录。
+/// 一条轨的结论。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Verdict {
     /// 窗口与已录的分片重叠一致，内容核对相同
@@ -94,51 +92,43 @@ pub(super) enum Verdict {
     Differs,
     /// 已录满 max_duration，这次不录，不影响判定
     Full,
+    /// 一直没拿到有分片的播放列表就停滞、看起来已结束（其他轨也不再出新分片）：这次不录，不影响判定
+    Ended,
 }
 
-/// 一条轨等到的第一份有分片（或已结束）的播放列表。
-pub(super) struct Candidate {
-    pub playlist: MediaPlaylist,
-    /// 这次加载开始的时刻
-    pub started: Instant,
+impl Verdict {
+    /// 这条轨这次要录。
+    fn records(self) -> bool {
+        matches!(self, Verdict::Matches | Verdict::Differs)
+    }
 }
 
 /// 完整来源地址与目录里记录的不同时怎么办。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NewUrl {
-    /// 改记当前地址：目录里还没有录过的分片，或各轨（已录满的除外）都接得上
+    /// 改记当前地址：目录里还没有录过的分片，或要录的各轨都接得上
     Adopt,
     /// 有轨接不上，无法确认是同一个直播
     Unverified,
-    /// 各轨都已录满、这次不录：不改记，照常合并
+    /// 这次没有要录的轨：不改记，照常合并
     Keep,
-}
-
-/// 一条轨在定下的会话里怎么录。
-pub(super) enum TrackPlan {
-    /// 已录满 max_duration，不录
-    Idle,
-    Record(Start, Candidate),
 }
 
 /// 判定结果。
 pub(super) struct Decision {
     pub session: u32,
     pub new_url: NewUrl,
-    pub tracks: Vec<TrackPlan>,
+    /// 各轨的起点；None 为这次不录（见 [`Verdict::Full`]、[`Verdict::Ended`]）
+    pub tracks: Vec<Option<Start>>,
 }
 
 impl Decision {
-    /// 目录里没有录过的分片：第 0 个会话，各轨都从首次拉到的播放列表的起点录。
-    pub(super) fn first(playlists: Vec<MediaPlaylist>, started: Instant) -> Self {
-        let tracks = playlists
-            .into_iter()
-            .map(|playlist| TrackPlan::Record(Start::Fresh, Candidate { playlist, started }))
-            .collect();
+    /// 目录里没有录过的分片：第 0 个会话，`tracks` 条轨都从窗口起点录。
+    pub(super) fn first(tracks: usize) -> Self {
         Decision {
             session: 0,
             new_url: NewUrl::Adopt,
-            tracks,
+            tracks: (0..tracks).map(|_| Some(Start::Fresh)).collect(),
         }
     }
 }
@@ -149,7 +139,7 @@ pub(super) struct Deciding {
     previous_session: u32,
     /// 各轨最近一次有分片的会话
     recorded: Vec<Option<Recorded>>,
-    offered: Vec<Option<(Candidate, Verdict)>>,
+    verdicts: Vec<Option<Verdict>>,
 }
 
 impl Deciding {
@@ -170,7 +160,7 @@ impl Deciding {
         Some(Deciding {
             previous_session,
             recorded,
-            offered: stored.segments.iter().map(|_| None).collect(),
+            verdicts: stored.segments.iter().map(|_| None).collect(),
         })
     }
 
@@ -178,24 +168,28 @@ impl Deciding {
         self.recorded[track].as_ref()
     }
 
-    pub(super) fn offer(&mut self, track: usize, candidate: Candidate, verdict: Verdict) {
-        self.offered[track] = Some((candidate, verdict));
+    pub(super) fn conclude(&mut self, track: usize, verdict: Verdict) {
+        self.verdicts[track] = Some(verdict);
+    }
+
+    pub(super) fn has_concluded(&self, track: usize) -> bool {
+        self.verdicts[track].is_some()
     }
 
     pub(super) fn is_complete(&self) -> bool {
-        self.offered.iter().all(Option::is_some)
+        self.verdicts.iter().all(Option::is_some)
     }
 
     /// 各轨都有结论后作出判定；另起会话而会话编号已达上限时为 None。
     pub(super) fn decide(self) -> Option<Decision> {
-        let offered: Vec<(Candidate, Verdict)> = self
-            .offered
+        let verdicts: Vec<Verdict> = self
+            .verdicts
             .into_iter()
-            .map(|o| o.expect("判定前各轨都已有结论"))
+            .map(|v| v.expect("判定前各轨都已有结论"))
             .collect();
         let previous = self.previous_session;
-        let continued = offered.iter().all(|(_, v)| *v != Verdict::Differs);
-        let recording = offered.iter().any(|(_, v)| *v != Verdict::Full);
+        let continued = verdicts.iter().all(|v| *v != Verdict::Differs);
+        let recording = verdicts.iter().any(|v| v.records());
         let session = if continued {
             previous
         } else {
@@ -209,17 +203,14 @@ impl Deciding {
         let tracks = self
             .recorded
             .into_iter()
-            .zip(offered)
-            .map(|(recorded, (candidate, verdict))| {
-                let start = match (recorded, verdict) {
-                    (_, Verdict::Full) => return TrackPlan::Idle,
-                    (Some(r), Verdict::Matches) if continued && r.session == previous => {
-                        Start::Continue(r)
-                    }
-                    (Some(r), Verdict::Matches) => Start::After { through: r.last() },
-                    _ => Start::Fresh,
-                };
-                TrackPlan::Record(start, candidate)
+            .zip(verdicts)
+            .map(|(recorded, verdict)| match (recorded, verdict) {
+                (_, Verdict::Full | Verdict::Ended) => None,
+                (Some(r), Verdict::Matches) if continued && r.session == previous => {
+                    Some(Start::Continue(r))
+                }
+                (Some(r), Verdict::Matches) => Some(Start::After { through: r.last() }),
+                _ => Some(Start::Fresh),
             })
             .collect();
         Some(Decision {
