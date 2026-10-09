@@ -133,8 +133,9 @@ impl WorkDir {
         .await?
     }
 
-    /// 删除整个任务目录。持锁删掉锁文件以外的内容，再释放锁、删锁文件与目录：释放锁之后别的任务
-    /// 就能打开这个目录，先删内容保证它看到的不会是删到一半的任务。
+    /// 删除整个任务目录。持锁删掉全部内容，最后删锁文件，再释放锁、删目录：释放锁之后别的任务就能打开这个目录，
+    /// 先删内容保证它看到的不会是删到一半的任务；锁文件也在持锁时删，别的任务打开的是新建的锁文件，
+    /// 不会锁上本任务还持有的那个。std 打开文件时允许删除，Windows 上持有句柄也能删。
     pub(crate) async fn remove(self) -> Result<(), Error> {
         let WorkDir { layout, _lock, .. } = self;
         blocking(move || {
@@ -153,15 +154,9 @@ impl WorkDir {
                 };
                 removed.map_err(io_error("删除", &path))?;
             }
-            // Windows 上打开着的文件无法删除，先释放
-            drop(_lock);
             let lock = root.join(LOCK_FILE);
-            match fs::remove_file(&lock) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                    return Err(io_error("删除", &lock)(e));
-                }
-                _ => {}
-            }
+            fs::remove_file(&lock).map_err(io_error("删除", &lock))?;
+            drop(_lock);
             match fs::remove_dir(root) {
                 Ok(()) => Ok(()),
                 // 释放锁后另一个任务已开始使用这个目录：本任务的内容已删完，目录留给它
@@ -314,24 +309,31 @@ pub(crate) async fn write(path: PathBuf, data: Vec<u8>) -> Result<(), Error> {
     .await?
 }
 
-/// 存入第 `track` 条轨的 init 段，返回其内容指纹，以及这次是否新写了文件（同内容的已存在时不重写）。
+/// 存入第 `track` 条轨的 init 段；`fingerprint` 为 `data` 的内容指纹，决定文件名。
 pub(crate) async fn store_init(
     layout: &Layout,
     track: usize,
+    fingerprint: Fingerprint,
     data: Vec<u8>,
-) -> Result<(Fingerprint, bool), Error> {
-    let fingerprint = Fingerprint::of_content(&data);
+) -> Result<StoredInit, Error> {
     let path = layout.init(track, fingerprint);
-    let created = blocking(move || {
+    blocking(move || {
         if completed_len(&path)?.is_some() {
-            return Ok(false);
+            return Ok(StoredInit::Existing);
         }
         let dir = parent(&path);
         fs::create_dir_all(dir).map_err(io_error("创建", dir))?;
-        write_atomic(&path, &data).map(|()| true)
+        write_atomic(&path, &data).map(|()| StoredInit::Created)
     })
-    .await??;
-    Ok((fingerprint, created))
+    .await?
+}
+
+/// [`store_init`] 的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoredInit {
+    Created,
+    /// 内容相同的已经存在，没有重写
+    Existing,
 }
 
 /// 文件所在目录；任务目录内的文件都有上级目录。

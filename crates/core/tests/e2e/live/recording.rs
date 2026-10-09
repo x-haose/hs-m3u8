@@ -47,24 +47,35 @@ async fn records_until_endlist() {
     );
 }
 
-/// 两次刷新之间窗口滑过了分片 1：记为缺失，其余照常合并，时间线在该处留空。
+/// 两次刷新之间窗口滑过了分片 1、2：记为缺失（进度按分片计），其余照常合并，时间线在该处留空。
 #[tokio::test(flavor = "multi_thread")]
 async fn window_slide_is_reported_as_missed() {
     let dir = test_dir("live_slide");
     let server = Server::start().await;
-    put_long(&server, "", &[0, 1, 2, 3]);
+    put_long(&server, "", &[0, 3]);
     server.put_sequence(
         "live.m3u8",
-        vec![playlist(&[0], false), playlist(&[2, 3], true)],
+        vec![playlist(&[0], false), playlist(&[3], true)],
     );
 
-    let output = run(live_request(server.url("live.m3u8"), &dir, STALL))
-        .await
+    let job = engine()
+        .start(live_request(server.url("live.m3u8"), &dir, STALL))
         .unwrap();
+    let progress = job.progress();
+    let output = job.wait().await.unwrap();
 
-    assert_output(&output, &expected_long(&dir, &[0, 2, 3], &[3]));
-    let missed = vec![missed(1, 1, MissReason::Expired)];
+    assert_output(&output, &expected_long(&dir, &[0, 3], &[2]));
+    let missed = vec![missed(1, 2, MissReason::Expired)];
     assert_eq!(output.live, report(LiveEnd::EndList, 1, missed));
+    let last = *progress.borrow();
+    assert_eq!(
+        (
+            last.segments_done,
+            last.segments_total,
+            last.segments_missed
+        ),
+        (2, 2, 2)
+    );
 }
 
 /// 列出的分片 404：记为缺失，录制继续；相邻且原因相同的缺失合成一个区间。
@@ -529,10 +540,22 @@ async fn unavailable_new_init_is_missed() {
     );
     server.put_sequence("live.m3u8", vec![first.into(), second]);
 
-    let output = run(live_request(server.url("live.m3u8"), &dir, STALL))
-        .await
+    let job = engine()
+        .start(live_request(server.url("live.m3u8"), &dir, STALL))
         .unwrap();
+    let progress = job.progress();
+    let output = job.wait().await.unwrap();
 
+    // 取不到 init 段的分片也算在要下载的分片里
+    let last = *progress.borrow();
+    assert_eq!(
+        (
+            last.segments_done,
+            last.segments_total,
+            last.segments_missed
+        ),
+        (1, 2, 1)
+    );
     let tracks = vec![track("fmp4_a/video", Some("init.mp4"), &["seg0.m4s"])];
     let want = expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]);
     assert_output(&output, &want);

@@ -10,9 +10,10 @@ pub struct Progress {
     pub stage: Stage,
     /// 已完成的分片，各轨合计；含续传前已完成的
     pub segments_done: usize,
-    /// 分片总数；直播时为目前已发现的分片数，随录制增长
+    /// 要下载的分片，各轨合计：已完成的（含续传前的）加上排入下载的；直播另含列出了但 init 段取不到的，
+    /// 随录制增长。全部处理完时等于已完成的加上本次取不到的
     pub segments_total: usize,
-    /// 直播本次运行中缺失的分片数（窗口已滑过、取不到、init 段取不到）；点播恒为 0
+    /// 直播本次运行中缺失的分片：窗口已滑过的（没有列出过，不在 `segments_total` 里）与取不到的；点播恒为 0
     pub segments_missed: usize,
     /// 任务目录中已完成的分片与 init 段的字节数（解密后）；含续传前已完成的
     pub bytes: u64,
@@ -99,6 +100,13 @@ pub struct Missed {
     pub first: u64,
     pub last: u64,
     pub reason: MissReason,
+}
+
+impl Missed {
+    /// 区间里的分片数；大到无法表示时为 `usize::MAX`。
+    pub fn count(&self) -> usize {
+        usize::try_from(self.last - self.first).map_or(usize::MAX, |n| n.saturating_add(1))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

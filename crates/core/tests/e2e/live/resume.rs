@@ -222,6 +222,37 @@ async fn new_token_continues_only_when_the_window_overlaps() {
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
 }
 
+/// 只合并时目录里是点播任务：明确报类型不符，不当作「没有录到」。
+#[tokio::test(flavor = "multi_thread")]
+async fn merge_only_rejects_a_vod_directory() {
+    let dir = test_dir("resume_merge_vod");
+    let server = Server::start().await;
+    server.put("seg0.ts", fixture("ts_long/seg0.ts"));
+    server.put(
+        "vod.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n#EXT-X-ENDLIST\n",
+    );
+    let req = live_request(server.url("vod.m3u8"), &dir, STALL);
+    assert!(run(req.clone()).await.is_err());
+
+    let mut merge = req;
+    merge.live = merge.live.map(|live| LiveOptions {
+        resume: Resume::MergeOnly,
+        ..live
+    });
+    let err = run(merge).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::WorkDir {
+                problem: WorkDirProblem::KindMismatch { .. },
+                ..
+            }
+        ),
+        "{err}"
+    );
+}
+
 /// 选轨偏好变了即是另一个任务：有已录内容时拒绝，不混进同一个目录。
 #[tokio::test(flavor = "multi_thread")]
 async fn changed_preference_is_rejected() {

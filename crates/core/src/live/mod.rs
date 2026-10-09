@@ -30,7 +30,7 @@ use crate::hooks::Hooks;
 use crate::http::{Http, Permit};
 use crate::request::LiveOptions;
 use crate::resolve::{self, ResolvedTrack};
-use crate::workdir::{self, JobRecord, Stored, WorkDir};
+use crate::workdir::{self, JobRecord, Stored, StoredInit, WorkDir};
 use crate::{
     Error, HttpError, LiveEnd, MissReason, Missed, Progress, Stage, WorkDirProblem, blocking,
 };
@@ -495,16 +495,22 @@ impl Recorder<'_> {
             ControlFlow::Continue(update) => update,
         };
         // init 段先落盘、再下载引用它的分片：中断后合并时，分片引用的 init 段一定存在
-        for (_, data) in update.init_files {
+        for (fingerprint, data) in update.init_files {
             let len = data.len() as u64;
-            let (_, created) = workdir::store_init(self.dir.layout(), track, data).await?;
-            if created {
+            let stored = workdir::store_init(self.dir.layout(), track, fingerprint, data).await?;
+            if stored == StoredInit::Created {
                 self.progress.send_modify(|p| p.bytes += len);
             }
         }
-        let (scheduled, missed) = (update.items.len(), update.missed.len());
+        let init_failed = update
+            .missed
+            .iter()
+            .filter(|m| matches!(m.reason, MissReason::InitFailed(_)))
+            .count();
+        let to_download = update.items.len() + init_failed;
+        let missed: usize = update.missed.iter().map(Missed::count).sum();
         self.progress.send_modify(|p| {
-            p.segments_total += scheduled;
+            p.segments_total += to_download;
             p.segments_missed += missed;
         });
         self.missed.extend(update.missed);
