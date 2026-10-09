@@ -1,4 +1,4 @@
-//! AES-128-CBC 解密与分片内容校验。
+//! AES-128-CBC 解密。
 
 use aes::Aes128;
 use aes::cipher::block_padding::Pkcs7;
@@ -23,39 +23,40 @@ pub(crate) fn decrypt(
     Ok(data)
 }
 
-/// 没有 init 段的分片：MPEG-TS（偏移 0 与 188 处为同步字节 0x47）、ADTS 音频，或以 ID3 标签开头的打包音频。
-pub(crate) fn check_ts(data: &[u8]) -> Result<(), Integrity> {
-    let ts = data.first() == Some(&0x47) && (data.len() < 376 || data[188] == 0x47);
-    let adts = data.len() >= 2 && data[0] == 0xFF && data[1] & 0xF0 == 0xF0;
-    let id3 = data.starts_with(b"ID3");
-    if ts || adts || id3 {
-        Ok(())
-    } else {
-        Err(Integrity::NotTs(head(data)))
-    }
-}
+#[cfg(test)]
+mod tests {
+    use aes::cipher::BlockModeEncrypt;
 
-/// fMP4 分片或 init 段：以合法的 ISO BMFF box 开头。
-pub(crate) fn check_fmp4(data: &[u8]) -> Result<(), Integrity> {
-    const BOXES: [&[u8; 4]; 9] = [
-        b"ftyp", b"styp", b"moof", b"moov", b"sidx", b"emsg", b"prft", b"free", b"skip",
-    ];
-    let ok = data.len() >= 8 && BOXES.iter().any(|b| &data[4..8] == *b) && {
-        let size = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-        size == 1 || size >= 8
-    };
-    if ok {
-        Ok(())
-    } else {
-        Err(Integrity::NotFmp4(head(data)))
-    }
-}
+    use super::*;
 
-/// 开头最多 16 字节的十六进制，用于错误信息。
-fn head(data: &[u8]) -> String {
-    data.iter()
-        .take(16)
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ")
+    fn encrypt(plain: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Vec<u8> {
+        let mut buf = plain.to_vec();
+        buf.resize(plain.len() + 16, 0);
+        let len = cbc::Encryptor::<Aes128>::new(key.into(), iv.into())
+            .encrypt_padded::<Pkcs7>(&mut buf, plain.len())
+            .unwrap()
+            .len();
+        buf.truncate(len);
+        buf
+    }
+
+    #[test]
+    fn decrypts_and_strips_padding() {
+        let (key, iv) = ([7u8; 16], [9u8; 16]);
+        for len in [0, 1, 15, 16, 17, 188 * 3] {
+            let plain: Vec<u8> = (0..len).map(|i| i as u8).collect();
+            assert_eq!(decrypt(encrypt(&plain, &key, &iv), &key, &iv), Ok(plain));
+        }
+    }
+
+    #[test]
+    fn wrong_key_and_bad_length_are_rejected() {
+        let (key, iv) = ([7u8; 16], [9u8; 16]);
+        let cipher = encrypt(b"0123456789abcdef0123", &key, &iv);
+        assert_eq!(decrypt(cipher, &[8u8; 16], &iv), Err(Integrity::Padding));
+        assert_eq!(
+            decrypt(vec![0; 15], &key, &iv),
+            Err(Integrity::CipherLength(15))
+        );
+    }
 }

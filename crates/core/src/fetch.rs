@@ -1,7 +1,7 @@
 //! 下载器：拉取 init 段与分片，解密、校验后写入任务目录。
 //!
-//! 项可以随时加入（点播一次加入全部，直播随刷新加入）；同时在途的项不超过任务的并发数，
-//! 其余排队。每项完成后由驱动方取走结果（[`Fetcher::next`]），据此更新进度、决定失败如何处理。
+//! 项可以随时加入（点播一次加入全部，直播随刷新加入）；同时在途的项不超过任务的并发数，其余排队。
+//! 每项完成后由驱动方取走结果（[`Fetcher::next`] / [`Fetcher::drain`]），据此更新进度、决定失败如何处理。
 
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
@@ -14,11 +14,11 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::crypto::{check_fmp4, check_ts, decrypt};
+use crate::crypto::decrypt;
+use crate::hooks::{HookKind, Hooks, Purpose, run_hook};
 use crate::http::Http;
-use crate::plan::Plan;
-use crate::workdir::{self, WorkDir};
-use crate::{Error, Hooks, Integrity, Progress, Purpose, Stage, blocking, run_hook};
+use crate::verify::{check_fmp4, check_standalone_segment};
+use crate::{Error, Integrity, Progress, workdir};
 
 /// 一项下载，`path` 为写入任务目录的位置。
 pub(crate) enum Item {
@@ -106,6 +106,24 @@ impl Fetcher {
         self.abort.cancel();
     }
 
+    /// 等排队与在途的项全部结束。`on_finished` 处理每项结果，返回 `Err` 时取消其余项；
+    /// 返回第一个真正的失败，其余项因此以 Cancelled 结束不覆盖它。
+    pub(crate) async fn drain(
+        &mut self,
+        mut on_finished: impl FnMut(ItemId, Result<u64, Error>) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let mut outcome = Ok(());
+        while let Some((id, result)) = self.next().await {
+            if let Err(e) = on_finished(id, result) {
+                self.abort();
+                if matches!(outcome, Ok(()) | Err(Error::Cancelled)) {
+                    outcome = Err(e);
+                }
+            }
+        }
+        outcome
+    }
+
     fn fill(&mut self) {
         while self.running.len() < self.limit
             && let Some(item) = self.pending.pop_front()
@@ -114,6 +132,16 @@ impl Fetcher {
                 .spawn(run(self.ctx.clone(), item, self.abort.clone()));
         }
     }
+}
+
+/// 一项成功后更新进度：字节数都计入，分片另计完成数。
+pub(crate) fn record_done(progress: &watch::Sender<Progress>, id: ItemId, len: u64) {
+    progress.send_modify(|p| {
+        p.bytes += len;
+        if matches!(id, ItemId::Segment { .. }) {
+            p.segments_done += 1;
+        }
+    });
 }
 
 async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
@@ -139,9 +167,10 @@ async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
                 .map_err(|e| match e {
                     Error::Cancelled => Error::Cancelled,
                     e => Error::Segment {
+                        track,
                         sequence: segment.sequence,
                         url: Box::new(segment.uri.clone()),
-                        source: Box::new(e),
+                        cause: Box::new(e),
                     },
                 });
             let result = match data {
@@ -157,88 +186,6 @@ async fn write(path: PathBuf, data: Vec<u8>) -> Result<u64, Error> {
     let len = data.len() as u64;
     workdir::write(path, data).await?;
     Ok(len)
-}
-
-/// 下载点播计划中尚未完成的 init 段与分片。返回 `Ok` 即全部已在任务目录中。
-///
-/// 任一项失败时取消其余项并返回该错误；任务被取消时返回 [`Error::Cancelled`]。
-pub(crate) async fn download(
-    fetcher: &mut Fetcher,
-    plan: Arc<Plan>,
-    dir: &WorkDir,
-    progress: &watch::Sender<Progress>,
-) -> Result<(), Error> {
-    let (scan_plan, scan_dir) = (plan.clone(), dir.clone());
-    let (items, done, bytes) = blocking(move || pending(&scan_plan, &scan_dir)).await??;
-    progress.send_modify(|p| {
-        p.stage = Stage::Downloading;
-        p.segments_total = plan.segment_count();
-        p.segments_done = done;
-        p.bytes = bytes;
-    });
-    for item in items {
-        fetcher.push(item);
-    }
-    let mut outcome = Ok(());
-    while let Some((id, result)) = fetcher.next().await {
-        match result {
-            Ok(len) => progress.send_modify(|p| {
-                p.bytes += len;
-                if matches!(id, ItemId::Segment { .. }) {
-                    p.segments_done += 1;
-                }
-            }),
-            Err(e) => {
-                fetcher.abort();
-                // 保留第一个真正的失败；其余项因取消而返回的 Cancelled 不覆盖它
-                if matches!(outcome, Ok(()) | Err(Error::Cancelled)) {
-                    outcome = Err(e);
-                }
-            }
-        }
-    }
-    outcome
-}
-
-/// 尚未完成的项（init 段在前），以及已完成的分片数与字节数（含 init 段）。
-fn pending(plan: &Plan, dir: &WorkDir) -> Result<(Vec<Item>, usize, u64), Error> {
-    let mut items = Vec::new();
-    let (mut done, mut bytes) = (0, 0);
-    for (track, t) in plan.tracks.iter().enumerate() {
-        for (index, init) in t.inits.iter().enumerate() {
-            let path = dir.init(track, index);
-            match workdir::completed_len(&path)? {
-                Some(len) => bytes += len,
-                None => items.push(Item::Init {
-                    track,
-                    init: init.clone(),
-                    path,
-                }),
-            }
-        }
-    }
-    for (track, t) in plan.tracks.iter().enumerate() {
-        for segment in &t.segments {
-            let path = dir.segment(
-                track,
-                segment.sequence,
-                segment.discontinuity,
-                t.init_index(segment),
-            );
-            match workdir::completed_len(&path)? {
-                Some(len) => {
-                    done += 1;
-                    bytes += len;
-                }
-                None => items.push(Item::Segment {
-                    track,
-                    segment: Box::new(segment.clone()),
-                    path,
-                }),
-            }
-        }
-    }
-    Ok((items, done, bytes))
 }
 
 /// 拉取 init 段并校验是 fMP4。
@@ -274,7 +221,7 @@ async fn fetch_segment(
         .await?
         .body;
     let url = segment.uri.clone();
-    let data = run_hook(&ctx.hooks, Purpose::Segment, move |hooks| {
+    let data = run_hook(&ctx.hooks, HookKind::Segment, move |hooks| {
         hooks.on_segment(&url, body)
     })
     .await?;
@@ -288,13 +235,14 @@ async fn fetch_segment(
     };
     match segment.init {
         Some(_) => check_fmp4(&data),
-        None => check_ts(&data),
+        None => check_standalone_segment(&data),
     }
     .map_err(integrity)?;
     Ok(data)
 }
 
 /// 取 key：同一地址只拉取一次，经 `on_key` 回调后必须是 16 字节。拉取失败不缓存，下次重新拉取。
+/// 请求与回调的错误包装为 [`Error::Key`]（取消除外）。
 async fn key_for(ctx: &Ctx, url: &Url, cancel: &CancellationToken) -> Result<[u8; 16], Error> {
     let cell = ctx
         .keys
@@ -305,12 +253,25 @@ async fn key_for(ctx: &Ctx, url: &Url, cancel: &CancellationToken) -> Result<[u8
         .clone();
     let key = cell
         .get_or_try_init(|| async {
-            let body = ctx.http.get(Purpose::Key, url, None, cancel).await?.body;
+            let wrap = |e: Error| match e {
+                Error::Cancelled => Error::Cancelled,
+                e => Error::Key {
+                    url: Box::new(url.clone()),
+                    cause: Box::new(e),
+                },
+            };
+            let body = ctx
+                .http
+                .get(Purpose::Key, url, None, cancel)
+                .await
+                .map_err(wrap)?
+                .body;
             let hook_url = url.clone();
-            let data = run_hook(&ctx.hooks, Purpose::Key, move |hooks| {
+            let data = run_hook(&ctx.hooks, HookKind::Key, move |hooks| {
                 hooks.on_key(&hook_url, body)
             })
-            .await?;
+            .await
+            .map_err(wrap)?;
             <[u8; 16]>::try_from(data.as_slice()).map_err(|_| Error::KeyLength {
                 url: Box::new(url.clone()),
                 length: data.len(),

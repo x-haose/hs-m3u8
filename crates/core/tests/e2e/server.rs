@@ -1,4 +1,4 @@
-//! 测试用 HTTP 服务：按路径返回内容，可注入 500、404、重定向、按请求次数变化的内容与阻塞点。
+//! 测试用 HTTP 服务：按路径返回内容，可注入 500、指定状态码、404、重定向、按请求次数变化的内容与阻塞点。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -13,7 +13,9 @@ enum Entry {
     Body(Vec<u8>),
     /// 第 n 次请求返回第 n 个，之后一直返回最后一个
     Sequence(Vec<Vec<u8>>),
-    Redirect(String),
+    /// 第 n 次请求重定向到第 n 个地址，之后一直是最后一个
+    Redirect(Vec<String>),
+    Status(StatusCode),
 }
 
 /// 收到请求后先通知测试，再等测试放行。
@@ -79,12 +81,27 @@ impl Server {
     }
 
     pub(crate) fn redirect(&self, from: &str, to: &str) {
-        let entry = Entry::Redirect(to.into());
+        self.redirect_sequence(from, vec![to.into()]);
+    }
+
+    /// 第 n 次请求 `from` 重定向到 `targets` 的第 n 个，之后一直是最后一个。
+    pub(crate) fn redirect_sequence(&self, from: &str, targets: Vec<String>) {
+        let entry = Entry::Redirect(targets);
         self.state
             .entries
             .lock()
             .unwrap()
             .insert(from.into(), entry);
+    }
+
+    /// 之后请求该路径返回 `status`。
+    pub(crate) fn status(&self, path: &str, status: StatusCode) {
+        let entry = Entry::Status(status);
+        self.state
+            .entries
+            .lock()
+            .unwrap()
+            .insert(path.into(), entry);
     }
 
     pub(crate) fn fail(&self, path: &str, times: usize) {
@@ -151,13 +168,16 @@ async fn serve(State(state): State<Arc<ServerState>>, uri: Uri, headers: HeaderM
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
+    let nth = |len: usize| (hits - 1).min(len - 1);
     let body = match state.entries.lock().unwrap().get(&path) {
         None => return StatusCode::NOT_FOUND.into_response(),
-        Some(Entry::Redirect(to)) => {
+        Some(Entry::Status(status)) => return status.into_response(),
+        Some(Entry::Redirect(targets)) => {
+            let to = &targets[nth(targets.len())];
             return (StatusCode::FOUND, [(header::LOCATION, format!("/{to}"))]).into_response();
         }
         Some(Entry::Body(body)) => body.clone(),
-        Some(Entry::Sequence(bodies)) => bodies[(hits - 1).min(bodies.len() - 1)].clone(),
+        Some(Entry::Sequence(bodies)) => bodies[nth(bodies.len())].clone(),
     };
     match headers.get(header::RANGE).and_then(|r| r.to_str().ok()) {
         None => body.into_response(),

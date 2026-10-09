@@ -5,7 +5,7 @@ mod live;
 mod server;
 mod vod;
 
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -38,6 +38,25 @@ fn expected(dir: &Path, streams: &[Streams], groups: &[DiscontinuityGroup]) -> V
     std::fs::read(path).unwrap()
 }
 
+/// ts_long 中的分片 `indices` 按 `groups` 切成不连续段组直接合并的期望输出；`groups` 为各组的分片数。
+fn expected_long(dir: &Path, indices: &[u64], groups: &[usize]) -> Vec<u8> {
+    let names: Vec<String> = indices.iter().map(|i| format!("seg{i}.ts")).collect();
+    let mut rest: &[String] = &names;
+    let groups: Vec<DiscontinuityGroup> = groups
+        .iter()
+        .map(|&n| {
+            let (group, tail) = rest.split_at(n);
+            rest = tail;
+            let group: Vec<&str> = group.iter().map(String::as_str).collect();
+            DiscontinuityGroup {
+                tracks: vec![track("ts_long", None, &group)],
+            }
+        })
+        .collect();
+    assert!(rest.is_empty(), "groups 之和应等于分片数");
+    expected(dir, &[Streams::All], &groups)
+}
+
 /// 每个测试独立的空目录。
 fn test_dir(test: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -55,7 +74,7 @@ fn test_dir(test: &str) -> PathBuf {
 fn request(url: Url, dir: &Path) -> JobRequest {
     let mut request = JobRequest::new(url, dir.join("out.mp4"));
     request.retry = RetryPolicy {
-        attempts: 3,
+        attempts: NonZeroU32::new(3).unwrap(),
         base_delay: Duration::from_millis(1),
         max_delay: Duration::from_millis(1),
     };
