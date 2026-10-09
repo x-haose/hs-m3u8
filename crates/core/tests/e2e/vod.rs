@@ -286,7 +286,13 @@ async fn failure_then_resume() {
     assert!(dir.join("out.mp4.hsdl/job.json").exists());
 
     put_ts_a(&server, "index.m3u8", 0.5);
-    assert!(matches!(run(req.clone()).await, Err(Error::PlanChanged)));
+    assert!(matches!(
+        run(req.clone()).await,
+        Err(Error::WorkDir {
+            problem: WorkDirProblem::PlanChanged,
+            ..
+        })
+    ));
 
     put_ts_a(&server, "index.m3u8", 1.0);
     let output = run(req).await.unwrap();

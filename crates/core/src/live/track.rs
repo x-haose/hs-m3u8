@@ -38,7 +38,7 @@ enum Overlap {
     /// 没有重叠，且最新的序号不超过已处理到的（疑似编码器重启）
     Regressed,
     /// 在该序号处与上次矛盾：分片换了，或重叠部分给出的编号偏移不一致
-    Changed(u64),
+    Inconsistent(u64),
 }
 
 /// 一条轨在会话开始时的状况。
@@ -271,7 +271,7 @@ impl LiveTrack {
                 }
                 return Ok(ControlFlow::Continue(Update::unchanged()));
             }
-            Overlap::Changed(sequence) => {
+            Overlap::Inconsistent(sequence) => {
                 return Ok(ControlFlow::Break(LiveEnd::Inconsistent {
                     track,
                     sequence,
@@ -503,11 +503,11 @@ fn compare(
             continue;
         };
         if listed.id != Fingerprint::of_segment(&s.uri, s.byte_range) {
-            return Overlap::Changed(s.sequence);
+            return Overlap::Inconsistent(s.sequence);
         }
         let this = listed.discontinuity - i128::from(s.discontinuity);
         match offset {
-            Some(existing) if existing != this => return Overlap::Changed(s.sequence),
+            Some(existing) if existing != this => return Overlap::Inconsistent(s.sequence),
             _ => offset = Some(this),
         }
     }

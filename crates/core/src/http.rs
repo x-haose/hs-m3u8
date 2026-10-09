@@ -16,13 +16,13 @@ use crate::ident::strip_query;
 use crate::request::{JobRequest, RetryPolicy, check_header};
 use crate::{Error, HttpError, Integrity};
 
-/// 请求是否占用引擎的在途名额。
+/// 请求是否计入引擎的在途上限。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Priority {
-    /// 占名额：key、分片与点播的 init 段，量大
-    Normal,
-    /// 不占名额：播放列表与刷新时新出现的 init 段，量小；排在其他任务的大批下载之后会让直播停滞
-    Urgent,
+pub(crate) enum Permit {
+    /// 计入：key、分片与点播的 init 段，量大
+    Required,
+    /// 不计入：播放列表与直播刷新时新出现的 init 段，量小；排在其他任务的大批下载之后会让直播停滞
+    Exempt,
 }
 
 pub(crate) struct Http {
@@ -30,7 +30,7 @@ pub(crate) struct Http {
     headers: Vec<(String, String)>,
     retry: RetryPolicy,
     hooks: Arc<dyn Hooks>,
-    /// 引擎内所有任务共享；[`Priority::Normal`] 的每次尝试从发出请求到读完响应体占用一个名额
+    /// 引擎内所有任务共享；[`Permit::Required`] 的每次尝试从发出请求到读完响应体占用一个名额
     requests: Arc<Semaphore>,
     jitter: std::hash::RandomState,
 }
@@ -82,19 +82,16 @@ impl Http {
         purpose: Purpose,
         url: &Url,
         range: Option<ByteRange>,
-        priority: Priority,
+        permit: Permit,
         cancel: &CancellationToken,
     ) -> Result<Response, Error> {
         let mut attempt = 1;
         loop {
-            let error = match self.attempt(purpose, url, range, priority, cancel).await {
+            let error = match self.attempt(purpose, url, range, permit, cancel).await {
                 Ok(response) => return Ok(response),
                 Err(error) => error,
             };
-            let asked = match &error {
-                Error::Http { retry_after, .. } => retry_after.unwrap_or_default(),
-                _ => Duration::ZERO,
-            };
+            let asked = error.retry_after().unwrap_or_default();
             if !error.retryable()
                 || attempt >= self.retry.attempts.get()
                 || asked > self.retry.max_delay
@@ -115,13 +112,13 @@ impl Http {
         purpose: Purpose,
         url: &Url,
         range: Option<ByteRange>,
-        priority: Priority,
+        permit: Permit,
         cancel: &CancellationToken,
     ) -> Result<Response, Error> {
         let parts = self.prepare(purpose, url).await?;
-        let _permit = match priority {
-            Priority::Urgent => None,
-            Priority::Normal => Some(tokio::select! {
+        let _permit = match permit {
+            Permit::Exempt => None,
+            Permit::Required => Some(tokio::select! {
                 _ = cancel.cancelled() => return Err(Error::Cancelled),
                 permit = self.requests.acquire() => permit.expect("引擎的信号量从不关闭"),
             }),

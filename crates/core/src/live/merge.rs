@@ -119,7 +119,7 @@ pub(crate) fn report_missed(plan: &MergePlan, known: Vec<Missed>) -> Vec<Missed>
 }
 
 /// 缺失按会话、轨道、序号排序，序号相接且原因相同的合成一个区间。
-pub(crate) fn merge_ranges(mut missed: Vec<Missed>) -> Vec<Missed> {
+fn merge_ranges(mut missed: Vec<Missed>) -> Vec<Missed> {
     missed.sort_by_key(|m| (m.session, m.track, m.first));
     let mut merged: Vec<Missed> = Vec::new();
     for m in missed {

@@ -107,7 +107,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 - **完成的判定只看最终文件名是否存在**：先写 `.part`、fsync 后改名，所以存在即完整（断电也成立），不需要逐片记账。
 - **来源摘要** = 去掉查询串的来源地址与选轨偏好的 SHA-256。不含查询串，因为签名与令牌每次会话不同。
 - **选轨**：目录里有同一来源的记录时，按记录的变体与音频属性在主播放列表中找回同一条轨，不按偏好重新选（主播放列表增删变体、地址换令牌都不影响）；找不到报 `WorkDir(SelectionGone)`。
-- **计划摘要**（点播）= 各分片身份（轨道、序号、去掉查询串的 URL、时长、不连续段序号、字节范围、init 段 URL 与范围）的 SHA-256；不含 key URL 与 IV，因为目录里存的是解密后的分片。摘要不同报 `PlanChanged`。init 段每次重新拉取（地址常带每次会话不同的签名），按完整地址去重，按内容命名，同组内容不同报 `Unsupported(InitChangesWithinGroup)`。
+- **计划摘要**（点播）= 各分片身份（轨道、序号、去掉查询串的 URL、时长、不连续段序号、字节范围、init 段 URL 与范围）的 SHA-256；不含 key URL 与 IV，因为目录里存的是解密后的分片。摘要不同报 `WorkDir(PlanChanged)`。init 段每次重新拉取（地址常带每次会话不同的签名），按完整地址去重，按内容命名，同组内容不同报 `Unsupported(InitChangesWithinGroup)`。
 - 记录与当前任务不一致时报错：来源不同 `SourceMismatch`，点播与直播不同 `KindMismatch`，轨道不同 `TracksMismatch`，计划不同 `PlanChanged`；直播的完整地址不同见 5.9。目录里还没有已完成的分片与 init 段时，直接改为当前任务。没有 `job.json` 的非空目录（`.part` 残留与锁文件除外）不当作任务目录，因为成功后整个目录会被删除。
 - 运行期间持有 `lock` 的排他锁，第二个任务打开同一目录时报 `WorkDir(Locked)`。删除任务目录时先持锁删掉锁文件以外的内容，再释放锁、删除锁文件与目录。
 - 输出文件已存在：拒绝覆盖，除非调用方明确要求；开始时与合并前各检查一次。输出所在目录在合并前创建。
@@ -170,7 +170,7 @@ pub trait Hooks: Send + Sync {
 | 调用方输入 | `InvalidInput`、`OutputExists` | 改参数后再试 |
 | 来源内容 | `Playlist`、`NotMediaPlaylist`、`Select`、`Unsupported`（直播被拒、无分片、DRM、SAMPLE-AES、无法合并的布局）、`Integrity`、`KeyLength` | 否 |
 | 外部依赖 | `Http`（`HttpError::retryable`）、`Io`；`Segment`、`Key` 说明出在哪个分片或 key；`LiveStalled`（直播停滞） | 看原因 |
-| 任务目录 | `PlanChanged`、`WorkDir`（`WorkDirProblem`）、`NothingRecorded` | 否 |
+| 任务目录 | `WorkDir`（`WorkDirProblem`）、`NothingRecorded` | 否 |
 | 其他 | `Hook`、`Remux`、`Cancelled` | 否 |
 
 - 错误信息已包含原因，不经 `source()` 重复给出；地址只显示到路径，不含查询串；代理地址不含用户名与密码。
