@@ -86,7 +86,7 @@ impl WorkDir {
     /// 已有 `job.json` 时其记录须与 `record` 相符（直播的完整地址除外）：来源不同报
     /// [`WorkDirProblem::SourceMismatch`]，点播与直播不同报 [`WorkDirProblem::KindMismatch`]，轨道不同报
     /// [`WorkDirProblem::TracksMismatch`]，点播的计划不同报 [`WorkDirProblem::PlanChanged`]；但目录里还没有已完成的
-    /// 分片与 init 段时，直接改为当前任务（没有可丢的内容）。没有 `job.json` 时目录必须不存在或为空
+    /// 分片时，直接改为当前任务（没有可丢的内容）。没有 `job.json` 时目录必须不存在或为空
     /// （`.part` 残留与锁文件除外），以免把别人的目录当成任务目录（成功后会整个删除）。
     pub(crate) async fn open(root: PathBuf, record: JobRecord) -> Result<WorkDir, Error> {
         blocking(move || open(root, record)).await?
@@ -96,9 +96,9 @@ impl WorkDir {
         &self.layout
     }
 
-    /// 打开前目录里已有、与当前请求相符的记录；新建或改为当前任务的目录为 None。
-    pub(crate) fn previous(&self) -> Option<&JobRecord> {
-        self.previous.as_ref()
+    /// 目录里原有的记录与 `current` 不同。[`WorkDir::open`] 已排除其他不符，不同之处只可能是直播的完整地址。
+    pub(crate) fn url_changed(&self, current: &JobRecord) -> bool {
+        self.previous.as_ref().is_some_and(|p| p != current)
     }
 
     /// 用 `record` 替换 `job.json` 中的记录。
@@ -229,7 +229,7 @@ fn open(root: PathBuf, record: JobRecord) -> Result<WorkDir, Error> {
         None => None,
         Some(recorded) => match recorded.conflict(&record) {
             None => Some(recorded),
-            Some(_) if !has_completed_files(&layout)? => None,
+            Some(_) if !has_completed_segments(&layout)? => None,
             Some(conflict) => return Err(conflict.into_error(&root)),
         },
     };
@@ -244,8 +244,8 @@ fn open(root: PathBuf, record: JobRecord) -> Result<WorkDir, Error> {
     })
 }
 
-/// 目录里有没有已完成的分片或 init 段。
-fn has_completed_files(layout: &Layout) -> Result<bool, Error> {
+/// 目录里有没有已完成的分片。只有 init 段时不算：它们随时可以重新拉取，没有可丢的内容。
+fn has_completed_segments(layout: &Layout) -> Result<bool, Error> {
     let tracks = layout.root.join(TRACKS_DIR);
     let entries = match fs::read_dir(&tracks) {
         Ok(entries) => entries,
@@ -258,7 +258,7 @@ fn has_completed_files(layout: &Layout) -> Result<bool, Error> {
         if !entry.file_type().map_err(io_error("读取", &dir))?.is_dir() {
             continue;
         }
-        if !list(&dir, parse_segment_name)?.is_empty() || !list(&dir, parse_init_name)?.is_empty() {
+        if !list(&dir, parse_segment_name)?.is_empty() {
             return Ok(true);
         }
     }

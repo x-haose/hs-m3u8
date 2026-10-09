@@ -89,6 +89,12 @@ impl Fetcher {
         })
     }
 
+    /// 立即拉取一个分片（经回调、解密、校验），不排队、不写盘；用于续录时核对内容。失败时返回原始错误，
+    /// 不包装为 [`Error::Segment`]。
+    pub(crate) async fn fetch(&self, segment: &Segment) -> Result<Vec<u8>, Error> {
+        fetch_segment(&self.ctx, segment, &self.abort).await
+    }
+
     pub(crate) fn is_idle(&self) -> bool {
         self.pending.is_empty() && self.running.is_empty()
     }
