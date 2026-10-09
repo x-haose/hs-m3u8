@@ -23,6 +23,9 @@ impl Fingerprint {
 
     /// 分片的身份：地址的最后一段（不含查询串）与字节范围。CDN 常在主机、路径前段或查询串里放令牌，
     /// 每次刷新、每次会话都可能不同，最后一段才稳定。
+    ///
+    /// 简化：只靠查询串区分分片的站点（如 `seg.php?id=…`），各分片的身份相同，比对退化为只看序号；
+    /// 遇到这类站点时，把查询串里区分分片的参数计入身份。
     pub(crate) fn of_segment(uri: &Url, range: Option<ByteRange>) -> Self {
         let range = range.map_or_else(String::new, |r| format!("{}@{}", r.length, r.offset));
         Self::of_content(format!("{}\n{range}", file_name(uri)).as_bytes())

@@ -6,7 +6,7 @@ use hs_m3u8_hls::Resolution;
 use hs_m3u8_remux::Streams;
 use serde::{Deserialize, Serialize};
 
-use crate::selection::{RenditionKey, SelectionKey, VariantKey};
+use crate::selection::{RenditionKey, SelectionKey, VariantAttributes, VariantKey, track_streams};
 use crate::{Error, JobType, WorkDirProblem};
 
 const FORMAT_VERSION: u32 = 2;
@@ -14,22 +14,20 @@ const FORMAT_VERSION: u32 = 2;
 /// 任务目录记录的任务；续传、续录时须与当前请求相符。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct JobRecord {
-    /// 来源摘要，见 [`crate::ident::source_digest`]
-    pub source: String,
+    /// 见 [`crate::ident::source_digest`]
+    pub source_digest: String,
     /// 所选的变体与音频；来源本身是媒体播放列表时为 None
     pub selection: Option<SelectionKey>,
-    /// 各轨的取流方式，至少一条
-    pub streams: Vec<Streams>,
     pub kind: RecordKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RecordKind {
-    /// 点播：计划摘要相同才能续传
-    Vod { plan: String },
-    /// 直播：`url` 为完整来源地址（含查询串）的摘要。地址变了仍可沿用目录，由录制确认窗口与已录内容衔接后
-    /// 再用 [`WorkDir::save`] 更新
-    Live { url: String },
+    /// 点播：计划摘要（见 [`crate::vod::Plan::digest`]）相同才能续传
+    Vod { plan_digest: String },
+    /// 直播：完整来源地址（含查询串）的摘要。地址变了仍可沿用目录，由录制确认窗口与已录内容衔接后
+    /// 再用 [`super::WorkDir::save`] 更新
+    Live { url_digest: String },
 }
 
 /// 记录与当前请求不符之处。
@@ -41,6 +39,11 @@ pub(super) enum Conflict {
 }
 
 impl JobRecord {
+    /// 各轨的取流方式，由选轨决定。
+    pub(crate) fn streams(&self) -> Vec<Streams> {
+        track_streams(self.selection.as_ref())
+    }
+
     fn job_type(&self) -> JobType {
         match self.kind {
             RecordKind::Vod { .. } => JobType::Vod,
@@ -50,7 +53,7 @@ impl JobRecord {
 
     /// 记录为 `self` 的目录能否用于当前请求 `current`；直播的完整地址不比较。
     pub(super) fn conflict(&self, current: &JobRecord) -> Option<Conflict> {
-        if self.source != current.source {
+        if self.source_digest != current.source_digest {
             return Some(Conflict::Source);
         }
         let (recorded, current_type) = (self.job_type(), current.job_type());
@@ -60,11 +63,11 @@ impl JobRecord {
                 current: current_type,
             });
         }
-        if self.selection != current.selection || self.streams != current.streams {
+        if self.selection != current.selection {
             return Some(Conflict::Tracks);
         }
         match (&self.kind, &current.kind) {
-            (RecordKind::Vod { plan: a }, RecordKind::Vod { plan: b }) if a != b => {
+            (RecordKind::Vod { plan_digest: a }, RecordKind::Vod { plan_digest: b }) if a != b => {
                 Some(Conflict::Plan)
             }
             _ => None,
@@ -95,17 +98,15 @@ impl Conflict {
 enum JobFile {
     Vod {
         format_version: u32,
-        source: String,
+        source_digest: String,
         selection: Option<SelectionFile>,
-        streams: Vec<StreamsName>,
-        plan: String,
+        plan_digest: String,
     },
     Live {
         format_version: u32,
-        source: String,
+        source_digest: String,
         selection: Option<SelectionFile>,
-        streams: Vec<StreamsName>,
-        url: String,
+        url_digest: String,
     },
 }
 
@@ -125,6 +126,7 @@ struct VariantFile {
     resolution: Option<[u32; 2]>,
     codecs: Vec<String>,
     audio_group: Option<String>,
+    occurrence: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -135,15 +137,6 @@ struct RenditionFile {
     name: Option<String>,
 }
 
-/// [`Streams`] 在 job.json 中的写法。
-#[derive(Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum StreamsName {
-    All,
-    Video,
-    Audio,
-}
-
 /// 先只读版本号：不认识的版本直接拒绝，不按当前格式去解释它。
 #[derive(Deserialize)]
 struct Version {
@@ -152,23 +145,20 @@ struct Version {
 
 pub(super) fn encode(record: &JobRecord) -> Vec<u8> {
     let format_version = FORMAT_VERSION;
-    let source = record.source.clone();
+    let source_digest = record.source_digest.clone();
     let selection = record.selection.as_ref().map(SelectionFile::from);
-    let streams = record.streams.iter().map(|&s| s.into()).collect();
     let file = match &record.kind {
-        RecordKind::Vod { plan } => JobFile::Vod {
+        RecordKind::Vod { plan_digest } => JobFile::Vod {
             format_version,
-            source,
+            source_digest,
             selection,
-            streams,
-            plan: plan.clone(),
+            plan_digest: plan_digest.clone(),
         },
-        RecordKind::Live { url } => JobFile::Live {
+        RecordKind::Live { url_digest } => JobFile::Live {
             format_version,
-            source,
+            source_digest,
             selection,
-            streams,
-            url: url.clone(),
+            url_digest: url_digest.clone(),
         },
     };
     serde_json::to_vec(&file).expect("JobFile 只含字符串、整数、数组与枚举，序列化不会失败")
@@ -184,43 +174,38 @@ pub(super) fn decode(bytes: &[u8]) -> Result<JobRecord, String> {
             version.format_version
         ));
     }
-    let (source, selection, streams, kind) =
+    let (source_digest, selection, kind) =
         match serde_json::from_slice(bytes).map_err(unreadable)? {
             JobFile::Vod {
-                source,
+                source_digest,
                 selection,
-                streams,
-                plan,
+                plan_digest,
                 ..
-            } => (source, selection, streams, RecordKind::Vod { plan }),
+            } => (source_digest, selection, RecordKind::Vod { plan_digest }),
             JobFile::Live {
-                source,
+                source_digest,
                 selection,
-                streams,
-                url,
+                url_digest,
                 ..
-            } => (source, selection, streams, RecordKind::Live { url }),
+            } => (source_digest, selection, RecordKind::Live { url_digest }),
         };
-    if streams.is_empty() {
-        return Err("job.json 中的 streams 为空".into());
-    }
     Ok(JobRecord {
-        source,
+        source_digest,
         selection: selection.map(SelectionKey::from),
-        streams: streams.into_iter().map(Streams::from).collect(),
         kind,
     })
 }
 
 impl From<&SelectionKey> for SelectionFile {
     fn from(key: &SelectionKey) -> Self {
-        let v = &key.variant;
+        let v = &key.variant.attributes;
         SelectionFile {
             variant: VariantFile {
                 bandwidth: v.bandwidth,
                 resolution: v.resolution.map(|r| [r.width, r.height]),
                 codecs: v.codecs.clone(),
                 audio_group: v.audio_group.clone(),
+                occurrence: key.variant.occurrence,
             },
             audio: key.audio.as_ref().map(|a| RenditionFile {
                 group_id: a.group_id.clone(),
@@ -236,38 +221,21 @@ impl From<SelectionFile> for SelectionKey {
         let v = file.variant;
         SelectionKey {
             variant: VariantKey {
-                bandwidth: v.bandwidth,
-                resolution: v
-                    .resolution
-                    .map(|[width, height]| Resolution { width, height }),
-                codecs: v.codecs,
-                audio_group: v.audio_group,
+                attributes: VariantAttributes {
+                    bandwidth: v.bandwidth,
+                    resolution: v
+                        .resolution
+                        .map(|[width, height]| Resolution { width, height }),
+                    codecs: v.codecs,
+                    audio_group: v.audio_group,
+                },
+                occurrence: v.occurrence,
             },
             audio: file.audio.map(|a| RenditionKey {
                 group_id: a.group_id,
                 language: a.language,
                 name: a.name,
             }),
-        }
-    }
-}
-
-impl From<Streams> for StreamsName {
-    fn from(streams: Streams) -> Self {
-        match streams {
-            Streams::All => StreamsName::All,
-            Streams::Video => StreamsName::Video,
-            Streams::Audio => StreamsName::Audio,
-        }
-    }
-}
-
-impl From<StreamsName> for Streams {
-    fn from(name: StreamsName) -> Self {
-        match name {
-            StreamsName::All => Streams::All,
-            StreamsName::Video => Streams::Video,
-            StreamsName::Audio => Streams::Audio,
         }
     }
 }
@@ -279,16 +247,19 @@ mod tests {
     #[test]
     fn job_file_round_trips_and_rejects_other_versions_and_fields() {
         let live = JobRecord {
-            source: "ab".into(),
+            source_digest: "ab".into(),
             selection: Some(SelectionKey {
                 variant: VariantKey {
-                    bandwidth: Some(2000),
-                    resolution: Some(Resolution {
-                        width: 1280,
-                        height: 720,
-                    }),
-                    codecs: vec!["avc1.640020".into()],
-                    audio_group: Some("aud".into()),
+                    attributes: VariantAttributes {
+                        bandwidth: Some(2000),
+                        resolution: Some(Resolution {
+                            width: 1280,
+                            height: 720,
+                        }),
+                        codecs: vec!["avc1.640020".into()],
+                        audio_group: Some("aud".into()),
+                    },
+                    occurrence: 1,
                 },
                 audio: Some(RenditionKey {
                     group_id: "aud".into(),
@@ -296,30 +267,31 @@ mod tests {
                     name: None,
                 }),
             }),
-            streams: vec![Streams::Video, Streams::Audio],
-            kind: RecordKind::Live { url: "cd".into() },
+            kind: RecordKind::Live {
+                url_digest: "cd".into(),
+            },
         };
         let bytes = encode(&live);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"kind":"live","format_version":2,"source":"ab","selection":{"variant":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"],"audio_group":"aud"},"audio":{"group_id":"aud","language":"en","name":null}},"streams":["video","audio"],"url":"cd"}"#
+            r#"{"kind":"live","format_version":2,"source_digest":"ab","selection":{"variant":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"],"audio_group":"aud","occurrence":1},"audio":{"group_id":"aud","language":"en","name":null}},"url_digest":"cd"}"#
         );
         assert_eq!(decode(&bytes), Ok(live));
         let vod = JobRecord {
-            source: "ab".into(),
+            source_digest: "ab".into(),
             selection: None,
-            streams: vec![Streams::All],
-            kind: RecordKind::Vod { plan: "ef".into() },
+            kind: RecordKind::Vod {
+                plan_digest: "ef".into(),
+            },
         };
         assert_eq!(decode(&encode(&vod)), Ok(vod));
 
         for rejected in [
             r#"{"kind":"vod","format_version":1,"plan_digest":"cd"}"#,
-            r#"{"kind":"vod","format_version":2,"source":"a","selection":null,"streams":["all"],"plan":"p","extra":1}"#,
-            r#"{"format_version":2,"source":"a","selection":null,"streams":["all"],"plan":"p"}"#,
-            r#"{"kind":"vod","format_version":2,"source":"a","selection":null,"streams":[],"plan":"p"}"#,
-            r#"{"kind":"vod","format_version":2,"source":"a","selection":null,"streams":["both"],"plan":"p"}"#,
-            r#"{"kind":"live","format_version":2,"source":"a","selection":{"variant":{"bandwidth":1,"resolution":null,"codecs":[],"audio_group":null,"uri":"x"},"audio":null},"streams":["all"],"url":"u"}"#,
+            r#"{"kind":"vod","format_version":2,"source_digest":"a","selection":null,"plan_digest":"p","extra":1}"#,
+            r#"{"format_version":2,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
+            r#"{"kind":"vod","format_version":2,"source_digest":"a","selection":null,"url_digest":"u"}"#,
+            r#"{"kind":"live","format_version":2,"source_digest":"a","selection":{"variant":{"bandwidth":1,"resolution":null,"codecs":[],"audio_group":null,"occurrence":0,"uri":"x"},"audio":null},"url_digest":"u"}"#,
         ] {
             assert!(decode(rejected.as_bytes()).is_err(), "{rejected}");
         }

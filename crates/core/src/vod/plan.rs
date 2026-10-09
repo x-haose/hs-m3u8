@@ -2,10 +2,10 @@
 
 use std::ops::Range;
 
-use hs_m3u8_hls::{ByteRange, InitSection, Segment};
+use hs_m3u8_hls::{InitSection, Segment};
 use sha2::{Digest, Sha256};
 
-use crate::ident::{Fingerprint, hex, strip_query};
+use crate::ident::{Fingerprint, hex};
 use crate::resolve::ResolvedTrack;
 use crate::{Error, Unsupported};
 
@@ -83,15 +83,12 @@ impl Plan {
         Ok(())
     }
 
-    /// 续传校验用的摘要（SHA-256 十六进制）。
+    /// 续传校验用的摘要（SHA-256 十六进制），写进 job.json，口径改变须升格式版本。
     ///
-    /// 只覆盖分片的身份：轨道、序号、去掉查询串的地址、时长、不连续段序号、字节范围、init 段地址与范围。
-    /// 不含 key 地址与 IV：任务目录里存的是已解密的分片；也不含查询串：很多站点的签名或令牌每次会话都不同。
+    /// 只覆盖分片的身份：轨道、序号、时长、不连续段序号、分片与 init 段的身份（见
+    /// [`Fingerprint::of_segment`]，与直播比对分片用同一口径）。不含 key 地址与 IV：任务目录里存的是已解密的
+    /// 分片；不含主机、路径前段与查询串：CDN 常在其中放每次会话不同的令牌。
     pub(crate) fn digest(&self) -> String {
-        let range = |r: Option<ByteRange>| {
-            r.map(|r| format!("{}@{}", r.length, r.offset))
-                .unwrap_or_default()
-        };
         let mut hasher = Sha256::new();
         for (index, track) in self.tracks.iter().enumerate() {
             hasher.update(format!("track {index} {}\n", track.segments.len()));
@@ -99,15 +96,14 @@ impl Plan {
                 let init = s
                     .init
                     .as_ref()
-                    .map(|i| format!("{} {}", strip_query(&i.uri), range(i.byte_range)))
+                    .map(|i| Fingerprint::of_segment(&i.uri, i.byte_range).to_string())
                     .unwrap_or_default();
                 hasher.update(format!(
-                    "{} {} {} {} {} {init}\n",
+                    "{} {} {} {} {init}\n",
                     s.sequence,
-                    strip_query(&s.uri),
+                    Fingerprint::of_segment(&s.uri, s.byte_range),
                     s.duration_us,
                     s.discontinuity,
-                    range(s.byte_range),
                 ));
             }
         }
