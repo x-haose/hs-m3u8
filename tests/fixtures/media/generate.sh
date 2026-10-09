@@ -1,33 +1,65 @@
 #!/usr/bin/env bash
-# 生成 remux 测试样本：2 秒、320x180、ffmpeg 合成画面与正弦音，不含第三方内容。
-# 需要带 libx264、libx265 的 ffmpeg 命令行。产物已提交到仓库，仅在需要重建时运行。
+# 生成 remux 测试样本：ffmpeg 合成画面与正弦音，按 1 秒切成 HLS 分片，不含第三方内容。
+# 每个目录是一条轨在一个不连续段组里的分片（fMP4 另带 init.mp4）；各节目的时间戳都从头开始，
+# 前后拼接即构成 EXT-X-DISCONTINUITY。需要带 libx264、libx265、libmp3lame 的 ffmpeg 命令行。
+# 产物已提交到仓库，仅在需要重建时运行。
 set -euo pipefail
 
 DIR=$(cd "$(dirname "$0")" && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf -- "${TMP:?}"' EXIT
 
-src=(-f lavfi -i "testsrc2=size=320x180:rate=25" -f lavfi -i "sine=frequency=440:sample_rate=48000" -t 2)
 ff=(ffmpeg -hide_banner -loglevel error -y)
+h264=(-c:v libx264 -preset veryfast -g 25 -b:v 150k)
+aac=(-c:a aac -b:a 64k)
 
-# TS：H.264 + AAC（ADTS）
-"${ff[@]}" "${src[@]}" -c:v libx264 -preset veryfast -g 25 -b:v 200k -c:a aac -b:a 64k -f mpegts "$DIR/h264_aac.ts"
+# 输入：$1 画面源，$2 尺寸，$3 正弦频率，$4 时长（秒）
+source_args() {
+  echo "-f lavfi -i $1=size=$2:rate=25 -f lavfi -i sine=frequency=$3:sample_rate=48000 -t $4"
+}
 
-# TS：HEVC + AAC
-"${ff[@]}" "${src[@]}" -c:v libx265 -preset ultrafast -x265-params log-level=error -g 25 -b:v 200k \
-  -c:a aac -b:a 64k -f mpegts "$DIR/hevc_aac.ts"
+# TS 分片：$1 目录名，其余为编码参数；只保留分片，丢弃播放列表
+ts_segments() {
+  local name=$1
+  shift
+  rm -rf -- "${DIR:?}/$name"
+  mkdir -p "$DIR/$name"
+  "${ff[@]}" "$@" -f hls -hls_time 1 -hls_playlist_type vod \
+    -hls_segment_filename "$DIR/$name/seg%d.ts" "$TMP/$name.m3u8"
+}
 
-# 音视频分流：fMP4 HLS，视频与音频为两条 rendition；每条按 init + 分片顺序拼成一个文件，即下载器拿到的形态
-"${ff[@]}" "${src[@]}" -c:v libx264 -preset veryfast -g 25 -b:v 200k -c:a aac -b:a 64k \
-  -map 0:v -map 1:a -f hls -hls_segment_type fmp4 -hls_time 1 -hls_playlist_type vod \
-  -var_stream_map "v:0,agroup:aud a:0,agroup:aud" -master_pl_name master.m3u8 \
-  -hls_fmp4_init_filename init.mp4 -hls_segment_filename "$TMP/track_%v/seg%d.m4s" "$TMP/track_%v/index.m3u8"
-for v in 0 1; do
-  name=$([[ $v == 0 ]] && echo split_video.mp4 || echo split_audio.mp4)
-  {
-    cat "$TMP/track_$v/init_$v.mp4"
-    grep -v '^#' "$TMP/track_$v/index.m3u8" | while read -r segment; do cat "$TMP/track_$v/$segment"; done
-  } > "$DIR/$name"
-done
+# fMP4 音视频分流：$1 目录名，其余为输入参数；产出 <目录>/video 与 <目录>/audio，各含 init.mp4 与 seg*.m4s
+fmp4_split() {
+  local name=$1
+  shift
+  local out=$TMP/$name
+  "${ff[@]}" "$@" "${h264[@]}" "${aac[@]}" -map 0:v -map 1:a \
+    -f hls -hls_segment_type fmp4 -hls_time 1 -hls_playlist_type vod \
+    -var_stream_map "v:0,agroup:aud a:0,agroup:aud" -master_pl_name master.m3u8 \
+    -hls_fmp4_init_filename init.mp4 -hls_segment_filename "$out/%v/seg%d.m4s" "$out/%v/index.m3u8"
+  rm -rf -- "${DIR:?}/$name"
+  for v in 0 1; do
+    local track=$([[ $v == 0 ]] && echo video || echo audio)
+    mkdir -p "$DIR/$name/$track"
+    mv "$out/$v/init_$v.mp4" "$DIR/$name/$track/init.mp4"
+    mv "$out/$v"/seg*.m4s "$DIR/$name/$track/"
+  done
+}
 
-ls -l "$DIR"
+# 节目 A：2 秒；节目 B：1 秒，画面与音高不同
+read -r -a a_src <<< "$(source_args testsrc2 320x180 440 2)"
+read -r -a b_src <<< "$(source_args testsrc 320x180 880 1)"
+
+ts_segments ts_a "${a_src[@]}" "${h264[@]}" "${aac[@]}"
+ts_segments ts_b "${b_src[@]}" "${h264[@]}" "${aac[@]}"
+fmp4_split fmp4_a "${a_src[@]}"
+fmp4_split fmp4_b "${b_src[@]}"
+
+# 反例：分辨率与第一组不同；HEVC；MP3 音频
+read -r -a small_src <<< "$(source_args testsrc2 160x90 440 1)"
+ts_segments ts_small "${small_src[@]}" "${h264[@]}" "${aac[@]}"
+read -r -a one_src <<< "$(source_args testsrc2 320x180 440 1)"
+ts_segments ts_hevc "${one_src[@]}" -c:v libx265 -preset ultrafast -x265-params log-level=error -g 25 -b:v 150k "${aac[@]}"
+ts_segments ts_mp3 "${one_src[@]}" "${h264[@]}" -c:a libmp3lame -b:a 64k
+
+find "$DIR" -type f ! -name generate.sh | sort | xargs ls -l

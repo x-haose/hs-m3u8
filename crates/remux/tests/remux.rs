@@ -1,14 +1,12 @@
-//! remux 的编解码测试：用 tests/fixtures/media 下的合成样本，核对输出各流的编码、包数与 MP4 结构。
+//! remux 的编解码测试：用 tests/fixtures/media 下按 1 秒切好的合成 HLS 分片，核对输出的包数、时间线与 MP4 结构。
 
 use std::path::{Path, PathBuf};
 
 use ffmpeg_next as ffmpeg;
-use hs_m3u8_remux::{Error, StreamKind, remux};
+use hs_m3u8_remux::{DiscontinuityGroup, Error, StreamKind, TrackSegments, remux};
 
-fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/media")
-        .join(name)
+fn fixtures() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/media")
 }
 
 /// 每个测试独立的空目录。
@@ -21,31 +19,90 @@ fn work_dir(test: &str) -> PathBuf {
     dir
 }
 
-/// 文件中第一路视频与第一路音频的包数（无该类流时为 None）。
-fn packet_counts(path: &Path) -> (Option<u64>, Option<u64>) {
+/// 目录下一条轨的分片：有 init.mp4 时作为 init 段，seg<N>.* 按 N 排序。
+fn track_in(dir: &Path) -> TrackSegments {
+    let init = dir.join("init.mp4");
+    let mut segments: Vec<(u32, PathBuf)> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter_map(|p| {
+            let stem = p.file_stem()?.to_str()?.strip_prefix("seg")?.parse().ok()?;
+            Some((stem, p))
+        })
+        .collect();
+    segments.sort();
+    TrackSegments {
+        init: init.exists().then_some(init),
+        segments: segments.into_iter().map(|(_, p)| p).collect(),
+    }
+}
+
+fn track(name: &str) -> TrackSegments {
+    track_in(&fixtures().join(name))
+}
+
+fn group<const N: usize>(tracks: [TrackSegments; N]) -> DiscontinuityGroup {
+    DiscontinuityGroup {
+        tracks: tracks.into(),
+    }
+}
+
+/// 一路流的包：(pts 秒, 结束时刻秒)，按文件中的顺序。
+type Timeline = Vec<(f64, f64)>;
+
+/// 文件中第一路视频与第一路音频的包时间线。
+fn timelines(path: &Path) -> (Timeline, Timeline) {
     ffmpeg::init().unwrap();
     let mut ictx = ffmpeg::format::input(path).unwrap();
     let first = |medium| {
         ictx.streams()
             .find(|s| s.parameters().medium() == medium)
-            .map(|s| s.index())
+            .map(|s| (s.index(), f64::from(s.time_base())))
     };
     let (video, audio) = (
         first(ffmpeg::media::Type::Video),
         first(ffmpeg::media::Type::Audio),
     );
-    let (mut v, mut a) = (0u64, 0u64);
+    let (mut v, mut a) = (Vec::new(), Vec::new());
     loop {
         let mut packet = ffmpeg::Packet::empty();
         match packet.read(&mut ictx) {
-            Ok(()) if Some(packet.stream()) == video => v += 1,
-            Ok(()) if Some(packet.stream()) == audio => a += 1,
-            Ok(()) => {}
+            Ok(()) => {
+                let target = match (video, audio) {
+                    (Some((i, tb)), _) if i == packet.stream() => Some((&mut v, tb)),
+                    (_, Some((i, tb))) if i == packet.stream() => Some((&mut a, tb)),
+                    _ => None,
+                };
+                if let Some((list, tb)) = target {
+                    let pts = packet.pts().or(packet.dts()).unwrap() as f64 * tb;
+                    list.push((pts, pts + packet.duration() as f64 * tb));
+                }
+            }
             Err(ffmpeg::Error::Eof) => break,
             Err(e) => panic!("读取 {} 失败: {e}", path.display()),
         }
     }
-    (video.map(|_| v), audio.map(|_| a))
+    (v, a)
+}
+
+/// 把一条轨的 init 段与分片按字节拼成一个文件，便于用 FFmpeg 直接读取输入的时间线。
+fn concat_track(t: &TrackSegments, dir: &Path, name: &str) -> PathBuf {
+    let mut bytes = Vec::new();
+    for p in t.init.iter().chain(&t.segments) {
+        bytes.extend(std::fs::read(p).unwrap());
+    }
+    let path = dir.join(name);
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+fn span(timeline: &Timeline) -> f64 {
+    let start = timeline.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+    let end = timeline
+        .iter()
+        .map(|p| p.1)
+        .fold(f64::NEG_INFINITY, f64::max);
+    end - start
 }
 
 /// MP4 顶层 box 的类型序列。
@@ -54,41 +111,61 @@ fn top_level_boxes(path: &Path) -> Vec<[u8; 4]> {
     let mut boxes = Vec::new();
     let mut offset = 0usize;
     while offset + 8 <= data.len() {
-        let size = u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as u64;
-        let kind: [u8; 4] = data[offset + 4..offset + 8].try_into().unwrap();
+        let size = u64::from(u32::from_be_bytes(
+            data[offset..offset + 4].try_into().unwrap(),
+        ));
+        boxes.push(data[offset + 4..offset + 8].try_into().unwrap());
         let size = match size {
             1 => u64::from_be_bytes(data[offset + 8..offset + 16].try_into().unwrap()),
             0 => (data.len() - offset) as u64,
             n => n,
         };
-        boxes.push(kind);
         offset += usize::try_from(size).unwrap();
     }
     boxes
 }
 
+fn assert_no_leftovers(output: &Path) {
+    assert!(!output.exists(), "失败时不应生成输出");
+    for suffix in [".part", ".part.list"] {
+        let mut name = output.as_os_str().to_owned();
+        name.push(suffix);
+        assert!(!Path::new(&name).exists(), "失败时不应留下 {suffix} 文件");
+    }
+}
+
 #[test]
-fn ts_h264_aac_copies_every_packet_with_moov_first() {
-    let dir = work_dir("ts_h264_aac");
-    let input = fixture("h264_aac.ts");
+fn ts_single_group_copies_every_packet_from_zero_with_moov_first() {
+    let dir = work_dir("ts_single_group");
     let output = dir.join("out.mp4");
+    let a = track("ts_a");
 
-    let report = remux(&[&input], &output).unwrap();
+    let report = remux(&[group([a.clone()])], &output).unwrap();
 
-    let (video, audio) = packet_counts(&input);
-    let kinds: Vec<_> = report
+    let (v_in, a_in) = timelines(&concat_track(&a, &dir, "in.ts"));
+    let streams: Vec<_> = report
         .streams
         .iter()
         .map(|s| (s.kind, s.codec, s.packets, s.skipped_without_dts))
         .collect();
     assert_eq!(
-        kinds,
+        streams,
         vec![
-            (StreamKind::Video, "h264", video.unwrap(), 0),
-            (StreamKind::Audio, "aac", audio.unwrap(), 0)
+            (StreamKind::Video, "h264", v_in.len() as u64, 0),
+            (StreamKind::Audio, "aac", a_in.len() as u64, 0)
         ]
     );
-    assert_eq!(packet_counts(&output), (video, audio));
+    let (v_out, a_out) = timelines(&output);
+    assert_eq!((v_out.len(), a_out.len()), (v_in.len(), a_in.len()));
+    let start = v_out
+        .iter()
+        .chain(&a_out)
+        .map(|p| p.0)
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        (0.0..0.1).contains(&start),
+        "输出应从 0 附近开始，实际 {start}"
+    );
 
     let boxes = top_level_boxes(&output);
     let pos = |name: &[u8; 4]| boxes.iter().position(|b| b == name).unwrap();
@@ -99,15 +176,17 @@ fn ts_h264_aac_copies_every_packet_with_moov_first() {
 }
 
 #[test]
-fn split_video_and_audio_renditions_merge_into_one_file() {
-    let dir = work_dir("split");
-    let (video_in, audio_in) = (fixture("split_video.mp4"), fixture("split_audio.mp4"));
+fn split_fmp4_renditions_merge_into_one_file() {
+    let dir = work_dir("split_fmp4");
     let output = dir.join("out.mp4");
+    let (video, audio) = (track("fmp4_a/video"), track("fmp4_a/audio"));
 
-    let report = remux(&[&video_in, &audio_in], &output).unwrap();
+    let report = remux(&[group([video.clone(), audio.clone()])], &output).unwrap();
 
-    let expected = (packet_counts(&video_in).0, packet_counts(&audio_in).1);
-    assert_eq!(packet_counts(&output), expected);
+    let v_in = timelines(&concat_track(&video, &dir, "v.mp4")).0;
+    let a_in = timelines(&concat_track(&audio, &dir, "a.mp4")).1;
+    let (v_out, a_out) = timelines(&output);
+    assert_eq!((v_out.len(), a_out.len()), (v_in.len(), a_in.len()));
     let kinds: Vec<_> = report.streams.iter().map(|s| (s.kind, s.codec)).collect();
     assert_eq!(
         kinds,
@@ -116,42 +195,144 @@ fn split_video_and_audio_renditions_merge_into_one_file() {
 }
 
 #[test]
+fn discontinuity_groups_are_laid_end_to_end() {
+    let dir = work_dir("discontinuity");
+    let output = dir.join("out.mp4");
+    let (a, b) = (track("ts_a"), track("ts_b"));
+    let (va, aa) = timelines(&concat_track(&a, &dir, "a.ts"));
+    let (vb, ab) = timelines(&concat_track(&b, &dir, "b.ts"));
+
+    remux(&[group([a.clone()]), group([b]), group([a])], &output).unwrap();
+
+    let (v_out, a_out) = timelines(&output);
+    assert_eq!(v_out.len(), 2 * va.len() + vb.len());
+    assert_eq!(a_out.len(), 2 * aa.len() + ab.len());
+    let expected = 2.0 * span(&va) + span(&vb);
+    assert!(
+        (span(&v_out) - expected).abs() < 0.1,
+        "视频总时长 {} 应约为 {expected}",
+        span(&v_out)
+    );
+}
+
+#[test]
+fn split_renditions_keep_their_relative_timing_across_discontinuities() {
+    let dir = work_dir("split_discontinuity");
+    let output = dir.join("out.mp4");
+    let (va, aa) = (track("fmp4_a/video"), track("fmp4_a/audio"));
+    let (vb, ab) = (track("fmp4_b/video"), track("fmp4_b/audio"));
+    let va_in = timelines(&concat_track(&va, &dir, "va.mp4")).0;
+    let aa_in = timelines(&concat_track(&aa, &dir, "aa.mp4")).1;
+    let vb_in = timelines(&concat_track(&vb, &dir, "vb.mp4")).0;
+    let ab_in = timelines(&concat_track(&ab, &dir, "ab.mp4")).1;
+
+    remux(&[group([va, aa]), group([vb, ab])], &output).unwrap();
+
+    let (v_out, a_out) = timelines(&output);
+    assert_eq!(
+        (v_out.len(), a_out.len()),
+        (va_in.len() + vb_in.len(), aa_in.len() + ab_in.len())
+    );
+    // 第 1 组的首个视频包与首个音频包之间的时间差，应与节目 B 输入中的一致（整组同偏移）
+    let delta_in = vb_in[0].0 - ab_in[0].0;
+    let delta_out = v_out[va_in.len()].0 - a_out[aa_in.len()].0;
+    assert!(
+        (delta_out - delta_in).abs() < 0.001,
+        "组内音视频相对时序应保持：输入 {delta_in}，输出 {delta_out}"
+    );
+    // 第 1 组紧接第 0 组：不重叠，空隙不超过一个视频帧（40ms）。
+    // 第 0 组的结束时刻用输入包的真实时长计算：MP4 以相邻 DTS 之差存样本时长，读回时组内末包的时长会被拉到下一组
+    let end_of = |out: &[(f64, f64)], input: &Timeline| {
+        out.iter()
+            .zip(input)
+            .map(|(o, i)| o.0 + (i.1 - i.0))
+            .fold(f64::NEG_INFINITY, f64::max)
+    };
+    let group0_end =
+        end_of(&v_out[..va_in.len()], &va_in).max(end_of(&a_out[..aa_in.len()], &aa_in));
+    let group1_start = v_out[va_in.len()..]
+        .iter()
+        .chain(&a_out[aa_in.len()..])
+        .map(|p| p.0)
+        .fold(f64::INFINITY, f64::min);
+    assert!(
+        (group0_end - 0.001..=group0_end + 0.041).contains(&group1_start),
+        "第 1 组起点 {group1_start} 应紧接第 0 组终点 {group0_end}"
+    );
+}
+
+#[test]
 fn hevc_output_is_tagged_hvc1() {
     let dir = work_dir("hevc");
-    let input = fixture("hevc_aac.ts");
     let output = dir.join("out.mp4");
+    let hevc = track("ts_hevc");
 
-    remux(&[&input], &output).unwrap();
+    remux(&[group([hevc.clone()])], &output).unwrap();
 
-    assert_eq!(packet_counts(&output), packet_counts(&input));
+    let (v_in, a_in) = timelines(&concat_track(&hevc, &dir, "in.ts"));
+    let (v_out, a_out) = timelines(&output);
+    assert_eq!((v_out.len(), a_out.len()), (v_in.len(), a_in.len()));
     let data = std::fs::read(&output).unwrap();
     let has = |tag: &[u8]| data.windows(4).any(|w| w == tag);
     assert!(has(b"hvc1") && !has(b"hev1"), "HEVC 输出流应标 hvc1");
 }
 
 #[test]
-fn timestamp_regression_fails_and_leaves_no_files() {
-    let dir = work_dir("regression");
-    // 同一段 TS 拼两遍：第二段的时间戳从头开始，相当于未处理的 EXT-X-DISCONTINUITY
-    let once = std::fs::read(fixture("h264_aac.ts")).unwrap();
-    let input = dir.join("twice.ts");
-    std::fs::write(&input, [once.as_slice(), once.as_slice()].concat()).unwrap();
-    let output = dir.join("out.mp4");
+fn paths_with_quotes_and_spaces_are_read() {
+    let dir = work_dir("quoted_paths").join("it's a dir");
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in ["seg0.ts", "seg1.ts"] {
+        std::fs::copy(fixtures().join("ts_a").join(name), dir.join(name)).unwrap();
+    }
+    let output = dir.join("out file.mp4");
 
-    let err = remux(&[&input], &output).unwrap_err();
+    let report = remux(&[group([track_in(&dir)])], &output).unwrap();
 
-    assert!(matches!(err, Error::Mux(_)), "应为封装错误，实际 {err:?}");
-    assert!(!output.exists());
-    assert!(!dir.join("out.mp4.part").exists());
+    assert_eq!(report.streams.len(), 2);
+    assert!(output.exists());
 }
 
 #[test]
-fn second_input_with_same_stream_kind_is_rejected() {
+fn timestamps_going_back_within_a_group_fail_and_leave_no_files() {
+    let dir = work_dir("regression");
+    let output = dir.join("out.mp4");
+    // 节目 B 接在 A 后面却放在同一组：时间戳回退，相当于漏标 EXT-X-DISCONTINUITY
+    let mut mixed = track("ts_a");
+    mixed.segments.extend(track("ts_b").segments);
+
+    let err = remux(&[group([mixed])], &output).unwrap_err();
+
+    assert!(matches!(err, Error::Mux(_)), "应为封装错误，实际 {err:?}");
+    assert_no_leftovers(&output);
+}
+
+#[test]
+fn same_stream_kind_from_two_tracks_is_rejected() {
     let dir = work_dir("duplicate");
     let output = dir.join("out.mp4");
 
+    let err = remux(&[group([track("ts_a"), track("fmp4_a/audio")])], &output).unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::DuplicateKind {
+                track: 1,
+                kind: StreamKind::Audio
+            }
+        ),
+        "实际 {err:?}"
+    );
+    assert_no_leftovers(&output);
+}
+
+#[test]
+fn resolution_change_between_groups_is_rejected() {
+    let dir = work_dir("params_changed");
+    let output = dir.join("out.mp4");
+
     let err = remux(
-        &[fixture("h264_aac.ts"), fixture("split_audio.mp4")],
+        &[group([track("ts_a")]), group([track("ts_small")])],
         &output,
     )
     .unwrap_err();
@@ -159,13 +340,35 @@ fn second_input_with_same_stream_kind_is_rejected() {
     assert!(
         matches!(
             err,
-            Error::DuplicateKind {
-                kind: StreamKind::Audio,
+            Error::ParamsChanged {
+                group: 1,
+                track: 0,
+                kind: StreamKind::Video,
                 ..
             }
         ),
         "实际 {err:?}"
     );
-    assert!(!output.exists());
-    assert!(!dir.join("out.mp4.part").exists());
+    assert_no_leftovers(&output);
+}
+
+#[test]
+fn mp3_audio_is_rejected() {
+    let dir = work_dir("mp3");
+    let output = dir.join("out.mp4");
+
+    let err = remux(&[group([track("ts_mp3")])], &output).unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::UnsupportedCodec {
+                kind: StreamKind::Audio,
+                codec: "mp3",
+                ..
+            }
+        ),
+        "实际 {err:?}"
+    );
+    assert_no_leftovers(&output);
 }
