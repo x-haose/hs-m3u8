@@ -12,6 +12,10 @@ publish = false
 ffmpeg-next.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+# 测试中压低进程的文件描述符上限（setrlimit）
+libc.workspace = true
+
 [lints.rust]
 # 本 crate 是 FFmpeg 的 FFI 边界：ffmpeg-next 没有读写 AVCodecParameters 部分字段的安全接口。
 # unsafe 只在 src/ffi.rs；其余 crate 继承 workspace 的 forbid。

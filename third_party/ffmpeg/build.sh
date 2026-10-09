@@ -46,7 +46,7 @@ flags=(
   --enable-static --disable-shared --disable-programs --disable-doc --disable-autodetect --disable-network
   --disable-asm --enable-pic
   --disable-everything --disable-avdevice --disable-avfilter --disable-swscale --disable-swresample
-  --enable-protocol=file,concatf
+  --enable-protocol=file
   --enable-demuxer=mpegts,mov,aac
   --enable-muxer=mp4
   --enable-parser=h264,hevc,aac

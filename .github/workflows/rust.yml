@@ -88,7 +88,7 @@ jobs:
       - name: 测试
         run: cargo test --workspace
 
-      # 数据正确性模块（hls、core）的行覆盖门槛，各自不低于 80%；覆盖率与平台无关，只在 Linux 上量
+      # 数据正确性模块（hls、core、remux）的行覆盖门槛，各自不低于 80%；覆盖率与平台无关，只在 Linux 上量
       - name: 安装 cargo-llvm-cov（Linux）
         if: runner.os == 'Linux'
         uses: taiki-e/install-action@v2
@@ -102,3 +102,4 @@ jobs:
           cargo llvm-cov clean --workspace
           cargo llvm-cov -p hs-m3u8-hls --fail-under-lines 80 --summary-only
           cargo llvm-cov -p hs-m3u8-core --fail-under-lines 80 --summary-only
+          cargo llvm-cov -p hs-m3u8-remux --fail-under-lines 80 --summary-only

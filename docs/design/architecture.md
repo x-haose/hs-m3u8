@@ -197,7 +197,7 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 // Report：每路输出流的编码参数（编码、宽高或采样率与声道）、包数与呈现时长
 ```
 
-- 组内：分片经 FFmpeg `concatf` 协议按字节顺序读取（fMP4 时 init 段在前），不先拼成大文件。列表文件写在输出旁、打开后即删除；每行写成单引号包裹的 `file:` URL，以免 Windows 路径的反斜杠被当成转义符。
+- 组内：分片按字节顺序当作一个连续的输入读取（fMP4 时 init 段在前），经 ffmpeg-next 的自定义 IO 交给 FFmpeg；同一时刻只打开一个分片文件，不先拼成大文件。FFmpeg 自带的 concat 协议会同时打开全部文件，一组几百个分片就超过进程的文件描述符上限（macOS 图形程序默认 256）。
 - 组间：整组共用一个时间偏移，保留组内各轨（视频与独立音频 rendition）原有的相对时序。偏移取两个下限中较大者：本组最早的 PTS 不早于此前所有流的最晚结束时刻；每路流本组首个 DTS 严格大于上一组末个 DTS（加一个输出时间基 tick 的余量吸收舍入）。按呈现而非 DTS 对齐，B 帧的解码提前量不会在组边界留下空隙。
 - 每条轨按 `Streams` 贡献第一路视频和（或）第一路音频，未指定种类的流不进输出、不检查编码；同类流只能来自一条轨；后续组的流种类与编码参数（编码、宽高、采样率、声道数）必须与第 0 组一致，否则报 `ParamsChanged`，由 core 决定如何处理（例如分辨率不同的广告段）。
 - 只接受 H.264、HEVC 与 AAC，其余编码报 `UnsupportedCodec`。
@@ -270,7 +270,7 @@ hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
 6. Python：maturin 构建 + 端到端冒烟
 7. 前端（GUI 阶段）：`tsc --noEmit`、lint、构建
 
-覆盖率：`hls` 与 `core` 行覆盖 ≥ 80%，由 cargo-llvm-cov 在 `make check` 与 CI 中检查。
+覆盖率：`hls`、`core`、`remux` 各自行覆盖 ≥ 80%，由 cargo-llvm-cov 在 `make check` 与 CI 中检查。
 
 ## 11. CI 与发布
 

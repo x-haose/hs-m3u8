@@ -40,6 +40,7 @@ rs_check:
 	cargo llvm-cov clean --workspace
 	cargo llvm-cov -p hs-m3u8-hls --fail-under-lines 80 --summary-only
 	cargo llvm-cov -p hs-m3u8-core --fail-under-lines 80 --summary-only
+	cargo llvm-cov -p hs-m3u8-remux --fail-under-lines 80 --summary-only
 
 check_i:
 	uv run pre-commit install

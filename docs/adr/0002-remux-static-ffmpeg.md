@@ -19,7 +19,7 @@ configure 参数以 `third_party/ffmpeg/build.sh` 为准，要点：
 --enable-static --disable-shared --disable-programs --disable-doc --disable-autodetect --disable-network
 --disable-asm --enable-pic
 --disable-everything --disable-avdevice --disable-avfilter --disable-swscale --disable-swresample
---enable-protocol=file,concatf --enable-demuxer=mpegts,mov,aac --enable-muxer=mp4
+--enable-protocol=file --enable-demuxer=mpegts,mov,aac --enable-muxer=mp4
 --enable-parser=h264,hevc,aac --enable-decoder=h264,hevc,aac
 --enable-bsf=aac_adtstoasc,extract_extradata
 ```
