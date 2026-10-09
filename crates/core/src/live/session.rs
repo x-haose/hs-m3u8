@@ -17,7 +17,7 @@ pub(super) enum Start {
     /// 序号不超过 `through` 的分片之前已录过，跳过
     After { through: u64 },
     /// 接着这条轨在这个会话里已录的部分：沿用其编号，补录窗口内尚未录完的分片
-    Continue(Recorded),
+    Continue(LatestSession),
 }
 
 impl Start {
@@ -32,7 +32,7 @@ impl Start {
 }
 
 /// 一条轨最近一次有分片的会话中已录完的分片。
-pub(super) struct Recorded {
+pub(super) struct LatestSession {
     session: u32,
     /// 序号 → 文件名记录的信息
     segments: BTreeMap<u64, SegmentName>,
@@ -40,7 +40,7 @@ pub(super) struct Recorded {
     skipped_through: Option<u64>,
 }
 
-impl Recorded {
+impl LatestSession {
     /// 一条轨的分片（按会话、序号排列）中最近一个会话的；`starts` 为该轨各会话的起点。一个分片都没有时为 None。
     pub(super) fn latest(
         files: &[SegmentFile],
@@ -59,7 +59,7 @@ impl Recorded {
             SessionStart::Fresh => None,
             SessionStart::After(through) => Some(through),
         };
-        Some(Recorded {
+        Some(LatestSession {
             session,
             segments,
             skipped_through,
@@ -75,7 +75,7 @@ impl Recorded {
             .segments
             .keys()
             .next_back()
-            .expect("Recorded 至少有一个分片")
+            .expect("最近的会话至少有一个分片")
     }
 
     pub(super) fn skipped_through(&self) -> Option<u64> {
@@ -138,7 +138,7 @@ pub(super) struct Deciding {
     /// 目录里最近的会话编号
     previous_session: u32,
     /// 各轨最近一次有分片的会话
-    recorded: Vec<Option<Recorded>>,
+    recorded: Vec<Option<LatestSession>>,
     verdicts: Vec<Option<Verdict>>,
 }
 
@@ -155,7 +155,7 @@ impl Deciding {
             .segments
             .iter()
             .zip(&stored.starts)
-            .map(|(files, starts)| Recorded::latest(files, starts))
+            .map(|(files, starts)| LatestSession::latest(files, starts))
             .collect();
         Some(Deciding {
             previous_session,
@@ -164,7 +164,7 @@ impl Deciding {
         })
     }
 
-    pub(super) fn recorded(&self, track: usize) -> Option<&Recorded> {
+    pub(super) fn recorded(&self, track: usize) -> Option<&LatestSession> {
         self.recorded[track].as_ref()
     }
 
