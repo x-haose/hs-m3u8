@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = ["crates/remux"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+repository = "https://github.com/x-haose/hs-m3u8"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.dependencies]
+ffmpeg-next = { version = "9.0.0", default-features = false, features = ["format", "static"] }
+thiserror = "2.0.21"
+
+[patch.crates-io]
+# 去掉 macOS 已移除的 QTKit，见 third_party/ffmpeg-sys-next/PATCHED.md
+ffmpeg-sys-next = { path = "third_party/ffmpeg-sys-next" }
