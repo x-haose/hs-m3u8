@@ -316,7 +316,7 @@ impl Recorder<'_> {
         decision: Decision,
         fetcher: &mut Fetcher,
     ) -> Result<Option<LiveEnd>, Error> {
-        if self.dir.url_changed(self.job) {
+        if self.dir.url_changed() {
             if !decision.may_switch_source {
                 return Err(Error::WorkDir {
                     path: self.dir.layout().root().to_path_buf(),
