@@ -8,9 +8,10 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::hooks::{HookKind, Hooks, Purpose, run_hook};
-use crate::http::Http;
+use crate::http::{Http, Priority};
 use crate::request::JobRequest;
-use crate::{Error, Unsupported};
+use crate::selection::SelectionKey;
+use crate::{Error, Unsupported, WorkDirProblem};
 
 /// 解析得到的一条轨：媒体播放列表的地址、取流方式与首次拉到的内容。
 /// 第 0 条为所选变体，第 1 条（若有）为独立的音频 rendition。
@@ -20,26 +21,48 @@ pub(crate) struct ResolvedTrack {
     pub playlist: MediaPlaylist,
 }
 
-/// 有任一条轨的播放列表没有 EXT-X-ENDLIST 即为直播。
-pub(crate) fn is_live(tracks: &[ResolvedTrack]) -> bool {
-    tracks.iter().any(|t| !t.playlist.ended)
+/// 解析结果。
+pub(crate) struct Resolved {
+    pub tracks: Vec<ResolvedTrack>,
+    /// 来源是主播放列表时所选的变体与音频
+    pub selection: Option<SelectionKey>,
 }
 
+impl Resolved {
+    /// 有任一条轨的播放列表没有 EXT-X-ENDLIST 即为直播。
+    pub(crate) fn is_live(&self) -> bool {
+        self.tracks.iter().any(|t| !t.playlist.ended)
+    }
+}
+
+/// 拉取来源并选轨。`recorded` 为任务目录记录的选轨：有记录时按它找回同一条轨，不按偏好重新选，
+/// 找不到时报 [`WorkDirProblem::SelectionGone`]。
 pub(crate) async fn resolve(
     http: &Http,
     request: &JobRequest,
+    recorded: Option<&SelectionKey>,
     cancel: &CancellationToken,
-) -> Result<Vec<ResolvedTrack>, Error> {
+) -> Result<Resolved, Error> {
     let hooks = &request.hooks;
     Ok(
         match load_playlist(http, hooks, &request.url, cancel).await? {
-            Playlist::Media(playlist) => vec![ResolvedTrack {
-                url: request.url.clone(),
-                streams: Streams::All,
-                playlist,
-            }],
+            Playlist::Media(playlist) => Resolved {
+                tracks: vec![ResolvedTrack {
+                    url: request.url.clone(),
+                    streams: Streams::All,
+                    playlist,
+                }],
+                selection: None,
+            },
             Playlist::Master(master) => {
-                let selection = hls::select(&master, &request.preference)?;
+                let selection = match recorded {
+                    Some(key) => key.find(&master).ok_or_else(|| Error::WorkDir {
+                        path: request.resolved_work_dir(),
+                        problem: WorkDirProblem::SelectionGone,
+                    })?,
+                    None => hls::select(&master, &request.preference)?,
+                };
+                let key = SelectionKey::of(&selection);
                 // 选了独立音频 rendition 时，变体里混着的音频不用，与播放器的行为一致
                 let main = match selection.audio {
                     Some(_) => Streams::Video,
@@ -60,7 +83,10 @@ pub(crate) async fn resolve(
                         playlist,
                     });
                 }
-                tracks
+                Resolved {
+                    tracks,
+                    selection: Some(key),
+                }
             }
         },
     )
@@ -88,7 +114,9 @@ async fn load_playlist(
     url: &Url,
     cancel: &CancellationToken,
 ) -> Result<Playlist, Error> {
-    let response = http.get(Purpose::Playlist, url, None, cancel).await?;
+    let response = http
+        .get(Purpose::Playlist, url, None, Priority::Urgent, cancel)
+        .await?;
     let final_url = response.url;
     let hook_url = final_url.clone();
     let body = response.body;

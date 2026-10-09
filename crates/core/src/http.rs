@@ -12,15 +12,25 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::hooks::{HookKind, Hooks, Purpose, RequestParts, run_hook};
+use crate::ident::strip_query;
 use crate::request::{JobRequest, RetryPolicy, check_header};
 use crate::{Error, HttpError, Integrity};
+
+/// 请求是否占用引擎的在途名额。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Priority {
+    /// 占名额：key、分片与点播的 init 段，量大
+    Normal,
+    /// 不占名额：播放列表与刷新时新出现的 init 段，量小；排在其他任务的大批下载之后会让直播停滞
+    Urgent,
+}
 
 pub(crate) struct Http {
     client: reqwest::Client,
     headers: Vec<(String, String)>,
     retry: RetryPolicy,
     hooks: Arc<dyn Hooks>,
-    /// 引擎内所有任务共享；key、init 段与分片的每次尝试从发出请求到读完响应体占用一个名额
+    /// 引擎内所有任务共享；[`Priority::Normal`] 的每次尝试从发出请求到读完响应体占用一个名额
     requests: Arc<Semaphore>,
     jitter: std::hash::RandomState,
 }
@@ -30,21 +40,6 @@ pub(crate) struct Response {
     /// 跟随重定向之后的最终地址
     pub url: Url,
     pub body: Vec<u8>,
-}
-
-/// 一次失败的尝试；`retry_after` 为服务器在 429/503 时要求的最短等待。错误装箱，失败路径上才分配。
-struct Failure {
-    error: Box<Error>,
-    retry_after: Option<Duration>,
-}
-
-impl From<Error> for Failure {
-    fn from(error: Error) -> Self {
-        Failure {
-            error: Box::new(error),
-            retry_after: None,
-        }
-    }
 }
 
 impl Http {
@@ -58,8 +53,13 @@ impl Http {
             .timeout(t.request)
             .tls_danger_accept_invalid_certs(request.insecure);
         if let Some(proxy) = &request.proxy {
-            let proxy = reqwest::Proxy::all(proxy.as_str())
-                .map_err(|e| Error::InvalidInput(format!("代理地址不可用 {proxy}：{e}")))?;
+            let proxy = reqwest::Proxy::all(proxy.as_str()).map_err(|e| {
+                Error::InvalidInput(format!(
+                    "代理地址不可用 {}：{}",
+                    proxy_text(proxy),
+                    e.without_url()
+                ))
+            })?;
             builder = builder.proxy(proxy);
         }
         let client = builder
@@ -76,26 +76,30 @@ impl Http {
     }
 
     /// GET `url`；`range` 不为空时只取这段字节。可重试的失败按 [`RetryPolicy`] 重试；
-    /// 服务器要求的等待超过 `max_delay` 时不再重试。
+    /// 服务器要求的等待超过 `max_delay` 时不再重试，错误里带上它要求的等待。
     pub(crate) async fn get(
         &self,
         purpose: Purpose,
         url: &Url,
         range: Option<ByteRange>,
+        priority: Priority,
         cancel: &CancellationToken,
     ) -> Result<Response, Error> {
         let mut attempt = 1;
         loop {
-            let failure = match self.attempt(purpose, url, range, cancel).await {
+            let error = match self.attempt(purpose, url, range, priority, cancel).await {
                 Ok(response) => return Ok(response),
-                Err(failure) => failure,
+                Err(error) => error,
             };
-            let asked = failure.retry_after.unwrap_or_default();
-            if !failure.error.retryable()
+            let asked = match &error {
+                Error::Http { retry_after, .. } => retry_after.unwrap_or_default(),
+                _ => Duration::ZERO,
+            };
+            if !error.retryable()
                 || attempt >= self.retry.attempts.get()
                 || asked > self.retry.max_delay
             {
-                return Err(*failure.error);
+                return Err(error);
             }
             let delay = self.backoff(url, attempt).max(asked);
             tokio::select! {
@@ -111,85 +115,19 @@ impl Http {
         purpose: Purpose,
         url: &Url,
         range: Option<ByteRange>,
+        priority: Priority,
         cancel: &CancellationToken,
-    ) -> Result<Response, Failure> {
+    ) -> Result<Response, Error> {
         let parts = self.prepare(purpose, url).await?;
-        let failed = |kind| Error::Http {
-            url: Box::new(parts.url.clone()),
-            kind,
-        };
-
-        // 播放列表请求小而急，不排在其他任务的大批下载之后
-        let _permit = match purpose {
-            Purpose::Playlist => None,
-            Purpose::Key | Purpose::Init | Purpose::Segment => Some(tokio::select! {
-                _ = cancel.cancelled() => return Err(Error::Cancelled.into()),
+        let _permit = match priority {
+            Priority::Urgent => None,
+            Priority::Normal => Some(tokio::select! {
+                _ = cancel.cancelled() => return Err(Error::Cancelled),
                 permit = self.requests.acquire() => permit.expect("引擎的信号量从不关闭"),
             }),
         };
-        let mut builder = self.client.get(parts.url.as_str());
-        for (name, value) in &parts.headers {
-            builder = builder.header(name, value);
-        }
-        if let Some(r) = range {
-            // hls 保证 offset + length 不溢出且 length ≥ 1
-            builder = builder.header(
-                RANGE,
-                format!("bytes={}-{}", r.offset, r.offset + r.length - 1),
-            );
-        }
-        let response = tokio::select! {
-            _ = cancel.cancelled() => return Err(Error::Cancelled.into()),
-            sent = builder.send() => sent.map_err(|e| failed(classify(e)))?,
-        };
-
-        let status = response.status();
-        if !status.is_success() {
-            let retry_after = matches!(
-                status,
-                StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
-            )
-            .then(|| {
-                response
-                    .headers()
-                    .get(RETRY_AFTER)?
-                    .to_str()
-                    .ok()?
-                    .trim()
-                    .parse()
-                    .ok()
-            })
-            .flatten()
-            .map(Duration::from_secs);
-            return Err(Failure {
-                error: Box::new(failed(HttpError::Status(status.as_u16()))),
-                retry_after,
-            });
-        }
-        if range.is_some() && status != StatusCode::PARTIAL_CONTENT {
-            return Err(failed(HttpError::RangeIgnored(status.as_u16())).into());
-        }
-        let final_url = Url::parse(response.url().as_str()).expect("reqwest 的响应地址是合法 URL");
-        let body = tokio::select! {
-            _ = cancel.cancelled() => return Err(Error::Cancelled.into()),
-            body = response.bytes() => body.map_err(|e| failed(classify(e)))?,
-        };
-        if let Some(r) = range
-            && body.len() as u64 != r.length
-        {
-            return Err(Error::Integrity {
-                url: Box::new(final_url),
-                kind: Integrity::RangeLength {
-                    expected: r.length,
-                    found: body.len(),
-                },
-            }
-            .into());
-        }
-        Ok(Response {
-            url: final_url,
-            body: body.to_vec(),
-        })
+        let response = self.send(&parts, range, cancel).await?;
+        read(response, &parts.url, range, cancel).await
     }
 
     /// 本次尝试的地址与请求头：经 `on_request` 回调修改，改后不合法时报回调错误（不重试）。
@@ -208,12 +146,60 @@ impl Http {
             cause: message.into(),
         };
         if !matches!(parts.url.scheme(), "http" | "https") {
-            return Err(invalid(format!("只支持 http/https 地址：{}", parts.url)));
+            return Err(invalid(format!(
+                "只支持 http/https 地址：{}",
+                strip_query(&parts.url)
+            )));
         }
         for (name, value) in &parts.headers {
             check_header(name, value).map_err(invalid)?;
         }
         Ok(parts)
+    }
+
+    /// 发出请求并检查状态码：非 2xx 为失败（429/503 时带上 Retry-After），字节范围请求须返回 206。
+    async fn send(
+        &self,
+        parts: &RequestParts,
+        range: Option<ByteRange>,
+        cancel: &CancellationToken,
+    ) -> Result<reqwest::Response, Error> {
+        let mut builder = self.client.get(parts.url.as_str());
+        for (name, value) in &parts.headers {
+            builder = builder.header(name, value);
+        }
+        if let Some(r) = range {
+            // hls 保证 offset + length 不溢出且 length ≥ 1
+            builder = builder.header(
+                RANGE,
+                format!("bytes={}-{}", r.offset, r.offset + r.length - 1),
+            );
+        }
+        let response = tokio::select! {
+            _ = cancel.cancelled() => return Err(Error::Cancelled),
+            sent = builder.send() => sent.map_err(|e| http_error(&parts.url, classify(e)))?,
+        };
+        let status = response.status();
+        if !status.is_success() {
+            let retry_after = matches!(
+                status,
+                StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+            )
+            .then(|| requested_wait(&response))
+            .flatten();
+            return Err(Error::Http {
+                url: Box::new(parts.url.clone()),
+                kind: HttpError::Status(status.as_u16()),
+                retry_after,
+            });
+        }
+        if range.is_some() && status != StatusCode::PARTIAL_CONTENT {
+            return Err(http_error(
+                &parts.url,
+                HttpError::RangeIgnored(status.as_u16()),
+            ));
+        }
+        Ok(response)
     }
 
     /// 第 `attempt` 次失败后的等待：base × 2^(attempt-1)，不超过 max，再乘以 [0.75, 1.25) 的抖动。
@@ -228,6 +214,56 @@ impl Http {
     }
 }
 
+/// 读完响应体；`url` 为发出请求的地址，用于错误信息。字节范围请求的响应体须恰好是请求的长度。
+async fn read(
+    response: reqwest::Response,
+    url: &Url,
+    range: Option<ByteRange>,
+    cancel: &CancellationToken,
+) -> Result<Response, Error> {
+    let final_url = response.url().clone();
+    let body = tokio::select! {
+        _ = cancel.cancelled() => return Err(Error::Cancelled),
+        body = response.bytes() => body.map_err(|e| http_error(url, classify(e)))?,
+    };
+    if let Some(r) = range
+        && body.len() as u64 != r.length
+    {
+        return Err(Error::Integrity {
+            url: Box::new(final_url),
+            kind: Integrity::RangeLength {
+                expected: r.length,
+                found: body.len(),
+            },
+        });
+    }
+    Ok(Response {
+        url: final_url,
+        body: body.to_vec(),
+    })
+}
+
+/// Retry-After 的秒数写法；HTTP 日期写法与无法解析的值视为没有要求。
+fn requested_wait(response: &reqwest::Response) -> Option<Duration> {
+    let seconds = response
+        .headers()
+        .get(RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(seconds))
+}
+
+fn http_error(url: &Url, kind: HttpError) -> Error {
+    Error::Http {
+        url: Box::new(url.clone()),
+        kind,
+        retry_after: None,
+    }
+}
+
 /// 归类传输错误；说明文字不含地址（调用方的错误已带去掉查询串的地址）。
 fn classify(error: reqwest::Error) -> HttpError {
     if error.is_timeout() {
@@ -238,5 +274,14 @@ fn classify(error: reqwest::Error) -> HttpError {
         HttpError::Connect(error.without_url().to_string())
     } else {
         HttpError::Transport(error.without_url().to_string())
+    }
+}
+
+/// 代理地址去掉用户名、密码与路径后的写法，用于错误信息。
+fn proxy_text(proxy: &Url) -> String {
+    let host = proxy.host_str().unwrap_or_default();
+    match proxy.port() {
+        Some(port) => format!("{}://{host}:{port}", proxy.scheme()),
+        None => format!("{}://{host}", proxy.scheme()),
     }
 }
