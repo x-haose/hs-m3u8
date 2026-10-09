@@ -11,7 +11,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
+        # 固定镜像版本，升级时显式修改
+        os: [macos-26, windows-2025, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -19,9 +20,15 @@ jobs:
 
       - name: MSVC 环境（Windows）
         if: runner.os == 'Windows'
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
+        shell: pwsh
+        run: |
+          # 找到带 VC 工具的 VS，执行 vcvarsall 后把环境变量传给后续步骤
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "找不到带 VC 工具的 Visual Studio" }
+          $vars = cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" x64 >nul && set"
+          if ($LASTEXITCODE -ne 0) { throw "vcvarsall.bat 执行失败（退出码 $LASTEXITCODE）" }
+          $vars | Where-Object { $_ -match '^[^=]+=' } | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: MSYS2（Windows）
         if: runner.os == 'Windows'
