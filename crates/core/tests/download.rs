@@ -16,7 +16,7 @@ use hs_m3u8_core::{
     Engine, Error, Hooks, HttpError, Integrity, JobRequest, Output, RequestParts, RetryPolicy,
     Stage, Unsupported, Url,
 };
-use hs_m3u8_remux::{DiscontinuityGroup, TrackSegments, remux};
+use hs_m3u8_remux::{DiscontinuityGroup, Streams, TrackSegments, remux};
 use tokio::sync::Notify;
 
 // ---------- 样本 ----------
@@ -39,10 +39,19 @@ fn track(dir: &str, init: Option<&str>, segments: &[&str]) -> TrackSegments {
 }
 
 /// 直接合并样本文件得到的期望输出。
-fn expected(dir: &Path, groups: &[DiscontinuityGroup]) -> Vec<u8> {
+fn expected(dir: &Path, streams: &[Streams], groups: &[DiscontinuityGroup]) -> Vec<u8> {
     let path = dir.join("expected.mp4");
-    remux(groups, &path).unwrap();
+    remux(streams, groups, &path).unwrap();
     std::fs::read(path).unwrap()
+}
+
+/// ts_a 的分片（H.264 + AAC 的 TS）。
+const TS_A: [&str; 2] = ["seg0.ts", "seg1.ts"];
+
+/// ts_a 两个分片单轨合并的期望输出。
+fn expected_ts_a(dir: &Path) -> Vec<u8> {
+    let tracks = vec![track("ts_a", None, &TS_A)];
+    expected(dir, &[Streams::ALL], &[DiscontinuityGroup { tracks }])
 }
 
 fn encrypt(plain: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Vec<u8> {
@@ -245,8 +254,6 @@ fn assert_output(output: &Output, expected: &[u8]) {
     assert!(!Path::new(&work_dir).exists());
 }
 
-const TS_A: [&str; 2] = ["seg0.ts", "seg1.ts"];
-
 /// ts_a 的两个分片，第一个用显式 IV、第二个换了 key 并用媒体序号推出的 IV。
 #[tokio::test(flavor = "multi_thread")]
 async fn aes128_explicit_and_sequence_iv() {
@@ -276,12 +283,7 @@ async fn aes128_explicit_and_sequence_iv() {
     let progress = job.progress();
     let output = job.wait().await.unwrap();
 
-    let want = expected(
-        &dir,
-        &[DiscontinuityGroup {
-            tracks: vec![track("ts_a", None, &TS_A)],
-        }],
-    );
+    let want = expected_ts_a(&dir);
     assert_output(&output, &want);
     assert_eq!(output.segments, 2);
     let last = *progress.borrow();
@@ -341,6 +343,7 @@ async fn split_audio_video_with_redirect_and_discontinuity() {
     };
     let want = expected(
         &dir,
+        &[Streams::VIDEO, Streams::AUDIO],
         &[
             program(
                 "fmp4_a",
@@ -352,6 +355,46 @@ async fn split_audio_video_with_redirect_and_discontinuity() {
     );
     assert_output(&output, &want);
     assert_eq!(output.segments, 8);
+}
+
+/// 变体 TS 混有音频，又选了独立音频 rendition：只用 rendition 的音频，变体里的音频不进输出。
+#[tokio::test(flavor = "multi_thread")]
+async fn selected_audio_rendition_replaces_muxed_audio() {
+    let dir = test_dir("muxed_audio");
+    let server = Server::start().await;
+    put_ts_a(&server, "video.m3u8", 1.0);
+    let audio = ["seg0.m4s", "seg1.m4s", "seg2.m4s"];
+    for name in ["init.mp4"].iter().chain(&audio) {
+        server.put(
+            &format!("audio/{name}"),
+            fixture(&format!("fmp4_a/audio/{name}")),
+        );
+    }
+    let mut playlist =
+        String::from("#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"audio/init.mp4\"\n");
+    for name in audio {
+        playlist += &format!("#EXTINF:1,\naudio/{name}\n");
+    }
+    server.put("audio.m3u8", playlist + "#EXT-X-ENDLIST\n");
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n\
+         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",DEFAULT=YES,URI=\"audio.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=320x180,AUDIO=\"aud\"\nvideo.m3u8\n",
+    );
+
+    let output = run(request(server.url("master.m3u8"), &dir)).await.unwrap();
+
+    let tracks = vec![
+        track("ts_a", None, &TS_A),
+        track("fmp4_a/audio", Some("init.mp4"), &audio),
+    ];
+    let want = expected(
+        &dir,
+        &[Streams::VIDEO, Streams::AUDIO],
+        &[DiscontinuityGroup { tracks }],
+    );
+    assert_output(&output, &want);
 }
 
 /// init 段与分片都是同一个文件里的字节范围。
@@ -375,6 +418,7 @@ async fn byte_ranges() {
 
     let want = expected(
         &dir,
+        &[Streams::ALL],
         &[DiscontinuityGroup {
             tracks: vec![track(
                 "fmp4_a/video",
@@ -397,12 +441,7 @@ async fn retries_server_errors() {
 
     let output = run(request(server.url("index.m3u8"), &dir)).await.unwrap();
 
-    let want = expected(
-        &dir,
-        &[DiscontinuityGroup {
-            tracks: vec![track("ts_a", None, &TS_A)],
-        }],
-    );
+    let want = expected_ts_a(&dir);
     assert_output(&output, &want);
     assert_eq!(server.hits("seg0.ts"), 3);
 }
@@ -456,12 +495,7 @@ async fn failure_then_resume() {
 
     put_ts_a(&server, "index.m3u8", 1.0);
     let output = run(req).await.unwrap();
-    let want = expected(
-        &dir,
-        &[DiscontinuityGroup {
-            tracks: vec![track("ts_a", None, &TS_A)],
-        }],
-    );
+    let want = expected_ts_a(&dir);
     assert_output(&output, &want);
     assert_eq!(server.hits("seg0.ts"), 1);
 }
@@ -489,12 +523,7 @@ async fn cancel_lock_and_resume() {
 
     server.ungate("seg1.ts");
     let output = run(req).await.unwrap();
-    let want = expected(
-        &dir,
-        &[DiscontinuityGroup {
-            tracks: vec![track("ts_a", None, &TS_A)],
-        }],
-    );
+    let want = expected_ts_a(&dir);
     assert_output(&output, &want);
     assert_eq!(server.hits("seg0.ts"), 1);
 }
@@ -584,12 +613,7 @@ async fn hooks_adapt_site() {
     req.hooks = Arc::new(SiteHooks);
     let output = run(req).await.unwrap();
 
-    let want = expected(
-        &dir,
-        &[DiscontinuityGroup {
-            tracks: vec![track("ts_a", None, &TS_A)],
-        }],
-    );
+    let want = expected_ts_a(&dir);
     assert_output(&output, &want);
 }
 

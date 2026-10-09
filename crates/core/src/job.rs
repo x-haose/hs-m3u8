@@ -53,9 +53,10 @@ pub(crate) async fn run(
     // 下载期间输出路径可能已被别人占用；开始时检查过，这里再查一次
     check_output(&request.output, request.overwrite)?;
     progress.send_modify(|p| p.stage = Stage::Merging);
+    let streams: Vec<_> = plan.tracks.iter().map(|t| t.streams).collect();
     let groups = merge_input(&plan, &dir);
     let output = request.output.clone();
-    let report = blocking(move || hs_m3u8_remux::remux(&groups, &output)).await??;
+    let report = blocking(move || hs_m3u8_remux::remux(&streams, &groups, &output)).await??;
 
     let cleanup_error = if request.keep_work_dir {
         None

@@ -69,7 +69,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 选轨（`select`）：
 
 - 默认取最高分辨率，同分辨率取最高带宽；有带分辨率的变体时不考虑纯音频变体；用户可按下标指定。
-- 变体带 `AUDIO` 组、且组内 rendition 有 URI 时，选 `DEFAULT=YES` 的那个，或按用户指定的语言选；这就是音视频分流的情况。
+- 变体带 `AUDIO` 组、且组内 rendition 有 URI 时，选 `DEFAULT=YES` 的那个，或按用户指定的语言选；这就是音视频分流的情况。此时只取变体的视频，变体里即使混有音频也不用，与播放器的行为一致。
 
 解析层自行实现（ADR-0006）：现成的 m3u8-rs 会静默丢失 key，hls_m3u8 拒绝真实网站常见的不规范写法。
 
@@ -187,12 +187,13 @@ pub enum Error {
 ```rust
 pub struct TrackSegments { pub init: Option<PathBuf>, pub segments: Vec<PathBuf> }   // 一条轨在一组内的分片
 pub struct DiscontinuityGroup { pub tracks: Vec<TrackSegments> }                     // 各组轨道顺序一致
-pub fn remux(groups: &[DiscontinuityGroup], output: &Path) -> Result<Report, Error>;
+pub struct Streams { pub video: bool, pub audio: bool }                              // 一条轨贡献的流种类，各组相同
+pub fn remux(tracks: &[Streams], groups: &[DiscontinuityGroup], output: &Path) -> Result<Report, Error>;
 ```
 
 - 组内：分片经 FFmpeg `concatf` 协议按字节顺序读取（fMP4 时 init 段在前），不先拼成大文件。列表文件写在输出旁、打开后即删除；每行写成单引号包裹的 `file:` URL，以免 Windows 路径的反斜杠被当成转义符。
 - 组间：整组共用一个时间偏移，保留组内各轨（视频与独立音频 rendition）原有的相对时序。偏移取两个下限中较大者：本组最早的 PTS 不早于此前所有流的最晚结束时刻；每路流本组首个 DTS 严格大于上一组末个 DTS（加一个输出时间基 tick 的余量吸收舍入）。按呈现而非 DTS 对齐，B 帧的解码提前量不会在组边界留下空隙。
-- 每条轨贡献第一路视频和（或）第一路音频，同类流只能来自一条轨；后续组的流种类与编码参数（编码、宽高、采样率、声道数）必须与第 0 组一致，否则报 `ParamsChanged`，由 core 决定如何处理（例如分辨率不同的广告段）。
+- 每条轨按 `Streams` 贡献第一路视频和（或）第一路音频，未指定种类的流不进输出、不检查编码；同类流只能来自一条轨；后续组的流种类与编码参数（编码、宽高、采样率、声道数）必须与第 0 组一致，否则报 `ParamsChanged`，由 core 决定如何处理（例如分辨率不同的广告段）。
 - 只接受 H.264、HEVC 与 AAC，其余编码报 `UnsupportedCodec`。
 - 其余约束见 ADR-0002：`Packet::read`、HEVC 标 `hvc1`、moov 前置、写临时文件后改名、回读核对包数。
 

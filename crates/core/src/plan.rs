@@ -3,6 +3,7 @@
 use std::ops::Range;
 
 use hs_m3u8_hls::{self as hls, InitSection, Playlist, Segment};
+use hs_m3u8_remux::Streams;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -15,17 +16,23 @@ pub(crate) struct Track {
     pub segments: Vec<Segment>,
     /// 本轨用到的 init 段，按首次出现的顺序去重；下标即任务目录中的编号
     pub inits: Vec<InitSection>,
+    /// 本轨在输出中贡献的流
+    pub streams: Streams,
 }
 
 impl Track {
-    fn new(segments: Vec<Segment>) -> Self {
+    fn new(segments: Vec<Segment>, streams: Streams) -> Self {
         let mut inits: Vec<InitSection> = Vec::new();
         for init in segments.iter().filter_map(|s| s.init.as_ref()) {
             if !inits.contains(init) {
                 inits.push(init.clone());
             }
         }
-        Track { segments, inits }
+        Track {
+            segments,
+            inits,
+            streams,
+        }
     }
 
     /// 分片所用 init 段在 `inits` 中的下标；无 init 段时为 None。
@@ -146,14 +153,19 @@ pub(crate) async fn resolve(
     cancel: &CancellationToken,
 ) -> Result<Plan, Error> {
     let tracks = match fetch(http, request, &request.url, cancel).await? {
-        Playlist::Media(media) => vec![track(media, &request.url)?],
+        Playlist::Media(media) => vec![track(media, &request.url, Streams::ALL)?],
         Playlist::Master(master) => {
             let selection = hls::select(&master, &request.preference)?;
-            let mut tracks =
-                vec![media_track(http, request, &selection.variant.uri, cancel).await?];
+            // 选了独立音频 rendition 时，变体里混着的音频不用，与播放器的行为一致
+            let main = match selection.audio {
+                Some(_) => Streams::VIDEO,
+                None => Streams::ALL,
+            };
+            let variant = &selection.variant.uri;
+            let mut tracks = vec![media_track(http, request, variant, main, cancel).await?];
             if let Some(audio) = selection.audio {
                 let uri = audio.uri.expect("select 只返回带 URI 的 rendition");
-                tracks.push(media_track(http, request, &uri, cancel).await?);
+                tracks.push(media_track(http, request, &uri, Streams::AUDIO, cancel).await?);
             }
             tracks
         }
@@ -165,17 +177,18 @@ async fn media_track(
     http: &Http,
     request: &JobRequest,
     url: &Url,
+    streams: Streams,
     cancel: &CancellationToken,
 ) -> Result<Track, Error> {
     match fetch(http, request, url, cancel).await? {
-        Playlist::Media(media) => track(media, url),
+        Playlist::Media(media) => track(media, url, streams),
         Playlist::Master(_) => Err(Error::InvalidInput(format!(
             "变体 {url} 指向的是主播放列表，不是媒体播放列表"
         ))),
     }
 }
 
-fn track(media: hls::MediaPlaylist, url: &Url) -> Result<Track, Error> {
+fn track(media: hls::MediaPlaylist, url: &Url, streams: Streams) -> Result<Track, Error> {
     if !media.ended {
         return Err(Error::Unsupported(Unsupported::Live));
     }
@@ -184,7 +197,7 @@ fn track(media: hls::MediaPlaylist, url: &Url) -> Result<Track, Error> {
             url.clone(),
         ))));
     }
-    Ok(Track::new(media.segments))
+    Ok(Track::new(media.segments, streams))
 }
 
 /// 拉取并解析播放列表；相对地址按重定向之后的最终地址解析。
