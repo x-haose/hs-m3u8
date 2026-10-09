@@ -74,7 +74,7 @@ async fn segments_missing_from_the_session_are_refilled() {
     put_long(&server, "", &[0, 1, 3]);
     server.put("live.m3u8", playlist(&[0, 1, 2, 3], false));
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 3 && p.segments_missed == 1).await;
+    interrupt(&req, |p| p.segments_done == 3 && p.segments_failed == 1).await;
 
     put_long(&server, "", &[2]);
     server.put("live.m3u8", playlist(&[0, 1, 2, 3], true));
@@ -93,7 +93,7 @@ async fn holes_from_an_earlier_run_are_unknown() {
     put_long(&server, "", &[0, 2, 3]);
     server.put("live.m3u8", playlist(&[0, 1, 2, 3], false));
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 3 && p.segments_missed == 1).await;
+    interrupt(&req, |p| p.segments_done == 3 && p.segments_failed == 1).await;
 
     server.put("live.m3u8", playlist(&[3], true));
     let output = run(req).await.unwrap();
@@ -315,7 +315,7 @@ async fn skipped_segments_are_not_refilled_later() {
     server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
     server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
     let req = live_request(server.url("master.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 3 && p.segments_missed == 1).await;
+    interrupt(&req, |p| p.segments_done == 3 && p.segments_failed == 1).await;
 
     // 运行 2：窗口 [1,2]；视频与会话 0 重叠，音频没有 → 会话 1，视频只录 2，音频录 1、2
     put_long(&server, "a/", &[1, 2, 3]);

@@ -11,10 +11,12 @@ pub struct Progress {
     /// 已完成的分片，各轨合计；含续传前已完成的
     pub segments_done: usize,
     /// 要下载的分片，各轨合计：已完成的（含续传前的）加上排入下载的；直播另含列出了但 init 段取不到的，
-    /// 随录制增长。全部处理完时等于已完成的加上本次取不到的
+    /// 随录制增长。全部处理完时等于 `segments_done` 加 `segments_failed`
     pub segments_total: usize,
-    /// 直播本次运行中缺失的分片：窗口已滑过的（没有列出过，不在 `segments_total` 里）与取不到的；点播恒为 0
-    pub segments_missed: usize,
+    /// 直播本次运行中列出了、但分片或其 init 段取不到的分片，计入 `segments_total`；点播恒为 0
+    pub segments_failed: usize,
+    /// 直播本次运行中两次刷新之间已滑出窗口、没有列出过的分片，不在 `segments_total` 里；点播恒为 0
+    pub segments_expired: usize,
     /// 任务目录中已完成的分片与 init 段的字节数（解密后）；含续传前已完成的
     pub bytes: u64,
 }

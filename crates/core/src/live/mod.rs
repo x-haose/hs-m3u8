@@ -534,18 +534,16 @@ impl Recorder<'_> {
                 self.progress.send_modify(|p| p.bytes += len);
             }
         }
-        let init_failed = update
-            .missed
-            .iter()
-            .filter(|m| matches!(m.reason, MissReason::InitFailed(_)))
-            .count();
-        let to_download = update.items.len() + init_failed;
-        let missed: usize = update.missed.iter().map(Missed::count).sum();
+        let failed = update.init_failed.len();
+        let expired = update.expired.as_ref().map_or(0, Missed::count);
+        let listed = update.items.len() + failed;
         self.progress.send_modify(|p| {
-            p.segments_total += to_download;
-            p.segments_missed += missed;
+            p.segments_total += listed;
+            p.segments_failed += failed;
+            p.segments_expired = p.segments_expired.saturating_add(expired);
         });
-        self.missed.extend(update.missed);
+        self.missed.extend(update.expired);
+        self.missed.extend(update.init_failed);
         for item in update.items {
             fetcher.push(item);
         }
@@ -578,7 +576,7 @@ impl Recorder<'_> {
             last: id.sequence,
             reason: MissReason::Failed(kind),
         });
-        self.progress.send_modify(|p| p.segments_missed += 1);
+        self.progress.send_modify(|p| p.segments_failed += 1);
         Ok(())
     }
 
