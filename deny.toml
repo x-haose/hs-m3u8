@@ -1,0 +1,43 @@
+# cargo-deny 0.20 配置：Rust 依赖的安全公告、许可证白名单、禁用包与来源。make check 与 CI 执行。
+# 静态链接的 FFmpeg 不是 crate，其 LGPL 合规由 third_party/ffmpeg/build.sh 检查。
+
+[graph]
+# 发布平台
+targets = ["aarch64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+
+[advisories]
+# 漏洞公告一律报错；被撤回的版本报错；unsound 覆盖传递依赖；unmaintained 只看工作区的直接依赖，
+# 传递依赖是否换掉由上游决定
+yanked = "deny"
+unsound = "all"
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+confidence-threshold = 0.93
+# 只允许宽松许可证：GUI 与 Python wheel 都是静态链接分发，copyleft 依赖会改变整个产物的许可义务
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "WTFPL", # ffmpeg-next、ffmpeg-sys-next
+]
+exceptions = []
+
+[bans]
+# 同一包的多个版本来自上游各自的版本约束，本项目无法消除，只影响体积与编译时间
+multiple-versions = "allow"
+wildcards = "deny"
+# 工作区内的 path 依赖不发布，不带版本号
+allow-wildcard-paths = true
+deny = [
+    # TLS 用 rustls；系统 OpenSSL 会破坏静态分发
+    { crate = "openssl", use-instead = "rustls" },
+    { crate = "openssl-sys", use-instead = "rustls" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

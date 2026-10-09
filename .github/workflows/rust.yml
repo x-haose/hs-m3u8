@@ -63,6 +63,21 @@ jobs:
       - name: 格式
         run: cargo fmt --all --check
 
+      # 依赖图与平台无关（各自已覆盖全部发布平台），只在 Linux 上查
+      - name: 依赖方向（Linux）
+        if: runner.os == 'Linux'
+        run: scripts/check_deps.sh
+
+      - name: 安装 cargo-deny（Linux）
+        if: runner.os == 'Linux'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+
+      - name: 安全公告、许可证、禁用包与来源（Linux）
+        if: runner.os == 'Linux'
+        run: cargo deny --locked check
+
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
