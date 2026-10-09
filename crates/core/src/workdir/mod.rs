@@ -5,11 +5,13 @@
 //! lock                                                       运行期间持有排他锁
 //! tracks/<轨道>/<会话>-<序号>-<不连续段>-<init>-<时长>-<身份>.seg  已解密、通过校验的分片
 //! tracks/<轨道>/init-<指纹>.mp4                               init 段，按内容命名
+//! tracks/<轨道>/start-<会话>-fresh 或 start-<会话>-after-<序号>     直播：该轨在该会话的起点（空文件）
 //! ```
 //!
 //! 分片文件名中：会话为第几个录制会话（点播恒为 0），不连续段为会话内的编号，init 为所用 init 段的内容指纹
 //! 或 `none`，时长为 EXTINF 声明的微秒数，身份见 [`Fingerprint::of_segment`]。合并要用的分组与时长、
-//! 续录要用的身份都在文件名里，只凭目录内容即可合并或续录。
+//! 续录要用的身份都在文件名里；直播每个会话开始前先记下各轨的起点（见 [`SessionStart`]），续录时据此确定补录的
+//! 范围。只凭目录内容即可合并或续录。
 //!
 //! 文件先写 `<名字>.part`，fsync 后改名，因此最终文件名存在即内容完整（断电也成立）。
 //! 请求配置（请求头、Cookie 等）不写入目录：续传时由调用方再次提供。
@@ -17,12 +19,16 @@
 mod names;
 mod record;
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, TryLockError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-pub(crate) use self::names::SegmentName;
-use self::names::{init_file_name, parse_init_name, parse_segment_name, segment_file_name};
+pub(crate) use self::names::{SegmentName, SessionStart};
+use self::names::{
+    init_file_name, parse_init_name, parse_segment_name, parse_start_name, segment_file_name,
+    start_file_name,
+};
 pub(crate) use self::record::{JobRecord, RecordKind};
 use self::record::{decode, encode};
 use crate::ident::Fingerprint;
@@ -51,6 +57,8 @@ pub(crate) struct SegmentFile {
 pub(crate) struct Stored {
     /// 各轨的分片，按（会话, 序号）排列
     pub segments: Vec<Vec<SegmentFile>>,
+    /// 各轨各会话的起点；有分片的会话一定有
+    pub starts: Vec<BTreeMap<u32, SessionStart>>,
     /// 各轨 init 段的字节数之和
     pub init_bytes: u64,
 }
@@ -117,12 +125,13 @@ impl WorkDir {
         blocking(move || write_atomic(&path, &bytes)).await?
     }
 
-    /// 前 `tracks` 条轨已完成的分片与 init 段。
+    /// 前 `tracks` 条轨已完成的分片、会话起点与 init 段。有分片的会话没有起点时目录内容矛盾。
     pub(crate) async fn scan(&self, tracks: usize) -> Result<Stored, Error> {
         let layout = self.layout.clone();
         blocking(move || {
             let mut stored = Stored {
                 segments: Vec::with_capacity(tracks),
+                starts: Vec::with_capacity(tracks),
                 init_bytes: 0,
             };
             for track in 0..tracks {
@@ -132,12 +141,34 @@ impl WorkDir {
                     .map(|(name, path, len)| SegmentFile { name, path, len })
                     .collect();
                 files.sort_by_key(|f| (f.name.session, f.name.sequence));
+                let starts = scan_starts(&layout, track, &files)?;
                 stored.segments.push(files);
+                stored.starts.push(starts);
                 for (_, _, len) in list(&dir, parse_init_name)? {
                     stored.init_bytes += len;
                 }
             }
             Ok(stored)
+        })
+        .await?
+    }
+
+    /// 记下第 `track` 条轨在 `session` 会话的起点，替换已有的；须在这条轨这个会话的分片落盘之前。
+    pub(crate) async fn record_start(
+        &self,
+        track: usize,
+        session: u32,
+        start: SessionStart,
+    ) -> Result<(), Error> {
+        let dir = self.layout.track(track);
+        blocking(move || {
+            fs::create_dir_all(&dir).map_err(io_error("创建", &dir))?;
+            for ((existing, _), path, _) in list(&dir, parse_start_name)? {
+                if existing == session {
+                    fs::remove_file(&path).map_err(io_error("删除", &path))?;
+                }
+            }
+            write_atomic(&dir.join(start_file_name(session, start)), &[])
         })
         .await?
     }
@@ -228,6 +259,33 @@ fn open(root: PathBuf, record: JobRecord) -> Result<WorkDir, Error> {
         url_changed,
         lock,
     })
+}
+
+/// 一条轨各会话的起点；`files` 中的分片所在的会话都须有，同一会话不能有两个。
+fn scan_starts(
+    layout: &Layout,
+    track: usize,
+    files: &[SegmentFile],
+) -> Result<BTreeMap<u32, SessionStart>, Error> {
+    let corrupt = |reason: String| Error::WorkDir {
+        path: layout.root.clone(),
+        problem: WorkDirProblem::Corrupt(reason),
+    };
+    let mut starts = BTreeMap::new();
+    for ((session, start), _, _) in list(&layout.track(track), parse_start_name)? {
+        if starts.insert(session, start).is_some() {
+            return Err(corrupt(format!(
+                "第 {track} 条轨会话 {session} 有两个起点记录"
+            )));
+        }
+    }
+    if let Some(f) = files.iter().find(|f| !starts.contains_key(&f.name.session)) {
+        return Err(corrupt(format!(
+            "第 {track} 条轨会话 {} 有分片，但没有起点记录",
+            f.name.session
+        )));
+    }
+    Ok(starts)
 }
 
 /// 没有 `job.json` 的目录只能是空的（`.part` 残留与锁文件除外），否则不是本库建立的任务目录。

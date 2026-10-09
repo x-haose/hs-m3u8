@@ -165,12 +165,13 @@ impl Default for LiveOptions {
 /// 任务目录里已有本来源的直播录制时怎么办。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Resume {
-    /// 续录。各轨当前的窗口都与之前录到的接得上时，接着录，并补上窗口内之前没录完的分片，时间线连续；
+    /// 续录。各轨当前的窗口都与各自之前录到的接得上时，接着录，并补上窗口内之前没录完的分片，时间线连续；
     /// 否则另起一段，与之前的首尾相接（中断期间的内容不在输出中），之前录过的分片不重录。最后一并合并。
-    /// 来源地址只有查询串变了（如换了令牌）时，必须接得上才续录，否则报
-    /// [`crate::WorkDirProblem::SourceUnverified`]
+    /// 完整来源地址与记录的不同（来源摘要相同，如换了令牌）时，必须都接得上才续录，否则报
+    /// [`crate::WorkDirProblem::SourceUnverified`]；各轨都已录满时不改记地址，直接合并
     Continue,
-    /// 不联网，只把已录到的分片合并成输出。目录须是本来源（地址不含查询串、选轨偏好与记录的相同）的直播录制：
+    /// 不联网，只把已录到的分片合并成输出。目录须是本来源（地址去掉用户名、密码、查询串与片段后，以及选轨偏好，
+    /// 都与记录的相同）的直播录制：
     /// 来源不同报 [`crate::WorkDirProblem::SourceMismatch`]，是点播的下载报
     /// [`crate::WorkDirProblem::NotLiveRecording`]；没有可合并的分片时报 [`Error::NothingRecorded`]
     MergeOnly,

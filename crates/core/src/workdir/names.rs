@@ -46,6 +46,35 @@ pub(super) fn parse_segment_name(file_name: &str) -> Option<SegmentName> {
     (parts.next().is_none() && segment_file_name(&name) == file_name).then_some(name)
 }
 
+/// 一条轨在一个会话里从哪里开始录：续录接着这个会话时，补录不越过它。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionStart {
+    /// 从当时窗口的起点录
+    Fresh,
+    /// 跳过不超过该序号的分片：它们录在更早的会话里
+    After(u64),
+}
+
+/// `start-<会话>-fresh` 或 `start-<会话>-after-<序号>`：空文件，信息都在名字里。
+pub(super) fn start_file_name(session: u32, start: SessionStart) -> String {
+    match start {
+        SessionStart::Fresh => format!("start-{session}-fresh"),
+        SessionStart::After(through) => format!("start-{session}-after-{through}"),
+    }
+}
+
+/// [`start_file_name`] 的逆；只认它写出的规范写法。
+pub(super) fn parse_start_name(file_name: &str) -> Option<(u32, SessionStart)> {
+    let rest = file_name.strip_prefix("start-")?;
+    let (session, kind) = rest.split_once('-')?;
+    let session = session.parse().ok()?;
+    let start = match kind {
+        "fresh" => SessionStart::Fresh,
+        _ => SessionStart::After(kind.strip_prefix("after-")?.parse().ok()?),
+    };
+    (start_file_name(session, start) == file_name).then_some((session, start))
+}
+
 /// `init-<指纹>.mp4`。
 pub(super) fn init_file_name(fingerprint: Fingerprint) -> String {
     format!("init-{fingerprint}.mp4")
@@ -96,6 +125,25 @@ mod tests {
         );
         for other in ["init-3.mp4", "init-0123456789abcdef.mp4.part"] {
             assert_eq!(parse_init_name(other), None, "{other}");
+        }
+
+        for (session, start) in [
+            (0, SessionStart::Fresh),
+            (u32::MAX, SessionStart::After(u64::MAX)),
+        ] {
+            let text = start_file_name(session, start);
+            assert_eq!(parse_start_name(&text), Some((session, start)), "{text}");
+        }
+        for other in [
+            "start-1-fresh.part",
+            "start-01-fresh",
+            "start-1-after-",
+            "start-1-after-+2",
+            "start-1-after-02",
+            "start-1-fresh-2",
+            "start--fresh",
+        ] {
+            assert_eq!(parse_start_name(other), None, "{other}");
         }
     }
 }
