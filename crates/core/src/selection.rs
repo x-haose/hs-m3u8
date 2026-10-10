@@ -181,7 +181,7 @@ mod tests {
         for index in [0, 1] {
             let preference = Preference {
                 variant: VariantChoice::Index(index),
-                audio_language: None,
+                audio: hs_m3u8_hls::AudioChoice::Default,
             };
             let selection = select(&m, &preference).unwrap();
             let key = SelectionKey::of(&selection, &m);

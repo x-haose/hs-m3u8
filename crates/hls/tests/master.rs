@@ -1,8 +1,8 @@
 //! 主播放列表解析与选轨。
 
 use hs_m3u8_hls::{
-    Error, MasterPlaylist, Playlist, Preference, RenditionKind, Resolution, SelectError,
-    SyntaxError, Url, VariantChoice, parse, select,
+    AudioChoice, Error, MasterPlaylist, Playlist, Preference, RenditionKind, Resolution,
+    SelectError, SyntaxError, Url, VariantChoice, parse, select,
 };
 
 const BASE: &str = "https://video.example.com/ext_tw_video/123/pu/pl/master.m3u8?tag=12";
@@ -123,14 +123,14 @@ fn audio_rendition_is_chosen_by_default_flag_or_language() {
 
     let english = Preference {
         variant: VariantChoice::Best,
-        audio_language: Some("EN".into()),
+        audio: AudioChoice::Language("EN".into()),
     };
     let audio = select(&m, &english).unwrap().audio.unwrap();
     assert_eq!(audio.rendition.name.as_deref(), Some("English"));
 
     let missing = Preference {
         variant: VariantChoice::Best,
-        audio_language: Some("ja".into()),
+        audio: AudioChoice::Language("ja".into()),
     };
     assert_eq!(
         select(&m, &missing).unwrap_err(),
@@ -138,6 +138,35 @@ fn audio_rendition_is_chosen_by_default_flag_or_language() {
             group: "aud".into(),
             language: "ja".into(),
             available: vec!["en".into(), "zh".into()],
+        }
+    );
+}
+
+/// 按下标选同组里的另一条音轨；下标越界、不是所选变体音频组里的音频时报错。
+#[test]
+fn audio_rendition_is_chosen_by_index() {
+    let m = master(SPLIT);
+    let by_index = |index| Preference {
+        variant: VariantChoice::Best,
+        audio: AudioChoice::Index(index),
+    };
+    let audio = select(&m, &by_index(0)).unwrap().audio.unwrap();
+    assert_eq!(audio.rendition.name.as_deref(), Some("English"));
+    assert_eq!(
+        select(&m, &by_index(2)).unwrap_err(),
+        SelectError::RenditionIndexOutOfRange { index: 2, count: 2 }
+    );
+
+    let other_group = master(
+        "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"x\",URI=\"x.m3u8\"\n\
+         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"b\",NAME=\"y\",URI=\"y.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=1000,AUDIO=\"a\"\nv.m3u8\n",
+    );
+    assert_eq!(
+        select(&other_group, &by_index(1)).unwrap_err(),
+        SelectError::NotVariantAudio {
+            index: 1,
+            group: Some("a".into())
         }
     );
 }
@@ -156,7 +185,7 @@ fn variant_index_is_bounds_checked() {
     let m = master(SPLIT);
     let first = Preference {
         variant: VariantChoice::Index(0),
-        audio_language: None,
+        audio: AudioChoice::Default,
     };
     assert_eq!(
         select(&m, &first).unwrap().variant.resolution,
@@ -167,7 +196,7 @@ fn variant_index_is_bounds_checked() {
     );
     let out = Preference {
         variant: VariantChoice::Index(9),
-        audio_language: None,
+        audio: AudioChoice::Default,
     };
     assert_eq!(
         select(&m, &out).unwrap_err(),

@@ -41,6 +41,12 @@ impl Source {
                 bare_url(&self.url)
             )));
         }
+        // 播放列表里的语言不会有换行；来源摘要按行编码
+        if let hls::AudioChoice::Language(language) = &self.preference.audio
+            && language.contains(['\n', '\r'])
+        {
+            return Err(Error::InvalidInput(format!("音频语言不合法：{language:?}")));
+        }
         self.http.validate()
     }
 }

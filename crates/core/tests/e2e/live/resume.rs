@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use hs_m3u8_core::hls::AudioChoice;
 use hs_m3u8_core::{
     Error, JobType, LiveEnd, LiveOptions, LiveReport, MissReason, Url, WorkDirProblem,
     merge_recorded,
@@ -313,7 +314,7 @@ async fn changed_preference_is_rejected() {
     interrupt(&req, |p| p.segments_done == 2).await;
 
     let mut other = req;
-    other.source.preference.audio_language = Some("en".into());
+    other.source.preference.audio = AudioChoice::Language("en".into());
     let err = run(other).await.unwrap_err();
     assert!(
         matches!(

@@ -10,7 +10,8 @@ use crate::{Error, resolve};
 /// 探测结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probe {
-    /// 来源是主播放列表时为它，列出可选的变体与音频 rendition（按下标选用见 [`crate::hls::VariantChoice::Index`]）；
+    /// 来源是主播放列表时为它，列出可选的变体与音频 rendition（按下标选用见 [`crate::hls::VariantChoice::Index`]
+    /// 与 [`crate::hls::AudioChoice::Index`]）；
     /// 来源本身是媒体播放列表时为 None
     pub master: Option<MasterPlaylist>,
     /// 按 [`Source::preference`] 选中的变体与音频，与新开的下载选的相同（续传时按任务目录的记录找回原来的轨）；
