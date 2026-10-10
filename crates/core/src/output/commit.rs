@@ -12,12 +12,12 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use crate::Error;
 use crate::error::io_error;
 use crate::workdir::PendingOutput;
+use crate::{Error, Leftover, LeftoverKind};
 
-/// 换上备齐的输出（调用方已检查过各输出能否写）。成功时返回删不掉的旧输出的说明：输出已换好，只是旧的还在。
-pub(super) fn swap_in(outputs: &[PendingOutput]) -> Result<Vec<String>, Error> {
+/// 换上备齐的输出（调用方已检查过各输出能否写）。成功时返回删不掉的旧输出：输出已换好，只是旧的还在。
+pub(super) fn swap_in(outputs: &[PendingOutput]) -> Result<Vec<Leftover>, Error> {
     let mut moved = Vec::new();
     let mut installed = Vec::new();
     if let Err(failure) = move_and_install(outputs, &mut moved, &mut installed) {
@@ -26,9 +26,11 @@ pub(super) fn swap_in(outputs: &[PendingOutput]) -> Result<Vec<String>, Error> {
     Ok(moved
         .iter()
         .filter_map(|o| {
-            remove(&o.aside, o.dir)
-                .err()
-                .map(|e| format!("删除被替换的旧输出 {} 失败：{e}", o.aside.display()))
+            remove(&o.aside, o.dir).err().map(|e| Leftover {
+                path: o.aside.clone(),
+                kind: LeftoverKind::Removable,
+                cause: e.to_string(),
+            })
         })
         .collect())
 }
@@ -72,22 +74,30 @@ fn install(o: &PendingOutput) -> Result<(), Error> {
 
 /// 撤回到换之前：装上的新输出删掉，挪开的旧输出放回。撤回也失败时把两者一并返回。
 fn roll_back(failure: Error, installed: &[&PendingOutput], moved: &[&PendingOutput]) -> Error {
+    let leftover = |path: &Path, kind, cause: io::Error| Leftover {
+        path: path.to_path_buf(),
+        kind,
+        cause: cause.to_string(),
+    };
     let undone = installed
         .iter()
         .rev()
-        .try_for_each(|o| remove(&o.target, o.dir).map_err(|e| (o.target.clone(), e)))
+        .try_for_each(|o| {
+            remove(&o.target, o.dir).map_err(|e| leftover(&o.target, LeftoverKind::Installed, e))
+        })
         .and_then(|()| {
-            moved
-                .iter()
-                .rev()
-                .try_for_each(|o| fs::rename(&o.aside, &o.target).map_err(|e| (o.aside.clone(), e)))
+            moved.iter().rev().try_for_each(|o| {
+                fs::rename(&o.aside, &o.target).map_err(|e| {
+                    let target = o.target.clone();
+                    leftover(&o.aside, LeftoverKind::Displaced { target }, e)
+                })
+            })
         });
     match undone {
         Ok(()) => failure,
-        Err((path, cause)) => Error::Cleanup {
+        Err(leftover) => Error::Cleanup {
             failure: Box::new(failure),
-            path,
-            cause,
+            leftovers: vec![leftover],
         },
     }
 }
@@ -169,10 +179,7 @@ mod tests {
         fs::create_dir(&hls.temp).unwrap();
         fs::write(hls.temp.join("index.m3u8"), "新").unwrap();
 
-        assert_eq!(
-            swap_in(&[mp4.clone(), hls.clone()]).unwrap(),
-            Vec::<String>::new()
-        );
+        assert_eq!(swap_in(&[mp4.clone(), hls.clone()]).unwrap(), []);
 
         assert_eq!(read(&mp4.target), "新");
         assert_eq!(read(&hls.target.join("index.m3u8")), "新");

@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
-use hs_m3u8_core::{Error, JobRequest, LiveOptions, Target, Unsupported, Url};
+use hs_m3u8_core::{Error, JobRequest, LeftoverKind, LiveOptions, Target, Unsupported, Url};
 use hs_m3u8_hls::{MediaPlaylist, Playlist, parse};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams, TrackSegments, remux};
 
@@ -416,7 +416,7 @@ async fn switching_to_hls_after_an_unsupported_codec_reuses_the_download() {
         .unwrap();
 
     assert!(dir.join("out/0/0.ts").is_file());
-    assert_eq!(output.cleanup_error, None);
+    assert_eq!(output.leftovers, []);
     assert!(!dir.join("out.hsdl").exists());
     assert_eq!(server.hits("seg0.ts"), 1);
 }
@@ -539,7 +539,7 @@ async fn hls_cannot_mix_fmp4_and_ts_in_one_track() {
 }
 
 /// 输出经符号链接落在任务目录里（按字面比较看不出）：删除任务目录时只删本库写的文件，输出留下，
-/// 没删完的原因记在 cleanup_error 里；job.json 也留下，目录仍是任务目录，再运行（覆盖）照常进行。
+/// 没删干净记在 leftovers 里；job.json 也留下，目录仍是任务目录，再运行（覆盖）照常进行。
 /// AppleDouble 文件随主文件：输出与 job.json 的留下，锁文件的删掉。
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
@@ -564,8 +564,14 @@ async fn outputs_inside_the_work_dir_survive_its_removal() {
     let output = run(req.clone()).await.unwrap();
 
     assert!(work.join("out.mp4").is_file());
-    let cleanup = output.cleanup_error.expect("留有输出，任务目录没删完");
-    assert!(cleanup.contains("out.mp4"), "{cleanup}");
+    let [leftover] = &output.leftovers[..] else {
+        panic!("留有输出，任务目录应没删干净：{:?}", output.leftovers);
+    };
+    assert_eq!(
+        (&leftover.path, &leftover.kind),
+        (&work, &LeftoverKind::WorkDir)
+    );
+    assert!(leftover.cause.contains("out.mp4"), "{leftover}");
     for name in ["job.json", "._out.mp4", "._job.json"] {
         assert!(work.join(name).is_file(), "{name} 应留下");
     }
@@ -639,7 +645,7 @@ async fn system_files_in_the_work_dir_do_not_block_its_removal() {
 
     let output = job.wait().await.unwrap();
 
-    assert_eq!(output.cleanup_error, None);
+    assert_eq!(output.leftovers, []);
     assert!(!work.exists());
 }
 
@@ -700,7 +706,7 @@ async fn long_output_names_are_written() {
 }
 
 /// 要求覆盖、两者都要，旧的 HLS 目录里有删不掉的内容：新的 MP4 与 HLS 照常换上，旧的挪开后删不掉，
-/// 记在 cleanup_error 里；任务目录里不留正在写的输出的记录。
+/// 记在 leftovers 里；任务目录里不留正在写的输出的记录。
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn old_outputs_that_cannot_be_removed_are_reported() {
@@ -722,8 +728,14 @@ async fn old_outputs_that_cannot_be_removed_are_reported() {
     req.output.keep_work_dir = true;
     let output = run(req).await.unwrap();
 
-    let cleanup = output.cleanup_error.expect("旧的 HLS 删不掉");
-    assert!(cleanup.contains(".hls.old"), "{cleanup}");
+    let [leftover] = &output.leftovers[..] else {
+        panic!("旧的 HLS 应删不掉：{:?}", output.leftovers);
+    };
+    assert_eq!(leftover.kind, LeftoverKind::Removable);
+    assert!(
+        leftover.path.to_string_lossy().ends_with(".hls.old"),
+        "{leftover}"
+    );
     assert_hls_matches(&dir.join("out"), &output.mp4.unwrap().path);
     assert!(!dir.join("out.hsdl/outputs.json").exists());
     let kept: Vec<_> = std::fs::read_dir(&dir)

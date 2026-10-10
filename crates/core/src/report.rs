@@ -1,5 +1,6 @@
 //! 任务的进度与结果。
 
+use std::fmt;
 use std::path::PathBuf;
 
 use crate::info::Selected;
@@ -83,11 +84,50 @@ pub struct Output {
     pub segments: usize,
     /// 同 [`Progress::bytes`]
     pub bytes: u64,
-    /// 收尾清理失败的原因（含路径）：删除被替换的旧输出或任务目录失败；输出不受影响。残留的任务目录里可能有不是
-    /// 本库写的文件（例如经符号链接写进去的输出本身），不要整个删除。都删干净时为 None
-    pub cleanup_error: Option<String>,
+    /// 收尾没删掉的东西：被替换的旧输出、没删干净的任务目录等；输出不受影响。都删干净时为空
+    pub leftovers: Vec<Leftover>,
     /// 直播的录制结果；点播为 None
     pub live: Option<LiveReport>,
+}
+
+/// 收尾时没能删掉或放回的一样东西；见 [`Output::leftovers`] 与 [`crate::Error::Cleanup`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Leftover {
+    pub path: PathBuf,
+    pub kind: LeftoverKind,
+    /// 没能删掉或放回的原因
+    pub cause: String,
+}
+
+/// 残留是什么，决定调用方怎么处理。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeftoverKind {
+    /// 本库写的、可以直接删除的东西：写了一半的临时输出、已被新输出替换的旧输出、任务目录里的记录
+    Removable,
+    /// 写输出失败后没能放回原处的旧输出，原来的路径为 `target`
+    Displaced { target: PathBuf },
+    /// 写输出失败后没能撤下的新输出：完整可用，留在原处
+    Installed,
+    /// 没删干净的任务目录：里面可能有不是本库写的文件（例如经符号链接写进去的输出本身），不要整个删除
+    WorkDir,
+}
+
+impl fmt::Display for Leftover {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (path, cause) = (self.path.display(), &self.cause);
+        match &self.kind {
+            LeftoverKind::Removable => write!(f, "删除 {path} 失败：{cause}"),
+            LeftoverKind::Displaced { target } => {
+                write!(
+                    f,
+                    "旧输出没能放回 {}，现在在 {path}：{cause}",
+                    target.display()
+                )
+            }
+            LeftoverKind::Installed => write!(f, "撤下新输出 {path} 失败：{cause}"),
+            LeftoverKind::WorkDir => write!(f, "任务目录 {path} 没删干净：{cause}"),
+        }
+    }
 }
 
 /// 生成的 MP4。

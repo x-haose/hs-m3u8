@@ -35,7 +35,7 @@ use self::record::{decode, encode};
 use crate::entries::{self, is_canonical_number};
 use crate::error::io_error;
 use crate::ident::Fingerprint;
-use crate::{Error, WorkDirProblem, blocking};
+use crate::{Error, Leftover, LeftoverKind, WorkDirProblem, blocking};
 
 const JOB_FILE: &str = "job.json";
 const LOCK_FILE: &str = "lock";
@@ -168,62 +168,76 @@ impl WorkDir {
 
     /// 删除整个任务目录。只删本库写的文件（`job.json`、`outputs.json`、各轨的分片与 init 段，以及它们写到一半的
     /// `.part`）、系统自动生成的元数据文件（见 [`remove_system_file`]）与因此变空的目录；其他文件（例如经符号链接或
-    /// 只差大小写的路径写进来的输出）原样留下，返回删除失败并指出留下的文件。有东西留下时 `job.json` 也留下：目录
-    /// 仍是可识别的任务目录，下次运行照常使用（没有已完成的分片，按当前任务重新开始）。
+    /// 只差大小写的路径写进来的输出）原样留下。有东西留下时 `job.json` 也留下：目录仍是可识别的任务目录，下次运行
+    /// 照常使用（没有已完成的分片，按当前任务重新开始）。没删干净时返回留下的原因。
     ///
     /// 持锁删掉其余内容，最后删锁文件，再释放锁、删目录：释放锁之后别的任务就能打开这个目录，先删内容保证它看到的
     /// 不会是删到一半的任务；锁文件也在持锁时删，别的任务打开的是新建的锁文件，不会锁上本任务还持有的那个。
     /// std 打开文件时允许删除，Windows 上持有句柄也能删。
-    pub(crate) async fn remove(self) -> Result<(), Error> {
+    pub(crate) async fn remove(self) -> Option<Leftover> {
         let WorkDir { layout, lock, .. } = self;
-        blocking(move || {
-            let root = &layout.root;
-            let (mut kept, mut system) = (Vec::new(), Vec::new());
-            let mut job = None;
-            for entry in entries::list(root)? {
-                let (path, kind) = (&entry.path, entry.kind);
-                // job.json 写到一半的、正在写的输出的记录（含写到一半的）
-                let ours = kind.is_file()
-                    && entry.name.to_str().is_some_and(|n| {
-                        n.strip_suffix(".part") == Some(JOB_FILE)
-                            || n.strip_suffix(".part").unwrap_or(n) == OUTPUTS_FILE
-                    });
-                match entry.name.to_str() {
-                    Some(LOCK_FILE) => {}
-                    Some(JOB_FILE) if kind.is_file() => job = Some(entry.path),
-                    Some(TRACKS_DIR) if kind.is_dir() => remove_tracks(path, &mut kept)?,
-                    _ if entry.is_system_file() => system.push(entry),
-                    _ if ours => fs::remove_file(path).map_err(io_error("删除", path))?,
-                    _ => kept.push(entry.path),
-                }
-            }
-            let mut remaining = kept.clone();
-            match job {
-                Some(job) if kept.is_empty() => {
-                    fs::remove_file(&job).map_err(io_error("删除", &job))?
-                }
-                Some(job) => remaining.push(job),
-                None => {}
-            }
-            let lock_path = root.join(LOCK_FILE);
-            fs::remove_file(&lock_path).map_err(io_error("删除", &lock_path))?;
-            for entry in &system {
-                remove_system_file(entry, &remaining)?;
-            }
-            drop(lock);
-            if let Some(first) = kept.first() {
-                let reason = format!("留有不是本库写的文件：{}", first.display());
-                let cause = io::Error::new(io::ErrorKind::DirectoryNotEmpty, reason);
-                return Err(io_error("删除", root)(cause));
-            }
-            match fs::remove_dir(root) {
-                Ok(()) => Ok(()),
-                // 释放锁后另一个任务已开始使用这个目录：本任务的内容已删完，目录留给它
-                Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(()),
-                Err(e) => Err(io_error("删除", root)(e)),
-            }
+        let root = layout.root;
+        let removed = blocking({
+            let root = root.clone();
+            move || remove_locked(&root, lock)
         })
-        .await?
+        .await;
+        let cause = match removed.and_then(|r| r) {
+            Ok(kept) => match kept.first() {
+                Some(first) => format!("留有不是本库写的文件：{}", first.display()),
+                None => return None,
+            },
+            Err(e) => e.to_string(),
+        };
+        Some(Leftover {
+            path: root,
+            kind: LeftoverKind::WorkDir,
+            cause,
+        })
+    }
+}
+
+/// [`WorkDir::remove`]：持着 `lock` 删除，返回不是本库写的、留下的文件。
+fn remove_locked(root: &Path, lock: File) -> Result<Vec<PathBuf>, Error> {
+    let (mut kept, mut system) = (Vec::new(), Vec::new());
+    let mut job = None;
+    for entry in entries::list(root)? {
+        let (path, kind) = (&entry.path, entry.kind);
+        // job.json 写到一半的、正在写的输出的记录（含写到一半的）
+        let ours = kind.is_file()
+            && entry.name.to_str().is_some_and(|n| {
+                n.strip_suffix(".part") == Some(JOB_FILE)
+                    || n.strip_suffix(".part").unwrap_or(n) == OUTPUTS_FILE
+            });
+        match entry.name.to_str() {
+            Some(LOCK_FILE) => {}
+            Some(JOB_FILE) if kind.is_file() => job = Some(entry.path),
+            Some(TRACKS_DIR) if kind.is_dir() => remove_tracks(path, &mut kept)?,
+            _ if entry.is_system_file() => system.push(entry),
+            _ if ours => fs::remove_file(path).map_err(io_error("删除", path))?,
+            _ => kept.push(entry.path),
+        }
+    }
+    let mut remaining = kept.clone();
+    match job {
+        Some(job) if kept.is_empty() => fs::remove_file(&job).map_err(io_error("删除", &job))?,
+        Some(job) => remaining.push(job),
+        None => {}
+    }
+    let lock_path = root.join(LOCK_FILE);
+    fs::remove_file(&lock_path).map_err(io_error("删除", &lock_path))?;
+    for entry in &system {
+        remove_system_file(entry, &remaining)?;
+    }
+    drop(lock);
+    if !kept.is_empty() {
+        return Ok(kept);
+    }
+    match fs::remove_dir(root) {
+        Ok(()) => Ok(kept),
+        // 释放锁后另一个任务已开始使用这个目录：本任务的内容已删完，目录留给它
+        Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(kept),
+        Err(e) => Err(io_error("删除", root)(e)),
     }
 }
 
