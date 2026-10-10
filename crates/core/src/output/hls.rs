@@ -59,14 +59,18 @@ pub(super) fn check(dir: &Path, overwrite: bool) -> Result<(), Error> {
     }
 }
 
-/// 本地 HLS 能否表示这些组：每条轨要么各组都有 init 段，要么都没有。EXT-X-MAP 一直作用到下一个 EXT-X-MAP，
-/// 没有 init 段的组接在有的组后面时，播放器会把前面的 init 段用在它上面。
-pub(super) fn check_layout(groups: &[Vec<GroupTrack>]) -> Result<(), Error> {
-    let tracks = groups.first().map_or(0, Vec::len);
+/// 本地 HLS 能否表示这些组：`has_init[g][t]` 为第 g 组第 t 条轨是否有 init 段。EXT-X-MAP 一直作用到下一个
+/// EXT-X-MAP，没有 init 段的组排在有的组后面时，播放器会把前面的 init 段用在它上面；反过来（先 TS 后 fMP4）可以。
+/// 点播的播放列表本身也是这样解析的，不会出现这种排列，只有直播跨会话续录时服务器换了格式才会。
+pub(super) fn check_layout(has_init: &[Vec<bool>]) -> Result<(), Error> {
+    let tracks = has_init.first().map_or(0, Vec::len);
     for track in 0..tracks {
-        let fmp4 = groups[0][track].init.is_some();
-        if groups.iter().any(|g| g[track].init.is_some() != fmp4) {
-            return Err(Error::Unsupported(Unsupported::HlsMixedInit { track }));
+        let mut fmp4_seen = false;
+        for group in has_init {
+            fmp4_seen |= group[track];
+            if fmp4_seen && !group[track] {
+                return Err(Error::Unsupported(Unsupported::HlsMixedInit { track }));
+            }
         }
     }
     Ok(())
@@ -132,10 +136,13 @@ fn fill(
                 let path = stage.join(track.to_string()).join(INDEX);
                 write_file(&path, &media_playlist(&written.groups, ""))?;
             }
+            // 两条轨分片峰值码率之和是 RFC 8216 4.3.4.2 要求的上限；算不出时用来源写的，它同样是上限
             let bandwidth = video
                 .peak_bps
                 .zip(audio.peak_bps)
-                .map(|(v, a)| v.saturating_add(a));
+                .map(|(v, a)| v.saturating_add(a))
+                .or(selection.variant.attributes.bandwidth)
+                .ok_or(Error::Unsupported(Unsupported::HlsBandwidthUnknown))?;
             write_file(&stage.join(INDEX), &master_playlist(selection, bandwidth))
         }
         (tracks, selection) => panic!(
@@ -302,11 +309,10 @@ fn media_playlist(groups: &[PlaylistGroup], prefix: &str) -> String {
     text + "#EXT-X-ENDLIST\n"
 }
 
-/// 视频与独立音频分离时的主播放列表：第 0 条轨为变体，第 1 条为音频 rendition。BANDWIDTH 为 `bandwidth`（两条轨
-/// 分片峰值码率之和，是 RFC 8216 4.3.4.2 要求的上限；算不出时不写），分辨率与编码照抄来源（来源没写的也不写）；
-/// 音频组固定为 `audio`。名称与语言照抄来源，带有引号或换行（带引号的字符串里不允许）
+/// 视频与独立音频分离时的主播放列表：第 0 条轨为变体，第 1 条为音频 rendition。BANDWIDTH 为 `bandwidth`，分辨率
+/// 与编码照抄来源（来源没写的也不写）；音频组固定为 `audio`。名称与语言照抄来源，带有引号或换行（带引号的字符串里不允许）
 /// 时不用：没有可用的名称时名称为 `audio`，语言不写。
-fn master_playlist(selection: &SelectionKey, bandwidth: Option<u64>) -> String {
+fn master_playlist(selection: &SelectionKey, bandwidth: u64) -> String {
     let audio = &selection
         .audio
         .as_ref()
@@ -328,9 +334,7 @@ fn master_playlist(selection: &SelectionKey, bandwidth: Option<u64>) -> String {
 
     let variant = &selection.variant.attributes;
     let mut attributes = Vec::new();
-    if let Some(bandwidth) = bandwidth {
-        attributes.push(format!("BANDWIDTH={bandwidth}"));
-    }
+    attributes.push(format!("BANDWIDTH={bandwidth}"));
     if let Some(r) = variant.resolution {
         attributes.push(format!("RESOLUTION={}x{}", r.width, r.height));
     }
@@ -507,8 +511,7 @@ mod tests {
     #[test]
     fn master_playlist_round_trips_through_the_parser() {
         let key = selection(Some("中文"), Some("zh"), &["avc1.64001f", "mp4a.40.2"]);
-        let Ok(Playlist::Master(master)) = parse(&master_playlist(&key, Some(2_500_000)), &url())
-        else {
+        let Ok(Playlist::Master(master)) = parse(&master_playlist(&key, 2_500_000), &url()) else {
             panic!("应为主播放列表");
         };
         let variant = &master.variants[0];
@@ -530,11 +533,25 @@ mod tests {
 
         // 带引号的名称与编码写不进带引号的字符串：名称改用语言，编码不写
         let odd = selection(Some("a\"b"), Some("en"), &["avc1\"x"]);
-        let Ok(Playlist::Master(master)) = parse(&master_playlist(&odd, None), &url()) else {
+        let Ok(Playlist::Master(master)) = parse(&master_playlist(&odd, 1), &url()) else {
             panic!("应为主播放列表");
         };
         assert_eq!(master.renditions[0].name.as_deref(), Some("en"));
         assert!(master.variants[0].codecs.is_empty());
+    }
+
+    #[test]
+    fn only_fmp4_followed_by_segments_without_init_is_rejected() {
+        assert!(check_layout(&[vec![false, true], vec![true, true]]).is_ok());
+        assert!(check_layout(&[vec![true], vec![true]]).is_ok());
+        let rejected = check_layout(&[vec![false, true], vec![true, true], vec![true, false]]);
+        assert!(
+            matches!(
+                rejected,
+                Err(Error::Unsupported(Unsupported::HlsMixedInit { track: 1 }))
+            ),
+            "{rejected:?}"
+        );
     }
 
     #[test]
