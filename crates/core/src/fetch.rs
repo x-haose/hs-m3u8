@@ -33,6 +33,18 @@ pub(crate) struct Item {
 pub(crate) struct ItemId {
     pub track: usize,
     pub sequence: u64,
+    /// EXTINF 声明的时长，微秒
+    pub duration_us: u64,
+}
+
+impl ItemId {
+    pub(crate) fn of(track: usize, segment: &Segment) -> Self {
+        ItemId {
+            track,
+            sequence: segment.sequence,
+            duration_us: segment.duration_us,
+        }
+    }
 }
 
 /// 一项的结果：成功时为写入的字节数。失败包装为 [`Error::Segment`]（取消除外）。
@@ -168,12 +180,9 @@ fn segment_error(track: usize, segment: &Segment, error: Error) -> Error {
     }
 }
 
-/// 一个分片成功后计入进度。
-pub(crate) fn count_done(progress: &watch::Sender<Progress>, len: u64) {
-    progress.send_modify(|p| {
-        p.bytes += len;
-        p.segments_done += 1;
-    });
+/// 一个分片成功后计入进度；`len` 为写入的字节数。
+pub(crate) fn count_done(progress: &watch::Sender<Progress>, id: ItemId, len: u64) {
+    progress.send_modify(|p| p.count_segment(id.track, id.duration_us, len));
 }
 
 async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
@@ -182,10 +191,7 @@ async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
         segment,
         path,
     } = item;
-    let id = ItemId {
-        track,
-        sequence: segment.sequence,
-    };
+    let id = ItemId::of(track, &segment);
     let data = fetch_segment(&ctx, &segment, &cancel)
         .await
         .map_err(|e| segment_error(track, &segment, e));

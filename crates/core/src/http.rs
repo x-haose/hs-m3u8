@@ -7,14 +7,14 @@ use std::time::Duration;
 use hs_m3u8_hls::ByteRange;
 use reqwest::StatusCode;
 use reqwest::header::{RANGE, RETRY_AFTER};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::hooks::{HookKind, Hooks, Purpose, RequestParts, run_hook};
 use crate::ident::bare_url;
 use crate::request::{HttpOptions, RetryPolicy, check_header};
-use crate::{Error, HttpError, Integrity};
+use crate::{Error, HttpError, Integrity, Progress};
 
 /// 请求是否计入引擎的在途上限。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +32,8 @@ pub(crate) struct Http {
     hooks: Arc<dyn Hooks>,
     /// 引擎内所有任务共享；[`Permit::Required`] 的每次尝试从发出请求到读完响应体占用一个名额
     requests: Arc<Semaphore>,
+    /// 读到的响应体字节计入 [`Progress::received`]；探测时没有进度，为 None
+    progress: Option<watch::Sender<Progress>>,
     jitter: std::hash::RandomState,
 }
 
@@ -47,6 +49,7 @@ impl Http {
         options: &HttpOptions,
         hooks: Arc<dyn Hooks>,
         requests: Arc<Semaphore>,
+        progress: Option<watch::Sender<Progress>>,
     ) -> Result<Self, Error> {
         let t = options.timeouts;
         let mut builder = reqwest::Client::builder()
@@ -75,6 +78,7 @@ impl Http {
             retry: options.retry,
             hooks,
             requests,
+            progress,
             jitter: std::hash::RandomState::new(),
         })
     }
@@ -128,7 +132,7 @@ impl Http {
             }),
         };
         let response = self.send(&parts, range, cancel).await?;
-        read(response, &parts.url, range, cancel).await
+        self.read(response, &parts.url, range, cancel).await
     }
 
     /// 本次尝试的地址与请求头：经 `on_request` 回调修改，改后不合法时报回调错误（不重试）。
@@ -208,35 +212,45 @@ impl Http {
         let permille = 750 + (self.jitter.hash_one((url.as_str(), attempt)) % 500) as u32;
         backoff_delay(&self.retry, attempt, permille)
     }
-}
 
-/// 读完响应体；`url` 为发出请求的地址，用于错误信息。字节范围请求的响应体须恰好是请求的长度。
-async fn read(
-    response: reqwest::Response,
-    url: &Url,
-    range: Option<ByteRange>,
-    cancel: &CancellationToken,
-) -> Result<Response, Error> {
-    let final_url = response.url().clone();
-    let body = tokio::select! {
-        _ = cancel.cancelled() => return Err(Error::Cancelled),
-        body = response.bytes() => body.map_err(|e| http_error(url, classify(e)))?,
-    };
-    if let Some(r) = range
-        && body.len() as u64 != r.length
-    {
-        return Err(Error::Integrity {
-            url: Box::new(final_url),
-            kind: Integrity::RangeLength {
-                expected: r.length,
-                found: body.len(),
-            },
-        });
+    /// 读完响应体，读到的每块计入进度；`url` 为发出请求的地址，用于错误信息。字节范围请求的响应体须恰好是
+    /// 请求的长度。
+    async fn read(
+        &self,
+        mut response: reqwest::Response,
+        url: &Url,
+        range: Option<ByteRange>,
+        cancel: &CancellationToken,
+    ) -> Result<Response, Error> {
+        let final_url = response.url().clone();
+        let mut body = Vec::new();
+        loop {
+            let chunk = tokio::select! {
+                _ = cancel.cancelled() => return Err(Error::Cancelled),
+                chunk = response.chunk() => chunk.map_err(|e| http_error(url, classify(e)))?,
+            };
+            let Some(chunk) = chunk else { break };
+            if let Some(progress) = &self.progress {
+                progress.send_modify(|p| p.received += chunk.len() as u64);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        if let Some(r) = range
+            && body.len() as u64 != r.length
+        {
+            return Err(Error::Integrity {
+                url: Box::new(final_url),
+                kind: Integrity::RangeLength {
+                    expected: r.length,
+                    found: body.len(),
+                },
+            });
+        }
+        Ok(Response {
+            url: final_url,
+            body,
+        })
     }
-    Ok(Response {
-        url: final_url,
-        body: body.to_vec(),
-    })
 }
 
 /// Retry-After 的秒数写法；HTTP 日期写法与无法解析的值视为没有要求。

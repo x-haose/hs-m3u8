@@ -3,7 +3,11 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use hs_m3u8_core::{Engine, Error, HttpError, LiveEnd, LiveOptions, MissReason, Missed, Stage};
+use axum::http::StatusCode;
+use hs_m3u8_core::{
+    Engine, Error, HttpError, LiveEnd, LiveOptions, MissReason, Missed, RefreshError,
+    RefreshFailure, Stage,
+};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
 use super::{
@@ -36,11 +40,50 @@ async fn records_until_endlist() {
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
     assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
-    let last = *progress.borrow();
+    let last = progress.borrow().clone();
     assert_eq!(
         (last.stage, last.segments_done, last.segments_total),
         (Stage::Done, 4, 4)
     );
+}
+
+/// 刷新失败（503，重试后仍失败）时进度里给出哪条轨、什么原因；恢复后清空，录制照常结束。
+#[tokio::test(flavor = "multi_thread")]
+async fn refresh_errors_show_in_progress_until_recovered() {
+    let dir = test_dir("live_refresh_error");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1]);
+    server.put("live.m3u8", playlist(&[0], false));
+    let job = engine()
+        .start(live_request(server.url("live.m3u8"), &dir, STALL))
+        .unwrap();
+    let mut progress = job.control().progress();
+    progress.wait_for(|p| p.segments_done == 1).await.unwrap();
+
+    server.status("live.m3u8", StatusCode::SERVICE_UNAVAILABLE);
+    let failed = tokio::time::timeout(
+        Duration::from_secs(10),
+        progress.wait_for(|p| p.refresh_error.is_some()),
+    )
+    .await
+    .expect("刷新失败应出现在进度里")
+    .unwrap()
+    .clone();
+    let unavailable = RefreshFailure::Http(HttpError::Status(503));
+    assert_eq!(
+        failed.refresh_error,
+        Some(RefreshError {
+            track: 0,
+            cause: unavailable
+        })
+    );
+    // 已录 1 秒
+    assert_eq!(failed.duration_us, 1_000_000);
+
+    server.put("live.m3u8", playlist(&[0, 1], true));
+    let output = job.wait().await.unwrap();
+    assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
+    assert_eq!(progress.borrow().refresh_error, None);
 }
 
 /// 两次刷新之间窗口滑过了分片 1、2：记为缺失（进度按分片计），其余照常合并，时间线在该处留空。
@@ -63,7 +106,7 @@ async fn window_slide_is_reported_as_missed() {
     assert_output(&output, &expected_long(&dir, &[0, 3], &[2]));
     let missed = vec![missed(1, 2, MissReason::Expired)];
     assert_eq!(output.live, report(LiveEnd::EndList, 1, missed));
-    let last = *progress.borrow();
+    let last = progress.borrow().clone();
     assert_eq!(
         (
             last.segments_done,
@@ -193,7 +236,7 @@ async fn unavailable_new_init_is_missed() {
     let output = job.wait().await.unwrap();
 
     // 取不到 init 段的分片也算在要下载的分片里
-    let last = *progress.borrow();
+    let last = progress.borrow().clone();
     assert_eq!(
         (
             last.segments_done,

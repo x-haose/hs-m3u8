@@ -1,13 +1,18 @@
 //! 任务的进度与结果。
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use crate::hls::{self, Selection};
 use crate::{HttpError, Report};
 
 /// 任务进度快照。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Progress {
     pub stage: Stage,
+    /// 所选的变体与音频 rendition；解析完成前、或来源本身是媒体播放列表时为 None。有已完成分片的任务目录按
+    /// 记录找回原来的轨，不一定是偏好会选的那条
+    pub selection: Option<Arc<Selection>>,
     /// 已完成的分片，各轨合计；含续传前已完成的
     pub segments_done: usize,
     /// 要下载的分片，各轨合计：已完成的（含续传前的）加上排入下载的；直播另含列出了但 init 段取不到的，
@@ -17,8 +22,42 @@ pub struct Progress {
     pub segments_failed: usize,
     /// 直播本次运行中两次刷新之间已滑出窗口、没有列出过的分片，不在 `segments_total` 里；点播恒为 0
     pub segments_expired: usize,
+    /// 第 0 条轨已完成分片的声明时长之和，微秒；含续传前已完成的。直播即已录时长
+    pub duration_us: u64,
     /// 任务目录中已完成的分片与 init 段的字节数（解密后）；含续传前已完成的
     pub bytes: u64,
+    /// 本次运行从网络读到的响应体字节数，读到即计：含播放列表与 key，含没读完、校验失败与重试前的请求。
+    /// 按它的变化算下载速度
+    pub received: u64,
+    /// 直播：最近一次刷新失败的轨与原因，这条轨之后刷新成功即清空；一直失败到停滞时任务以
+    /// [`crate::Error::LiveStalled`] 结束
+    pub refresh_error: Option<RefreshError>,
+}
+
+impl Progress {
+    /// 计入一个已完成的分片：第 `track` 条轨、声明时长 `duration_us`、`len` 字节。
+    pub(crate) fn count_segment(&mut self, track: usize, duration_us: u64, len: u64) {
+        self.segments_done += 1;
+        self.bytes += len;
+        if track == 0 {
+            self.duration_us = self.duration_us.saturating_add(duration_us);
+        }
+    }
+}
+
+/// 直播一条轨的一次刷新失败；这类失败等下次刷新，不使任务立即失败。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshError {
+    pub track: usize,
+    pub cause: RefreshFailure,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshFailure {
+    /// 取不到：404/410，或重试后仍失败的临时故障
+    Http(HttpError),
+    /// 内容为空或语法错误，多为服务器还没写完
+    Playlist(hls::Error),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

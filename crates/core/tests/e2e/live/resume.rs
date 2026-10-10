@@ -121,10 +121,14 @@ async fn max_duration_counts_earlier_sessions() {
     interrupt(&req, |p| p.segments_done == 1).await;
 
     server.put("live.m3u8", playlist(&[1, 2, 3], false));
-    let output = run(req).await.unwrap();
+    let job = engine().start(req).unwrap();
+    let progress = job.control().progress();
+    let output = job.wait().await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1], &[1, 1]));
     assert_eq!(output.live, report(LiveEnd::DurationReached, 2, vec![]));
+    // 已录时长含之前的会话
+    assert_eq!(progress.borrow().duration_us, 2_000_000);
     assert_eq!(server.hits("seg2.ts"), 0);
 }
 

@@ -58,6 +58,11 @@ pub(crate) async fn run(
             path: root,
             problem: WorkDirProblem::SelectionGone,
         })?;
+    let selection = resolved
+        .master
+        .as_ref()
+        .map(|m| Arc::new(m.selection.clone()));
+    task.progress.send_modify(|p| p.selection = selection);
     if resolved.is_live() || continuing_live && request.live.is_some() {
         run_live(task, source, resolved).await
     } else {

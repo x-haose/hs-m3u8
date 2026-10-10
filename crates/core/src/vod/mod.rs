@@ -7,7 +7,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use self::plan::Plan;
-use crate::fetch::{Fetcher, Item, count_done, fetch_init};
+use crate::fetch::{Fetcher, Item, ItemId, count_done, fetch_init};
 use crate::http::{Http, Permit};
 use crate::ident::Fingerprint;
 use crate::output::{GroupSegment, GroupTrack};
@@ -44,17 +44,18 @@ pub(crate) async fn download(
             });
         }
     }
-    let (pending, done, bytes) = blocking(move || pending(items)).await??;
+    let Sorted { pending, done } = blocking(move || sort(items)).await??;
     progress.send_modify(|p| {
-        p.segments_done = done;
-        p.bytes += bytes;
+        for (id, len) in done {
+            p.count_segment(id.track, id.duration_us, len);
+        }
     });
     for item in pending {
         fetcher.push(item);
     }
     fetcher
-        .drain(|_, result| {
-            count_done(progress, result?);
+        .drain(|id, result| {
+            count_done(progress, id, result?);
             Ok(())
         })
         .await?;
@@ -115,20 +116,27 @@ fn segment_name(segment: &Segment, init: Option<Fingerprint>) -> SegmentName {
     }
 }
 
-/// 尚未完成的项，以及已完成的分片数与字节数。
-fn pending(items: Vec<Item>) -> Result<(Vec<Item>, usize, u64), Error> {
-    let mut pending = Vec::new();
-    let (mut done, mut bytes) = (0, 0);
+/// 计划中的项按是否已在任务目录中分开。
+struct Sorted {
+    pending: Vec<Item>,
+    /// 已完成的项与其字节数
+    done: Vec<(ItemId, u64)>,
+}
+
+fn sort(items: Vec<Item>) -> Result<Sorted, Error> {
+    let mut sorted = Sorted {
+        pending: Vec::new(),
+        done: Vec::new(),
+    };
     for item in items {
         match workdir::completed_len(&item.path)? {
-            Some(len) => {
-                done += 1;
-                bytes += len;
-            }
-            None => pending.push(item),
+            Some(len) => sorted
+                .done
+                .push((ItemId::of(item.track, &item.segment), len)),
+            None => sorted.pending.push(item),
         }
     }
-    Ok((pending, done, bytes))
+    Ok(sorted)
 }
 
 /// 计划中的不连续段组换成任务目录中的文件。

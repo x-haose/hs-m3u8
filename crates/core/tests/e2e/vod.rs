@@ -59,19 +59,23 @@ async fn aes128_explicit_and_sequence_iv() {
          #EXT-X-KEY:METHOD=AES-128,URI=\"k0\",IV=0x{}\n",
         hex(&iv0)
     );
+    let mut served = 0;
     for i in 0..4u64 {
         let plain = fixture(&format!("ts_long/seg{i}.ts"));
         let cipher = match i {
             0 => encrypt(&plain, &key0, &iv0),
             _ => encrypt(&plain, &key1, &u128::from(7 + i).to_be_bytes()),
         };
+        served += cipher.len();
         server.put(&format!("s{i}.ts"), cipher);
         if i == 1 {
             playlist += "#EXT-X-KEY:METHOD=AES-128,URI=\"k1\"\n";
         }
         playlist += &format!("#EXTINF:1,\ns{i}.ts\n");
     }
-    server.put("index.m3u8", playlist + "#EXT-X-ENDLIST\n");
+    let playlist = playlist + "#EXT-X-ENDLIST\n";
+    served += playlist.len() + key0.len() + key1.len();
+    server.put("index.m3u8", playlist);
 
     let mut req = request(server.url("index.m3u8"), &dir);
     req.concurrency = NonZeroUsize::new(4).unwrap();
@@ -81,11 +85,14 @@ async fn aes128_explicit_and_sequence_iv() {
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
     assert_eq!(output.segments, 4);
-    let last = *progress.borrow();
+    let last = progress.borrow().clone();
     assert_eq!(
         (last.stage, last.segments_done, last.segments_total),
         (Stage::Done, 4, 4)
     );
+    // 读到的字节：播放列表、两个 key 与四个分片（密文），各一次
+    assert_eq!(last.received, served as u64);
+    assert_eq!(last.duration_us, 4_000_000);
     assert_eq!((server.hits("k0"), server.hits("k1")), (1, 1));
 }
 
@@ -135,7 +142,10 @@ async fn split_audio_video_with_redirect_and_discontinuity() {
     assert_eq!((master.variants.len(), master.renditions.len()), (1, 1));
     let selection = probe.selection.unwrap();
     assert_eq!(selection.variant.uri, server.url("hls/video.m3u8"));
-    assert_eq!(selection.audio.unwrap().uri, server.url("hls/audio.m3u8"));
+    assert_eq!(
+        selection.audio.as_ref().unwrap().uri,
+        server.url("hls/audio.m3u8")
+    );
     let counts: Vec<(usize, bool)> = probe
         .tracks
         .iter()
@@ -143,7 +153,10 @@ async fn split_audio_video_with_redirect_and_discontinuity() {
         .collect();
     assert_eq!(counts, [(3, true), (5, true)]);
 
-    let output = run(req).await.unwrap();
+    let job = engine().start(req).unwrap();
+    let progress = job.control().progress();
+    let output = job.wait().await.unwrap();
+    assert_eq!(progress.borrow().selection.as_deref(), Some(&selection));
 
     let program = |name: &str, video: &[&str], audio: &[&str]| DiscontinuityGroup {
         tracks: vec![
@@ -311,10 +324,20 @@ async fn failure_then_resume() {
     ));
 
     put_ts_a(&server, "index.m3u8", 1.0);
-    let output = run(req).await.unwrap();
+    let job = engine().start(req).unwrap();
+    let progress = job.control().progress();
+    let output = job.wait().await.unwrap();
     let want = expected_ts_a(&dir);
     assert_output(&output, &want);
     assert_eq!(server.hits("seg0.ts"), 1);
+    // 续传前已完成的分片计入时长与字节数
+    let last = progress.borrow().clone();
+    assert_eq!(last.duration_us, 2_000_000);
+    let plain: usize = TS_A
+        .map(|n| fixture(&format!("ts_a/{n}")).len())
+        .iter()
+        .sum();
+    assert_eq!(last.bytes, plain as u64);
 }
 
 /// CDN 在路径里放每次会话不同的令牌：续传时分片的地址都变了，但身份（地址最后一段）不变，照常续传。
