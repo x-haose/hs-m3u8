@@ -560,36 +560,43 @@ mod tests {
         assert_no_names_left(&outputs, &work);
     }
 
-    /// 输出路径最近的已存在的上级不是目录（是文件，或悬空的符号链接）：建不出来，报路径被占用，带上挡住它的上级；
-    /// 上级只是缺目录的建得出来。
-    #[test]
-    fn an_output_that_cannot_be_created_is_occupied() {
-        let dir = scratch("under_file");
-        fs::write(dir.join("file"), "别人的文件").unwrap();
-        let file = dir.join("file");
-        let mut blocked = vec![
-            (dir.join("file/out"), file.clone()),
-            (dir.join("file/sub/out"), file),
-        ];
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(dir.join("gone"), dir.join("link")).unwrap();
-            blocked.push((dir.join("link/sub/out"), dir.join("link")));
-        }
-
+    /// 检查 `target` 时应报建不出来，挡住它的是上级 `ancestor`。
+    fn assert_blocked(target: &Path, ancestor: &Path) {
         for kind in [OutputKind::Mp4, OutputKind::Hls] {
-            for (target, ancestor) in &blocked {
-                match check(&pending(kind, target.clone()), true) {
-                    Err(Error::OutputOccupied {
-                        path,
-                        ancestor: Some(found),
-                    }) => assert_eq!((&path, &found), (target, ancestor)),
-                    other => panic!("应报建不出来：{other:?}"),
-                }
+            match check(&pending(kind, target.to_path_buf()), true) {
+                Err(Error::OutputOccupied {
+                    path,
+                    ancestor: Some(found),
+                }) => assert_eq!((&*path, &*found), (target, ancestor)),
+                other => panic!("应报建不出来：{other:?}"),
             }
+        }
+    }
+
+    /// 输出路径最近的已存在的上级是文件：建不出来，报路径被占用，带上挡住它的上级；上级只是缺目录的建得出来。
+    #[test]
+    fn an_output_under_a_file_is_occupied() {
+        let dir = scratch("under_file");
+        let file = dir.join("file");
+        fs::write(&file, "别人的文件").unwrap();
+
+        assert_blocked(&dir.join("file/out"), &file);
+        assert_blocked(&dir.join("file/sub/out"), &file);
+        for kind in [OutputKind::Mp4, OutputKind::Hls] {
             let creatable = pending(kind, dir.join("new/sub/out"));
             assert_eq!(check(&creatable, false).unwrap(), Occupant::Nothing);
         }
+    }
+
+    /// 上级是悬空的符号链接（如没挂载的外置盘）：跟随后不存在，但它本身在，同样建不出来。
+    #[cfg(unix)]
+    #[test]
+    fn an_output_under_a_dangling_symlink_is_occupied() {
+        let dir = scratch("under_dangling_link");
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(dir.join("gone"), &link).unwrap();
+
+        assert_blocked(&dir.join("link/sub/out"), &link);
     }
 
     /// 换上没做完时中断：临时输出删掉；挪开的旧输出原处空着就放回，原处是新输出就删掉。
