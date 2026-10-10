@@ -58,7 +58,7 @@ pub enum RefreshCause {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Stage {
-    /// 准备：下载时检查输出、拉取播放列表、选轨；只合并时检查输出、读取任务目录
+    /// 准备：检查输出、读取任务目录，下载时还要拉取播放列表、选轨
     #[default]
     Preparing,
     /// 点播：下载分片

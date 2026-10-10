@@ -46,6 +46,31 @@ async fn records_until_endlist() {
     );
 }
 
+/// 进入录制阶段时进度里各轨就有一项（还没有刷新失败）：这里 init 段还没取到，会话还没开始录。
+#[tokio::test(flavor = "multi_thread")]
+async fn refresh_errors_have_an_item_per_track_once_recording() {
+    let dir = test_dir("live_refresh_errors_initial");
+    let server = Server::start().await;
+    server.put("v/init.mp4", fixture("fmp4_a/video/init.mp4"));
+    server.put("v/seg0.m4s", fixture("fmp4_a/video/seg0.m4s"));
+    server.put("live.m3u8", signed_fmp4_playlist("v", "1", 1, 1, false));
+    let gate = server.gate("v/init.mp4");
+    let job = engine()
+        .start(live_request(server.url("live.m3u8"), &dir, STALL))
+        .unwrap();
+    let progress = job.control().progress();
+    gate.arrived.notified().await;
+
+    let snapshot = progress.borrow().clone();
+    job.control().cancel();
+    server.ungate("v/init.mp4");
+    assert!(matches!(job.wait().await, Err(Error::Cancelled)));
+    assert_eq!(
+        (snapshot.stage, snapshot.refresh_errors),
+        (Stage::Recording, vec![None])
+    );
+}
+
 /// 刷新失败（503，重试后仍失败）时进度里给出哪条轨、什么原因；恢复后清空，录制照常结束。
 #[tokio::test(flavor = "multi_thread")]
 async fn refresh_errors_show_in_progress_until_recovered() {
