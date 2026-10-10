@@ -1,11 +1,10 @@
 //! 服务器前后不一致：重定向、不连续段重新编号、旧缓存、序号回退、分片被替换、空的刷新。
 
-use std::num::NonZeroU32;
 use std::time::Duration;
 
-use hs_m3u8_core::{LiveEnd, MissReason, RetryPolicy};
+use hs_m3u8_core::{LiveEnd, MissReason};
 
-use super::{STALL, interrupt, live_request, missed, playlist, put_long, report};
+use super::{STALL, interrupt, live_request, missed, playlist, put_long, report, slow_retry};
 use crate::server::Server;
 use crate::{assert_output, expected_long, fixture, run, test_dir};
 
@@ -210,11 +209,7 @@ async fn a_held_playlist_that_contradicts_ends_recording() {
     interrupt(&req, |p| p.segments_done == 2).await;
 
     // 核对 seg1 先失败两次（退避 300 毫秒），其间刷新拿到序号 2 换了分片的一份
-    req.retry = RetryPolicy {
-        attempts: NonZeroU32::new(3).unwrap(),
-        base_delay: Duration::from_millis(300),
-        max_delay: Duration::from_millis(300),
-    };
+    req.retry = slow_retry(Duration::from_millis(300));
     server.fail("seg1.ts", 2);
     server.put("other2.ts", fixture("ts_long/seg2.ts"));
     let contradicting = "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MEDIA-SEQUENCE:0\n\

@@ -10,16 +10,18 @@ mod sessions;
 mod stall;
 mod stop;
 
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::time::Duration;
 
 use hs_m3u8_core::{
-    Error, JobRequest, LiveEnd, LiveOptions, LiveReport, MissReason, Missed, Progress, Resume, Url,
+    Error, JobRequest, LiveEnd, LiveOptions, LiveReport, MissReason, Missed, Progress, Resume,
+    RetryPolicy, Url,
 };
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
 use crate::server::Server;
-use crate::{engine, expected, fixture, request, track};
+use crate::{engine, expected, fixture, request, run, track};
 
 /// 序号即 ts_long 分片编号的直播播放列表；`indices` 须连续。
 fn playlist(indices: &[u64], end: bool) -> String {
@@ -71,6 +73,24 @@ fn live_request(url: Url, dir: &Path, stall_timeout: Duration) -> JobRequest {
 }
 
 const STALL: Duration = Duration::from_secs(2);
+
+/// 每次退避 `delay`、最多 3 次尝试的重试：让一个先失败两次的请求持续一段已知的时间。
+fn slow_retry(delay: Duration) -> RetryPolicy {
+    RetryPolicy {
+        attempts: NonZeroU32::new(3).unwrap(),
+        base_delay: delay,
+        max_delay: delay,
+    }
+}
+
+/// 第一次运行到录满 max_duration 自行结束，保留任务目录、删掉输出，供之后续录。
+async fn run_until_full(req: &JobRequest) {
+    let mut first = req.clone();
+    first.keep_work_dir = true;
+    let output = run(first).await.unwrap();
+    assert_eq!(output.live.unwrap().end, LiveEnd::DurationReached);
+    std::fs::remove_file(&req.output).unwrap();
+}
 
 fn report(end: LiveEnd, session_count: usize, missed: Vec<Missed>) -> Option<LiveReport> {
     Some(LiveReport {
