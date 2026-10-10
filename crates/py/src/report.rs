@@ -5,7 +5,7 @@ use std::time::Duration;
 use hs_m3u8_core as core;
 use pyo3::prelude::*;
 
-use crate::convert::PyPath;
+use crate::convert::{PyPath, Seq};
 use crate::info::Selected;
 use crate::record::{record, variants};
 
@@ -217,7 +217,7 @@ record! {
         pub received: u64,
         /// 直播：各轨（下标为轨道编号）最近一次刷新失败的原因。这条轨之后刷新成功、不再刷新或录制结束即为 None；
         /// 一直失败到停滞时任务以 `LiveStalledError` 结束。点播与录制开始前为空
-        pub refresh_errors: Vec<Option<RefreshCause>>,
+        pub refresh_errors: Seq<Option<RefreshCause>>,
     }
 }
 
@@ -239,7 +239,7 @@ record! {
     /// 合并 MP4 的结果。
     pub struct MediaReport {
         /// 各路输出流，按流的下标排列
-        pub streams: Vec<StreamReport>,
+        pub streams: Seq<StreamReport>,
     }
 }
 
@@ -335,7 +335,7 @@ record! {
         pub session_count: usize,
         /// 不在输出中的分片，按会话、轨道、序号排列，相接且原因相同的合成一个区间。不含之前的运行里、某个会话第一个
         /// 已完成分片之前或最后一个之后缺的（原因与范围随那次运行一起丢了）
-        pub missed: Vec<Missed>,
+        pub missed: Seq<Missed>,
     }
 }
 
@@ -353,7 +353,7 @@ record! {
         /// 同 `Progress.bytes`
         pub bytes: u64,
         /// 收尾没删掉的东西：被替换的旧输出、没删干净的任务目录等；输出不受影响。都删干净时为空
-        pub leftovers: Vec<Leftover>,
+        pub leftovers: Seq<Leftover>,
         /// 直播的录制结果；点播为 None
         pub live: Option<LiveReport>,
     }

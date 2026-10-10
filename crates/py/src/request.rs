@@ -1,5 +1,5 @@
-//! 请求：来源、选轨偏好、发请求的方式、输出与任务的配置。构造时只做 Python 侧就能判定的检查，其余由 core 在探测、
-//! 开始任务时检查。
+//! 请求：来源、选轨偏好、发请求的方式、输出与任务的配置。构造时只检查 core 的类型表示不了的值（负数、超出范围、
+//! 该至少为 1 的计数为 0、地址解析不了），其余由 core 在探测、开始任务时检查。
 
 use std::hash::{Hash, Hasher};
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -12,7 +12,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString, PyTuple};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use crate::convert::{PyPath, bare_url, extract_headers};
+use crate::convert::{Count, Headers, PyPath, Span, bare_url};
 use crate::error::{invalid_input, to_pyerr};
 use crate::hooks::{self, Hooks};
 use crate::record::{record, reduce, variants};
@@ -26,7 +26,7 @@ variants! {
         /// 主播放列表里第几个变体（从 0 起，见 `VariantInfo.index`）
         Index {
             /// 下标
-            index: usize,
+            index: Count<usize>,
         },
     }
 }
@@ -44,7 +44,7 @@ variants! {
         /// 主播放列表里第几个音频（只数音频，从 0 起，见 `AudioInfo.index`）；须在所选变体的音频组里
         Index {
             /// 下标
-            index: usize,
+            index: Count<usize>,
         },
     }
 }
@@ -110,15 +110,15 @@ impl Timeouts {
     #[gen_stub(skip)]
     #[pyo3(signature = (
         *,
-        connect = core::Timeouts::default().connect,
-        read_idle = core::Timeouts::default().read_idle,
-        request = core::Timeouts::default().request,
+        connect = Span(core::Timeouts::default().connect),
+        read_idle = Span(core::Timeouts::default().read_idle),
+        request = Span(core::Timeouts::default().request),
     ))]
-    fn new(connect: Duration, read_idle: Duration, request: Duration) -> Self {
+    fn new(connect: Span, read_idle: Span, request: Span) -> Self {
         Timeouts {
-            connect,
-            read_idle,
-            request,
+            connect: connect.0,
+            read_idle: read_idle.0,
+            request: request.0,
         }
     }
 }
@@ -164,23 +164,23 @@ impl RetryPolicy {
     #[gen_stub(skip)]
     #[pyo3(signature = (
         *,
-        attempts = core::RetryPolicy::default().attempts.get(),
-        base_delay = core::RetryPolicy::default().base_delay,
-        max_delay = core::RetryPolicy::default().max_delay,
+        attempts = Count(core::RetryPolicy::default().attempts.get()),
+        base_delay = Span(core::RetryPolicy::default().base_delay),
+        max_delay = Span(core::RetryPolicy::default().max_delay),
     ))]
     fn new(
         py: Python<'_>,
-        attempts: u32,
-        base_delay: Duration,
-        max_delay: Duration,
+        attempts: Count<u32>,
+        base_delay: Span,
+        max_delay: Span,
     ) -> PyResult<Self> {
-        if attempts == 0 {
+        if attempts.0 == 0 {
             return Err(invalid_input(py, "attempts 至少为 1".to_owned()));
         }
         Ok(RetryPolicy {
-            attempts,
-            base_delay,
-            max_delay,
+            attempts: attempts.0,
+            base_delay: base_delay.0,
+            max_delay: max_delay.0,
         })
     }
 }
@@ -191,7 +191,7 @@ impl RetryPolicy {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct HttpOptions {
     /// 附加到所有请求的请求头，按顺序，同名的可以有多个
-    pub headers: Vec<(String, String)>,
+    pub headers: Headers,
     /// HTTP 或 SOCKS 代理的地址；None 时使用系统代理设置
     pub proxy: Option<String>,
     /// 不校验 TLS 证书
@@ -216,34 +216,26 @@ impl HttpOptions {
         retry = RetryPolicy::from(core::RetryPolicy::default()),
     ))]
     fn new(
-        #[gen_stub(override_type(
-            type_repr = "collections.abc.Mapping[str, str] | collections.abc.Iterable[tuple[str, str]] | None",
-            imports = ("collections.abc",)
-        ))]
-        headers: Option<&Bound<'_, PyAny>>,
+        headers: Option<Headers>,
         proxy: Option<String>,
         insecure: bool,
         timeouts: Timeouts,
         retry: RetryPolicy,
-    ) -> PyResult<Self> {
-        Ok(HttpOptions {
-            headers: headers
-                .map(extract_headers)
-                .transpose()?
-                .unwrap_or_default(),
+    ) -> Self {
+        HttpOptions {
+            headers: headers.unwrap_or_default(),
             proxy,
             insecure,
             timeouts,
             retry,
-        })
+        }
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        let names: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
         let proxy = self.proxy.as_deref().map(bare_url);
         Ok(format!(
             "HttpOptions(headers={}, proxy={}, insecure={}, timeouts={}, retry={})",
-            names.into_pyobject(py)?.repr()?,
+            PyTuple::new(py, self.headers.names())?.repr()?,
             proxy.into_pyobject(py)?.repr()?,
             if self.insecure { "True" } else { "False" },
             Bound::new(py, self.timeouts.clone())?.repr()?,
@@ -536,11 +528,11 @@ pyo3_stub_gen::inventory::submit! {
 impl LiveOptions {
     #[new]
     #[gen_stub(skip)]
-    #[pyo3(signature = (*, max_duration = None, stall_timeout = core::LiveOptions::default().stall_timeout))]
-    fn new(max_duration: Option<Duration>, stall_timeout: Duration) -> Self {
+    #[pyo3(signature = (*, max_duration = None, stall_timeout = Span(core::LiveOptions::default().stall_timeout)))]
+    fn new(max_duration: Option<Span>, stall_timeout: Span) -> Self {
         LiveOptions {
-            max_duration,
-            stall_timeout,
+            max_duration: max_duration.map(|span| span.0),
+            stall_timeout: stall_timeout.0,
         }
     }
 }
@@ -612,7 +604,7 @@ impl JobRequest {
         output,
         *,
         key = None,
-        concurrency = core::JobRequest::DEFAULT_CONCURRENCY.get(),
+        concurrency = Count(core::JobRequest::DEFAULT_CONCURRENCY.get()),
         live = Some(LiveOptions::from(core::LiveOptions::default())),
     ))]
     fn new(
@@ -620,9 +612,10 @@ impl JobRequest {
         source: Py<Source>,
         output: OutputOptions,
         key: Option<KeyOverride>,
-        concurrency: usize,
+        concurrency: Count<usize>,
         live: Option<LiveOptions>,
     ) -> PyResult<Self> {
+        let Count(concurrency) = concurrency;
         if concurrency == 0 {
             return Err(invalid_input(py, "concurrency 至少为 1".to_owned()));
         }
@@ -695,7 +688,7 @@ impl HttpOptions {
         let attempts =
             NonZeroU32::new(self.retry.attempts).expect("构造 RetryPolicy 时已检查至少为 1");
         Ok(core::HttpOptions {
-            headers: self.headers.clone(),
+            headers: self.headers.0.clone(),
             proxy,
             insecure: self.insecure,
             timeouts: core::Timeouts {
@@ -801,7 +794,7 @@ impl From<core::RetryPolicy> for RetryPolicy {
 impl From<core::HttpOptions> for HttpOptions {
     fn from(h: core::HttpOptions) -> Self {
         HttpOptions {
-            headers: h.headers,
+            headers: Headers(h.headers),
             proxy: h.proxy.map(String::from),
             insecure: h.insecure,
             timeouts: h.timeouts.into(),
@@ -815,12 +808,12 @@ impl From<Preference> for core::hls::Preference {
         core::hls::Preference {
             variant: match p.variant {
                 VariantChoice::Best {} => core::hls::VariantChoice::Best,
-                VariantChoice::Index { index } => core::hls::VariantChoice::Index(index),
+                VariantChoice::Index { index } => core::hls::VariantChoice::Index(index.0),
             },
             audio: match p.audio {
                 AudioChoice::Default {} => core::hls::AudioChoice::Default,
                 AudioChoice::Language { language } => core::hls::AudioChoice::Language(language),
-                AudioChoice::Index { index } => core::hls::AudioChoice::Index(index),
+                AudioChoice::Index { index } => core::hls::AudioChoice::Index(index.0),
             },
         }
     }

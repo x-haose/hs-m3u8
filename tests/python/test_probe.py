@@ -16,6 +16,7 @@ from hs_m3u8 import (
     HttpErrorKind,
     HttpOptions,
     InvalidInputError,
+    LiveOptions,
     Malformed,
     PlaylistError,
     Preference,
@@ -26,6 +27,7 @@ from hs_m3u8 import (
     SelectError,
     SelectFailure,
     Source,
+    Timeouts,
     VariantChoice,
 )
 
@@ -75,7 +77,7 @@ def test_master_playlists_list_their_tracks_and_the_selection(server: Server) ->
 
     assert result.master is not None
     low, high = result.master.variants
-    assert (low.index, low.bandwidth, low.codecs, low.audio_group) == (0, 800000, ["avc1.4d401e", "mp4a.40.2"], "aud")
+    assert (low.index, low.bandwidth, low.codecs, low.audio_group) == (0, 800000, ("avc1.4d401e", "mp4a.40.2"), "aud")
     assert low.resolution is not None
     assert (low.resolution.width, low.resolution.height) == (640, 360)
     assert [(a.index, a.language, a.default, a.separate) for a in result.master.audio] == [
@@ -170,7 +172,7 @@ def test_http_failures_report_the_status_and_whether_to_retry(server: Server) ->
     assert gone.value.url == server.url("gone.m3u8")
     assert not gone.value.retryable
     assert gone.value.segment is None
-    assert gone.value.leftovers == []
+    assert gone.value.leftovers == ()
     assert busy.value.kind == HttpErrorKind.Status(503)
     assert busy.value.retryable
 
@@ -189,14 +191,31 @@ def test_malformed_playlists_and_impossible_selections_are_reported(server: Serv
 
 
 def test_invalid_arguments_are_reported_before_any_request(server: Server) -> None:
+    # 为 0、为负、超出范围的计数与为负的时长都是参数错误，不是 OverflowError、ValueError
     with pytest.raises(InvalidInputError):
         Engine(max_requests=0)
     with pytest.raises(InvalidInputError):
+        Engine(max_requests=-1)
+    with pytest.raises(InvalidInputError):
         RetryPolicy(attempts=0)
     with pytest.raises(InvalidInputError):
-        probe(Source("ftp://example.com/a.m3u8"))
+        RetryPolicy(attempts=2**40)
     with pytest.raises(InvalidInputError):
-        probe(Source("不是地址"))
+        VariantChoice.Index(-1)
+    with pytest.raises(InvalidInputError):
+        Timeouts(connect=timedelta(seconds=-1))
+    with pytest.raises(InvalidInputError):
+        LiveOptions(stall_timeout=timedelta(seconds=-1))
+    url = server.url("a.m3u8")
+    unusable = [
+        Source("ftp://example.com/a.m3u8"),
+        Source("不是地址"),
+        Source(url, http=HttpOptions(proxy="sock5://127.0.0.1:9")),
+        Source(url, http=HttpOptions(proxy="不是地址")),
+    ]
+    for source in unusable:
+        with pytest.raises(InvalidInputError):
+            probe(source)
     assert server.hits("a.m3u8") == 0
 
 

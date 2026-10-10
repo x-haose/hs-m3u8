@@ -10,7 +10,7 @@ use pyo3::types::PyTuple;
 use pyo3::{PyClass, PyClassInitializer};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use crate::convert::PyPath;
+use crate::convert::{PyPath, Seq};
 use crate::hooks::PyHookError;
 use crate::record::{partial, record, variants};
 use crate::report::{
@@ -48,7 +48,7 @@ variants! {
             /// 给的语言
             language: String,
             /// 组里有的语言
-            available: Vec<String>,
+            available: Seq<String>,
         },
         /// `AudioChoice.Index` 的下标超出范围
         AudioIndexOutOfRange {
@@ -140,9 +140,9 @@ variants! {
             /// 与第 0 条轨不一致的轨
             track: usize,
             /// 第 0 条轨的各不连续段编号
-            first: Vec<u64>,
+            first: Seq<u64>,
             /// 这条轨的各不连续段编号
-            found: Vec<u64>,
+            found: Seq<u64>,
         },
     }
 }
@@ -349,7 +349,7 @@ pub struct HsM3u8Error {
     /// `KeyLengthError.url`）
     pub key_url: Option<String>,
     /// 失败后收拾也没做完而留下的东西；都做完时为空
-    pub leftovers: Vec<Leftover>,
+    pub leftovers: Seq<Leftover>,
 }
 
 /// 本类属性的名字：pickle 时与各子类自己的属性一起交给构造函数。
@@ -381,7 +381,7 @@ impl HsM3u8Error {
         retry_after: Option<u64>,
         segment: Option<SegmentRef>,
         key_url: Option<String>,
-        leftovers: Option<Vec<Leftover>>,
+        leftovers: Option<Seq<Leftover>>,
     ) -> Self {
         // 说明由 __init__ 放进 args
         let _ = message;
@@ -411,7 +411,7 @@ impl HsM3u8Error {
         retry_after: Option<u64>,
         segment: Option<SegmentRef>,
         key_url: Option<String>,
-        leftovers: Option<Vec<Leftover>>,
+        leftovers: Option<Seq<Leftover>>,
     ) -> PyResult<()> {
         // 其余参数已由构造函数用过；收同样的参数，签名才与构造函数一致
         let _ = (retryable, retry_after, segment, key_url, leftovers);
@@ -432,7 +432,7 @@ impl HsM3u8Error {
             retry_after,
             segment: None,
             key_url: None,
-            leftovers: Vec::new(),
+            leftovers: Seq::default(),
         }
     }
 }
@@ -526,7 +526,7 @@ macro_rules! exception {
                 retry_after: Option<u64>,
                 segment: Option<SegmentRef>,
                 key_url: Option<String>,
-                leftovers: Option<Vec<Leftover>>,
+                leftovers: Option<Seq<Leftover>>,
             ) -> PyClassInitializer<Self> {
                 let base = HsM3u8Error::new(message, retryable, retry_after, segment, key_url, leftovers);
                 <$parent as Parent>::initializer(base, $name { $($field),* })
@@ -551,7 +551,7 @@ macro_rules! exception {
                 retry_after: Option<u64>,
                 segment: Option<SegmentRef>,
                 key_url: Option<String>,
-                leftovers: Option<Vec<Leftover>>,
+                leftovers: Option<Seq<Leftover>>,
             ) -> PyResult<()> {
                 // 其余参数已由构造函数用过；收同样的参数，签名才与构造函数一致
                 let _ = ($($field,)* retryable, retry_after, segment, key_url, leftovers);
@@ -902,8 +902,8 @@ fn exception(
                 } => {
                     let reason = SourceUnsupported::DiscontinuityMismatch {
                         track,
-                        first,
-                        found,
+                        first: Seq(first),
+                        found: Seq(found),
                     };
                     instance(
                         py,
@@ -1032,7 +1032,7 @@ impl From<core::hls::SelectError> for SelectFailure {
             } => SelectFailure::AudioLanguageNotFound {
                 group,
                 language,
-                available,
+                available: Seq(available),
             },
             E::AudioIndexOutOfRange { index, count } => {
                 SelectFailure::AudioIndexOutOfRange { index, count }

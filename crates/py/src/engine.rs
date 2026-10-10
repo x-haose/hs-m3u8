@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use tokio::task::JoinError;
 
-use crate::convert::PyPath;
+use crate::convert::{Count, PyPath, Seq};
 use crate::error::{invalid_input, to_pyerr};
 use crate::info::Probe;
 use crate::job::Job;
@@ -43,9 +43,9 @@ pyo3_stub_gen::inventory::submit! {
 impl Engine {
     #[new]
     #[gen_stub(skip)]
-    #[pyo3(signature = (*, max_requests = core::Engine::DEFAULT_MAX_REQUESTS.get()))]
-    fn new(py: Python<'_>, max_requests: usize) -> PyResult<Self> {
-        let max_requests = NonZeroUsize::new(max_requests)
+    #[pyo3(signature = (*, max_requests = Count(core::Engine::DEFAULT_MAX_REQUESTS.get())))]
+    fn new(py: Python<'_>, max_requests: Count<usize>) -> PyResult<Self> {
+        let max_requests = NonZeroUsize::new(max_requests.0)
             .ok_or_else(|| invalid_input(py, "max_requests 至少为 1".to_owned()))?;
         Ok(Engine {
             inner: core::Engine::new(max_requests),
@@ -106,7 +106,7 @@ impl Engine {
     /// （`UnsupportedVersion`）或无法解析（`Corrupt`）时什么也不动：不知道它记着什么就不收拾，可用写下它的版本放弃，
     /// 或由用户删掉记录（`outputs.json`；写了一半的临时输出与没能放回的旧输出以 `hsdl-` 开头，留在输出旁）后再放弃。
     #[pyo3(signature = (work_dir, *, unsettled = Unsettled::Fail {}))]
-    async fn discard(&self, work_dir: PyPath, unsettled: Unsettled) -> PyResult<Vec<Leftover>> {
+    async fn discard(&self, work_dir: PyPath, unsettled: Unsettled) -> PyResult<Seq<Leftover>> {
         self.owner.check("Engine")?;
         let engine = self.inner.clone();
         let unsettled = core::Unsettled::from(&unsettled);

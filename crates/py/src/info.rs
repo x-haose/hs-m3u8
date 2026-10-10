@@ -5,6 +5,7 @@ use std::time::Duration;
 use hs_m3u8_core as core;
 use pyo3::prelude::*;
 
+use crate::convert::Seq;
 use crate::record::record;
 
 record! {
@@ -27,7 +28,7 @@ record! {
         /// RESOLUTION；来源没写时为 None
         pub resolution: Option<Resolution>,
         /// CODECS 拆开后的各项，如 `avc1.640028`、`mp4a.40.2`
-        pub codecs: Vec<String>,
+        pub codecs: Seq<String>,
         /// 引用的音频组（AUDIO 属性）；没有时为 None
         pub audio_group: Option<String>,
     }
@@ -66,9 +67,9 @@ record! {
     /// 主播放列表里可选的轨与选中的轨。
     pub struct MasterInfo {
         /// 各变体，按出现顺序
-        pub variants: Vec<VariantInfo>,
+        pub variants: Seq<VariantInfo>,
         /// 各音频 rendition，按出现顺序
-        pub audio: Vec<AudioInfo>,
+        pub audio: Seq<AudioInfo>,
         /// 按选轨偏好选中的变体与音频
         pub selected: Selected,
     }
@@ -95,7 +96,7 @@ record! {
         /// 续传时下载按记录找回原来的轨，可能与它不同。来源本身是媒体播放列表时为 None
         pub master: Option<MasterInfo>,
         /// 所选各轨的概况：第 0 条为所选变体（或来源本身），第 1 条（若有）为独立的音频
-        pub tracks: Vec<TrackInfo>,
+        pub tracks: Seq<TrackInfo>,
         /// 是否直播：有任一条轨没有 EXT-X-ENDLIST。新开的下载按同一判定走直播或点播；探测不读任务目录，续录
         /// 中途直播已结束的，下载仍按直播继续
         pub live: bool,
@@ -117,7 +118,7 @@ impl From<core::VariantInfo> for VariantInfo {
             index: v.index,
             bandwidth: v.bandwidth,
             resolution: v.resolution.map(Resolution::from),
-            codecs: v.codecs,
+            codecs: Seq(v.codecs),
             audio_group: v.audio_group,
         }
     }

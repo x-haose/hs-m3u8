@@ -247,7 +247,8 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 - 类型：不出现 `Any`、没写元素类型的 `dict` 与 `list`。调用方能据以处理的信息都是有类型的字段；只供人看的细节（播放列表语法错误的具体内容、FFmpeg 的错误说明等）是 `str`，`str(异常)` 是完整说明。
 - 路径：入参接受 `str | os.PathLike[str]`，返回的一律是 `pathlib.Path`（绝对路径）。地址是 `str`，内容是 `bytes`。
 - 时长：`datetime.timedelta`；服务器要求的等待 `retry_after` 是整数秒（可能大到超出 `timedelta` 能表示的范围）。
-- 序列：返回 `list[T]`。请求头入参接受 `Mapping[str, str]` 或 `(名, 值)` 的序列（同名请求头可以有多个），保存为 `list[tuple[str, str]]`。
+- 序列：返回 `tuple[T, ...]`，改不了，也就没有「改了却没生效」；传入接受任意序列。请求头传入 `Mapping[str, str]` 或 `(名, 值)` 的可迭代对象（同名可以有多个，不接受 `str`、`bytes`），保存为 `tuple[tuple[str, str], ...]`。
+- 计数与时长：为负或超出范围时抛 `InvalidInputError`，与「该至少为 1 而为 0」同类；构造时只检查 core 的类型表示不了的值，其余（如超时为 0）由 core 在探测、开始任务时检查。
 - 默认值取 `core` 的（`Default` 实现与常量），绑定层不另写数字；可否重试、区间的分片数等也由 `core` 算好、作为字段给出，绑定层不另写规则。
 - 说明：中文，每个类、字段、方法、参数都写。请求头的值、key、代理地址里的口令不进 `__repr__`。
 - 异步方法返回协程，在 asyncio 事件循环里 await；协程被取消或丢弃时，所等的操作随之取消。本库内部出错（缺陷）时抛 `pyo3_runtime.PanicException`。
@@ -263,7 +264,7 @@ class Engine:
     async def probe(self, source: Source) -> Probe: ...
     def start(self, request: JobRequest) -> Job: ...  # 参数错误立即抛出
     def merge_recorded(self, output: OutputOptions) -> Job: ...
-    async def discard(self, work_dir: StrPath, *, unsettled: Unsettled = Unsettled.Fail()) -> list[Leftover]: ...
+    async def discard(self, work_dir: StrPath, *, unsettled: Unsettled = Unsettled.Fail()) -> tuple[Leftover, ...]: ...
 
 
 class Job:  # 不再被引用、也没有在等它时取消任务（已开始写出的在后台写完）
@@ -285,18 +286,18 @@ class Job:  # 不再被引用、也没有在等它时取消任务（已开始写
 
 结果（字段同 `core`，微秒数改为 `timedelta`，名字去掉 `_us`）：
 
-- `Probe`：`master: MasterInfo | None`、`tracks: list[TrackInfo]`、`live: bool`；`MasterInfo`：`variants: list[VariantInfo]`、`audio: list[AudioInfo]`、`selected: Selected`；`VariantInfo`、`AudioInfo`、`Selected`、`TrackInfo`、`Resolution`。
-- `Progress`：`stage: Stage`、`selected`、`segments_done`、`segments_total`、`segments_failed`、`segments_expired`、`duration: timedelta`、`bytes`、`received`、`refresh_errors: list[RefreshCause | None]`；`Stage`：`Preparing()`、`Downloading()`、`Recording()`、`Writing()`、`Done()`；`RefreshCause`：`reason: RefreshReason`（`Http(failure)`、`Empty()`、`Syntax(line, detail)`）、`retryable`、`retry_after`。
+- `Probe`：`master: MasterInfo | None`、`tracks: tuple[TrackInfo, ...]`、`live: bool`；`MasterInfo`：`variants: tuple[VariantInfo, ...]`、`audio: tuple[AudioInfo, ...]`、`selected: Selected`；`VariantInfo`、`AudioInfo`、`Selected`、`TrackInfo`、`Resolution`。
+- `Progress`：`stage: Stage`、`selected`、`segments_done`、`segments_total`、`segments_failed`、`segments_expired`、`duration: timedelta`、`bytes`、`received`、`refresh_errors: tuple[RefreshCause | None, ...]`；`Stage`：`Preparing()`、`Downloading()`、`Recording()`、`Writing()`、`Done()`；`RefreshCause`：`reason: RefreshReason`（`Http(failure)`、`Empty()`、`Syntax(line, detail)`）、`retryable`、`retry_after`。
 - `HttpFailure`：`kind: HttpErrorKind`、`retryable: bool`、`retry_after: int | None`；`HttpErrorKind`：`Status(code)`、`RangeIgnored(code)`、`Timeout()`、`Certificate(detail)`、`Redirect(detail)`、`Connect(detail)`、`InvalidRequest(detail)`、`Transport(detail)`。
-- `Output`：`mp4: Mp4Output | None`、`hls: Path | None`、`segments`、`bytes`、`leftovers: list[Leftover]`、`live: LiveReport | None`；`Mp4Output`：`path`、`report: MediaReport`；`MediaReport`：`streams: list[StreamReport]`；`StreamReport`：`shape: Shape`、`packets`、`skipped_without_dts`、`duration`；`Shape`：`Video(codec, width, height)`、`Audio(codec, sample_rate, channels)`；`StreamKind`：`Video()`、`Audio()`。
+- `Output`：`mp4: Mp4Output | None`、`hls: Path | None`、`segments`、`bytes`、`leftovers: tuple[Leftover, ...]`、`live: LiveReport | None`；`Mp4Output`：`path`、`report: MediaReport`；`MediaReport`：`streams: tuple[StreamReport, ...]`；`StreamReport`：`shape: Shape`、`packets`、`skipped_without_dts`、`duration`；`Shape`：`Video(codec, width, height)`、`Audio(codec, sample_rate, channels)`；`StreamKind`：`Video()`、`Audio()`。
 - `Leftover`：`path`、`kind: LeftoverKind`、`cause: str`；`LeftoverKind`：`Removable()`、`Displaced(target)`、`Installed()`、`WorkDir()`。
-- `LiveReport`：`end: LiveEnd | None`、`session_count`、`missed: list[Missed]`；`LiveEnd`：`EndList()`、`Stopped()`、`DurationReached()`、`Stalled(track, cause: StallCause)`、`Restarted(track)`、`Inconsistent(track, sequence)`；`StallCause`：`NoNewSegments()`、`PlaylistGone(status)`；`Missed`：`session`、`track`、`first`、`last`、`reason: MissReason`、`count`；`MissReason`：`Expired()`、`Failed(kind)`、`InitFailed(kind)`、`Unmergeable()`、`Unknown()`。
+- `LiveReport`：`end: LiveEnd | None`、`session_count`、`missed: tuple[Missed, ...]`；`LiveEnd`：`EndList()`、`Stopped()`、`DurationReached()`、`Stalled(track, cause: StallCause)`、`Restarted(track)`、`Inconsistent(track, sequence)`；`StallCause`：`NoNewSegments()`、`PlaylistGone(status)`；`Missed`：`session`、`track`、`first`、`last`、`reason: MissReason`、`count`；`MissReason`：`Expired()`、`Failed(kind)`、`InitFailed(kind)`、`Unmergeable()`、`Unknown()`。
 
 异常：类表示出了什么问题，按调用方的处理方式分组（同 5.8）。`core` 里说明出在哪里的包装（`Segment`、`Key`、`Cleanup`）不另成异常类，抛的是包着的原因，位置与残留作为属性：`except HttpError` 也接得住分片与 key 的网络错误。
 
 ```
 HsM3u8Error                       retryable: bool、retry_after: int | None、segment: SegmentRef | None（track、sequence、url）、
-│                                 key_url: str | None、leftovers: list[Leftover]（失败后收拾也没做完时）
+│                                 key_url: str | None、leftovers: tuple[Leftover, ...]（失败后收拾也没做完时）
 ├── RequestError                  改请求再试
 │   ├── InvalidInputError
 │   ├── OutputExistsError         path；要求覆盖即可替换

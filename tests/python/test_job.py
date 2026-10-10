@@ -79,7 +79,7 @@ def run(request: JobRequest) -> Output:
     return asyncio.run(main())
 
 
-def discard(work_dir: Path) -> list[Leftover]:
+def discard(work_dir: Path) -> tuple[Leftover, ...]:
     return asyncio.run(Engine().discard(work_dir))
 
 
@@ -113,7 +113,7 @@ def test_downloads_write_the_mp4_and_report_its_streams(server: Server, tmp_path
     assert target.is_file()
     assert {type(stream.shape) for stream in output.mp4.report.streams} == {Shape.Video, Shape.Audio}
     assert all(stream.packets > 0 for stream in output.mp4.report.streams)
-    assert (output.segments, output.hls, output.live, output.leftovers) == (2, None, None, [])
+    assert (output.segments, output.hls, output.live, output.leftovers) == (2, None, None, ())
     assert not (tmp_path / "out.hsdl").exists()
     assert progress.stage == Stage.Done()
     assert (progress.segments_done, progress.segments_total) == (2, 2)
@@ -213,7 +213,7 @@ def test_failed_segments_say_which_and_the_task_can_be_discarded(server: Server,
     assert_exception_survives_pickle(raised.value)
     work_dir = request.output.resolved_work_dir()
     assert work_dir.is_dir()
-    assert discard(work_dir) == []
+    assert discard(work_dir) == ()
     assert not work_dir.exists()
 
 
@@ -315,6 +315,8 @@ def test_invalid_job_arguments_are_reported_and_keys_stay_out_of_reprs(server: S
         KeyOverride(key, iv=bytes(3))
     with pytest.raises(InvalidInputError):
         JobRequest(source, output, concurrency=0)
+    with pytest.raises(InvalidInputError):
+        JobRequest(source, output, concurrency=-1)
     override = KeyOverride(key, iv=key)
     assert (override.key, override.iv) == (key, key)
     assert repr(override) == "KeyOverride(key=..., iv=...)"

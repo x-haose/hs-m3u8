@@ -8,10 +8,10 @@ use hs_m3u8_core as core;
 use hs_m3u8_core::Url;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyTuple};
+use pyo3::types::{PyBytes, PyDict, PyString, PyTuple};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use crate::convert::{bare_url, extract_headers};
+use crate::convert::{Headers, bare_url};
 use crate::record::{reduce, variants};
 
 variants! {
@@ -37,7 +37,7 @@ pub struct RequestParts {
     /// 请求的地址
     pub url: String,
     /// 本次请求的请求头（已含 `HttpOptions.headers`），按顺序，同名的可以有多个
-    pub headers: Vec<(String, String)>,
+    pub headers: Headers,
 }
 
 #[gen_stub_pymethods]
@@ -46,26 +46,16 @@ impl RequestParts {
     /// 各参数即同名属性。
     #[new]
     #[pyo3(signature = (url, *, headers))]
-    fn new(
-        url: String,
-        #[gen_stub(override_type(
-            type_repr = "collections.abc.Mapping[str, str] | collections.abc.Iterable[tuple[str, str]]",
-            imports = ("collections.abc",)
-        ))]
-        headers: &Bound<'_, PyAny>,
-    ) -> PyResult<Self> {
-        Ok(RequestParts {
-            url,
-            headers: extract_headers(headers)?,
-        })
+    fn new(url: String, headers: Headers) -> Self {
+        RequestParts { url, headers }
     }
 
-    fn __repr__(&self) -> String {
-        let names: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
-        format!(
-            "RequestParts(url={:?}, headers={names:?})",
-            bare_url(&self.url)
-        )
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        Ok(format!(
+            "RequestParts(url={}, headers={})",
+            PyString::new(py, &bare_url(&self.url)).repr()?,
+            PyTuple::new(py, self.headers.names())?.repr()?,
+        ))
     }
 
     #[gen_stub(skip)]
@@ -191,7 +181,7 @@ impl core::Hooks for PyHooks {
         }
         let parts = RequestParts {
             url: request.url.to_string(),
-            headers: request.headers.clone(),
+            headers: Headers(request.headers.clone()),
         };
         let changed = Python::attach(|py| {
             let result =
@@ -206,7 +196,7 @@ impl core::Hooks for PyHooks {
             })?;
             Ok(core::RequestParts {
                 url,
-                headers: changed.headers,
+                headers: changed.headers.0,
             })
         })
         .map_err(|failure: PyErr| Box::new(PyHookError(failure)) as core::HookError)?;
