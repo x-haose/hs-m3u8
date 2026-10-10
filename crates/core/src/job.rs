@@ -16,7 +16,7 @@ use crate::request::JobRequest;
 use crate::resolve::{self, Resolved};
 use crate::vod::{self, Plan};
 use crate::workdir::{JobRecord, RecordKind, Stored, WorkDir, read_resumable};
-use crate::{Error, LiveReport, Output, Progress, Stage, Unsupported, WorkDirProblem};
+use crate::{Error, LiveReport, Output, Progress, Stage, Unsupported, WorkDirProblem, blocking};
 
 /// 一次运行用到的共享对象。
 struct Task {
@@ -42,6 +42,7 @@ pub(crate) async fn run(
         progress,
     };
     let request = &task.request;
+    check_targets(&request.output).await?;
     let root = request.output.resolved_work_dir();
     let source = source_digest(&request.source.url, &request.source.preference);
     // 任务目录里有同一来源、可续的记录时，按记录的选轨找回同一条轨；记录的是直播且请求开启了直播时按直播继续，
@@ -138,6 +139,7 @@ async fn run_vod(task: Task, source: String, resolved: Resolved) -> Result<Outpu
 /// 不联网，只合并任务目录中已录到的直播分片。
 pub(crate) async fn merge_recorded(output: OutputOptions) -> Result<Output, Error> {
     output.validate()?;
+    check_targets(&output).await?;
     let root = output.resolved_work_dir();
     let Some(record) = read_resumable(root.clone()).await? else {
         return Err(Error::NothingRecorded);
@@ -207,4 +209,10 @@ impl Task {
         self.progress.send_modify(|p| p.stage = Stage::Done);
         Ok(output)
     }
+}
+
+/// 输出能否写（见 [`output::check_targets`]）；要读文件系统，在阻塞线程池中执行。
+async fn check_targets(options: &OutputOptions) -> Result<(), Error> {
+    let options = options.clone();
+    blocking(move || output::check_targets(&options)).await?
 }
