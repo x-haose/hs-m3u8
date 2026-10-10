@@ -49,7 +49,7 @@ pub(crate) async fn run(
         return merge_only(task).await;
     }
     let root = request.resolved_work_dir();
-    let source = source_digest(&request.url, &request.preference);
+    let source = source_digest(&request.source.url, &request.source.preference);
     // 任务目录里有同一来源、可续的记录时，按记录的选轨找回同一条轨；记录的是直播且请求开启了直播时按直播继续，
     // 即使播放列表已出现 ENDLIST（中断期间直播结束了）。没开启直播时按点播运行，由 WorkDir::open 报类型不符
     let recorded = read_resumable(root.clone())
@@ -59,7 +59,7 @@ pub(crate) async fn run(
         .as_ref()
         .is_some_and(|r| matches!(r.kind, RecordKind::Live { .. }));
     let selection = recorded.as_ref().and_then(|r| r.selection.as_ref());
-    let resolved = resolve::resolve(&task.http, request, selection, &task.cancel)
+    let resolved = resolve::resolve(&task.http, &request.source, selection, &task.cancel)
         .await?
         .ok_or(Error::WorkDir {
             path: root,
@@ -82,14 +82,14 @@ async fn run_live(task: Task, source: String, resolved: Resolved) -> Result<Outp
         source_digest: source,
         selection: resolved.selection.clone(),
         kind: RecordKind::Live {
-            url_digest: url_digest(&task.request.url),
+            url_digest: url_digest(&task.request.source.url),
         },
     };
     let dir = WorkDir::open(task.request.resolved_work_dir(), record).await?;
     let mut fetcher = task.fetcher();
     let ctx = Context {
         http: task.http.clone(),
-        hooks: task.request.hooks.clone(),
+        hooks: task.request.source.hooks.clone(),
         dir: &dir,
         fetcher: &mut fetcher,
         progress: &task.progress,
@@ -148,7 +148,7 @@ async fn merge_only(task: Task) -> Result<Output, Error> {
             problem: WorkDirProblem::NotLiveRecording,
         });
     }
-    if record.source_digest != source_digest(&request.url, &request.preference) {
+    if record.source_digest != source_digest(&request.source.url, &request.source.preference) {
         return Err(Error::WorkDir {
             path: root,
             problem: WorkDirProblem::SourceMismatch,
@@ -203,7 +203,7 @@ impl Task {
     fn fetcher(&self) -> Fetcher {
         Fetcher::new(
             self.http.clone(),
-            self.request.hooks.clone(),
+            self.request.source.hooks.clone(),
             self.request.concurrency,
             &self.cancel,
         )

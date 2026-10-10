@@ -9,7 +9,7 @@ use url::Url;
 
 use crate::hooks::{HookKind, Hooks, Purpose, run_hook};
 use crate::http::{Http, Permit};
-use crate::request::JobRequest;
+use crate::request::Source;
 use crate::selection::{SelectionKey, track_streams};
 use crate::{Error, Unsupported};
 
@@ -43,16 +43,16 @@ impl Resolved {
 /// 主播放列表里找不到它时为 `Ok(None)`。
 pub(crate) async fn resolve(
     http: &Http,
-    request: &JobRequest,
+    source: &Source,
     recorded: Option<&SelectionKey>,
     cancel: &CancellationToken,
 ) -> Result<Option<Resolved>, Error> {
-    let hooks = &request.hooks;
+    let hooks = &source.hooks;
     Ok(Some(
-        match load_playlist(http, hooks, &request.url, cancel).await? {
+        match load_playlist(http, hooks, &source.url, cancel).await? {
             Playlist::Media(playlist) => Resolved {
                 tracks: vec![ResolvedTrack {
-                    url: request.url.clone(),
+                    url: source.url.clone(),
                     playlist,
                 }],
                 selection: None,
@@ -63,7 +63,7 @@ pub(crate) async fn resolve(
                         Some(selection) => selection,
                         None => return Ok(None),
                     },
-                    None => hls::select(&master, &request.preference)?,
+                    None => hls::select(&master, &source.preference)?,
                 };
                 let key = SelectionKey::of(&selection, &master);
                 let url = selection.variant.uri;

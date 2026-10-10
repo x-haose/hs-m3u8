@@ -38,7 +38,7 @@ pub use hooks::{HookError, HookKind, Hooks, NoHooks, Purpose, RequestParts};
 pub use hs_m3u8_hls as hls;
 pub use hs_m3u8_remux::{Report, Shape, StreamKind, StreamReport};
 pub use report::{LiveEnd, LiveReport, MissReason, Missed, Output, Progress, Stage, StallCause};
-pub use request::{JobRequest, LiveOptions, Resume, RetryPolicy, Timeouts};
+pub use request::{HttpOptions, JobRequest, LiveOptions, Resume, RetryPolicy, Source, Timeouts};
 pub use url::Url;
 
 pub(crate) use blocking::blocking;
@@ -64,7 +64,11 @@ impl Engine {
     /// 参数错误与输出已存在时立即返回错误。
     pub fn start(&self, request: JobRequest) -> Result<Job, Error> {
         request.validate()?;
-        let http = Http::new(&request, self.requests.clone())?;
+        let http = Http::new(
+            &request.source.http,
+            request.source.hooks.clone(),
+            self.requests.clone(),
+        )?;
         let cancel = CancellationToken::new();
         let stop = CancellationToken::new();
         let (progress_tx, progress) = watch::channel(Progress::default());

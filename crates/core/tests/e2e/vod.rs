@@ -523,7 +523,7 @@ async fn hooks_adapt_site() {
     );
 
     let mut req = request(server.url("index.m3u8"), &dir);
-    req.hooks = Arc::new(SiteHooks);
+    req.source.hooks = Arc::new(SiteHooks);
     let output = run(req).await.unwrap();
 
     let want = expected_ts_a(&dir);
@@ -639,7 +639,7 @@ async fn inits_differing_only_in_query_are_distinct() {
          #EXTINF:1,\nfmp4_b/seg0.m4s\n#EXT-X-ENDLIST\n",
     );
     let mut req = request(server.url("index.m3u8"), &dir);
-    req.hooks = Arc::new(InitByQuery);
+    req.source.hooks = Arc::new(InitByQuery);
 
     let output = run(req).await.unwrap();
 

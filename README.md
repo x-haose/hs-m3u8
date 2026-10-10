@@ -27,13 +27,14 @@ HLS（m3u8）下载器。本分支是 Rust 重写：Rust 库、Python 包（`hs-
 ```rust
 use std::num::NonZeroUsize;
 
-use hs_m3u8_core::{Engine, JobRequest, Url};
+use hs_m3u8_core::{Engine, JobRequest, Source, Url};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let engine = Engine::new(NonZeroUsize::new(32).unwrap());
     let url = Url::parse("https://example.com/master.m3u8")?;
-    let job = engine.start(JobRequest::new(url, "downloads/video.mp4".into()))?;
+    let request = JobRequest::new(Source::new(url), "downloads/video.mp4".into());
+    let job = engine.start(request)?;
     let output = job.wait().await?;
     println!("已保存到 {}", output.path.display());
     Ok(())

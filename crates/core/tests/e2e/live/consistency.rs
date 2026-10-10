@@ -209,7 +209,7 @@ async fn a_held_playlist_that_contradicts_ends_recording() {
     interrupt(&req, |p| p.segments_done == 2).await;
 
     // 核对 seg1 先失败两次（退避 300 毫秒），其间刷新拿到序号 2 换了分片的一份
-    req.retry = slow_retry(Duration::from_millis(300));
+    req.source.http.retry = slow_retry(Duration::from_millis(300));
     server.fail("seg1.ts", 2);
     server.put("other2.ts", fixture("ts_long/seg2.ts"));
     let contradicting = "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MEDIA-SEQUENCE:0\n\

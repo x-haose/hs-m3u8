@@ -115,7 +115,7 @@ async fn a_slow_check_does_not_stall_a_waiting_track() {
     let mut req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(300));
     interrupt(&req, |p| p.segments_done == 4).await;
 
-    req.retry = slow_retry(Duration::from_millis(300));
+    req.source.http.retry = slow_retry(Duration::from_millis(300));
     server.fail("v/seg1.ts", 2);
     server.put("video.m3u8", playlist_in("v/", &[0, 1, 2, 3], true));
     server.put_sequence(
@@ -173,7 +173,7 @@ async fn a_stall_while_another_track_is_checking() {
     let mut req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(300));
     interrupt(&req, |p| p.segments_done == 4).await;
 
-    req.retry = slow_retry(Duration::from_millis(400));
+    req.source.http.retry = slow_retry(Duration::from_millis(400));
     server.fail("v/seg1.ts", 2);
     server.put("video.m3u8", playlist_in("v/", &[0, 1, 2], true));
     server.put("audio.m3u8", playlist_in("a/", &[], false));
@@ -204,7 +204,7 @@ async fn a_slow_init_fetch_does_not_stall_another_track() {
     let mut req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(300));
     interrupt(&req, |p| p.segments_done == 2).await;
 
-    req.retry = slow_retry(Duration::from_millis(300));
+    req.source.http.retry = slow_retry(Duration::from_millis(300));
     server.put("video.m3u8", signed_fmp4_playlist("video", "2", 2, 2, true));
     server.fail("video/init.mp4", 2);
     server.put_sequence(
@@ -449,7 +449,7 @@ async fn slow_check_does_not_count_as_a_stall() {
 
     // 核对 seg1 先失败两次，退避合计至少 600 毫秒；其间播放列表一直没有新分片、也没结束（约 100 毫秒刷新一次，
     // 前六次都是 [0,1]），之后才出现 2、3
-    req.retry = slow_retry(Duration::from_millis(400));
+    req.source.http.retry = slow_retry(Duration::from_millis(400));
     server.fail("seg1.ts", 2);
     let mut windows = vec![playlist(&[0, 1], false); 6];
     windows.push(playlist(&[0, 1, 2], false));
