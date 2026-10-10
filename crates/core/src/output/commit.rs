@@ -28,60 +28,53 @@ use crate::{Error, Leftover, LeftoverKind};
 /// 输出路径上现在的东西。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Occupant {
+    /// 什么也没有，且建得出来：最近的已存在的上级是目录
     Nothing,
     /// 没有内容的目录（系统自动生成的元数据文件不算）
     EmptyDir,
     /// 输出：MP4 路径上的文件，或全是本库写出的文件的 HLS 目录
     Output,
-    /// 别的东西：MP4 路径上的目录，HLS 路径上的文件或有别的文件的目录
+    /// 别的东西：MP4 路径上的目录，HLS 路径上的文件或有别的文件的目录；或上级有一段是文件，建不出来
     Other,
 }
 
-/// 输出路径上现在的东西；不跟随符号链接。
+/// 输出路径上现在的东西；输出路径本身是符号链接时不跟随。
 fn occupant(o: &PendingOutput) -> Result<Occupant, Error> {
     let target = o.target();
-    match o.kind() {
-        OutputKind::Mp4 => match fs::symlink_metadata(target) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Occupant::Nothing),
-            Err(cause) => Err(io_error("检查", target)(cause)),
-            Ok(meta) if meta.is_dir() => Ok(Occupant::Other),
-            Ok(_) => Ok(Occupant::Output),
-        },
-        OutputKind::Hls => hls::occupant(target),
+    let meta = match fs::symlink_metadata(target) {
+        Ok(meta) => meta,
+        Err(e) if is_absent(&e) => return absent_occupant(target),
+        Err(cause) => return Err(io_error("检查", target)(cause)),
+    };
+    match (o.kind(), meta.is_dir()) {
+        (OutputKind::Mp4, false) => Ok(Occupant::Output),
+        (OutputKind::Hls, true) => hls::occupant(target),
+        _ => Ok(Occupant::Other),
     }
 }
 
-/// 输出能否写，能写时返回路径上现在的东西：空着（且建得出来，见 [`ensure_creatable`]）、是空目录，或要求覆盖而路径
-/// 上是输出。是输出而没有要求覆盖时报 [`Error::OutputExists`]；是别的东西时报 [`Error::OutputOccupied`]，覆盖也不
-/// 替换，以免路径给错时删掉别人的文件。
-pub(super) fn check(o: &PendingOutput, overwrite: bool) -> Result<Occupant, Error> {
-    match occupant(o)? {
-        Occupant::Other => Err(Error::OutputOccupied(o.target().to_path_buf())),
-        Occupant::Output if !overwrite => Err(Error::OutputExists(o.target().to_path_buf())),
-        Occupant::Nothing => {
-            ensure_creatable(o.target())?;
-            Ok(Occupant::Nothing)
-        }
-        occupant => Ok(occupant),
-    }
-}
-
-/// 不存在的输出路径建得出来：它最近的已存在的上级是目录（跟随符号链接）。路径中间有一段是文件时，Unix 上检查输出
-/// 路径本身就报「不是目录」，Windows 上却报「不存在」，在这里查出来，不等到下载完写出时才失败。
-fn ensure_creatable(target: &Path) -> Result<(), Error> {
+/// 不存在的输出路径：最近的已存在的上级是目录时建得出来，是文件时建不出来。上级有一段是文件时，Unix 上报「不是
+/// 目录」，Windows 上报「不存在」，两种都在这里查清。
+fn absent_occupant(target: &Path) -> Result<Occupant, Error> {
     for ancestor in target.ancestors().skip(1) {
         match fs::metadata(ancestor) {
-            Ok(meta) if meta.is_dir() => return Ok(()),
-            Ok(_) => {
-                let reason = format!("上级 {} 不是目录", ancestor.display());
-                let cause = io::Error::new(io::ErrorKind::NotADirectory, reason);
-                return Err(io_error("检查", target)(cause));
-            }
+            Ok(meta) if meta.is_dir() => return Ok(Occupant::Nothing),
+            Ok(_) => return Ok(Occupant::Other),
             Err(e) if is_absent(&e) => {}
             Err(cause) => return Err(io_error("检查", ancestor)(cause)),
         }
     }
-    Ok(())
+    Ok(Occupant::Nothing)
+}
+
+/// 输出能否写，能写时返回路径上现在的东西：空着、是空目录，或要求覆盖而路径上是输出。是输出而没有要求覆盖时报
+/// [`Error::OutputExists`]；是别的东西时报 [`Error::OutputOccupied`]，覆盖也不替换，以免路径给错时删掉别人的文件。
+pub(super) fn check(o: &PendingOutput, overwrite: bool) -> Result<Occupant, Error> {
+    match occupant(o)? {
+        Occupant::Other => Err(Error::OutputOccupied(o.target().to_path_buf())),
+        Occupant::Output if !overwrite => Err(Error::OutputExists(o.target().to_path_buf())),
+        occupant => Ok(occupant),
+    }
 }
 
 /// 收拾上次留下的：先按记录，再按本次各输出 `current` 的名字（没有记录的），规则见模块说明。返回旧输出因原处是别的
@@ -115,7 +108,7 @@ pub(super) fn unsettled(o: &PendingOutput) -> Leftover {
         kind: LeftoverKind::Displaced {
             target: o.target().to_path_buf(),
         },
-        cause: "原处已有不是输出的东西".to_owned(),
+        cause: "原处已被别的东西占用".to_owned(),
     }
 }
 
@@ -336,7 +329,7 @@ fn exists(path: &Path) -> io::Result<bool> {
     }
 }
 
-/// 路径不存在：没有这一项，或上级路径中有一段是文件（这时由随后对输出路径的检查报出）。
+/// 路径不存在：没有这一项，或上级有一段是文件。
 fn is_absent(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -543,18 +536,22 @@ mod tests {
         assert_no_names_left(&outputs, &work);
     }
 
-    /// 不存在的输出路径中间有一段是文件：建不出来，报输出路径；中间只是缺目录的建得出来。
+    /// 输出路径的上级有一段是文件：建不出来，是路径被占用，报输出路径；上级只是缺目录的建得出来。
     #[test]
-    fn an_output_under_a_file_cannot_be_created() {
+    fn an_output_under_a_file_is_occupied() {
         let dir = scratch("under_file");
         fs::write(dir.join("file"), "别人的文件").unwrap();
-        let target = dir.join("file/sub/out.mp4");
 
-        match ensure_creatable(&target) {
-            Err(Error::Io { path, .. }) => assert_eq!(path, target),
-            other => panic!("应报建不出来：{other:?}"),
+        for kind in [OutputKind::Mp4, OutputKind::Hls] {
+            for target in [dir.join("file/out"), dir.join("file/sub/out")] {
+                match check(&pending(kind, target.clone()), true) {
+                    Err(Error::OutputOccupied(path)) => assert_eq!(path, target),
+                    other => panic!("应报路径被占用：{other:?}"),
+                }
+            }
+            let creatable = pending(kind, dir.join("new/sub/out"));
+            assert_eq!(check(&creatable, false).unwrap(), Occupant::Nothing);
         }
-        assert!(ensure_creatable(&dir.join("new/sub/out.mp4")).is_ok());
     }
 
     /// 换上没做完时中断：临时输出删掉；挪开的旧输出原处空着就放回，原处是新输出就删掉。

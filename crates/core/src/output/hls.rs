@@ -43,15 +43,10 @@ fn extension(format: Standalone) -> &'static str {
     }
 }
 
-/// HLS 输出路径上现在的东西：全是本库写出的文件的目录是输出，没有内容的是空目录（系统自动生成的元数据文件都不算，
-/// 见 [`entries::Entry::is_system_file`]），文件与有别的文件的目录是别的东西。不跟随符号链接。
+/// HLS 输出路径上已有的目录 `dir` 是什么：全是本库写出的文件的是输出，没有内容的是空目录（系统自动生成的元数据
+/// 文件都不算，见 [`entries::Entry::is_system_file`]），有别的文件的是别的东西。
 pub(super) fn occupant(dir: &Path) -> Result<Occupant, Error> {
-    let meta = match fs::symlink_metadata(dir) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Occupant::Nothing),
-        Err(cause) => return Err(io_error("检查", dir)(cause)),
-    };
-    if !meta.is_dir() || !written_by_us(dir)? {
+    if !written_by_us(dir)? {
         Ok(Occupant::Other)
     } else if entries::is_empty(dir)? {
         Ok(Occupant::EmptyDir)

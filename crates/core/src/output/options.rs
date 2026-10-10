@@ -17,9 +17,9 @@ pub struct OutputOptions {
     /// HLS 目录名。`a.mp4` 与 HLS 目录 `a` 共用 `a.hsdl`，改变输出种类后接着用已下载的分片。只能是空目录、
     /// 不存在的目录或本库建立的任务目录
     pub work_dir: Option<PathBuf>,
-    /// 输出已存在时替换：MP4 文件直接替换；HLS 目录只在其中全是本库写出的文件时替换。路径是别的东西（MP4 路径是
-    /// 目录、HLS 路径不是目录或里面有别人的文件）时覆盖也不替换，报 [`Error::OutputOccupied`]。为 false 时 HLS
-    /// 目录须不存在或为空（系统自动生成的元数据文件不算），否则报 [`Error::OutputExists`]
+    /// 输出已存在时替换：MP4 文件直接替换；HLS 目录只在其中全是本库写出的文件时替换。路径被别的东西占用（见
+    /// [`Error::OutputOccupied`]）时覆盖也不替换。为 false 时 HLS 目录须不存在或为空（系统自动生成的元数据文件不算），
+    /// 否则报 [`Error::OutputExists`]
     pub overwrite: bool,
     /// 成功后保留任务目录
     pub keep_work_dir: bool,
