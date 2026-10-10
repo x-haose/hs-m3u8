@@ -15,13 +15,9 @@ pub struct Probe {
     pub master: Option<MasterInfo>,
     /// 所选各轨的概况：第 0 条为所选变体（或来源本身），第 1 条（若有）为独立的音频
     pub tracks: Vec<TrackInfo>,
-}
-
-impl Probe {
-    /// 是否直播：有任一条轨没有 EXT-X-ENDLIST，与下载的判定相同。
-    pub fn is_live(&self) -> bool {
-        self.tracks.iter().any(|t| !t.ended)
-    }
+    /// 是否直播：有任一条轨没有 EXT-X-ENDLIST。新开的下载按同一判定走直播或点播；探测不读任务目录，续录中途
+    /// 直播已结束的，下载仍按直播继续
+    pub live: bool,
 }
 
 /// 拉取来源并按偏好选轨；不下载分片，不碰任务目录。随返回的 future 被丢弃而取消。
@@ -32,6 +28,7 @@ pub(crate) async fn probe(http: &Http, source: &Source) -> Result<Probe, Error> 
         .await?
         .expect("没有记录的选轨时按偏好选，选不出即报错，不会是找不到记录");
     Ok(Probe {
+        live: resolved.is_live(),
         master: resolved
             .master
             .as_ref()

@@ -139,7 +139,7 @@ async fn split_audio_video_with_redirect_and_discontinuity() {
     // 探测：列出主播放列表、按偏好选出的轨与各轨的媒体播放列表，相对地址按重定向之后的地址解析
     let req = request(server.url("watch"), &dir);
     let probe = engine().probe(&req.source).await.unwrap();
-    assert!(!probe.is_live());
+    assert!(!probe.live);
     let master = probe.master.unwrap();
     assert_eq!((master.variants.len(), master.audio.len()), (1, 1));
     let selected = &master.selected;
@@ -155,7 +155,7 @@ async fn split_audio_video_with_redirect_and_discontinuity() {
     let job = engine().start(req).unwrap();
     let progress = job.control().progress();
     let output = job.wait().await.unwrap();
-    assert_eq!(progress.borrow().selection.as_ref(), Some(selected));
+    assert_eq!(progress.borrow().selected.as_ref(), Some(selected));
 
     let program = |name: &str, video: &[&str], audio: &[&str]| DiscontinuityGroup {
         tracks: vec![
@@ -403,7 +403,7 @@ async fn resume_finds_the_same_redundant_variant() {
     assert_output(&output, &want);
     // b/seg1 第一次运行时到达过一次（挂住后取消），续传时再下一次
     assert_eq!((server.hits("a/seg1.ts"), server.hits("b/seg1.ts")), (0, 2));
-    let selected = progress.borrow().selection.clone().unwrap();
+    let selected = progress.borrow().selected.clone().unwrap();
     assert_eq!(selected.variant.index, 1);
 }
 
@@ -701,7 +701,7 @@ async fn signed_init_urls_resume_with_the_right_init() {
 
     // 两个样本的 init 段只差 SPS/PPS，配错时成片也可能逐字节相同，所以另核对目录里的 init 段
     let mut inits: Vec<Vec<u8>> =
-        std::fs::read_dir(req.output.resolved_work_dir().join("tracks/0"))
+        std::fs::read_dir(req.output.resolved_work_dir().unwrap().join("tracks/0"))
             .unwrap()
             .map(|e| e.unwrap().path())
             .filter(|p| p.extension().is_some_and(|e| e == "mp4"))

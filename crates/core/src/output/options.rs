@@ -70,18 +70,17 @@ impl OutputOptions {
     }
 
     /// 实际使用的任务目录：`work_dir`，未指定时见 [`OutputOptions::work_dir`]。
-    /// 输出路径没有文件名（校验会拒绝）时为整个路径加 `.hsdl`。
-    pub fn resolved_work_dir(&self) -> PathBuf {
+    /// 未指定 `work_dir` 而输出路径没有文件名时报参数错误。
+    pub fn resolved_work_dir(&self) -> Result<PathBuf, Error> {
         if let Some(dir) = &self.work_dir {
-            return dir.clone();
+            return Ok(dir.clone());
         }
         match self.target.primary() {
-            (path, Some(stem)) => sibling(path, stem, ".hsdl"),
-            (path, None) => {
-                let mut name = path.as_os_str().to_owned();
-                name.push(".hsdl");
-                PathBuf::from(name)
-            }
+            (path, Some(stem)) => Ok(sibling(path, stem, ".hsdl")),
+            (path, None) => Err(Error::InvalidInput(format!(
+                "输出路径没有文件名：{}",
+                path.display()
+            ))),
         }
     }
 
@@ -106,7 +105,7 @@ impl OutputOptions {
         {
             return invalid("MP4 路径是文件，不能以路径分隔符结尾", mp4);
         }
-        let work_dir = self.resolved_work_dir();
+        let work_dir = self.resolved_work_dir()?;
         let mut paths: Vec<&Path> = vec![&work_dir];
         paths.extend(self.target.mp4());
         paths.extend(self.target.hls());

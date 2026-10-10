@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 
 use crate::info::Selected;
-use crate::{HttpError, Report, hls};
+use crate::remux::Report;
+use crate::{HttpError, hls};
 
 /// 任务进度快照。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -11,7 +12,7 @@ pub struct Progress {
     pub stage: Stage,
     /// 所选的变体与音频 rendition；解析完成前、或来源本身是媒体播放列表时为 None。有已完成分片的任务目录按
     /// 记录找回原来的轨，不一定是偏好会选的那条
-    pub selection: Option<Selected>,
+    pub selected: Option<Selected>,
     /// 已完成的分片，各轨合计；含续传前已完成的
     pub segments_done: usize,
     /// 要下载的分片，各轨合计：已完成的（含续传前的）加上排入下载的；直播另含列出了但 init 段取不到的，
@@ -57,15 +58,15 @@ pub enum RefreshCause {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Stage {
-    /// 拉取播放列表、选轨
+    /// 准备：下载时检查输出、拉取播放列表、选轨；只合并时检查输出、读取任务目录
     #[default]
-    Resolving,
+    Preparing,
     /// 点播：下载分片
     Downloading,
     /// 直播：刷新播放列表并下载新分片
     Recording,
-    /// 写出输出（合并 MP4、写本地 HLS）；开始写出后不响应取消
-    Merging,
+    /// 写出输出（合并 MP4、写本地 HLS）；不响应取消
+    Writing,
     Done,
 }
 

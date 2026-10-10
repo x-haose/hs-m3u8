@@ -40,9 +40,6 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 
 pub use error::{Error, HttpError, Integrity, JobType, StallError, Unsupported, WorkDirProblem};
 pub use hooks::{HookError, HookKind, Hooks, NoHooks, Purpose, RequestParts};
-pub use hs_m3u8_remux::{
-    Error as RemuxError, FfmpegError, Report, Shape, StreamKind, StreamReport,
-};
 pub use info::{AudioInfo, MasterInfo, Selected, TrackInfo, VariantInfo};
 pub use output::{OutputOptions, Target};
 pub use probe::Probe;
@@ -54,6 +51,11 @@ pub use request::{
     HttpOptions, JobRequest, KeyOverride, LiveOptions, RetryPolicy, Source, Timeouts,
 };
 pub use url::Url;
+
+/// 公开接口用到的合并报告与合并错误的类型。
+pub mod remux {
+    pub use hs_m3u8_remux::{Error, FfmpegError, Report, Shape, StreamKind, StreamReport};
+}
 
 /// 公开接口用到的播放列表解析与选轨类型。
 pub mod hls {
@@ -119,8 +121,8 @@ impl Engine {
     }
 
     /// 不联网，只把任务目录中已录到的直播分片写成输出；用于中断后不再续录、或来源已取不到的录制。与
-    /// [`Engine::start`] 一样返回任务句柄：进度给出已录的分片数、字节数与时长，阶段为 [`Stage::Merging`]；
-    /// 开始写出前可取消，停止不起作用。参数错误时立即返回错误；不在 tokio 运行时内调用会 panic。
+    /// [`Engine::start`] 一样返回任务句柄：进度给出已录的分片数、字节数与时长，阶段先为 [`Stage::Preparing`]、
+    /// 写出时为 [`Stage::Writing`]；开始写出前可取消，停止不起作用。参数错误时立即返回错误；不在 tokio 运行时内调用会 panic。
     ///
     /// 任务目录见 [`OutputOptions::resolved_work_dir`]。目录里是点播的下载时报
     /// [`WorkDirProblem::NotLiveRecording`]（点播用同样的请求再次运行即可续传）；目录不存在或没有已完成的分片时报
@@ -139,8 +141,8 @@ fn count_received(progress: watch::Sender<Progress>) -> OnReceived {
     Box::new(move |len| progress.send_modify(|p| p.received += len))
 }
 
-/// 运行中的任务：等结果用 [`Job::wait`]，取消、停止与读进度用 [`Job::control`]。丢弃句柄即取消任务；已进入
-/// 合并阶段的任务仍会在后台完成合并并写出输出。
+/// 运行中的任务：等结果用 [`Job::wait`]，取消、停止与读进度用 [`Job::control`]。丢弃句柄即取消任务；已开始写出
+/// （[`Stage::Writing`]）的任务仍会在后台写完。
 pub struct Job {
     control: JobControl,
     task: JoinHandle<Result<Output, Error>>,
@@ -197,13 +199,13 @@ impl JobControl {
     }
 
     /// 请求取消；[`Job::wait`] 随后返回 [`Error::Cancelled`]，已完成的分片保留在任务目录中。
-    /// 合并阶段不响应取消：已进入合并的任务照常完成。
+    /// 开始写出（[`Stage::Writing`]）后不响应取消：已开始写出的任务照常完成。
     pub fn cancel(&self) {
         self.cancel.cancel();
     }
 
-    /// 直播：停止刷新，把已拉到的播放列表处理完、已列出的分片下完后合并，[`Job::wait`] 返回录到的部分；续录时
-    /// 会话还没定下就立即结束，不录新的分片。点播不受影响。
+    /// 直播：停止刷新，把已拉到的播放列表处理完、已列出的分片下完后写出，[`Job::wait`] 返回录到的部分；续录时
+    /// 会话还没定下就立即结束，不录新的分片。点播与只合并不受影响。
     pub fn stop(&self) {
         self.stop.cancel();
     }
