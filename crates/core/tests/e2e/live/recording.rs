@@ -5,8 +5,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use hs_m3u8_core::{
-    Engine, Error, HttpError, LiveEnd, LiveOptions, MissReason, Missed, RefreshError,
-    RefreshFailure, Stage,
+    Engine, Error, HttpError, LiveEnd, LiveOptions, MissReason, Missed, RefreshCause, Stage,
 };
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
@@ -63,27 +62,21 @@ async fn refresh_errors_show_in_progress_until_recovered() {
     server.status("live.m3u8", StatusCode::SERVICE_UNAVAILABLE);
     let failed = tokio::time::timeout(
         Duration::from_secs(10),
-        progress.wait_for(|p| p.refresh_error.is_some()),
+        progress.wait_for(|p| p.refresh_errors.iter().any(Option::is_some)),
     )
     .await
     .expect("刷新失败应出现在进度里")
     .unwrap()
     .clone();
-    let unavailable = RefreshFailure::Http(HttpError::Status(503));
-    assert_eq!(
-        failed.refresh_error,
-        Some(RefreshError {
-            track: 0,
-            cause: unavailable
-        })
-    );
+    let unavailable = RefreshCause::Http(HttpError::Status(503));
+    assert_eq!(failed.refresh_errors, [Some(unavailable)]);
     // 已录 1 秒
     assert_eq!(failed.duration_us, 1_000_000);
 
     server.put("live.m3u8", playlist(&[0, 1], true));
     let output = job.wait().await.unwrap();
     assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
-    assert_eq!(progress.borrow().refresh_error, None);
+    assert_eq!(progress.borrow().refresh_errors, [None]);
 }
 
 /// 两次刷新之间窗口滑过了分片 1、2：记为缺失（进度按分片计），其余照常合并，时间线在该处留空。

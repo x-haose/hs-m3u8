@@ -28,9 +28,9 @@ pub struct Progress {
     /// 本次运行从网络读到的响应体字节数，读到即计：含播放列表与 key，含没读完、校验失败与重试前的请求。
     /// 按它的变化算下载速度
     pub received: u64,
-    /// 直播：最近一次刷新失败的轨与原因，这条轨之后刷新成功即清空；一直失败到停滞时任务以
-    /// [`crate::Error::LiveStalled`] 结束
-    pub refresh_error: Option<RefreshError>,
+    /// 直播：各轨（下标为轨道编号）最近一次刷新失败的原因。这条轨之后刷新成功、不再刷新或录制结束即清空；
+    /// 一直失败到停滞时任务以 [`crate::Error::LiveStalled`] 结束。点播与录制开始前为空
+    pub refresh_errors: Vec<Option<RefreshCause>>,
 }
 
 impl Progress {
@@ -44,18 +44,14 @@ impl Progress {
     }
 }
 
-/// 直播一条轨的一次刷新失败；这类失败等下次刷新，不使任务立即失败。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RefreshError {
-    pub track: usize,
-    pub cause: RefreshFailure,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RefreshFailure {
+/// 直播一次刷新失败的原因；这类失败等下次刷新，不使任务立即失败。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RefreshCause {
     /// 取不到：404/410，或重试后仍失败的临时故障
+    #[error(transparent)]
     Http(HttpError),
     /// 内容为空或语法错误，多为服务器还没写完
+    #[error(transparent)]
     Playlist(hls::Error),
 }
 

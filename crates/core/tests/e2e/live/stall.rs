@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use hs_m3u8_core::{Error, HttpError, LiveEnd, MissReason, StallCause, StallError};
+use hs_m3u8_core::{Error, HttpError, LiveEnd, MissReason, RefreshCause, StallCause, StallError};
 
 use super::{
     STALL, expected_split, live_request, missed, playlist, playlist_with_target, put_long,
@@ -12,7 +12,8 @@ use super::{
 use crate::server::Server;
 use crate::{assert_output, engine, expected_long, fixture, run, test_dir};
 
-/// 播放列表不再出现新分片，随后被删除（404）：超过 stall_timeout 即按直播已结束收尾。
+/// 播放列表不再出现新分片，随后被删除（404）：超过 stall_timeout 即按直播已结束收尾；停滞期间进度里报
+/// 刷新失败，收尾后清空。
 #[tokio::test(flavor = "multi_thread")]
 async fn removed_playlist_ends_recording() {
     let dir = test_dir("live_gone");
@@ -26,6 +27,11 @@ async fn removed_playlist_ends_recording() {
     let mut progress = job.control().progress();
     progress.wait_for(|p| p.segments_total == 2).await.unwrap();
     server.remove("live.m3u8");
+    let gone = Some(RefreshCause::Http(HttpError::Status(404)));
+    progress
+        .wait_for(|p| p.refresh_errors == [gone.clone()])
+        .await
+        .unwrap();
     let output = job.wait().await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
@@ -34,6 +40,7 @@ async fn removed_playlist_ends_recording() {
         cause: StallCause::PlaylistGone(404),
     };
     assert_eq!(output.live, report(end, 1, vec![]));
+    assert_eq!(progress.borrow().refresh_errors, [None]);
 }
 
 /// 刷新照常成功、只是不再出现新分片：按直播已结束收尾。
