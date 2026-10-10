@@ -3,8 +3,11 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 
+use super::commit;
 use crate::Error;
 use crate::error::io_error;
+use crate::ident::Fingerprint;
+use crate::workdir::{OutputKind, PendingOutput};
 
 /// 输出到哪里、任务目录在哪里；下载（[`crate::JobRequest::output`]）与只合并（[`crate::Engine::merge_recorded`]）共用。
 /// 用 [`OutputOptions::new`] 取默认值后按需修改字段。
@@ -23,7 +26,8 @@ pub struct OutputOptions {
     pub keep_work_dir: bool,
 }
 
-/// 输出什么。各路径与任务目录不能相同或互相包含（按字面比较，不跟随符号链接），所在目录不存在时在写出前创建。
+/// 输出什么。各路径与任务目录不能相同或互相包含（按字面比较，不跟随符号链接），所在目录不存在时在写出前创建；
+/// 相对路径按开始任务时的当前目录补全，之后改变当前目录不影响任务。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     /// MP4 文件
@@ -86,18 +90,13 @@ impl OutputOptions {
         }
     }
 
-    /// 输出路径是 UTF-8、MP4 路径不以分隔符结尾，各路径都以文件名结尾、互不相同也不互相包含。只按字面判断，
-    /// 不访问文件系统：输出能否写由 [`super::check_targets`] 在任务开头查。
-    pub(crate) fn validate(&self) -> Result<(), Error> {
+    /// 校验并补全为绝对路径：MP4 路径不以分隔符结尾，各路径都以文件名结尾、互不相同也不互相包含，输出路径补全后
+    /// 是 UTF-8（任务目录记下正在写的输出，记录的写法要求 UTF-8；Unix 上的文件名、Windows 上含孤立代理项的路径可以
+    /// 不是）。只按字面判断，不访问文件系统：输出能否写在任务开头查。
+    pub(crate) fn resolve(&self) -> Result<ResolvedOutput, Error> {
         let invalid = |reason: &str, path: &Path| {
             Err(Error::InvalidInput(format!("{reason}：{}", path.display())))
         };
-        for path in self.target.mp4().into_iter().chain(self.target.hls()) {
-            // 写到一半的输出记进任务目录，记录的写法要求 UTF-8；Windows 与 macOS 上的路径总是 UTF-8
-            if path.to_str().is_none() {
-                return invalid("输出路径须为 UTF-8", path);
-            }
-        }
         if let Some(mp4) = self.target.mp4()
             && mp4
                 .as_os_str()
@@ -107,18 +106,22 @@ impl OutputOptions {
             return invalid("MP4 路径是文件，不能以路径分隔符结尾", mp4);
         }
         let work_dir = self.resolved_work_dir()?;
+        let targets = [
+            (OutputKind::Mp4, self.target.mp4()),
+            (OutputKind::Hls, self.target.hls()),
+        ];
         let mut paths: Vec<&Path> = vec![&work_dir];
-        paths.extend(self.target.mp4());
-        paths.extend(self.target.hls());
+        paths.extend(targets.iter().filter_map(|&(_, path)| path));
         let mut absolute = Vec::with_capacity(paths.len());
         for path in &paths {
             if !ends_with_file_name(path) {
                 return invalid("路径须以文件名结尾", path);
             }
-            absolute.push(lexical_absolute(path)?);
+            absolute.push(std::path::absolute(path).map_err(io_error("解析", path))?);
         }
-        for (i, a) in absolute.iter().enumerate() {
-            for (j, b) in absolute.iter().enumerate() {
+        let literal: Vec<PathBuf> = absolute.iter().map(|p| lexical(p)).collect();
+        for (i, a) in literal.iter().enumerate() {
+            for (j, b) in literal.iter().enumerate() {
                 if i != j && a.starts_with(b) {
                     return Err(Error::InvalidInput(format!(
                         "输出与任务目录的路径不能相同或互相包含：{} 与 {}",
@@ -128,7 +131,42 @@ impl OutputOptions {
                 }
             }
         }
-        Ok(())
+        let fingerprint = Fingerprint::of_content(literal[0].as_os_str().as_encoded_bytes());
+        let mut absolute = absolute.into_iter();
+        let work_dir = absolute.next().expect("第一个是任务目录");
+        let mut outputs = Vec::new();
+        for ((kind, path), target) in targets
+            .into_iter()
+            .filter_map(|(kind, path)| Some((kind, path?)))
+            .zip(absolute)
+        {
+            if target.to_str().is_none() {
+                return invalid("输出路径须为 UTF-8", path);
+            }
+            outputs.push(commit::pending(kind, target, fingerprint));
+        }
+        Ok(ResolvedOutput {
+            outputs,
+            work_dir,
+            overwrite: self.overwrite,
+            keep_work_dir: self.keep_work_dir,
+        })
+    }
+}
+
+/// 校验过、补全为绝对路径的输出配置（见 [`OutputOptions::resolve`]），任务内部只用它。
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedOutput {
+    /// 各输出，MP4 在前
+    pub outputs: Vec<PendingOutput>,
+    pub work_dir: PathBuf,
+    pub overwrite: bool,
+    pub keep_work_dir: bool,
+}
+
+impl ResolvedOutput {
+    pub(crate) fn get(&self, kind: OutputKind) -> Option<&PendingOutput> {
+        self.outputs.iter().find(|o| o.kind == kind)
     }
 }
 
@@ -152,9 +190,8 @@ pub(crate) fn sibling(path: &Path, name: &OsStr, suffix: &str) -> PathBuf {
         .map_or_else(|| PathBuf::from(&file), |p| p.join(&file))
 }
 
-/// 按字面规整成绝对路径：补上当前目录，去掉 `.`，`..` 退一级；不访问文件系统，不跟随符号链接。
-pub(super) fn lexical_absolute(path: &Path) -> Result<PathBuf, Error> {
-    let absolute = std::path::absolute(path).map_err(io_error("解析", path))?;
+/// 按字面规整绝对路径 `absolute`：去掉 `.`，`..` 退一级；不访问文件系统，不跟随符号链接。
+fn lexical(absolute: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in absolute.components() {
         match component {
@@ -165,5 +202,28 @@ pub(super) fn lexical_absolute(path: &Path) -> Result<PathBuf, Error> {
             other => normalized.push(other),
         }
     }
-    Ok(normalized)
+    normalized
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 相对路径按当前目录补全，记进任务目录的临时名与挪开的名字也就与之后的当前目录无关；它们与输出同级。
+    #[test]
+    fn relative_paths_are_resolved_against_the_current_directory() {
+        let options = OutputOptions::new(Target::Both {
+            mp4: "a/out.mp4".into(),
+            hls: "a/out/".into(),
+        });
+        let resolved = options.resolve().unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(resolved.work_dir, cwd.join("a/out.hsdl"));
+        for (o, target) in resolved.outputs.iter().zip(["a/out.mp4", "a/out"]) {
+            assert_eq!(o.target, cwd.join(target));
+            for name in [&o.temp, &o.aside] {
+                assert_eq!(name.parent(), Some(cwd.join("a").as_path()));
+            }
+        }
+    }
 }

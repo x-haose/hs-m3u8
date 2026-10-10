@@ -11,17 +11,18 @@ use crate::http::Http;
 use crate::ident::{source_digest, url_digest};
 use crate::info::Selected;
 use crate::live::{self, Context, Outcome};
-use crate::output::OutputOptions;
-use crate::output::{self, Content};
+use crate::output::{self, Content, ResolvedOutput};
 use crate::request::JobRequest;
 use crate::resolve::{self, Resolved};
 use crate::vod::{self, Plan};
-use crate::workdir::{JobRecord, RecordKind, Stored, WorkDir, read_resumable};
+use crate::workdir::{JobRecord, Lock, RecordKind, Stored, WorkDir, read_resumable};
 use crate::{Error, LiveReport, Output, Progress, Stage, Unsupported, WorkDirProblem, blocking};
 
 /// 一次运行用到的共享对象。
 struct Task {
     request: JobRequest,
+    /// 校验过的 `request.output`
+    output: ResolvedOutput,
     http: Arc<Http>,
     cancel: CancellationToken,
     stop: CancellationToken,
@@ -30,21 +31,22 @@ struct Task {
 
 pub(crate) async fn run(
     request: JobRequest,
+    output: ResolvedOutput,
     http: Http,
     cancel: CancellationToken,
     stop: CancellationToken,
     progress: watch::Sender<Progress>,
 ) -> Result<Output, Error> {
+    let lock = prepare(&output).await?;
     let task = Task {
         request,
+        output,
         http: Arc::new(http),
         cancel,
         stop,
         progress,
     };
-    let request = &task.request;
-    check_targets(&request.output).await?;
-    let root = request.output.resolved_work_dir()?;
+    let (request, root) = (&task.request, &task.output.work_dir);
     let source = source_digest(&request.source.url, &request.source.preference);
     // 任务目录里有同一来源、可续的记录时，按记录的选轨找回同一条轨；记录的是直播且请求开启了直播时按直播继续，
     // 即使播放列表已出现 ENDLIST（中断期间直播结束了）。没开启直播时按点播运行，由 WorkDir::open 报类型不符
@@ -57,8 +59,8 @@ pub(crate) async fn run(
     let selection = recorded.as_ref().and_then(|r| r.selection.as_ref());
     let resolved = resolve::resolve(&task.http, &request.source, selection, &task.cancel)
         .await?
-        .ok_or(Error::WorkDir {
-            path: root,
+        .ok_or_else(|| Error::WorkDir {
+            path: root.clone(),
             problem: WorkDirProblem::SelectionGone,
         })?;
     let selection = resolved
@@ -67,14 +69,28 @@ pub(crate) async fn run(
         .map(|m| Selected::of(&m.playlist, &m.selection));
     task.progress.send_modify(|p| p.selected = selection);
     if resolved.is_live() || continuing_live && request.live.is_some() {
-        run_live(task, source, resolved).await
+        run_live(task, source, resolved, lock).await
     } else {
-        run_vod(task, source, resolved).await
+        run_vod(task, source, resolved, lock).await
     }
 }
 
+/// 任务开头、联网之前：任务目录已存在时先加锁（挡住同时使用它的任务），收拾上次写输出留下的，再检查各输出能否写
+/// （见 [`output::prepare`]）。返回的锁交给 [`WorkDir::open`]。
+async fn prepare(output: &ResolvedOutput) -> Result<Option<Lock>, Error> {
+    let lock = WorkDir::lock_existing(output.work_dir.clone()).await?;
+    let output = output.clone();
+    blocking(move || output::prepare(&output)).await??;
+    Ok(lock)
+}
+
 /// 直播：录制，再合并任务目录中录到的全部分片。
-async fn run_live(task: Task, source: String, resolved: Resolved) -> Result<Output, Error> {
+async fn run_live(
+    task: Task,
+    source: String,
+    resolved: Resolved,
+    lock: Option<Lock>,
+) -> Result<Output, Error> {
     let options = task
         .request
         .live
@@ -86,7 +102,7 @@ async fn run_live(task: Task, source: String, resolved: Resolved) -> Result<Outp
             url_digest: url_digest(&task.request.source.url),
         },
     };
-    let dir = WorkDir::open(task.request.output.resolved_work_dir()?, record).await?;
+    let dir = WorkDir::open(task.output.work_dir.clone(), record, lock).await?;
     let mut fetcher = task.fetcher();
     let ctx = Context {
         http: task.http.clone(),
@@ -105,7 +121,12 @@ async fn run_live(task: Task, source: String, resolved: Resolved) -> Result<Outp
 }
 
 /// 点播：下载计划中尚未完成的部分，再合并。
-async fn run_vod(task: Task, source: String, resolved: Resolved) -> Result<Output, Error> {
+async fn run_vod(
+    task: Task,
+    source: String,
+    resolved: Resolved,
+    lock: Option<Lock>,
+) -> Result<Output, Error> {
     let streams = resolved.streams();
     let selection = resolved.selection_key();
     let plan = Plan::new(resolved.tracks)?;
@@ -116,7 +137,7 @@ async fn run_vod(task: Task, source: String, resolved: Resolved) -> Result<Outpu
             plan_digest: plan.digest(),
         },
     };
-    let dir = WorkDir::open(task.request.output.resolved_work_dir()?, record).await?;
+    let dir = WorkDir::open(task.output.work_dir.clone(), record, lock).await?;
     let mut fetcher = task.fetcher();
     let groups = vod::download(
         &task.http,
@@ -139,12 +160,12 @@ async fn run_vod(task: Task, source: String, resolved: Resolved) -> Result<Outpu
 
 /// 不联网，只合并任务目录中已录到的直播分片。
 pub(crate) async fn merge_recorded(
-    output: OutputOptions,
+    output: ResolvedOutput,
     cancel: CancellationToken,
     progress: watch::Sender<Progress>,
 ) -> Result<Output, Error> {
-    check_targets(&output).await?;
-    let root = output.resolved_work_dir()?;
+    let lock = prepare(&output).await?;
+    let root = output.work_dir.clone();
     let Some(record) = read_resumable(root.clone()).await? else {
         return Err(Error::NothingRecorded);
     };
@@ -154,7 +175,7 @@ pub(crate) async fn merge_recorded(
             problem: WorkDirProblem::NotLiveRecording,
         });
     }
-    let dir = WorkDir::open(root, record).await?;
+    let dir = WorkDir::open(root, record, lock).await?;
     let streams = dir.record().streams();
     let stored = dir.scan(streams.len()).await?;
     live::count_stored(&stored, &progress);
@@ -203,14 +224,7 @@ impl Task {
     }
 
     async fn finish(self, dir: WorkDir, content: Content) -> Result<Output, Error> {
-        finish(
-            dir,
-            content,
-            &self.request.output,
-            &self.cancel,
-            &self.progress,
-        )
-        .await
+        finish(dir, content, &self.output, &self.cancel, &self.progress).await
     }
 }
 
@@ -221,7 +235,7 @@ impl Task {
 async fn finish(
     dir: WorkDir,
     content: Content,
-    options: &OutputOptions,
+    options: &ResolvedOutput,
     cancel: &CancellationToken,
     progress: &watch::Sender<Progress>,
 ) -> Result<Output, Error> {
@@ -233,10 +247,4 @@ async fn finish(
     let output = output::write(dir, content, options, bytes).await?;
     progress.send_modify(|p| p.stage = Stage::Done);
     Ok(output)
-}
-
-/// 输出能否写（见 [`output::check_targets`]）；要读文件系统，在阻塞线程池中执行。
-async fn check_targets(options: &OutputOptions) -> Result<(), Error> {
-    let options = options.clone();
-    blocking(move || output::check_targets(&options)).await?
 }

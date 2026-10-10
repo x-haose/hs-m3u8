@@ -316,7 +316,7 @@ pub enum WorkDirProblem {
     NotEmpty,
     #[error("正被另一个任务使用")]
     Locked,
-    /// job.json 或分片文件无法识别
+    /// job.json、outputs.json 或分片文件无法识别
     #[error("内容无法识别：{0}")]
     Corrupt(String),
     /// 目录里记录的任务类型与本次不同：记录的是直播、本次是点播，多为中断期间直播结束了而请求没开启直播
