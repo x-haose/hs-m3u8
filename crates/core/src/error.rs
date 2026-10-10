@@ -34,10 +34,14 @@ pub enum Error {
     /// 输出已存在，要求覆盖（[`crate::OutputOptions::overwrite`]）即可替换
     #[error("输出已存在：{}", .0.display())]
     OutputExists(PathBuf),
-    /// 路径已被占用，覆盖也不会替换（以免路径给错时删掉别人的文件），换一个路径：要输出 MP4 而那里是目录，要输出
-    /// HLS 而那里不是目录或目录里有不是本库写出的文件，或上级有一段是文件
-    #[error("路径已被占用，覆盖也不会替换：{}", .0.display())]
-    OutputOccupied(PathBuf),
+    /// 输出路径 `path` 用不了，覆盖也不会替换（以免路径给错时删掉别人的文件），换一个路径：要输出 MP4 而那里是目录，
+    /// 要输出 HLS 而那里不是目录或目录里有不是本库写出的文件；或那里什么也没有，而最近的已存在的上级 `ancestor`
+    /// 不是目录（是文件，或悬空的符号链接），建不出来。路径本身被占用时 `ancestor` 为 None
+    #[error("{}", occupied_text(.path, .ancestor.as_deref()))]
+    OutputOccupied {
+        path: PathBuf,
+        ancestor: Option<PathBuf>,
+    },
     /// 内容不是合法的播放列表；用了不支持的加密是 [`Unsupported::Encryption`]
     #[error("解析播放列表 {} 失败：{cause}", bare_url(.url))]
     Playlist {
@@ -104,6 +108,17 @@ pub enum Error {
     },
     #[error("任务已取消")]
     Cancelled,
+}
+
+fn occupied_text(path: &Path, ancestor: Option<&Path>) -> String {
+    match ancestor {
+        None => format!("路径已被占用，覆盖也不会替换：{}", path.display()),
+        Some(ancestor) => format!(
+            "建不出 {}：上级 {} 不是目录",
+            path.display(),
+            ancestor.display()
+        ),
+    }
 }
 
 fn joined(leftovers: &[Leftover]) -> String {

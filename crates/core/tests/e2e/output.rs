@@ -249,7 +249,10 @@ async fn existing_hls_directories_are_replaced_only_when_written_by_the_library(
     for name in ["0/._notes", "0/notes.txt"] {
         std::fs::write(hls.join(name), "别人的文件").unwrap();
         match run(replace.clone()).await {
-            Err(Error::OutputOccupied(p)) => assert_eq!(p, hls),
+            Err(Error::OutputOccupied {
+                path,
+                ancestor: None,
+            }) => assert_eq!(path, hls),
             other => panic!("{name} 应算别人的文件：{other:?}"),
         }
         assert!(hls.join(name).is_file());
@@ -277,7 +280,10 @@ async fn outputs_taken_during_the_download_leave_nothing_behind() {
     server.ungate("seg0.ts");
 
     match job.wait().await {
-        Err(Error::OutputOccupied(path)) => assert_eq!(path, dir.join("out")),
+        Err(Error::OutputOccupied {
+            path,
+            ancestor: None,
+        }) => assert_eq!(path, dir.join("out")),
         other => panic!("应报有别人的文件：{other:?}"),
     }
     assert_eq!(names_in(&dir), ["out", "out.hsdl"]);
@@ -702,27 +708,26 @@ async fn invalid_output_paths_are_rejected() {
     }
 }
 
-/// 输出路径的上一级是文件，或 HLS 路径以分隔符结尾而那里是文件：任务开头检查输出时报路径被占用，指向输出路径
-/// 本身，不是内部的临时名。
+/// 输出路径的上一级是文件（报错带上它），或 HLS 路径以分隔符结尾而那里是文件：任务开头检查输出时报路径被占用，
+/// 指向输出路径本身，不是内部的临时名。
 #[tokio::test(flavor = "multi_thread")]
 async fn an_output_under_a_file_is_reported_as_occupied() {
     let dir = test_dir("output_under_file");
     std::fs::write(dir.join("file"), "别人的文件").unwrap();
     let url = Url::parse("http://127.0.0.1:9/index.m3u8").unwrap();
+    let mp4 = dir.join("file/out.mp4");
     let cases = [
-        (
-            Target::Mp4(dir.join("file/out.mp4")),
-            dir.join("file/out.mp4"),
-        ),
-        (Target::Hls(dir.join("file/")), dir.join("file")),
+        (Target::Mp4(mp4.clone()), mp4, Some(dir.join("file"))),
+        (Target::Hls(dir.join("file/")), dir.join("file"), None),
     ];
-    for (target, occupied) in cases {
+    for (target, occupied, blocking) in cases {
         let mut req = request_to(url.clone(), &dir, target);
         req.output.work_dir = Some(dir.join("work"));
 
         match run(req).await {
-            Err(Error::OutputOccupied(path)) => {
-                assert_eq!(path.as_os_str(), occupied.as_os_str())
+            Err(Error::OutputOccupied { path, ancestor }) => {
+                assert_eq!(path.as_os_str(), occupied.as_os_str());
+                assert_eq!(ancestor, blocking);
             }
             other => panic!("应报路径被占用：{other:?}"),
         }
