@@ -84,15 +84,26 @@ fn occupant_by_ancestor(target: &Path) -> Result<Occupant, Error> {
 /// [`Error::OutputExists`]；是别的东西或建不出来时报 [`Error::OutputOccupied`]，覆盖也不替换，以免路径给错时删掉
 /// 别人的文件。
 pub(super) fn check(o: &PendingOutput, overwrite: bool) -> Result<Occupant, Error> {
-    let occupied = |ancestor| Error::OutputOccupied {
-        path: o.target().to_path_buf(),
-        ancestor,
-    };
     match occupant(o)? {
-        Occupant::Other => Err(occupied(None)),
-        Occupant::Blocked { ancestor } => Err(occupied(Some(ancestor))),
+        Occupant::Other => Err(occupied(o, None)),
+        Occupant::Blocked { ancestor } => Err(occupied(o, Some(ancestor))),
         Occupant::Output if !overwrite => Err(Error::OutputExists(o.target().to_path_buf())),
         occupant => Ok(occupant),
+    }
+}
+
+/// 输出路径建不建得出来：建不出来时报 [`Error::OutputOccupied`]（带上挡住的上级），不看路径上现在的东西。
+pub(super) fn check_creatable(o: &PendingOutput) -> Result<(), Error> {
+    match occupant(o)? {
+        Occupant::Blocked { ancestor } => Err(occupied(o, Some(ancestor))),
+        _ => Ok(()),
+    }
+}
+
+fn occupied(o: &PendingOutput, ancestor: Option<PathBuf>) -> Error {
+    Error::OutputOccupied {
+        path: o.target().to_path_buf(),
+        ancestor,
     }
 }
 

@@ -721,13 +721,21 @@ async fn an_output_under_a_file_is_reported_as_occupied() {
     // 结尾带本平台的分隔符：补全后的路径用的也是它，按字节比较才看得出结尾的分隔符去掉了
     let mut hls = file.clone().into_os_string();
     hls.push(std::path::MAIN_SEPARATOR_STR);
+    let work = Some(dir.join("work"));
+    // 默认的任务目录与输出同级，同样建不出来：报的仍是输出路径被占用
     let cases = [
-        (Target::Mp4(mp4.clone()), mp4, Some(file.clone())),
-        (Target::Hls(hls.into()), file, None),
+        (
+            Target::Mp4(mp4.clone()),
+            work.clone(),
+            mp4.clone(),
+            Some(file.clone()),
+        ),
+        (Target::Mp4(mp4.clone()), None, mp4, Some(file.clone())),
+        (Target::Hls(hls.into()), work, file, None),
     ];
-    for (target, occupied, blocking) in cases {
+    for (target, work_dir, occupied, blocking) in cases {
         let mut req = request_to(url.clone(), &dir, target);
-        req.output.work_dir = Some(dir.join("work"));
+        req.output.work_dir = work_dir;
 
         match run(req).await {
             Err(Error::OutputOccupied { path, ancestor }) => {

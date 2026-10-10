@@ -77,6 +77,12 @@ fn create_dirs(options: &ResolvedOutput) -> Result<(), Error> {
     Ok(())
 }
 
+/// 各输出的路径建不建得出来（见 [`commit::check_creatable`]）。任务开头在给任务目录加锁之前查：默认的任务目录与
+/// 输出同级，输出的上级是文件时任务目录也建不出来，先查输出才报得出路径被占用。要读文件系统，在阻塞线程池中调用。
+pub(crate) fn check_creatable(options: &ResolvedOutput) -> Result<(), Error> {
+    options.outputs.iter().try_for_each(commit::check_creatable)
+}
+
 /// 各输出能否写（见 [`commit::check`]），顺序同各输出。
 fn check_all(options: &ResolvedOutput) -> Result<Vec<Occupant>, Error> {
     options

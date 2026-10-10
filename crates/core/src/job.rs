@@ -79,9 +79,12 @@ pub(crate) async fn run(
     }
 }
 
-/// 任务开头、联网之前：任务目录已存在时先加锁（挡住同时使用它的任务），收拾上次写输出留下的，再检查各输出能否写
-/// （见 [`output::prepare`]）。返回的锁交给 [`WorkDir::open`]。
+/// 任务开头、联网之前：先查各输出的路径建不建得出来（见 [`output::check_creatable`]），任务目录已存在时加锁（挡住
+/// 同时使用它的任务），收拾上次写输出留下的，再检查各输出能否写（见 [`output::prepare`]）。返回的锁交给
+/// [`WorkDir::open`]。
 async fn prepare(output: &ResolvedOutput) -> Result<Option<Lock>, Error> {
+    let options = output.clone();
+    blocking(move || output::check_creatable(&options)).await??;
     let lock = WorkDir::lock_existing(output.work_dir.clone()).await?;
     let output = output.clone();
     blocking(move || output::prepare(&output)).await??;
