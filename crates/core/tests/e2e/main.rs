@@ -99,7 +99,5 @@ fn assert_output(output: &Output, expected: &[u8]) {
     let mp4 = &output.mp4.as_ref().expect("应输出 MP4").path;
     assert_eq!(std::fs::read(mp4).unwrap(), expected);
     assert_eq!(output.cleanup_error, None);
-    let mut work_dir = mp4.clone().into_os_string();
-    work_dir.push(".hsdl");
-    assert!(!Path::new(&work_dir).exists());
+    assert!(!mp4.with_extension("hsdl").exists());
 }

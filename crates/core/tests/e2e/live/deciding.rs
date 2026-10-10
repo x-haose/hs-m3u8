@@ -73,7 +73,7 @@ async fn a_waiting_track_stops_while_another_keeps_going() {
         ),
         "{err}"
     );
-    assert!(dir.join("out.mp4.hsdl/job.json").exists());
+    assert!(dir.join("out.hsdl/job.json").exists());
 }
 
 /// 中断期间直播结束了：视频停在 [0,1]（没有 ENDLIST、不再更新），音频的播放列表变空。音频停滞时视频也不再出

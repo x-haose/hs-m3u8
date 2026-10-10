@@ -149,7 +149,7 @@ async fn one_failing_track_fails_the_recording() {
         other => panic!("{other}"),
     }
     assert!(err.retryable());
-    assert!(dir.join("out.mp4.hsdl/job.json").exists());
+    assert!(dir.join("out.hsdl/job.json").exists());
 }
 
 /// 音频轨每次都有新分片、但它们的 init 段一直 404：一个都录不到，超过 stall_timeout 即任务失败，
@@ -325,7 +325,7 @@ async fn a_frozen_track_fails_while_the_other_keeps_going() {
         "{err}"
     );
     assert!(err.retryable());
-    assert!(dir.join("out.mp4.hsdl/job.json").exists());
+    assert!(dir.join("out.hsdl/job.json").exists());
 }
 
 /// 刷新返回 503 并要求等一个无法表示的时长：不再刷新，按刷新失败的停滞结束，不会因时间溢出而崩溃。

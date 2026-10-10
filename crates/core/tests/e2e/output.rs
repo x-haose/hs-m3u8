@@ -151,7 +151,7 @@ async fn split_source_writes_both_outputs() {
     for name in ["0/0.m4s", "0/2.m4s", "1/4.m4s"] {
         assert!(hls.join(name).is_file(), "{name}");
     }
-    assert!(!dir.join("out.mp4.hsdl").exists());
+    assert!(!dir.join("out.hsdl").exists());
     assert!(!dir.join("out.part").exists());
 }
 
@@ -236,7 +236,7 @@ async fn a_failed_hls_output_removes_the_new_mp4() {
         other => panic!("应报输出已存在：{other:?}"),
     }
     assert!(!dir.join("out.mp4").exists());
-    assert!(dir.join("out.mp4.hsdl/job.json").exists());
+    assert!(dir.join("out.hsdl/job.json").exists());
 
     std::fs::remove_dir_all(&stage).unwrap();
     let output = run(req).await.unwrap();
@@ -268,7 +268,7 @@ async fn live_holes_and_sessions_in_hls() {
     // 第一次：录到 seg0、seg2（seg1 缺失）；保留目录供续录
     let mut first = req.clone();
     first.output.target = Target::Mp4(dir.join("first.mp4"));
-    first.output.work_dir = Some(dir.join("out.mp4.hsdl"));
+    first.output.work_dir = Some(dir.join("out.hsdl"));
     first.output.keep_work_dir = true;
     run(first).await.unwrap();
     // 第二次：编码器重启后的新节目，序号从 0 重来、内容不同，另起会话
@@ -296,6 +296,37 @@ async fn live_holes_and_sessions_in_hls() {
     assert_eq!(seen, want);
     assert_hls_matches(&hls, &output.mp4.as_ref().unwrap().path);
     assert_output(&output, &expected_long(&dir, &[0, 2, 3], &[2, 1]));
+}
+
+/// 合并 MP4 时编码不受支持（MP3 音频）而失败，任务目录保留；改为输出 HLS 后用同一个默认任务目录，
+/// 不重新下载。HLS 目录路径带结尾的分隔符也照常。
+#[tokio::test(flavor = "multi_thread")]
+async fn switching_to_hls_after_an_unsupported_codec_reuses_the_download() {
+    let dir = test_dir("output_switch");
+    let server = Server::start().await;
+    server.put("seg0.ts", fixture("ts_mp3/seg0.ts"));
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1.5,\nseg0.ts\n#EXT-X-ENDLIST\n",
+    );
+    let url = server.url("index.m3u8");
+    let mp4 = request_to(url.clone(), &dir, Target::Mp4(dir.join("out.mp4")));
+    match run(mp4).await {
+        Err(Error::Remux(_)) => {}
+        other => panic!("MP3 音频应合并失败：{other:?}"),
+    }
+    assert!(dir.join("out.hsdl/job.json").exists());
+
+    let mut hls = dir.join("out").into_os_string();
+    hls.push(std::path::MAIN_SEPARATOR_STR);
+    let output = run(request_to(url, &dir, Target::Hls(hls.into())))
+        .await
+        .unwrap();
+
+    assert!(dir.join("out/0/0.ts").is_file());
+    assert_eq!(output.cleanup_error, None);
+    assert!(!dir.join("out.hsdl").exists());
+    assert_eq!(server.hits("seg0.ts"), 1);
 }
 
 /// 输出经符号链接落在任务目录里（按字面比较看不出）：删除任务目录时只删本库写的文件，输出留下，

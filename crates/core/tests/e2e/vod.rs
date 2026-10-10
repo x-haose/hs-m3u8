@@ -312,7 +312,7 @@ async fn failure_then_resume() {
         other => panic!("{other}"),
     }
     assert!(!req.output.target.mp4().unwrap().exists());
-    assert!(dir.join("out.mp4.hsdl/job.json").exists());
+    assert!(dir.join("out.hsdl/job.json").exists());
 
     put_ts_a(&server, "index.m3u8", 0.5);
     assert!(matches!(
@@ -507,7 +507,7 @@ async fn wrong_key_fails_integrity() {
         ),
         other => panic!("{other}"),
     }
-    let written = std::fs::read_dir(dir.join("out.mp4.hsdl/tracks/0"))
+    let written = std::fs::read_dir(dir.join("out.hsdl/tracks/0"))
         .map(|entries| entries.count())
         .unwrap_or(0);
     assert_eq!(written, 0, "校验失败的分片不应写盘");
@@ -827,6 +827,6 @@ async fn rejected_before_download() {
         "{err}"
     );
     // 下载前失败不留下任务目录与输出
-    assert!(!dir.join("out.mp4.hsdl").exists());
+    assert!(!dir.join("out.hsdl").exists());
     assert_eq!(server.hits("v0.ts") + server.hits("a0.aac"), 0);
 }
