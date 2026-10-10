@@ -359,13 +359,17 @@ async fn endless_retry_after_ends_as_a_refresh_failure() {
 
     let err = job.wait().await.unwrap_err();
 
-    match &err {
-        Error::LiveStalled {
-            track: 0,
-            cause: StallError::RefreshFailed(cause),
-        } => assert!(cause.retry_after().is_some(), "{cause}"),
-        other => panic!("{other}"),
-    }
+    assert!(
+        matches!(
+            err,
+            Error::LiveStalled {
+                track: 0,
+                cause: StallError::RefreshFailed(_),
+            }
+        ),
+        "{err}"
+    );
+    assert!(err.retry_after().is_some());
 }
 
 /// TARGETDURATION 比 stall_timeout 长：停滞至少等三个目标时长，正常的刷新节奏不会被误判为停滞。

@@ -3,6 +3,7 @@
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use aes::cipher::block_padding::Pkcs7;
 use aes::cipher::{BlockModeEncrypt, KeyIvInit};
@@ -266,6 +267,25 @@ async fn retries_server_errors() {
     let want = expected_ts_a(&dir);
     assert_output(&output, &want);
     assert_eq!(server.hits("seg0.ts"), 3);
+}
+
+/// 服务器要求的等待超过重试的等待上限：不再重试，任务失败；错误可重试，服务器要求的等待包在分片的失败里，
+/// 从最外层就能取到。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_retry_after_is_reported_with_the_failure() {
+    let dir = test_dir("retry_after");
+    let server = Server::start().await;
+    put_ts_a(&server, "index.m3u8", 1.0);
+    server.status_retry_after("seg1.ts", StatusCode::TOO_MANY_REQUESTS, "3600");
+
+    let err = run(request(server.url("index.m3u8"), &dir))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, Error::Segment { sequence: 1, .. }), "{err}");
+    assert!(err.retryable());
+    assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+    assert_eq!(server.hits("seg1.ts"), 1);
 }
 
 /// ts_a 的两个分片，明文；`duration` 为每个分片声明的时长。
