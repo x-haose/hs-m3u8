@@ -105,7 +105,8 @@ impl Engine {
     }
 
     /// 校验请求并在当前 tokio 运行时上启动任务；不在 tokio 运行时内调用会 panic。参数错误时立即返回错误，
-    /// 不访问文件系统；输出已存在等要读文件系统的检查在任务开头、任何下载之前进行，结果经 [`Job::wait`] 返回。
+    /// 不访问文件系统；输出已存在等要读文件系统的检查、建出输出所在的目录在任务开头、任何下载之前进行，结果经
+    /// [`Job::wait`] 返回。
     pub fn start(&self, request: JobRequest) -> Result<Job, Error> {
         let output = request.validate()?;
         let (progress_tx, progress) = watch::channel(Progress::default());

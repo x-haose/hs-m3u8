@@ -102,17 +102,14 @@ fn check_layout(has_init: &[Vec<bool>]) -> Result<(), Error> {
     Ok(())
 }
 
-/// 在准备目录 `stage`（还不存在）里备齐 HLS 输出；`work_dir` 为分片所在的任务目录，用于报告目录内容无法识别。
-/// 失败时 `stage` 里可能留有备了一半的内容，由调用方删除。
+/// 在准备目录 `stage`（还不存在，上级已在任务开头建出）里备齐 HLS 输出；`work_dir` 为分片所在的任务目录，用于
+/// 报告目录内容无法识别。失败时 `stage` 里可能留有备了一半的内容，由调用方删除。
 pub(super) fn stage(
     stage: &Path,
     work_dir: &Path,
     groups: &[Vec<GroupTrack>],
     selection: Option<&SelectionKey>,
 ) -> Result<(), Error> {
-    if let Some(parent) = stage.parent().filter(|p| !p.as_os_str().is_empty()) {
-        fs::create_dir_all(parent).map_err(io_error("创建", parent))?;
-    }
     fs::create_dir(stage).map_err(io_error("创建", stage))?;
     fill(stage, work_dir, groups, selection)
 }

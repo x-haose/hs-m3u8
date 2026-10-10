@@ -737,6 +737,69 @@ async fn an_output_under_a_file_is_reported_as_occupied() {
     }
 }
 
+/// 输出所在的目录建不出来（这里是没有写权限，盘不在、连不上同样）：任务开头、联网之前就报出，不等下载完。以 root
+/// 运行时权限位不起作用，不测。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn output_directories_that_cannot_be_created_fail_before_downloading() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = test_dir("output_dir_denied");
+    if is_root(&dir) {
+        return;
+    }
+    let _writable = Writable(dir.clone());
+    let locked = dir.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let server = Server::start().await;
+    let target = Target::Mp4(locked.join("sub/out.mp4"));
+    let mut req = request_to(server.url("index.m3u8"), &dir, target);
+    req.output.work_dir = Some(dir.join("work"));
+
+    match run(req).await {
+        Err(Error::Io { action, path, .. }) => {
+            assert_eq!((action, path), ("创建", locked.join("sub")))
+        }
+        other => panic!("应报建不出输出所在的目录：{other:?}"),
+    }
+    assert_eq!(server.hits("index.m3u8"), 0);
+}
+
+/// 以 root 运行：权限位不起作用，造不出没有权限的情形。
+#[cfg(unix)]
+fn is_root(dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    std::fs::metadata(dir).unwrap().uid() == 0
+}
+
+/// 结束时（含断言失败）恢复目录权限，免得下次删不掉测试目录。
+#[cfg(unix)]
+struct Writable(PathBuf);
+
+#[cfg(unix)]
+impl Drop for Writable {
+    fn drop(&mut self) {
+        make_writable(&self.0);
+    }
+}
+
+#[cfg(unix)]
+fn make_writable(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let writable = std::fs::Permissions::from_mode(0o755);
+    if std::fs::set_permissions(dir, writable).is_err() {
+        return;
+    }
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            make_writable(&entry.path());
+        }
+    }
+}
+
 /// 输出名很长（238 字节，在文件名上限 255 字节之内）：临时名定长，不因输出名变长而超出上限。
 #[tokio::test(flavor = "multi_thread")]
 async fn long_output_names_are_written() {
@@ -764,31 +827,12 @@ async fn long_output_names_are_written() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn old_outputs_that_cannot_be_removed_are_reported_and_removed_later() {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
 
     use hs_m3u8_core::LeftoverKind;
 
-    /// 结束时（含断言失败）恢复目录权限，免得下次删不掉测试目录。
-    struct Writable(PathBuf);
-    impl Drop for Writable {
-        fn drop(&mut self) {
-            make_writable(&self.0);
-        }
-    }
-    fn make_writable(dir: &Path) {
-        let writable = std::fs::Permissions::from_mode(0o755);
-        if std::fs::set_permissions(dir, writable).is_err() {
-            return;
-        }
-        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-            if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                make_writable(&entry.path());
-            }
-        }
-    }
-
     let dir = test_dir("output_old_kept");
-    if std::fs::metadata(&dir).unwrap().uid() == 0 {
+    if is_root(&dir) {
         return;
     }
     let _writable = Writable(dir.clone());
