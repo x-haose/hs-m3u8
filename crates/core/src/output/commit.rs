@@ -28,8 +28,7 @@ use crate::{Error, Leftover, LeftoverKind};
 /// 输出路径上现在的东西。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Occupant {
-    /// 什么也没有，最近的已存在的上级是目录；一级都不存在（如 Windows 上不存在的盘符）时也是，任务开头建输出所在的
-    /// 目录时报出
+    /// 什么也没有，且建得出来：最近的已存在的上级是目录
     Nothing,
     /// 没有内容的目录（系统自动生成的元数据文件不算）
     EmptyDir,
@@ -58,7 +57,9 @@ fn occupant(o: &PendingOutput) -> Result<Occupant, Error> {
 
 /// 不存在的输出路径看最近的已存在的上级：是目录（跟随符号链接）就建得出来，否则建不出来。上级有一段是文件时，
 /// Unix 上报「不是目录」，Windows 上报「不存在」；上级是悬空的符号链接时报「不存在」，它本身却在。都在这里查清。
+/// 连根都不存在（Windows 上不存在的盘符、连不上的共享）时以根的错误报出。
 fn occupant_by_ancestor(target: &Path) -> Result<Occupant, Error> {
+    let mut missing = None;
     for ancestor in target.ancestors().skip(1) {
         match fs::metadata(ancestor) {
             Ok(meta) if meta.is_dir() => return Ok(Occupant::Nothing),
@@ -66,6 +67,7 @@ fn occupant_by_ancestor(target: &Path) -> Result<Occupant, Error> {
             // 跟随后不存在：没有这一项就再往上看，有（悬空的符号链接）就建不出来
             Err(e) if is_absent(&e) => {
                 if !exists(ancestor).map_err(io_error("检查", ancestor))? {
+                    missing = Some((ancestor, e));
                     continue;
                 }
             }
@@ -74,7 +76,8 @@ fn occupant_by_ancestor(target: &Path) -> Result<Occupant, Error> {
         let ancestor = ancestor.to_path_buf();
         return Ok(Occupant::Blocked { ancestor });
     }
-    Ok(Occupant::Nothing)
+    let (root, cause) = missing.expect("以文件名结尾的绝对路径至少有一级上级");
+    Err(io_error("检查", root)(cause))
 }
 
 /// 输出能否写，能写时返回路径上现在的东西：空着、是空目录，或要求覆盖而路径上是输出。是输出而没有要求覆盖时报
@@ -598,6 +601,22 @@ mod tests {
         std::os::unix::fs::symlink(dir.join("gone"), &link).unwrap();
 
         assert_blocked(&dir.join("link/sub/out"), &link);
+    }
+
+    /// 输出在不存在的盘符上：连根都不存在，建不出来，以根的错误报出。
+    #[cfg(windows)]
+    #[test]
+    fn an_output_on_a_missing_drive_is_reported() {
+        let drive = ('D'..='Z')
+            .rev()
+            .map(|letter| PathBuf::from(format!("{letter}:\\")))
+            .find(|drive| !drive.exists())
+            .expect("D 到 Z 里至少有一个没用的盘符");
+
+        match check(&pending(OutputKind::Mp4, drive.join("out.mp4")), false) {
+            Err(Error::Io { path, .. }) => assert_eq!(path, drive),
+            other => panic!("应报根不存在：{other:?}"),
+        }
     }
 
     /// 换上没做完时中断：临时输出删掉；挪开的旧输出原处空着就放回，原处是新输出就删掉。
