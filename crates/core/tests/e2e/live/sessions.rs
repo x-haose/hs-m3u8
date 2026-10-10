@@ -196,8 +196,8 @@ async fn a_full_directory_keeps_the_recorded_url() {
     let with_token = |token: u32, max: Option<u64>| {
         let url = Url::parse(&format!("{}?token={token}", server.url("live.m3u8"))).unwrap();
         let mut req = live_request(url, &dir, STALL);
-        req.keep_work_dir = true;
-        req.overwrite = true;
+        req.output.keep_work_dir = true;
+        req.output.overwrite = true;
         req.live = Some(LiveOptions {
             max_duration: max.map(Duration::from_secs),
             ..req.live.unwrap()
@@ -205,7 +205,7 @@ async fn a_full_directory_keeps_the_recorded_url() {
         req
     };
     let first = run(with_token(1, Some(2))).await.unwrap();
-    assert_eq!(first.live.unwrap().end, LiveEnd::DurationReached);
+    assert_eq!(first.live.unwrap().end, Some(LiveEnd::DurationReached));
     let job_json = dir.join("out.mp4.hsdl/job.json");
     let recorded = std::fs::read(&job_json).unwrap();
 
@@ -213,7 +213,7 @@ async fn a_full_directory_keeps_the_recorded_url() {
     server.put("seg1.ts", fixture("ts_long/seg3.ts"));
     server.put("live.m3u8", playlist(&[0, 1], true));
     let second = run(with_token(2, Some(2))).await.unwrap();
-    assert_eq!(second.live.unwrap().end, LiveEnd::DurationReached);
+    assert_eq!(second.live.unwrap().end, Some(LiveEnd::DurationReached));
     assert_eq!(std::fs::read(&job_json).unwrap(), recorded);
 
     let err = run(with_token(2, None)).await.unwrap_err();

@@ -118,7 +118,10 @@ async fn sequence_regression_ends_as_restarted() {
         .unwrap();
 
     assert_output(&output, &expected_long(&dir, &[2, 3], &[2]));
-    assert_eq!(output.live.unwrap().end, LiveEnd::Restarted { track: 0 });
+    assert_eq!(
+        output.live.unwrap().end,
+        Some(LiveEnd::Restarted { track: 0 })
+    );
     assert_eq!(server.hits("seg0.ts"), 0);
 }
 
@@ -190,10 +193,10 @@ async fn changed_segment_ends_recording() {
     assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
     assert_eq!(
         output.live.unwrap().end,
-        LiveEnd::Inconsistent {
+        Some(LiveEnd::Inconsistent {
             track: 0,
             sequence: 1
-        }
+        })
     );
 }
 

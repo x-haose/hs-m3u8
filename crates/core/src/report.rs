@@ -54,8 +54,8 @@ pub struct Output {
 /// 直播的录制结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveReport {
-    /// 本次运行的录制如何结束
-    pub end: LiveEnd,
+    /// 本次运行的录制如何结束；只合并（[`crate::merge_recorded`]）时为 None
+    pub end: Option<LiveEnd>,
     /// 合并进输出的录制会话数。会话是一段时间线连续的录制：中断后续录时，若各轨都与之前录到的内容接得上，
     /// 仍是同一个会话；否则另起一个，与之前的首尾相接
     pub session_count: usize,
@@ -81,8 +81,6 @@ pub enum LiveEnd {
     /// 第 `track` 条轨在序号 `sequence` 处与之前刷新得到的播放列表矛盾：同一序号换了分片，或不连续段编号
     /// 对不上（服务器错误，RFC 8216 6.2.2）；之后的分片未录
     Inconsistent { track: usize, sequence: u64 },
-    /// 按 [`crate::Resume::MergeOnly`] 只合并了已录到的分片
-    MergeOnly,
 }
 
 /// 一条轨停滞时看起来已结束的原因：用于 [`LiveEnd::Stalled`]（各轨都已结束），也用于

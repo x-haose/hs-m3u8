@@ -15,8 +15,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use hs_m3u8_core::{
-    Error, JobRequest, LiveEnd, LiveOptions, LiveReport, MissReason, Missed, Progress, Resume,
-    RetryPolicy, Url,
+    Error, JobRequest, LiveEnd, LiveOptions, LiveReport, MissReason, Missed, Progress, RetryPolicy,
+    Url,
 };
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
@@ -67,7 +67,6 @@ fn live_request(url: Url, dir: &Path, stall_timeout: Duration) -> JobRequest {
     req.live = Some(LiveOptions {
         max_duration: None,
         stall_timeout,
-        resume: Resume::Continue,
     });
     req
 }
@@ -86,15 +85,15 @@ fn slow_retry(delay: Duration) -> RetryPolicy {
 /// 第一次运行到录满 max_duration 自行结束，保留任务目录、删掉输出，供之后续录。
 async fn run_until_full(req: &JobRequest) {
     let mut first = req.clone();
-    first.keep_work_dir = true;
+    first.output.keep_work_dir = true;
     let output = run(first).await.unwrap();
-    assert_eq!(output.live.unwrap().end, LiveEnd::DurationReached);
-    std::fs::remove_file(&req.output).unwrap();
+    assert_eq!(output.live.unwrap().end, Some(LiveEnd::DurationReached));
+    std::fs::remove_file(&req.output.path).unwrap();
 }
 
 fn report(end: LiveEnd, session_count: usize, missed: Vec<Missed>) -> Option<LiveReport> {
     Some(LiveReport {
-        end,
+        end: Some(end),
         session_count,
         missed,
     })
@@ -118,7 +117,7 @@ async fn interrupt(req: &JobRequest, until: impl FnMut(&Progress) -> bool) {
     progress.wait_for(until).await.unwrap();
     job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
-    assert!(!req.output.exists());
+    assert!(!req.output.path.exists());
 }
 
 /// 视频加独立音频 rendition 的直播源：放 fmp4_a 的 init 段与分片，两条媒体播放列表按 `video` / `audio`

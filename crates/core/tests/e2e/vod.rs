@@ -298,7 +298,7 @@ async fn failure_then_resume() {
         ),
         other => panic!("{other}"),
     }
-    assert!(!req.output.exists());
+    assert!(!req.output.path.exists());
     assert!(dir.join("out.mp4.hsdl/job.json").exists());
 
     put_ts_a(&server, "index.m3u8", 0.5);
@@ -442,7 +442,7 @@ async fn cancel_lock_and_resume() {
     );
     job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
-    assert!(!req.output.exists());
+    assert!(!req.output.path.exists());
 
     server.ungate("seg1.ts");
     let output = run(req).await.unwrap();
@@ -613,16 +613,17 @@ async fn signed_init_urls_resume_with_the_right_init() {
     server.put("index.m3u8", playlist([1, 1, 1]));
     server.put("fmp4_b/seg0.m4s", fixture("fmp4_b/video/seg0.m4s"));
     let mut req = req;
-    req.keep_work_dir = true;
+    req.output.keep_work_dir = true;
     let output = run(req.clone()).await.unwrap();
 
     // 两个样本的 init 段只差 SPS/PPS，配错时成片也可能逐字节相同，所以另核对目录里的 init 段
-    let mut inits: Vec<Vec<u8>> = std::fs::read_dir(req.resolved_work_dir().join("tracks/0"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|e| e == "mp4"))
-        .map(|p| std::fs::read(p).unwrap())
-        .collect();
+    let mut inits: Vec<Vec<u8>> =
+        std::fs::read_dir(req.output.resolved_work_dir().join("tracks/0"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|e| e == "mp4"))
+            .map(|p| std::fs::read(p).unwrap())
+            .collect();
     inits.sort();
     let mut want_inits = vec![
         fixture("fmp4_a/video/init.mp4"),
@@ -755,12 +756,12 @@ async fn rejected_before_download() {
     let server = Server::start().await;
 
     let req = request(server.url("index.m3u8"), &dir);
-    std::fs::write(&req.output, b"").unwrap();
+    std::fs::write(&req.output.path, b"").unwrap();
     assert!(matches!(
         engine().start(req.clone()),
         Err(Error::OutputExists(_))
     ));
-    std::fs::remove_file(&req.output).unwrap();
+    std::fs::remove_file(&req.output.path).unwrap();
 
     server.put(
         "live.m3u8",

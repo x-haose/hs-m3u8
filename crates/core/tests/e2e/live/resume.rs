@@ -2,7 +2,10 @@
 
 use std::time::Duration;
 
-use hs_m3u8_core::{Error, JobType, LiveEnd, LiveOptions, MissReason, Resume, Url, WorkDirProblem};
+use hs_m3u8_core::{
+    Error, JobType, LiveEnd, LiveOptions, LiveReport, MissReason, Url, WorkDirProblem,
+    merge_recorded,
+};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
 use super::{
@@ -114,7 +117,6 @@ async fn max_duration_counts_earlier_sessions() {
     req.live = Some(LiveOptions {
         max_duration: Some(Duration::from_secs(2)),
         stall_timeout: STALL,
-        resume: Resume::Continue,
     });
     interrupt(&req, |p| p.segments_done == 1).await;
 
@@ -160,7 +162,7 @@ async fn continue_finds_the_recorded_variant() {
     assert_eq!(server.hits("hi.m3u8"), 0);
 
     // 记录的变体不在了：明确失败，不改录别的变体
-    std::fs::remove_file(&req.output).unwrap();
+    std::fs::remove_file(&req.output.path).unwrap();
     server.put("master.m3u8", format!("#EXTM3U\n{lo}"));
     server.put("lo.m3u8", media("lo", false));
     interrupt(&req, |p| p.segments_done == 2).await;
@@ -247,6 +249,29 @@ async fn a_live_directory_without_live_options_is_a_kind_mismatch() {
     assert!(dir.join("out.mp4.hsdl/job.json").exists());
 }
 
+/// 只合并：不联网，把中断前录到的合并成输出，没有录制结束原因。
+#[tokio::test(flavor = "multi_thread")]
+async fn merge_recorded_merges_without_the_network() {
+    let dir = test_dir("resume_merge");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1, 2, 3]);
+    server.put("live.m3u8", playlist(&[0, 1, 2], false));
+    let req = live_request(server.url("live.m3u8"), &dir, STALL);
+    interrupt(&req, |p| p.segments_done == 3).await;
+    let hits = server.hits("live.m3u8");
+
+    let output = merge_recorded(req.output.clone()).await.unwrap();
+
+    assert_output(&output, &expected_long(&dir, &[0, 1, 2], &[3]));
+    let want = LiveReport {
+        end: None,
+        session_count: 1,
+        missed: vec![],
+    };
+    assert_eq!(output.live, Some(want));
+    assert_eq!(server.hits("live.m3u8"), hits);
+}
+
 /// 只合并时目录里是点播任务：明确报不是直播录制，不当作「没有录到」。
 #[tokio::test(flavor = "multi_thread")]
 async fn merge_only_rejects_a_vod_directory() {
@@ -260,12 +285,7 @@ async fn merge_only_rejects_a_vod_directory() {
     let req = live_request(server.url("vod.m3u8"), &dir, STALL);
     assert!(run(req.clone()).await.is_err());
 
-    let mut merge = req;
-    merge.live = merge.live.map(|live| LiveOptions {
-        resume: Resume::MergeOnly,
-        ..live
-    });
-    let err = run(merge).await.unwrap_err();
+    let err = merge_recorded(req.output).await.unwrap_err();
     assert!(
         matches!(
             err,
