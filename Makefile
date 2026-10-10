@@ -9,9 +9,11 @@ ifeq ($(shell uname -s),Darwin)
 export BINDGEN_EXTRA_CLANG_ARGS := --sysroot=$(shell xcrun --show-sdk-path)
 endif
 
-# Python 开发环境：uv 把开发工具装进 $(VENV)（Python 版本由 UV_PYTHON 指定，如 make py_test VENV=.venv-3.15
-# UV_PYTHON=3.15）；PyO3 的构建脚本按它确定 Python 版本与链接参数
+# Python 开发环境：uv 把开发工具装进 $(VENV)，Python 默认用支持的最低版本，换版本另给目录（如 make py_test
+# VENV=.venv-3.15 UV_PYTHON=3.15）；PyO3 的构建脚本按它确定 Python 版本与链接参数
 VENV ?= .venv
+UV_PYTHON ?= 3.12
+export UV_PYTHON
 export UV_PROJECT_ENVIRONMENT := $(VENV)
 PYTHON := $(abspath $(VENV)/bin/python)
 export PYO3_PYTHON := $(PYTHON)
@@ -56,8 +58,9 @@ ffmpeg_present:
 ffmpeg:
 	third_party/ffmpeg/build.sh
 
+# --inexact：不卸掉 maturin develop 装进来的 hs-m3u8（pyproject 里 package = false，uv 不认它）
 py_env:
-	uv sync --locked
+	uv sync --locked --inexact
 
 # 构建扩展模块（调试版）并装进 .venv
 py_develop: py_env ffmpeg_present
