@@ -348,10 +348,31 @@ fn timestamps_going_back_within_a_group_fail() {
     assert!(
         matches!(
             err,
-            Error::Unsupported(Unsupported::DtsBackward {
+            Error::Unsupported(Unsupported::DtsNotIncreasing {
                 group: 0,
                 track: 0,
                 ..
+            })
+        ),
+        "实际 {err:?}"
+    );
+}
+
+/// 相邻分片首尾重复了一帧：两帧的解码时间戳相同，同样放不进同一条 MP4 轨。
+#[test]
+fn a_frame_repeated_across_segments_fails() {
+    let dir = work_dir("repeated_frame");
+    let output = dir.join("out.mp4");
+
+    let err = remux(&[Streams::Video], &[group([track("ts_repeat")])], &output).unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::DtsNotIncreasing {
+                group: 0,
+                track: 0,
+                kind: StreamKind::Video,
             })
         ),
         "实际 {err:?}"
