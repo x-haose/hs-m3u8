@@ -217,7 +217,8 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 
 - 组内：分片按字节顺序当作一个连续的输入读取（fMP4 时 init 段在前），经 ffmpeg-next 的自定义 IO 交给 FFmpeg；同一时刻只打开一个分片文件，不先拼成大文件。FFmpeg 自带的 concat 协议会同时打开全部文件，一组几百个分片就超过进程的文件描述符上限（macOS 图形程序默认 256）。
 - 组间：整组共用一个时间偏移，保留组内各轨（视频与独立音频 rendition）原有的相对时序。偏移取两个下限中较大者：本组最早的 PTS 不早于此前所有流的最晚结束时刻；每路流本组首个 DTS 严格大于上一组末个 DTS（加一个输出时间基 tick 的余量吸收舍入）。按呈现而非 DTS 对齐，B 帧的解码提前量不会在组边界留下空隙。
-- 每条轨按 `Streams` 贡献第一路视频和（或）第一路音频，未指定种类的流不进输出、不检查编码；同类流只能来自一条轨；后续组的流种类与编码参数（编码、宽高、采样率、声道数）必须与第 0 组一致，否则报 `Unsupported::ParamsChanged`（流种类不同为 `LayoutChanged`），由 core 决定如何处理（例如分辨率不同的广告段）。
+- 每条轨按 `Streams` 贡献第一路视频和（或）第一路音频，没有这类流的轨不贡献（如只有音频的变体又选了独立音频：输出只有音频），各轨都没有时报 `Unsupported::NoStreams`；未指定种类的流不进输出、不检查编码；同类流只能来自一条轨；后续组的流种类与编码参数（编码、宽高、采样率、声道数）必须与第 0 组一致，否则报 `Unsupported::ParamsChanged`（流种类不同为 `LayoutChanged`），由 core 决定如何处理（例如分辨率不同的广告段）。
+- 组内每路流的解码时间戳不能往回跳（多为来源漏标了 `EXT-X-DISCONTINUITY`），否则报 `Unsupported::DtsBackward`；MP4 封装器对此只报「参数不合法」，在写包前查出来，与写盘失败分开。
 - 只接受 H.264、HEVC 与 AAC，其余编码报 `Unsupported::Codec`。内容放不进 MP4 的这三种归在 `remux::Error::Unsupported` 一个分支，core 转为 `Unsupported::Mp4`，与写盘等其他合并失败（`Error::Remux`）分开：调用方据此建议改为输出本地 HLS。
 - 写到调用方给的路径（core 给临时名，成功后改名），写完回读核对包数并落盘，失败时删除；其余约束见 ADR-0002：`Packet::read`、HEVC 标 `hvc1`、moov 前置。
 
