@@ -14,7 +14,9 @@ use crate::{Error, hls};
 /// 一个下载任务的配置。用 [`JobRequest::new`] 取默认值后按需修改字段。
 #[derive(Clone)]
 pub struct JobRequest {
-    /// 主播放列表或媒体播放列表的地址
+    /// 主播放列表或媒体播放列表的地址。它去掉用户名、密码、查询串与片段后，连同 `preference`，称为本任务的
+    /// 来源：任务目录记录的来源不同即是另一个任务（[`crate::WorkDirProblem::SourceMismatch`]）；来源相同而完整
+    /// 地址不同（如换了令牌）时，直播续录见 [`crate::Resume::Continue`]
     pub url: Url,
     /// 输出的 MP4 路径；所在目录不存在时在合并前创建
     pub output: PathBuf,
@@ -22,8 +24,7 @@ pub struct JobRequest {
     pub work_dir: Option<PathBuf>,
     /// 附加到所有请求的请求头
     pub headers: Vec<(String, String)>,
-    /// 选轨偏好。它与来源地址一起决定「是不是同一个任务」：任务目录里有已完成的分片、而记录的偏好与它不同时报
-    /// [`crate::WorkDirProblem::SourceMismatch`]。相同时按记录的变体与音频找回同一条轨，不重新选
+    /// 选轨偏好，属于来源（见 `url`）。任务目录里有已完成的分片时按记录的变体与音频找回同一条轨，不按偏好重新选
     pub preference: hls::Preference,
     /// 本任务同时下载的分片数
     pub concurrency: NonZeroUsize,
@@ -127,7 +128,8 @@ pub(crate) fn check_output(output: &Path, overwrite: bool) -> Result<(), Error> 
 ///
 /// 录制从当前播放列表里的全部分片开始，按 RFC 8216 6.3.4 的节奏刷新，直到所有轨出现 EXT-X-ENDLIST、
 /// 调用 [`crate::Job::stop`]、各轨都录满 `max_duration`、任一轨停滞，或服务器的播放列表前后矛盾
-/// （序号回退、同一序号换了分片）。结束后把已列出的分片下完再合并，结束原因见 [`crate::LiveEnd`]。
+/// （序号回退、同一序号换了分片）。结束后把已拉到的播放列表处理完、已列出的分片下完再合并，结束原因见
+/// [`crate::LiveEnd`]。
 ///
 /// 停滞：任一轨持续 `stall_timeout` 没有录到新分片（有分片还在排队或下载时不算）。播放列表不再出新分片
 /// 或已被删除（404/410），且其他轨也不再出，视为直播已结束，照常合并；刷新一直失败、一直不返回，
@@ -167,13 +169,12 @@ impl Default for LiveOptions {
 pub enum Resume {
     /// 续录。各轨当前的窗口都与各自之前录到的接得上时，接着录，并补上窗口内之前没录完的分片，时间线连续；
     /// 否则另起一段，与之前的首尾相接（中断期间的内容不在输出中），之前录过的分片不重录。最后一并合并。
-    /// 完整来源地址与记录的不同（来源摘要相同，如换了令牌）时，必须都接得上才续录，否则报
-    /// [`crate::WorkDirProblem::SourceUnverified`]；各轨都已录满时不改记地址，直接合并
+    /// 来源相同而完整地址与记录的不同（如换了令牌）时，要录的各轨都接得上才续录并改记新地址，否则报
+    /// [`crate::WorkDirProblem::SourceUnverified`]；这次没有要录的轨（都已录满或已结束）时不改记，直接合并
     Continue,
-    /// 不联网，只把已录到的分片合并成输出。目录须是本来源（地址去掉用户名、密码、查询串与片段后，以及选轨偏好，
-    /// 都与记录的相同）的直播录制：
-    /// 来源不同报 [`crate::WorkDirProblem::SourceMismatch`]，是点播的下载报
-    /// [`crate::WorkDirProblem::NotLiveRecording`]；没有可合并的分片时报 [`Error::NothingRecorded`]
+    /// 不联网，只把已录到的分片合并成输出。目录须是同一来源（见 [`crate::JobRequest::url`]）的直播录制：来源不同报
+    /// [`crate::WorkDirProblem::SourceMismatch`]，是点播的下载报 [`crate::WorkDirProblem::NotLiveRecording`]；
+    /// 没有可合并的分片时报 [`Error::NothingRecorded`]
     MergeOnly,
 }
 

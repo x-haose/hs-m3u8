@@ -39,7 +39,7 @@ enum Refresh {
 
 /// 这条轨在本次运行里的角色。
 enum Role {
-    /// 会话还没定下。`candidate` 为已拿到第一份有分片（或已结束）的播放列表，在等核对或等其他轨；
+    /// 会话还没定下。`candidate` 为已拿到候选（第一份有分片的播放列表），在等核对或等其他轨；
     /// `seen` 为见过的分片序号范围（首, 尾），用于判断是否列出了新分片
     Undecided {
         candidate: bool,
@@ -143,7 +143,7 @@ impl LiveTrack {
         self.role = Role::Idle;
     }
 
-    /// 会话定下之前拿到了第一份有分片（或已结束）的播放列表。
+    /// 会话定下之前拿到了候选（第一份有分片的播放列表）。
     pub(super) fn has_candidate(&self) -> bool {
         matches!(
             self.role,
