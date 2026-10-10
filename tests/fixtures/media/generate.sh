@@ -66,4 +66,12 @@ ts_segments ts_mp3 "${one_src[@]}" "${h264[@]}" -c:a libmp3lame -b:a 64k
 read -r -a long_src <<< "$(source_args testsrc2 160x90 440 4)"
 ts_segments ts_long "${long_src[@]}" "${h264[@]}" "${aac[@]}"
 
+# 边界重复一帧：两个 10 帧/秒、没有 B 帧的纯视频分片，第二个从第一个的最后一帧开始，两帧的解码时间戳相同
+rm -rf -- "${DIR:?}/ts_repeat"
+mkdir -p "$DIR/ts_repeat"
+repeat=(-f lavfi -i testsrc2=size=160x90:rate=10)
+repeat_enc=(-c:v libx264 -preset veryfast -bf 0 -g 10 -an -f mpegts)
+"${ff[@]}" "${repeat[@]}" -t 1 "${repeat_enc[@]}" "$DIR/ts_repeat/seg0.ts"
+"${ff[@]}" "${repeat[@]}" -ss 0.9 -t 1 -output_ts_offset 0.9 "${repeat_enc[@]}" "$DIR/ts_repeat/seg1.ts"
+
 find "$DIR" -type f ! -name generate.sh | sort | xargs ls -l

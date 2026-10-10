@@ -246,9 +246,11 @@ pub enum Unsupported {
         first: Shape,
         found: Shape,
     },
-    /// 多为来源在时间戳重新开始处漏标了 `EXT-X-DISCONTINUITY`
-    #[error("第 {group} 组第 {track} 条轨的{kind}解码时间戳往回跳，无法放进同一条 MP4 轨")]
-    DtsBackward {
+    /// 往回跳多为来源在时间戳重新开始处漏标了 `EXT-X-DISCONTINUITY`，重复多为相邻分片首尾重复了一帧
+    #[error(
+        "第 {group} 组第 {track} 条轨的{kind}解码时间戳不递增（往回跳或重复），无法放进同一条 MP4 轨"
+    )]
+    DtsNotIncreasing {
         group: usize,
         track: usize,
         kind: StreamKind,
@@ -514,7 +516,7 @@ impl Source {
     }
 }
 
-/// 一路输出流：第 0 组决定其编码参数，写出过程中累计统计。时刻均为输出时间线上的微秒。
+/// 一路输出流：第 0 组决定其编码参数，写出过程中累计统计。`_us` 结尾的时刻为输出时间线上的微秒。
 struct OutStream {
     shape: Shape,
     /// 写头之后由封装器确定
@@ -524,6 +526,8 @@ struct OutStream {
     start_us: Option<i64>,
     end_us: Option<i64>,
     last_dts_us: Option<i64>,
+    /// 写出的上一个包的 DTS，输出时间基
+    last_dts: Option<i64>,
 }
 
 fn write_verified(
@@ -548,6 +552,7 @@ fn write_verified(
             start_us: None,
             end_us: None,
             last_dts_us: None,
+            last_dts: None,
         })
         .collect();
     // 组间余量：最粗的输出时间基的一个 tick（向上取整到微秒）。换到输出时间基时的舍入不超过半个 tick，
@@ -736,14 +741,17 @@ fn write_group(
         let out = mapping.output;
         let o = &mut outs[out];
         let t = retime(&mut packet, mapping.time_base, o.time_base, offset_us);
-        // 组间的偏移保证递增，往回跳只会出在组内；封装器对此只报「参数不合法」
-        if o.last_dts_us.is_some_and(|last| t.dts_us < last) {
-            return Err(Error::Unsupported(Unsupported::DtsBackward {
+        // MP4 封装器要求每路流的 DTS 在输出时间基下严格递增，不满足时只报「参数不合法」；组间的偏移保证跨组递增，
+        // 不递增只会出在组内
+        let dts = packet.dts().expect("retime 设了 DTS");
+        if o.last_dts.is_some_and(|last| dts <= last) {
+            return Err(Error::Unsupported(Unsupported::DtsNotIncreasing {
                 group,
                 track: source.track,
                 kind: o.shape.kind(),
             }));
         }
+        o.last_dts = Some(dts);
         o.start_us = Some(o.start_us.map_or(t.pts_us, |s| s.min(t.pts_us)));
         o.end_us = Some(o.end_us.map_or(t.end_us, |e| e.max(t.end_us)));
         o.last_dts_us = Some(t.dts_us);
