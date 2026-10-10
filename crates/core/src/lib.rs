@@ -46,8 +46,8 @@ pub use info::{AudioInfo, MasterInfo, Selected, TrackInfo, VariantInfo};
 pub use output::{OutputOptions, Target};
 pub use probe::Probe;
 pub use report::{
-    LiveEnd, LiveReport, MissReason, Missed, Mp4Output, Output, Progress, RefreshError,
-    RefreshFailure, Stage, StallCause,
+    LiveEnd, LiveReport, MissReason, Missed, Mp4Output, Output, Progress, RefreshCause, Stage,
+    StallCause,
 };
 pub use request::{
     HttpOptions, JobRequest, KeyOverride, LiveOptions, RetryPolicy, Source, Timeouts,

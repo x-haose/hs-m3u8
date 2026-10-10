@@ -37,10 +37,7 @@ use crate::http::Http;
 use crate::request::LiveOptions;
 use crate::resolve::ResolvedTrack;
 use crate::workdir::{self, Stored, StoredInit, WorkDir};
-use crate::{
-    Error, LiveEnd, MissReason, Missed, Progress, RefreshError, RefreshFailure, Stage,
-    WorkDirProblem,
-};
+use crate::{Error, LiveEnd, MissReason, Missed, Progress, RefreshCause, Stage, WorkDirProblem};
 
 /// 本次运行的录制结果。
 pub(crate) struct Outcome {
@@ -113,7 +110,10 @@ pub(crate) async fn record(
     options: LiveOptions,
 ) -> Result<Outcome, Error> {
     let (dir, progress) = (ctx.dir, ctx.progress);
-    progress.send_modify(|p| p.stage = Stage::Recording);
+    progress.send_modify(|p| {
+        p.stage = Stage::Recording;
+        p.refresh_errors = vec![None; tracks.len()];
+    });
     let stored = dir.scan(tracks.len()).await?;
     count_stored(&stored, progress);
     let now = Instant::now();
@@ -156,6 +156,7 @@ pub(crate) async fn record(
         Err(e) => Err(e),
     };
     recorder.tasks.shutdown().await;
+    recorder.clear_refresh_errors();
     recorder.settle(result, fetcher).await
 }
 
@@ -237,6 +238,25 @@ impl Recorder<'_> {
     /// 定下结束原因；已有的不变。
     fn end(&mut self, end: LiveEnd) {
         self.ending.get_or_insert(end);
+        self.clear_refresh_errors();
+    }
+
+    /// 第 `track` 条轨最近一次刷新失败的原因计入进度；None 为清空。
+    fn note_refresh(&self, track: usize, cause: Option<RefreshCause>) {
+        self.progress.send_if_modified(|p| {
+            let changed = p.refresh_errors[track] != cause;
+            p.refresh_errors[track] = cause;
+            changed
+        });
+    }
+
+    /// 不再刷新（结束中或已结束）时清空各轨的刷新失败。
+    fn clear_refresh_errors(&self) {
+        self.progress.send_if_modified(|p| {
+            let changed = p.refresh_errors.iter().any(Option::is_some);
+            p.refresh_errors.fill(None);
+            changed
+        });
     }
 
     /// 发起到期的刷新，等下一件事。已完成的后台任务与下载先于停止、停滞处理：停止前已拉到的照常处理，
@@ -375,21 +395,13 @@ impl Recorder<'_> {
                 let Some(cause) = waitable_refresh_error(&e) else {
                     return Err(e);
                 };
-                self.progress.send_modify(|p| {
-                    p.refresh_error = Some(RefreshError { track, cause });
-                });
+                self.note_refresh(track, Some(cause));
                 self.tracks[track].refresh_failed(e, Instant::now());
                 return Ok(());
             }
         };
         self.tracks[track].refreshed();
-        self.progress.send_if_modified(|p| {
-            let cleared = p.refresh_error.as_ref().is_some_and(|r| r.track == track);
-            if cleared {
-                p.refresh_error = None;
-            }
-            cleared
-        });
+        self.note_refresh(track, None);
         let fetched = Fetched { playlist, started };
         if self.tracks[track].is_undecided() {
             return self.undecided(track, fetched).await;
@@ -519,15 +531,15 @@ impl Recorder<'_> {
 
 /// 刷新失败中可以等下次刷新的及其原因：取不到（含 404/410，直播结束时常见）、内容为空或语法错误（服务器
 /// 没写完）。其余（401/403 等、内容不是播放列表、DRM、回调出错）为 None，使任务失败。
-fn waitable_refresh_error(error: &Error) -> Option<RefreshFailure> {
+fn waitable_refresh_error(error: &Error) -> Option<RefreshCause> {
     match error {
         Error::Playlist { cause, .. } => match **cause {
             hls::Error::Syntax { .. } | hls::Error::Empty => {
-                Some(RefreshFailure::Playlist((**cause).clone()))
+                Some(RefreshCause::Playlist((**cause).clone()))
             }
             _ => None,
         },
-        _ => error.missable().map(RefreshFailure::Http),
+        _ => error.missable().map(RefreshCause::Http),
     }
 }
 

@@ -54,6 +54,7 @@ impl Recorder<'_> {
                 continue;
             }
             self.tracks[track].end_undecided();
+            self.note_refresh(track, None);
             self.verdicts().conclude(track, Verdict::Ended);
         }
         self.decide_if_complete().await
