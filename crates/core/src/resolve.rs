@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use hs_m3u8_hls::{self as hls, MediaPlaylist, Playlist};
+use hs_m3u8_hls::{self as hls, MasterPlaylist, MediaPlaylist, Playlist, Selection};
 use hs_m3u8_remux::Streams;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -23,11 +23,24 @@ pub(crate) struct ResolvedTrack {
 /// 解析结果。
 pub(crate) struct Resolved {
     pub tracks: Vec<ResolvedTrack>,
-    /// 来源是主播放列表时所选的变体与音频
-    pub selection: Option<SelectionKey>,
+    /// 来源是主播放列表时为它与其中所选的轨；来源本身是媒体播放列表时为 None
+    pub master: Option<Chosen>,
+}
+
+/// 主播放列表与其中所选的轨。
+pub(crate) struct Chosen {
+    pub playlist: MasterPlaylist,
+    pub selection: Selection,
+    /// 记进任务目录的选轨身份
+    pub key: SelectionKey,
 }
 
 impl Resolved {
+    /// 记进任务目录的选轨身份；来源本身是媒体播放列表时为 None。
+    pub(crate) fn selection_key(&self) -> Option<SelectionKey> {
+        self.master.as_ref().map(|m| m.key.clone())
+    }
+
     /// 有任一条轨的播放列表没有 EXT-X-ENDLIST 即为直播。
     pub(crate) fn is_live(&self) -> bool {
         self.tracks.iter().any(|t| !t.playlist.ended)
@@ -35,7 +48,7 @@ impl Resolved {
 
     /// 各轨的取流方式。
     pub(crate) fn streams(&self) -> Vec<Streams> {
-        track_streams(self.selection.as_ref())
+        track_streams(self.master.as_ref().map(|m| &m.key))
     }
 }
 
@@ -55,7 +68,7 @@ pub(crate) async fn resolve(
                     url: source.url.clone(),
                     playlist,
                 }],
-                selection: None,
+                master: None,
             },
             Playlist::Master(master) => {
                 let selection = match recorded {
@@ -66,19 +79,23 @@ pub(crate) async fn resolve(
                     None => hls::select(&master, &source.preference)?,
                 };
                 let key = SelectionKey::of(&selection, &master);
-                let url = selection.variant.uri;
+                let url = selection.variant.uri.clone();
                 let playlist = fetch_media(http, hooks, &url, cancel).await?;
                 let mut tracks = vec![ResolvedTrack { url, playlist }];
-                if let Some(audio) = selection.audio {
+                if let Some(audio) = &selection.audio {
                     let playlist = fetch_media(http, hooks, &audio.uri, cancel).await?;
                     tracks.push(ResolvedTrack {
-                        url: audio.uri,
+                        url: audio.uri.clone(),
                         playlist,
                     });
                 }
                 Resolved {
                     tracks,
-                    selection: Some(key),
+                    master: Some(Chosen {
+                        playlist: master,
+                        selection,
+                        key,
+                    }),
                 }
             }
         },

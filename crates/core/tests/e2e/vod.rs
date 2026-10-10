@@ -127,7 +127,22 @@ async fn split_audio_video_with_redirect_and_discontinuity() {
     );
     server.redirect("watch", "hls/master.m3u8");
 
-    let output = run(request(server.url("watch"), &dir)).await.unwrap();
+    // 探测：列出主播放列表、按偏好选出的轨与各轨的媒体播放列表，相对地址按重定向之后的地址解析
+    let req = request(server.url("watch"), &dir);
+    let probe = engine().probe(&req.source).await.unwrap();
+    let master = probe.master.unwrap();
+    assert_eq!((master.variants.len(), master.renditions.len()), (1, 1));
+    let selection = probe.selection.unwrap();
+    assert_eq!(selection.variant.uri, server.url("hls/video.m3u8"));
+    assert_eq!(selection.audio.unwrap().uri, server.url("hls/audio.m3u8"));
+    let counts: Vec<(usize, bool)> = probe
+        .tracks
+        .iter()
+        .map(|t| (t.segments.len(), t.ended))
+        .collect();
+    assert_eq!(counts, [(3, true), (5, true)]);
+
+    let output = run(req).await.unwrap();
 
     let program = |name: &str, video: &[&str], audio: &[&str]| DiscontinuityGroup {
         tracks: vec![
@@ -524,6 +539,10 @@ async fn hooks_adapt_site() {
 
     let mut req = request(server.url("index.m3u8"), &dir);
     req.source.hooks = Arc::new(SiteHooks);
+    // 探测经同样的回调：带上签名请求头，播放列表经改写
+    let probe = engine().probe(&req.source).await.unwrap();
+    assert_eq!(probe.master, None);
+    assert_eq!(probe.tracks[0].segments[1].uri, server.url("seg1.ts"));
     let output = run(req).await.unwrap();
 
     let want = expected_ts_a(&dir);
