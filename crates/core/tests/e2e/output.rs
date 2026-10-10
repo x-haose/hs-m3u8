@@ -201,7 +201,8 @@ async fn hls_only_keeps_codecs_the_mp4_cannot_take() {
 }
 
 /// 已有的 HLS 目录：为空（系统自动生成的元数据文件不算）可以直接写；全是本库写出的文件时不覆盖就报已存在、
-/// 覆盖即替换；里面有别的文件时覆盖也不替换，报另一种错误。
+/// 覆盖即替换；里面有别的文件时覆盖也不替换，报另一种错误。元数据文件含 macOS 在 exFAT 等卷上为每个文件与目录
+/// 生成的 `._<名字>`。
 #[tokio::test(flavor = "multi_thread")]
 async fn existing_hls_directories_are_replaced_only_when_written_by_the_library() {
     let dir = test_dir("output_overwrite");
@@ -225,6 +226,9 @@ async fn existing_hls_directories_are_replaced_only_when_written_by_the_library(
     let mut replace = req;
     replace.output.overwrite = true;
     std::fs::write(hls.join("0/Thumbs.db"), "资源管理器生成的").unwrap();
+    for name in ["._index.m3u8", "._0", "0/._0.ts"] {
+        std::fs::write(hls.join(name), "扩展属性").unwrap();
+    }
     run(replace.clone()).await.unwrap();
     assert!(hls.join("0/0.ts").is_file());
 
@@ -530,6 +534,7 @@ async fn hls_cannot_mix_fmp4_and_ts_in_one_track() {
 
 /// 输出经符号链接落在任务目录里（按字面比较看不出）：删除任务目录时只删本库写的文件，输出留下，
 /// 没删完的原因记在 cleanup_error 里；job.json 也留下，目录仍是任务目录，再运行（覆盖）照常进行。
+/// AppleDouble 文件随主文件：输出与 job.json 的留下，锁文件的删掉。
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn outputs_inside_the_work_dir_survive_its_removal() {
@@ -542,6 +547,9 @@ async fn outputs_inside_the_work_dir_survive_its_removal() {
     );
     let work = dir.join("work");
     std::fs::create_dir(&work).unwrap();
+    for name in ["._out.mp4", "._job.json", "._lock"] {
+        std::fs::write(work.join(name), "扩展属性").unwrap();
+    }
     std::os::unix::fs::symlink(&work, dir.join("link")).unwrap();
     let target = Target::Mp4(dir.join("link/out.mp4"));
     let mut req = request_to(server.url("index.m3u8"), &dir, target);
@@ -552,8 +560,10 @@ async fn outputs_inside_the_work_dir_survive_its_removal() {
     assert!(work.join("out.mp4").is_file());
     let cleanup = output.cleanup_error.expect("留有输出，任务目录没删完");
     assert!(cleanup.contains("out.mp4"), "{cleanup}");
-    assert!(work.join("job.json").is_file());
-    for name in ["lock", "tracks"] {
+    for name in ["job.json", "._out.mp4", "._job.json"] {
+        assert!(work.join(name).is_file(), "{name} 应留下");
+    }
+    for name in ["lock", "._lock", "tracks"] {
         assert!(!work.join(name).exists(), "{name} 应已删除");
     }
 
@@ -562,7 +572,8 @@ async fn outputs_inside_the_work_dir_survive_its_removal() {
     assert!(work.join("out.mp4").is_file());
 }
 
-/// 下载期间系统在任务目录里生成了元数据文件（在访达里打开过）：成功后照样删掉整个任务目录。
+/// 下载期间系统在任务目录里生成了元数据文件（在访达里打开过；在 exFAT 等卷上，macOS 为每个文件与目录生成
+/// `._<名字>`，主文件不在的也算）：成功后照样删掉整个任务目录。
 #[tokio::test(flavor = "multi_thread")]
 async fn system_files_in_the_work_dir_do_not_block_its_removal() {
     let dir = test_dir("output_work_dir_ds_store");
@@ -580,6 +591,15 @@ async fn system_files_in_the_work_dir_do_not_block_its_removal() {
     gate.arrived.notified().await;
     std::fs::write(work.join(".DS_Store"), "访达生成的").unwrap();
     std::fs::write(work.join("tracks/0/.DS_Store"), "访达生成的").unwrap();
+    for name in [
+        "._job.json",
+        "._lock",
+        "._tracks",
+        "tracks/._0",
+        "tracks/0/._gone.seg",
+    ] {
+        std::fs::write(work.join(name), "扩展属性").unwrap();
+    }
     server.ungate("seg1.ts");
 
     let output = job.wait().await.unwrap();

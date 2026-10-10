@@ -167,9 +167,9 @@ impl WorkDir {
     }
 
     /// 删除整个任务目录。只删本库写的文件（`job.json`、`outputs.json`、各轨的分片与 init 段，以及它们写到一半的
-    /// `.part`）、系统自动生成的元数据文件（见 [`entries::Entry::is_system_file`]）与因此变空的目录；其他文件（例如经符号链接或只差大小写的路径
-    /// 写进来的输出）原样留下，返回删除失败并指出留下的文件。有东西留下时 `job.json` 也留下：目录仍是可识别的
-    /// 任务目录，下次运行照常使用（没有已完成的分片，按当前任务重新开始）。
+    /// `.part`）、系统自动生成的元数据文件（见 [`remove_system_file`]）与因此变空的目录；其他文件（例如经符号链接或
+    /// 只差大小写的路径写进来的输出）原样留下，返回删除失败并指出留下的文件。有东西留下时 `job.json` 也留下：目录
+    /// 仍是可识别的任务目录，下次运行照常使用（没有已完成的分片，按当前任务重新开始）。
     ///
     /// 持锁删掉其余内容，最后删锁文件，再释放锁、删目录：释放锁之后别的任务就能打开这个目录，先删内容保证它看到的
     /// 不会是删到一半的任务；锁文件也在持锁时删，别的任务打开的是新建的锁文件，不会锁上本任务还持有的那个。
@@ -178,7 +178,7 @@ impl WorkDir {
         let WorkDir { layout, lock, .. } = self;
         blocking(move || {
             let root = &layout.root;
-            let mut kept = Vec::new();
+            let (mut kept, mut system) = (Vec::new(), Vec::new());
             let mut job = None;
             for entry in entries::list(root)? {
                 let (path, kind) = (&entry.path, entry.kind);
@@ -192,17 +192,24 @@ impl WorkDir {
                     Some(LOCK_FILE) => {}
                     Some(JOB_FILE) if kind.is_file() => job = Some(entry.path),
                     Some(TRACKS_DIR) if kind.is_dir() => remove_tracks(path, &mut kept)?,
-                    _ if ours || entry.is_system_file() => {
-                        fs::remove_file(path).map_err(io_error("删除", path))?;
-                    }
+                    _ if entry.is_system_file() => system.push(entry),
+                    _ if ours => fs::remove_file(path).map_err(io_error("删除", path))?,
                     _ => kept.push(entry.path),
                 }
             }
-            if let Some(job) = job.filter(|_| kept.is_empty()) {
-                fs::remove_file(&job).map_err(io_error("删除", &job))?;
+            let mut remaining = kept.clone();
+            match job {
+                Some(job) if kept.is_empty() => {
+                    fs::remove_file(&job).map_err(io_error("删除", &job))?
+                }
+                Some(job) => remaining.push(job),
+                None => {}
             }
             let lock_path = root.join(LOCK_FILE);
             fs::remove_file(&lock_path).map_err(io_error("删除", &lock_path))?;
+            for entry in &system {
+                remove_system_file(entry, &remaining)?;
+            }
             drop(lock);
             if let Some(first) = kept.first() {
                 let reason = format!("留有不是本库写的文件：{}", first.display());
@@ -220,13 +227,15 @@ impl WorkDir {
     }
 }
 
-/// 删掉 `tracks/` 下各轨的分片与 init 段（含写到一半的 `.part`）与变空的目录；认不得的记进 `kept`。
+/// 删掉 `tracks/` 下各轨的分片与 init 段（含写到一半的 `.part`）、系统自动生成的元数据文件与变空的目录；认不得的
+/// 记进 `kept`。
 fn remove_tracks(tracks: &Path, kept: &mut Vec<PathBuf>) -> Result<(), Error> {
     let before = kept.len();
+    let mut system = Vec::new();
     for track in entries::list(tracks)? {
         let dir = &track.path;
         if track.is_system_file() {
-            fs::remove_file(dir).map_err(io_error("删除", dir))?;
+            system.push(track);
             continue;
         }
         if !(track.kind.is_dir() && track.name.to_str().is_some_and(is_canonical_number)) {
@@ -234,26 +243,49 @@ fn remove_tracks(tracks: &Path, kept: &mut Vec<PathBuf>) -> Result<(), Error> {
             continue;
         }
         let track_before = kept.len();
+        let mut track_system = Vec::new();
         for entry in entries::list(dir)? {
             let ours = entry.kind.is_file()
                 && entry.name.to_str().is_some_and(|n| {
                     let n = n.strip_suffix(".part").unwrap_or(n);
                     parse_segment_name(n).is_some() || parse_init_name(n).is_some()
                 });
-            if ours || entry.is_system_file() {
+            if entry.is_system_file() {
+                track_system.push(entry);
+            } else if ours {
                 fs::remove_file(&entry.path).map_err(io_error("删除", &entry.path))?;
             } else {
                 kept.push(entry.path);
             }
         }
+        for entry in &track_system {
+            remove_system_file(entry, &kept[track_before..])?;
+        }
         if kept.len() == track_before {
             fs::remove_dir(dir).map_err(io_error("删除", dir))?;
         }
+    }
+    for entry in &system {
+        remove_system_file(entry, &kept[before..])?;
     }
     if kept.len() == before {
         fs::remove_dir(tracks).map_err(io_error("删除", tracks))?;
     }
     Ok(())
+}
+
+/// 删掉系统自动生成的元数据文件 `entry`（见 [`entries::Entry::is_system_file`]）。AppleDouble 文件随它的主文件：
+/// 主文件或主目录里的东西在 `remaining` 中（留下）时它也留下；macOS 删除主文件时已一并删掉它，已不存在不算失败。
+fn remove_system_file(entry: &entries::Entry, remaining: &[PathBuf]) -> Result<(), Error> {
+    if let Some(owner) = entry.apple_double_owner()
+        && remaining.iter().any(|path| path.starts_with(&owner))
+    {
+        return Ok(());
+    }
+    match fs::remove_file(&entry.path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other.map_err(io_error("删除", &entry.path)),
+    }
 }
 
 /// 有可续的内容时读取任务目录的记录；目录或 `job.json` 不存在，或还没有已完成的分片时为 None（按当前请求

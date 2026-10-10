@@ -15,15 +15,29 @@ pub(crate) struct Entry {
 }
 
 impl Entry {
-    /// 系统自动生成的元数据文件（访达的 `.DS_Store`、Windows 资源管理器的 `Thumbs.db` 与 `desktop.ini`）：不含用户
-    /// 的内容，判断目录是否为空、是否全是本库写的文件时不算，删除目录时一起删。
+    /// 系统自动生成的元数据文件：访达的 `.DS_Store`、Windows 资源管理器的 `Thumbs.db` 与 `desktop.ini`，以及
+    /// AppleDouble 文件（见 [`Entry::apple_double_owner`]）。不含用户的内容，判断目录是否为空、是否全是本库写的
+    /// 文件时不算。
     pub(crate) fn is_system_file(&self) -> bool {
         const SYSTEM_FILES: [&str; 3] = [".DS_Store", "Thumbs.db", "desktop.ini"];
-        self.kind.is_file()
-            && self
-                .name
-                .to_str()
-                .is_some_and(|n| SYSTEM_FILES.contains(&n))
+        self.apple_double_owner().is_some()
+            || self.kind.is_file()
+                && self
+                    .name
+                    .to_str()
+                    .is_some_and(|n| SYSTEM_FILES.contains(&n))
+    }
+
+    /// AppleDouble 文件 `._<名字>` 所属的同目录的 `<名字>`；不是 AppleDouble 文件时为 None。macOS 在不能存扩展
+    /// 属性的文件系统（exFAT、FAT32、部分网络共享）上为每个带扩展属性的文件与目录生成一个，删除 `<名字>` 时一并删除；
+    /// 在别的系统上读这种卷时要自己删。
+    pub(crate) fn apple_double_owner(&self) -> Option<PathBuf> {
+        let owner = self
+            .name
+            .to_str()?
+            .strip_prefix("._")
+            .filter(|o| !o.is_empty())?;
+        self.kind.is_file().then(|| self.path.with_file_name(owner))
     }
 }
 
