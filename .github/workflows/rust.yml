@@ -75,11 +75,16 @@ jobs:
         if: runner.os == 'macOS'
         run: make rs_fmt rs_clippy rs_test
 
-      # Windows 的 make 只在 MSYS2 里，而 MSYS2 的 link.exe 会遮住 MSVC 的链接器，所以直接运行
-      # 与 Makefile 的 rs_fmt、rs_clippy、rs_test 相同的命令
-      - name: 格式、clippy、测试（Windows）
+      # Windows 的 make 只在 MSYS2 里，而 MSYS2 的 link.exe 会遮住 MSVC 的链接器，所以直接运行与 Makefile 的
+      # rs_fmt、rs_clippy、rs_test 相同的命令。每条命令单独一步：PowerShell 里一步跑几条命令时，只有最后一条的退出码算数
+      - name: 格式（Windows）
         if: runner.os == 'Windows'
-        run: |
-          cargo fmt --all --check
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo test --workspace
+        run: cargo fmt --all --check
+
+      - name: clippy（Windows）
+        if: runner.os == 'Windows'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: 测试（Windows）
+        if: runner.os == 'Windows'
+        run: cargo test --workspace
