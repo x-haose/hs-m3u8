@@ -8,8 +8,9 @@ use crate::{MasterPlaylist, Rendition, RenditionKind, Variant};
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Preference {
     pub variant: VariantChoice,
-    /// 音频语言（与 LANGUAGE 比较，不区分大小写）；None 时取 DEFAULT=YES 的 rendition，没有则取组内第一个
-    pub audio_language: Option<String>,
+    /// 所选变体引用了音频组（AUDIO 属性）时取组里哪个 rendition；`Default` 与 `Language` 在变体没有引用音频组时
+    /// 不起作用
+    pub audio: AudioChoice,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -18,6 +19,17 @@ pub enum VariantChoice {
     #[default]
     Best,
     /// `MasterPlaylist::variants` 中的下标
+    Index(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AudioChoice {
+    /// DEFAULT=YES 的 rendition，没有则取组内第一个
+    #[default]
+    Default,
+    /// 组内第一个 LANGUAGE 与它相同（不区分大小写）的
+    Language(String),
+    /// `MasterPlaylist::renditions` 中的下标；须是所选变体音频组里的音频 rendition
     Index(usize),
 }
 
@@ -49,6 +61,11 @@ pub enum SelectError {
         language: String,
         available: Vec<String>,
     },
+    #[error("rendition 下标 {index} 超出范围（共 {count} 个）")]
+    RenditionIndexOutOfRange { index: usize, count: usize },
+    /// 指定的 rendition 不是音频，或不在所选变体引用的音频组里（变体没有引用音频组时 `group` 为 None）
+    #[error("第 {index} 个 rendition 不是所选变体的音频组（{}）里的音频", group.as_deref().unwrap_or("无"))]
+    NotVariantAudio { index: usize, group: Option<String> },
 }
 
 pub fn select(master: &MasterPlaylist, preference: &Preference) -> Result<Selection, SelectError> {
@@ -88,38 +105,64 @@ fn select_audio(
     variant: &Variant,
     preference: &Preference,
 ) -> Result<Option<SelectedAudio>, SelectError> {
-    let Some(group) = &variant.audio else {
-        return Ok(None);
-    };
-    let candidates: Vec<&Rendition> = master
-        .renditions
-        .iter()
-        .filter(|r| r.kind == RenditionKind::Audio && &r.group_id == group)
-        .collect();
-    let chosen = match &preference.audio_language {
-        Some(language) => Some(
-            candidates
+    let is_audio_of =
+        |r: &Rendition, group: &str| r.kind == RenditionKind::Audio && r.group_id == group;
+    let chosen = match (&preference.audio, &variant.audio) {
+        (AudioChoice::Index(index), group) => {
+            let rendition =
+                master
+                    .renditions
+                    .get(*index)
+                    .ok_or(SelectError::RenditionIndexOutOfRange {
+                        index: *index,
+                        count: master.renditions.len(),
+                    })?;
+            if !group.as_deref().is_some_and(|g| is_audio_of(rendition, g)) {
+                return Err(SelectError::NotVariantAudio {
+                    index: *index,
+                    group: group.clone(),
+                });
+            }
+            rendition
+        }
+        (_, None) => return Ok(None),
+        (choice, Some(group)) => {
+            let candidates: Vec<&Rendition> = master
+                .renditions
                 .iter()
-                .find(|r| {
+                .filter(|r| is_audio_of(r, group))
+                .collect();
+            let found = match choice {
+                AudioChoice::Language(language) => candidates.iter().copied().find(|r| {
                     r.language
                         .as_deref()
                         .is_some_and(|l| l.eq_ignore_ascii_case(language))
-                })
-                .ok_or_else(|| SelectError::AudioLanguageNotFound {
-                    group: group.clone(),
-                    language: language.clone(),
-                    available: candidates
-                        .iter()
-                        .filter_map(|r| r.language.clone())
-                        .collect(),
-                })?,
-        ),
-        None => candidates.iter().find(|r| r.default).or(candidates.first()),
+                }),
+                _ => candidates
+                    .iter()
+                    .copied()
+                    .find(|r| r.default)
+                    .or(candidates.first().copied()),
+            };
+            match (found, choice) {
+                (Some(rendition), _) => rendition,
+                (None, AudioChoice::Language(language)) => {
+                    return Err(SelectError::AudioLanguageNotFound {
+                        group: group.clone(),
+                        language: language.clone(),
+                        available: candidates
+                            .iter()
+                            .filter_map(|r| r.language.clone())
+                            .collect(),
+                    });
+                }
+                (None, _) => return Ok(None),
+            }
+        }
     };
-    Ok(chosen.and_then(|r| {
-        Some(SelectedAudio {
-            uri: r.uri.clone()?,
-            rendition: (*r).clone(),
-        })
+    // 没有 URI 的 rendition 混在变体流里，没有独立的媒体播放列表
+    Ok(chosen.uri.clone().map(|uri| SelectedAudio {
+        uri,
+        rendition: chosen.clone(),
     }))
 }

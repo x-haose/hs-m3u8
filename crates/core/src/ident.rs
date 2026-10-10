@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use hs_m3u8_hls::{ByteRange, Preference, VariantChoice};
+use hs_m3u8_hls::{AudioChoice, ByteRange, Preference, VariantChoice};
 use sha2::{Digest, Sha256};
 use url::Url;
 
@@ -46,19 +46,20 @@ impl fmt::Display for Fingerprint {
 }
 
 /// 来源摘要（SHA-256 十六进制）：来源地址（见 [`source_address`]）与选轨偏好。语言代码与选轨一样不区分
-/// ASCII 大小写。每项一行、地址里不会有换行，编码没有歧义。
+/// ASCII 大小写。每项一行；地址与语言里不会有换行（语言由 [`crate::Source`] 的校验保证），编码没有歧义。
+/// 按下标选音频时另起一行，默认与按语言的写法与之前相同。
 pub(crate) fn source_digest(url: &Url, preference: &Preference) -> String {
     let variant = match preference.variant {
         VariantChoice::Best => "best".to_owned(),
         VariantChoice::Index(index) => format!("index {index}"),
     };
-    let audio = preference
-        .audio_language
-        .as_deref()
-        .map(str::to_ascii_lowercase)
-        .unwrap_or_default();
+    let audio = match &preference.audio {
+        AudioChoice::Default => "audio \n".to_owned(),
+        AudioChoice::Language(language) => format!("audio {}\n", language.to_ascii_lowercase()),
+        AudioChoice::Index(index) => format!("audio \naudio-rendition {index}\n"),
+    };
     digest_hex(format!(
-        "url {}\nvariant {variant}\naudio {audio}\n",
+        "url {}\nvariant {variant}\n{audio}",
         source_address(url)
     ))
 }
@@ -172,7 +173,7 @@ mod tests {
         let source = Url::parse("https://user:pw@a.example:8443/live.m3u8?token=1").unwrap();
         let best = Preference {
             variant: VariantChoice::Best,
-            audio_language: Some("EN".into()),
+            audio: AudioChoice::Language("EN".into()),
         };
         assert_eq!(
             source_digest(&source, &best),
@@ -180,7 +181,7 @@ mod tests {
         );
         let index = Preference {
             variant: VariantChoice::Index(2),
-            audio_language: None,
+            audio: AudioChoice::Default,
         };
         assert_eq!(
             source_digest(&source, &index),
@@ -209,7 +210,7 @@ mod tests {
         let url = |s: &str| Url::parse(s).unwrap();
         let preference = |variant, language: Option<&str>| Preference {
             variant,
-            audio_language: language.map(str::to_owned),
+            audio: language.map_or(AudioChoice::Default, |l| AudioChoice::Language(l.into())),
         };
         let base = source_digest(
             &url("https://a.example/live.m3u8?token=1"),
@@ -234,6 +235,13 @@ mod tests {
             source_digest(
                 &url("https://a.example/live.m3u8"),
                 &preference(VariantChoice::Best, None),
+            ),
+            source_digest(
+                &url("https://a.example/live.m3u8"),
+                &Preference {
+                    variant: VariantChoice::Best,
+                    audio: AudioChoice::Index(0),
+                },
             ),
         ] {
             assert_ne!(base, other);

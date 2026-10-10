@@ -14,7 +14,9 @@ mod select;
 
 pub use master::{MasterPlaylist, Rendition, RenditionKind, Resolution, Variant};
 pub use media::{ByteRange, InitSection, MediaPlaylist, PlaylistType, Segment, SegmentKey};
-pub use select::{Preference, SelectError, SelectedAudio, Selection, VariantChoice, select};
+pub use select::{
+    AudioChoice, Preference, SelectError, SelectedAudio, Selection, VariantChoice, select,
+};
 pub use url::Url;
 
 use line::{LineKind, lines};
