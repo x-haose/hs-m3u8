@@ -28,7 +28,8 @@ use crate::{Error, Leftover, LeftoverKind};
 /// 输出路径上现在的东西。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Occupant {
-    /// 什么也没有，且建得出来：最近的已存在的上级是目录
+    /// 什么也没有，最近的已存在的上级是目录；一级都不存在（如 Windows 上不存在的盘符）时也是，任务开头建输出所在的
+    /// 目录时报出
     Nothing,
     /// 没有内容的目录（系统自动生成的元数据文件不算）
     EmptyDir,
