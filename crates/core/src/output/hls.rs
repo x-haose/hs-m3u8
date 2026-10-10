@@ -17,7 +17,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use super::GroupTrack;
-use super::commit::Existing;
+use super::commit::Occupant;
 use crate::entries::{self, is_canonical_number};
 use crate::error::io_error;
 use crate::ident::Fingerprint;
@@ -43,24 +43,20 @@ fn extension(format: Standalone) -> &'static str {
     }
 }
 
-/// 目标目录能否写，能写时返回路径上已有的东西：不存在、没有内容（系统自动生成的元数据文件不算，见
-/// [`entries::Entry::is_system_file`]），或 `overwrite` 且其中全是本库写出的文件。全是本库写出的文件而没有要求覆盖时
-/// 报 [`Error::OutputExists`]；不是目录或有别的文件时报 [`Error::OutputOccupied`]，覆盖也不替换。
-pub(super) fn check(dir: &Path, overwrite: bool) -> Result<Existing, Error> {
+/// HLS 输出路径上现在的东西：全是本库写出的文件的目录是输出，没有内容的是空目录（系统自动生成的元数据文件都不算，
+/// 见 [`entries::Entry::is_system_file`]），文件与有别的文件的目录是别的东西。不跟随符号链接。
+pub(super) fn occupant(dir: &Path) -> Result<Occupant, Error> {
     let meta = match fs::symlink_metadata(dir) {
         Ok(meta) => meta,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Existing::Nothing),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Occupant::Nothing),
         Err(cause) => return Err(io_error("检查", dir)(cause)),
     };
     if !meta.is_dir() || !written_by_us(dir)? {
-        return Err(Error::OutputOccupied(dir.to_path_buf()));
-    }
-    if overwrite {
-        Ok(Existing::Output)
+        Ok(Occupant::Other)
     } else if entries::is_empty(dir)? {
-        Ok(Existing::EmptyDir)
+        Ok(Occupant::EmptyDir)
     } else {
-        Err(Error::OutputExists(dir.to_path_buf()))
+        Ok(Occupant::Output)
     }
 }
 

@@ -192,8 +192,9 @@ pub(crate) async fn discard(root: PathBuf) -> Result<Vec<Leftover>, Error> {
         return Ok(Vec::new());
     };
     let work_dir = root.clone();
-    blocking(move || output::recover_recorded(&work_dir)).await??;
-    Ok(workdir::remove(root, lock).await.into_iter().collect())
+    let mut leftovers = blocking(move || output::recover_recorded(&work_dir)).await??;
+    leftovers.extend(workdir::remove(root, lock).await);
+    Ok(leftovers)
 }
 
 /// 合并直播录到的分片；`recording` 为本次运行的录制，只合并时为 None。
