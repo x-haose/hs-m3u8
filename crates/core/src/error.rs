@@ -6,13 +6,14 @@
 //!   [`Unsupported::Hls`]（改用另一种输出）；
 //! - 来源本身不行，同样的请求再试也不会成功：[`Error::Playlist`]、[`Error::NotMediaPlaylist`]、
 //!   [`Error::Unsupported`] 的其余各项、[`Error::Integrity`]、[`Error::KeyLength`]；
-//! - 网络：[`Error::Http`]；[`Error::Segment`]、[`Error::Key`] 说明出在哪个分片或 key，[`Error::LiveStalled`] 说明
-//!   直播哪条轨停滞。可否重试看 [`Error::retryable`]，服务器要求的等待看 [`Error::retry_after`]，两者都看包着的
-//!   原因；
+//! - 网络：[`Error::Http`]，看 [`HttpError::retryable`]；
+//! - 说明出在哪里、看包着的原因：[`Error::Segment`]、[`Error::Key`]（哪个分片或 key）、[`Error::LiveStalled`]（直播
+//!   哪条轨停滞）、[`Error::Cleanup`]（失败后收拾也没做完，带残留列表）；
 //! - 读写文件：[`Error::Io`]；合并 MP4：[`Error::Remux`]。都不可重试；
 //! - 任务目录：[`Error::WorkDir`]（按 [`WorkDirProblem`] 处理）、[`Error::NothingRecorded`]；
-//! - 调用方的回调出错：[`Error::Hook`]；[`Error::Cancelled`]；失败后收拾也没做完：[`Error::Cleanup`]，带残留列表，
-//!   可否重试看原来的失败。
+//! - 调用方的回调出错：[`Error::Hook`]；[`Error::Cancelled`]。
+//!
+//! 可否重试看 [`Error::retryable`]，服务器要求的等待看 [`Error::retry_after`]，两者都看包着的原因。
 //!
 //! 错误信息已包含原因，不经 `source()` 重复给出；地址只显示到路径，不含用户名、密码与查询串（常带凭据或令牌）。
 
@@ -96,7 +97,7 @@ pub enum Error {
         path: PathBuf,
         cause: io::Error,
     },
-    /// 合并 MP4 时读分片或写输出出错；内容放不进 MP4 是 [`Unsupported::Mp4`]
+    /// 合并 MP4 失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是 [`Unsupported::Mp4`]
     #[error("合并失败：{0}")]
     Remux(Box<hs_m3u8_remux::Error>),
     /// 写输出失败后收拾本次写出的、或任务开头收拾上次写输出留下的，没能做完：`failure` 为失败的原因（后者为
@@ -305,8 +306,8 @@ pub enum HttpError {
     Redirect(String),
     #[error("连接失败：{0}")]
     Connect(String),
-    /// 请求无法构造：地址能解析，HTTP 库却不接受（如超过 65534 字节）。回调改出的地址与请求头不合法时报
-    /// [`Error::Hook`]
+    /// 请求无法构造：地址能解析，HTTP 库却不接受（如超过 65534 字节，播放列表里的与回调改出的都可能）。回调改出的
+    /// 地址不是 http/https、或请求头不合法时报 [`Error::Hook`]
     #[error("请求不合法：{0}")]
     InvalidRequest(String),
     /// 读取响应体等其他传输错误
