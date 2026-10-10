@@ -1,5 +1,5 @@
 //! 续录时的会话判定：由各轨的结论定下会话编号、各轨的起点，以及完整来源地址变了时怎么办（纯计算；
-//! 等候选与核对内容见 `deciding` 模块）。
+//! 等各轨的候选、核对内容见 [`super::deciding`]）。
 //!
 //! 一条轨的窗口与它最近一次有分片的会话重叠（身份与编号一致），且重叠的分片重新下载后与已存的逐字节相同，
 //! 才算接得上；编码器重启后序号与文件名都可能从头再来，只看文件名分不出是不是同一段内容。要录的各轨都接得上
@@ -12,23 +12,10 @@ use crate::workdir::{SegmentFile, SegmentName, SessionStart, Stored};
 
 /// 一条轨在会话开始时的状况。
 pub(super) enum Start {
-    /// 窗口内的分片全部录
-    Fresh,
-    /// 序号不超过 `through` 的分片之前已录过，跳过
-    After { through: u64 },
-    /// 接着这条轨在这个会话里已录的部分：沿用其编号，补录窗口内尚未录完的分片
+    /// 在这个会话里从这里开始录，起点要记进任务目录
+    New(SessionStart),
+    /// 接着这条轨在这个会话里已录的部分：沿用其编号与已记下的起点，补录窗口内尚未录完的分片
     Continue(LatestSession),
-}
-
-impl Start {
-    /// 要记进任务目录的起点；接着录时沿用已记下的，为 None。
-    pub(super) fn to_record(&self) -> Option<SessionStart> {
-        match self {
-            Start::Fresh => Some(SessionStart::Fresh),
-            Start::After { through } => Some(SessionStart::After(*through)),
-            Start::Continue(_) => None,
-        }
-    }
 }
 
 /// 一条轨最近一次有分片的会话中已录完的分片。
@@ -128,13 +115,15 @@ impl Decision {
         Decision {
             session: 0,
             new_url: NewUrl::Adopt,
-            tracks: (0..tracks).map(|_| Some(Start::Fresh)).collect(),
+            tracks: (0..tracks)
+                .map(|_| Some(Start::New(SessionStart::Fresh)))
+                .collect(),
         }
     }
 }
 
-/// 正在判定的会话。
-pub(super) struct Deciding {
+/// 正在判定的会话：各轨最近的会话与收集到的结论。
+pub(super) struct Verdicts {
     /// 目录里最近的会话编号
     previous_session: u32,
     /// 各轨最近一次有分片的会话
@@ -142,7 +131,7 @@ pub(super) struct Deciding {
     verdicts: Vec<Option<Verdict>>,
 }
 
-impl Deciding {
+impl Verdicts {
     /// 由目录里已录的内容开始判定；一个分片都没有时为 None（直接录第 0 个会话）。
     pub(super) fn new(stored: &Stored) -> Option<Self> {
         let previous_session = stored
@@ -157,7 +146,7 @@ impl Deciding {
             .zip(&stored.starts)
             .map(|(files, starts)| LatestSession::latest(files, starts))
             .collect();
-        Some(Deciding {
+        Some(Verdicts {
             previous_session,
             recorded,
             verdicts: stored.segments.iter().map(|_| None).collect(),
@@ -180,10 +169,9 @@ impl Deciding {
         self.verdicts.iter().all(Option::is_some)
     }
 
-    /// 各轨都有结论后作出判定；另起会话而会话编号已达上限时为 None。
-    pub(super) fn decide(self) -> Option<Decision> {
-        let verdicts: Vec<Verdict> = self
-            .verdicts
+    /// 各轨都有结论后作出判定，取走各轨最近的会话；另起会话而会话编号已达上限时为 None。
+    pub(super) fn decide(&mut self) -> Option<Decision> {
+        let verdicts: Vec<Verdict> = std::mem::take(&mut self.verdicts)
             .into_iter()
             .map(|v| v.expect("判定前各轨都已有结论"))
             .collect();
@@ -200,8 +188,7 @@ impl Deciding {
             (true, true) => NewUrl::Adopt,
             (true, false) => NewUrl::Unverified,
         };
-        let tracks = self
-            .recorded
+        let tracks = std::mem::take(&mut self.recorded)
             .into_iter()
             .zip(verdicts)
             .map(|(recorded, verdict)| match (recorded, verdict) {
@@ -209,8 +196,8 @@ impl Deciding {
                 (Some(r), Verdict::Matches) if continued && r.session == previous => {
                     Some(Start::Continue(r))
                 }
-                (Some(r), Verdict::Matches) => Some(Start::After { through: r.last() }),
-                _ => Some(Start::Fresh),
+                (Some(r), Verdict::Matches) => Some(Start::New(SessionStart::After(r.last()))),
+                _ => Some(Start::New(SessionStart::Fresh)),
             })
             .collect();
         Some(Decision {

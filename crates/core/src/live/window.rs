@@ -8,6 +8,7 @@ use hs_m3u8_hls::{InitSection, MediaPlaylist, Segment};
 use super::session::{LatestSession, Start};
 use crate::fetch::Item;
 use crate::ident::Fingerprint;
+use crate::workdir::SessionStart;
 use crate::workdir::{Layout, SegmentName};
 use crate::{Error, HttpError, LiveEnd, MissReason, Missed, Unsupported};
 
@@ -82,6 +83,13 @@ pub(super) struct Scope<'a> {
 
 /// 新分片引用、上一份播放列表里没有的 init 段，及其拉取结果。
 pub(super) type NewInits = Vec<(InitSection, Result<Vec<u8>, Error>)>;
+
+/// 拉哪些新 init 段：要录的分片（见 [`Processed::is_new`]）引用、又不在 `known` 中的。
+pub(super) struct InitsToFetch {
+    /// 上一份播放列表引用、内容已知的 init 段
+    pub known: Vec<InitSection>,
+    pub processed: Processed,
+}
 
 /// 处理一份播放列表的结果。
 pub(super) struct Update {
@@ -175,8 +183,8 @@ impl Window {
             recorded_us,
         };
         match start {
-            Start::Fresh => {}
-            Start::After { through } => window.processed.last = Some(through),
+            Start::New(SessionStart::Fresh) => {}
+            Start::New(SessionStart::After(through)) => window.processed.last = Some(through),
             Start::Continue(earlier) => window.continue_from(&earlier),
         }
         window
@@ -196,17 +204,16 @@ impl Window {
         });
     }
 
-    pub(super) fn processed(&self) -> &Processed {
-        &self.processed
-    }
-
     pub(super) fn recorded_us(&self) -> u64 {
         self.recorded_us
     }
 
-    /// 上一份播放列表引用、内容已知的 init 段。
-    pub(super) fn known_inits(&self) -> Vec<InitSection> {
-        self.inits.iter().map(|(init, _)| init.clone()).collect()
+    /// 处理下一份播放列表前要拉哪些新 init 段。
+    pub(super) fn inits_to_fetch(&self) -> InitsToFetch {
+        InitsToFetch {
+            known: self.inits.iter().map(|(init, _)| init.clone()).collect(),
+            processed: self.processed.clone(),
+        }
     }
 
     /// 处理一份播放列表：与上一份比对，新分片排入下载或记为缺失。`fetched` 为新分片引用的新 init 段。
