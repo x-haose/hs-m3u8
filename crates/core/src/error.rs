@@ -387,9 +387,18 @@ pub enum WorkDirProblem {
     NotEmpty,
     #[error("正被另一个任务使用")]
     Locked,
-    /// job.json、outputs.json 或分片文件无法识别
+    /// job.json、outputs.json 或分片文件无法识别；是另一个格式版本写的为 [`WorkDirProblem::UnsupportedVersion`]
     #[error("内容无法识别：{0}")]
     Corrupt(String),
+    /// 记录 `file`（job.json 或 outputs.json）是另一个格式版本写的：`found` 比本库支持的 `supported` 新时，用更新的
+    /// 版本续传；旧时，用写下它的版本做完，或放弃任务（outputs.json 是另一个版本写的时放弃也不动它，见
+    /// [`crate::Engine::discard`]）
+    #[error("{file} 的格式版本 {found} 不受支持（支持 {supported}）")]
+    UnsupportedVersion {
+        file: &'static str,
+        found: u32,
+        supported: u32,
+    },
     /// 目录里记录的任务类型与本次不同：记录的是直播、本次是点播，多为中断期间直播结束了而请求没开启直播
     /// （[`crate::JobRequest::live`]），开启即可续录，或用 [`crate::Engine::merge_recorded`] 只合并；记录的是点播、
     /// 本次是直播（同一来源现在是直播），换一个任务目录
