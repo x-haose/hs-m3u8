@@ -138,25 +138,23 @@ async fn split_audio_video_with_redirect_and_discontinuity() {
     // 探测：列出主播放列表、按偏好选出的轨与各轨的媒体播放列表，相对地址按重定向之后的地址解析
     let req = request(server.url("watch"), &dir);
     let probe = engine().probe(&req.source).await.unwrap();
+    assert!(!probe.is_live());
     let master = probe.master.unwrap();
-    assert_eq!((master.variants.len(), master.renditions.len()), (1, 1));
-    let selection = probe.selection.unwrap();
-    assert_eq!(selection.variant.uri, server.url("hls/video.m3u8"));
+    assert_eq!((master.variants.len(), master.audio.len()), (1, 1));
+    let selected = &master.selected;
     assert_eq!(
-        selection.audio.as_ref().unwrap().uri,
-        server.url("hls/audio.m3u8")
+        (selected.variant.index, selected.variant.bandwidth),
+        (0, Some(200_000))
     );
-    let counts: Vec<(usize, bool)> = probe
-        .tracks
-        .iter()
-        .map(|t| (t.segments.len(), t.ended))
-        .collect();
+    let audio = selected.audio.as_ref().unwrap();
+    assert_eq!((audio.index, audio.name.as_deref()), (0, Some("main")));
+    let counts: Vec<(usize, bool)> = probe.tracks.iter().map(|t| (t.segments, t.ended)).collect();
     assert_eq!(counts, [(3, true), (5, true)]);
 
     let job = engine().start(req).unwrap();
     let progress = job.control().progress();
     let output = job.wait().await.unwrap();
-    assert_eq!(progress.borrow().selection.as_deref(), Some(&selection));
+    assert_eq!(progress.borrow().selection.as_ref(), Some(selected));
 
     let program = |name: &str, video: &[&str], audio: &[&str]| DiscontinuityGroup {
         tracks: vec![
@@ -388,13 +386,24 @@ async fn resume_finds_the_same_redundant_variant() {
     job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
     server.ungate("b/seg1.ts");
+    // 中断期间主播放列表多了一个更高的变体：按偏好会选它，续传按记录找回 b，进度里报告的也是 b
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=160x90\na/v.m3u8\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=160x90\nb/v.m3u8\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=9,RESOLUTION=1920x1080\nc/v.m3u8\n",
+    );
 
-    let output = run(req).await.unwrap();
+    let job = engine().start(req).unwrap();
+    let progress = job.control().progress();
+    let output = job.wait().await.unwrap();
 
     let want = expected_ts_a(&dir);
     assert_output(&output, &want);
     // b/seg1 第一次运行时到达过一次（挂住后取消），续传时再下一次
     assert_eq!((server.hits("a/seg1.ts"), server.hits("b/seg1.ts")), (0, 2));
+    let selected = progress.borrow().selection.clone().unwrap();
+    assert_eq!(selected.variant.index, 1);
 }
 
 /// 上次一个分片都没下完就中断：目录里没有可续的内容，不按记录的选轨找回（那个变体已从主播放列表里删掉），
@@ -592,7 +601,10 @@ async fn hooks_adapt_site() {
     // 探测经同样的回调：带上签名请求头，播放列表经改写
     let probe = engine().probe(&req.source).await.unwrap();
     assert_eq!(probe.master, None);
-    assert_eq!(probe.tracks[0].segments[1].uri, server.url("seg1.ts"));
+    assert_eq!(
+        (probe.tracks[0].segments, probe.tracks[0].encrypted),
+        (2, true)
+    );
     let output = run(req).await.unwrap();
 
     let want = expected_ts_a(&dir);
@@ -762,11 +774,35 @@ async fn errors_do_not_reveal_credentials_or_tokens() {
     let Err(invalid) = engine().start(request(unsupported, &dir)) else {
         panic!("ftp 地址应被拒绝");
     };
+
+    // 探测结果、进度与可修改的请求的调试输出同样不带：界面与日志常直接打印它们
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nv.m3u8?token=SECRET\n",
+    );
+    server.put(
+        "v.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts?token=SECRET\n#EXT-X-ENDLIST\n",
+    );
+    server.put("seg0.ts", fixture("ts_a/seg0.ts"));
+    let req = request(server.url("master.m3u8?token=SECRET"), &dir);
+    let probe = engine().probe(&req.source).await.unwrap();
+    let job = engine().start(req).unwrap();
+    let progress = job.control().progress();
+    job.wait().await.unwrap();
+    let parts = RequestParts {
+        url: Url::parse("https://user:PASSWD@h.example/x?token=SECRET").unwrap(),
+        headers: vec![("cookie".into(), "SECRET".into())],
+    };
+
     for text in [
         err.to_string(),
         format!("{err:?}"),
         invalid.to_string(),
         format!("{invalid:?}"),
+        format!("{probe:?}"),
+        format!("{:?}", *progress.borrow()),
+        format!("{parts:?}"),
     ] {
         assert!(
             !text.contains("PASSWD") && !text.contains("SECRET"),

@@ -1,10 +1,9 @@
 //! 任务的进度与结果。
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use crate::hls::{self, Selection};
-use crate::{HttpError, Report};
+use crate::info::Selected;
+use crate::{HttpError, Report, hls};
 
 /// 任务进度快照。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -12,7 +11,7 @@ pub struct Progress {
     pub stage: Stage,
     /// 所选的变体与音频 rendition；解析完成前、或来源本身是媒体播放列表时为 None。有已完成分片的任务目录按
     /// 记录找回原来的轨，不一定是偏好会选的那条
-    pub selection: Option<Arc<Selection>>,
+    pub selection: Option<Selected>,
     /// 已完成的分片，各轨合计；含续传前已完成的
     pub segments_done: usize,
     /// 要下载的分片，各轨合计：已完成的（含续传前的）加上排入下载的；直播另含列出了但 init 段取不到的，

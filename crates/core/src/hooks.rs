@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use url::Url;
 
+use crate::ident::bare_url;
 use crate::{Error, blocking};
 
 /// 回调返回的错误；原样保存在 [`Error::Hook`] 中，绑定层可以取回原始错误（如 Python 异常）。
@@ -20,11 +21,22 @@ pub enum Purpose {
 }
 
 /// [`Hooks::on_request`] 可修改的请求。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RequestParts {
     pub url: Url,
     /// 本次请求的请求头（已含 [`crate::HttpOptions::headers`]）
     pub headers: Vec<(String, String)>,
+}
+
+/// 只显示地址到路径与请求头的名字：请求头常带 Cookie 与令牌，地址的查询串常带签名。
+impl fmt::Debug for RequestParts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
+        f.debug_struct("RequestParts")
+            .field("url", &bare_url(&self.url))
+            .field("headers", &names)
+            .finish()
+    }
 }
 
 /// 出错的是哪个回调。

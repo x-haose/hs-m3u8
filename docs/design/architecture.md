@@ -51,7 +51,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 ```
 
 - `hls` 不依赖 tokio、reqwest、ffmpeg；`remux` 不依赖 `core`、`hls`、tokio、reqwest；`core` 不依赖 tauri、pyo3。
-- 跨边界一律翻译：`hls` 不暴露第三方解析库的类型；`py` 与 `apps/desktop` 把 `core` 的类型转成各自的表示，`core` 不出现 Python 或前端的概念。
+- 跨边界一律翻译：`hls` 不暴露第三方解析库的类型；`py` 与 `apps/desktop` 把 `core` 的类型转成各自的表示，`core` 不出现 Python 或前端的概念。`core` 的公开接口只重新导出用到的 `hls` 类型（选轨偏好与解析错误，在 `core::hls` 下）与 `remux` 的合并报告和错误，绑定层只依赖 `core`。
 - 以上由检查命令机器判定（第 10 节），不靠人看。
 
 ## 4. hls：数据模型与规范化
@@ -90,7 +90,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 
 本地 HLS 不经 FFmpeg，原样保留已解密的分片，不受 MP4 合并对编码的限制。入口 `index.m3u8` 单轨时为媒体播放列表，音视频分离时为主播放列表（码率为两条轨分片峰值码率之和，按落盘的文件算；分辨率与编码照抄来源）；各轨的分片在 `<轨道>/` 下按播放顺序编号。扩展名按内容定（TS、AAC、MP3、AC-3、E-AC-3，fMP4 为 `m4s`）：FFmpeg 读 HLS 时核对扩展名与识别出的格式，不一致即拒绝（FFmpeg 9.0.2 的 `extension_picky`，默认开启）。组与组之间加 `EXT-X-DISCONTINUITY`；组内缺失的分片不标出、保留原时间戳，与 MP4 一致：缺失往往只在一条轨上，只给一条轨加不连续标记会让各轨的不连续段编号对不上。`EXT-X-MAP` 一直作用到下一个 `EXT-X-MAP`，同一条轨有的组用 init 段、有的不用（直播续录时服务器换了格式）无法表示，合并 MP4 之前就报 `Unsupported(HlsMixedInit)`。
 
-开始下载前可用 `Engine::probe` 只解析不下载：请求与回调同下载，返回主播放列表（可选的变体与音轨）、按偏好选中的轨与各轨的媒体播放列表（时长、是否直播、是否加密）。来源与访问方式（地址、选轨偏好、请求配置、回调）合为 `Source`，探测与下载共用。
+开始下载前可用 `Engine::probe` 只解析不下载：请求与回调同下载，返回可选的变体与音轨（带下标，按下标选用）、按偏好选中的轨、各轨概况（分片数、时长、是否结束、是否加密）与是否直播。探测结果与进度里的所选轨道都是 core 自己的描述类型，不含地址：地址常带令牌，而它们常被打进日志与界面。来源与访问方式（地址、选轨偏好、请求配置、回调）合为 `Source`，探测与下载共用。
 
 模块：`request`（请求与选项）、`resolve`（拉取播放列表、选轨）、`probe`（探测）、`selection`（选轨的身份）、`ident`（指纹与摘要）、`vod`（`plan` 点播计划与摘要，纯计算）、`live`（`session` 续录时的会话判定、`window` 每轨的窗口与新分片、`track` 每轨的刷新与停滞、`merge` 合并输入与缺失报告）、`fetch`（分片下载队列、拉取 init 段）、`workdir`（`record` 任务记录与 job.json 格式、`names` 文件名）、`output`（MP4 与本地 HLS 输出）、`job`（分派与收尾）、`http`、`crypto`、`verify`、`hooks`（回调）、`report`（进度与结果）、`error`、`blocking`（阻塞线程池）。
 

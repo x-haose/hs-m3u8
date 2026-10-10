@@ -6,8 +6,8 @@
 use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
-use hs_m3u8_core::hls::{MediaPlaylist, Playlist, parse};
 use hs_m3u8_core::{Error, JobRequest, LiveOptions, Target, Unsupported, Url};
+use hs_m3u8_hls::{MediaPlaylist, Playlist, parse};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams, TrackSegments, remux};
 
 use crate::server::Server;
