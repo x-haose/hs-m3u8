@@ -1,4 +1,4 @@
-//! 录制派出的后台任务：刷新播放列表、为暂存的播放列表拉 init 段、续录时核对内容。事件循环不等它们，
+//! 录制派出的后台任务：刷新播放列表、准备暂存的播放列表（拉它要用的 init 段）、续录时核对内容。事件循环不等它们，
 //! 由 [`Tasks`] 持有，完成后作为事件交回；录制结束时取消并等它们退出（协作取消，在途的回调返回后才结束）。
 
 use std::path::PathBuf;
@@ -10,19 +10,12 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::session::Verdict;
-use super::track::{InitsToFetch, RefreshRequest};
-use super::window::NewInits;
+use super::track::{Fetched, RefreshRequest};
+use super::window::{InitsToFetch, NewInits};
 use crate::fetch::{self, Direct};
 use crate::hooks::Hooks;
 use crate::http::{Http, Permit};
 use crate::{Error, HttpError, blocking, resolve};
-
-/// 拉到的一份播放列表。
-pub(super) struct Fetched {
-    pub playlist: MediaPlaylist,
-    /// 这次加载开始的时刻
-    pub started: Instant,
-}
 
 /// 一个后台任务的结果。
 pub(super) enum Done {
@@ -32,8 +25,8 @@ pub(super) enum Done {
         started: Instant,
         result: Result<(MediaPlaylist, Option<NewInits>), Error>,
     },
-    /// 为暂存的播放列表拉好了 init 段
-    Loaded {
+    /// 准备好了暂存的一份播放列表
+    Prepared {
         track: usize,
         fetched: Fetched,
         result: Result<NewInits, Error>,
@@ -46,7 +39,7 @@ pub(super) enum Done {
 }
 
 /// 核对用的一个重叠分片与它已存的文件。
-pub(super) struct Overlap {
+pub(super) struct StoredOverlap {
     pub segment: Segment,
     pub stored: PathBuf,
 }
@@ -94,8 +87,8 @@ impl Tasks {
         });
     }
 
-    /// 为第 `track` 条轨暂存的一份播放列表拉 init 段。
-    pub(super) fn load(
+    /// 准备第 `track` 条轨暂存的一份播放列表：拉它要用的 init 段。
+    pub(super) fn prepare(
         &mut self,
         http: Arc<Http>,
         track: usize,
@@ -105,7 +98,7 @@ impl Tasks {
         let cancel = self.cancel.clone();
         self.set.spawn(async move {
             let result = new_inits(&http, &fetched.playlist, &inits, &cancel).await;
-            Done::Loaded {
+            Done::Prepared {
                 track,
                 fetched,
                 result,
@@ -114,7 +107,7 @@ impl Tasks {
     }
 
     /// 核对第 `track` 条轨能否接着最近的会话录：`overlaps` 为窗口与已录分片重叠的部分，序号从大到小。
-    pub(super) fn check(&mut self, direct: Direct, track: usize, overlaps: Vec<Overlap>) {
+    pub(super) fn check(&mut self, direct: Direct, track: usize, overlaps: Vec<StoredOverlap>) {
         let cancel = self.cancel.clone();
         self.set.spawn(async move {
             let result = check(&direct, track, overlaps, &cancel).await;
@@ -151,12 +144,12 @@ impl Tasks {
 async fn check(
     direct: &Direct,
     track: usize,
-    overlaps: Vec<Overlap>,
+    overlaps: Vec<StoredOverlap>,
     cancel: &CancellationToken,
 ) -> Result<Verdict, Error> {
     // 最近一次重试后仍失败的临时故障
     let mut transient = None;
-    for Overlap { segment, stored } in overlaps {
+    for StoredOverlap { segment, stored } in overlaps {
         let data = match direct.fetch(track, &segment, cancel).await {
             Ok(data) => data,
             Err(e) => match e.missable() {

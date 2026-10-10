@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::fetch::Fetcher;
 use crate::http::Http;
 use crate::ident::{source_digest, url_digest};
-use crate::live::{self, Context, Recording};
+use crate::live::{self, Context, Outcome};
 use crate::request::{JobRequest, Resume, check_output};
 use crate::resolve::{self, Resolved};
 use crate::vod::{self, Plan};
@@ -167,7 +167,7 @@ fn merge_live(
     dir: &WorkDir,
     stored: &Stored,
     streams: Vec<Streams>,
-    recording: Option<Recording>,
+    recording: Option<Outcome>,
 ) -> Result<MergeInput, Error> {
     let plan = live::merge_plan(&stored.segments, dir.layout())?;
     if plan.groups.is_empty() {

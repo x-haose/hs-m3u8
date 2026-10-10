@@ -27,9 +27,9 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use self::merge::{merge_plan, report_missed};
-use self::session::Deciding;
-use self::tasks::{Done, Fetched, Tasks};
-use self::track::LiveTrack;
+use self::session::Verdicts;
+use self::tasks::{Done, Tasks};
+use self::track::{Fetched, LiveTrack};
 use self::window::{NewInits, Scope};
 use crate::fetch::{Direct, Fetcher, Finished, ItemId, count_done};
 use crate::hooks::Hooks;
@@ -40,7 +40,7 @@ use crate::workdir::{self, Stored, StoredInit, WorkDir};
 use crate::{Error, LiveEnd, MissReason, Missed, Progress, Stage};
 
 /// 本次运行的录制结果。
-pub(crate) struct Recording {
+pub(crate) struct Outcome {
     pub end: LiveEnd,
     /// 本次运行中记下原因的缺失（未合并成区间）
     pub missed: Vec<Missed>,
@@ -67,9 +67,9 @@ struct Signals<'a> {
 /// 录制处在哪个阶段。
 enum Phase {
     /// 续录时会话还没定下
-    Deciding(Deciding),
-    /// 录制第 `session` 个会话
-    Recording { session: u32 },
+    Deciding(Verdicts),
+    /// 会话已定下，录进第 `session` 个会话
+    Decided { session: u32 },
 }
 
 /// 等到的下一件事。
@@ -108,15 +108,16 @@ pub(crate) async fn record(
     ctx: Context<'_>,
     tracks: Vec<ResolvedTrack>,
     options: LiveOptions,
-) -> Result<Recording, Error> {
+) -> Result<Outcome, Error> {
     let (dir, progress) = (ctx.dir, ctx.progress);
     progress.send_modify(|p| p.stage = Stage::Recording);
     let stored = dir.scan(tracks.len()).await?;
     count_stored(&stored, progress);
     let now = Instant::now();
-    let phase = match Deciding::new(&stored) {
-        Some(deciding) => Phase::Deciding(deciding),
-        None => Phase::Recording { session: 0 },
+    // 目录里没有录过的分片时直接录第 0 个会话
+    let phase = match Verdicts::new(&stored) {
+        Some(verdicts) => Phase::Deciding(verdicts),
+        None => Phase::Decided { session: 0 },
     };
     let mut recorder = Recorder {
         http: ctx.http,
@@ -182,21 +183,20 @@ pub(crate) fn count_stored(stored: &Stored, progress: &watch::Sender<Progress>) 
 }
 
 impl Recorder<'_> {
-    /// 按节奏刷新、处理各种事件，直到结束。返回录进的会话与结束原因；会话定下之前就结束时会话为 None
-    /// （没有排入任何下载）。
+    /// 按节奏刷新、处理各种事件，直到结束，返回结束原因。
     async fn run(
         &mut self,
         signals: &Signals<'_>,
         fetcher: &mut Fetcher,
-    ) -> Result<(Option<u32>, LiveEnd), Error> {
+    ) -> Result<LiveEnd, Error> {
         loop {
-            if let Some(finished) = self.finished() {
-                return Ok(finished);
+            if let Some(end) = self.finished() {
+                return Ok(end);
             }
             match self.next_event(signals, fetcher).await? {
                 Event::Stop => match self.phase {
-                    Phase::Deciding(_) => return Ok((None, LiveEnd::Stopped)),
-                    Phase::Recording { .. } => self.end(LiveEnd::Stopped),
+                    Phase::Deciding(_) => return Ok(LiveEnd::Stopped),
+                    Phase::Decided { .. } => self.end(LiveEnd::Stopped),
                 },
                 Event::Stall(track) => self.on_stall(track).await?,
                 Event::Due => {}
@@ -206,21 +206,20 @@ impl Recorder<'_> {
         }
     }
 
-    /// 录制结束时的会话与结束原因；还没结束时为 None。
-    fn finished(&self) -> Option<(Option<u32>, LiveEnd)> {
-        let Phase::Recording { session } = self.phase else {
+    /// 录制结束时的结束原因；还没结束时为 None。
+    fn finished(&self) -> Option<LiveEnd> {
+        if matches!(self.phase, Phase::Deciding(_)) {
             return None;
-        };
-        let end = match &self.ending {
-            Some(_) if self.tracks.iter().any(LiveTrack::is_loading) => return None,
-            Some(end) => end.clone(),
-            None if self.tracks.iter().all(LiveTrack::is_ended) => LiveEnd::EndList,
+        }
+        match &self.ending {
+            Some(_) if self.tracks.iter().any(LiveTrack::has_held) => None,
+            Some(end) => Some(end.clone()),
+            None if self.tracks.iter().all(LiveTrack::is_ended) => Some(LiveEnd::EndList),
             None if !self.tracks.iter().any(|t| t.needs_refresh(self.max_us())) => {
-                LiveEnd::DurationReached
+                Some(LiveEnd::DurationReached)
             }
-            None => return None,
-        };
-        Some((Some(session), end))
+            None => None,
+        }
     }
 
     /// 定下结束原因；已有的不变。
@@ -353,31 +352,30 @@ impl Recorder<'_> {
                     }
                 }
             }
-            Done::Loaded {
+            Done::Prepared {
                 track,
                 fetched,
                 result,
             } => {
                 self.process(track, fetched, result?, fetcher).await?;
-                self.load_next(track);
+                self.prepare_next(track);
                 Ok(())
             }
             Done::Checked { track, result } => self.checked(track, result?).await,
         }
     }
 
-    /// 会话定下后暂存第 `track` 条轨的一份播放列表，等轮到它时拉 init 段、处理；这次不录的轨丢弃。
+    /// 会话定下后暂存第 `track` 条轨的一份播放列表，等轮到它时准备、处理。这次不录的轨不刷新，
+    /// 结束中拉到的不暂存，所以只有要录的轨走到这里。
     fn hold(&mut self, track: usize, fetched: Fetched) {
-        if self.tracks[track].window().is_some() {
-            self.tracks[track].hold(fetched);
-            self.load_next(track);
-        }
+        self.tracks[track].hold(fetched);
+        self.prepare_next(track);
     }
 
-    /// 第 `track` 条轨没有在途的刷新或拉取时，为最早暂存的播放列表拉 init 段。
-    fn load_next(&mut self, track: usize) {
-        if let Some((fetched, inits)) = self.tracks[track].start_loading(Instant::now()) {
-            self.tasks.load(self.http.clone(), track, fetched, inits);
+    /// 第 `track` 条轨没有在途的刷新或准备时，开始准备最早暂存的播放列表。
+    fn prepare_next(&mut self, track: usize) {
+        if let Some((fetched, inits)) = self.tracks[track].start_preparing(Instant::now()) {
+            self.tasks.prepare(self.http.clone(), track, fetched, inits);
         }
     }
 
@@ -434,7 +432,7 @@ impl Recorder<'_> {
     /// 录制中的会话编号。
     fn session(&self) -> u32 {
         match self.phase {
-            Phase::Recording { session } => session,
+            Phase::Decided { session } => session,
             Phase::Deciding(_) => panic!("会话定下之后才处理播放列表、下载分片"),
         }
     }
@@ -464,18 +462,16 @@ impl Recorder<'_> {
         Ok(())
     }
 
-    /// 录制结束后收尾：正常结束且排入过下载时等已列出的分片下完；失败时取消其余下载、等它们退出。
+    /// 录制结束后收尾：正常结束时等已列出的分片下完；失败时取消其余下载、等它们退出。
     async fn settle(
         mut self,
-        result: Result<(Option<u32>, LiveEnd), Error>,
+        result: Result<LiveEnd, Error>,
         fetcher: &mut Fetcher,
-    ) -> Result<Recording, Error> {
+    ) -> Result<Outcome, Error> {
         match result {
-            Ok((session, end)) => {
-                if session.is_some() {
-                    fetcher.drain(|id, r| self.on_finished(id, r)).await?;
-                }
-                Ok(Recording {
+            Ok(end) => {
+                fetcher.drain(|id, r| self.on_finished(id, r)).await?;
+                Ok(Outcome {
                     end,
                     missed: self.missed,
                 })
