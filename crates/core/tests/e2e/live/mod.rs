@@ -3,6 +3,7 @@
 
 mod consistency;
 mod deciding;
+mod late_refresh;
 mod recording;
 mod resume;
 mod sessions;
