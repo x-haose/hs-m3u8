@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
-use hs_m3u8_core::{Error, JobRequest, LeftoverKind, LiveOptions, Target, Unsupported, Url};
+use hs_m3u8_core::{Error, JobRequest, LiveOptions, Target, Unsupported, Url};
 use hs_m3u8_hls::{MediaPlaylist, Playlist, parse};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams, TrackSegments, remux};
 
@@ -555,6 +555,8 @@ async fn hls_cannot_mix_fmp4_and_ts_in_one_track() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn outputs_inside_the_work_dir_survive_its_removal() {
+    use hs_m3u8_core::LeftoverKind;
+
     let dir = test_dir("output_alias");
     let server = Server::start().await;
     server.put("seg0.ts", fixture("ts_a/seg0.ts"));
@@ -739,6 +741,8 @@ async fn long_output_names_are_written() {
 #[tokio::test(flavor = "multi_thread")]
 async fn old_outputs_that_cannot_be_removed_are_reported_and_removed_later() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    use hs_m3u8_core::LeftoverKind;
 
     /// 结束时（含断言失败）恢复目录权限，免得下次删不掉测试目录。
     struct Writable(PathBuf);
