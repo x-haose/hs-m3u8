@@ -493,16 +493,17 @@ impl Recorder<'_> {
             }
             Err(error) => error,
         };
-        let Some(kind) = error.missable() else {
+        let Some(failure) = error.missable() else {
             return Err(error);
         };
-        self.tracks[id.track].segment_missed(kind.clone());
+        let reason = MissReason::Failed(failure.kind.clone());
+        self.tracks[id.track].segment_missed(failure);
         self.missed.push(Missed {
             session: self.session(),
             track: id.track,
             first: id.sequence,
             last: id.sequence,
-            reason: MissReason::Failed(kind),
+            reason,
         });
         self.progress.send_modify(|p| p.segments_failed += 1);
         Ok(())
@@ -544,10 +545,7 @@ fn waitable_refresh_error(error: &Error) -> Option<RefreshCause> {
             }),
             hls::Malformed::NotAPlaylist | hls::Malformed::Mixed => None,
         },
-        _ => error.missable().map(|kind| RefreshCause::Http {
-            kind,
-            retry_after: error.retry_after(),
-        }),
+        _ => error.missable().map(RefreshCause::Http),
     }
 }
 

@@ -195,12 +195,15 @@ impl From<hs_m3u8_hls::SelectError> for Error {
 impl Error {
     /// 取不到：404/410（已过期），或重试后仍失败的临时故障时返回原因；分片的失败看其原因。key、回调、校验等
     /// 失败为 None。
-    pub(crate) fn missable(&self) -> Option<HttpError> {
+    pub(crate) fn missable(&self) -> Option<HttpFailure> {
         match self {
-            Error::Http { kind, .. }
-                if kind.retryable() || matches!(kind, HttpError::Status(404 | 410)) =>
-            {
-                Some(kind.clone())
+            Error::Http {
+                kind, retry_after, ..
+            } if kind.retryable() || matches!(kind, HttpError::Status(404 | 410)) => {
+                Some(HttpFailure {
+                    kind: kind.clone(),
+                    retry_after: *retry_after,
+                })
             }
             Error::Segment { cause, .. } => cause.missable(),
             _ => None,
@@ -214,10 +217,7 @@ impl Error {
             Error::Http { retry_after, .. } => *retry_after,
             Error::Segment { cause, .. } | Error::Key { cause, .. } => cause.retry_after(),
             Error::Cleanup { failure, .. } => failure.retry_after(),
-            Error::LiveStalled {
-                cause: StallError::RefreshFailed(RefreshCause::Http { retry_after, .. }),
-                ..
-            } => *retry_after,
+            Error::LiveStalled { cause, .. } => cause.retry_after(),
             _ => None,
         }
     }
@@ -228,15 +228,7 @@ impl Error {
             Error::Http { kind, .. } => kind.retryable(),
             Error::Segment { cause, .. } | Error::Key { cause, .. } => cause.retryable(),
             Error::Cleanup { failure, .. } => failure.retryable(),
-            Error::LiveStalled { cause, .. } => match cause {
-                StallError::RefreshFailed(RefreshCause::Http { kind, .. }) => kind.retryable(),
-                StallError::RefreshFailed(RefreshCause::Empty | RefreshCause::Syntax { .. }) => {
-                    false
-                }
-                StallError::RefreshPending => true,
-                StallError::Unrecordable(kind) => kind.retryable(),
-                StallError::TrackStopped(cause) => *cause == StallCause::NoNewSegments,
-            },
+            Error::LiveStalled { cause, .. } => cause.retryable(),
             _ => false,
         }
     }
@@ -281,6 +273,14 @@ pub enum HlsUnsupported {
     /// 音视频分离时主播放列表必须写码率（BANDWIDTH），而某条轨的分片声明的时长都为 0 算不出，来源也没写
     #[error("某条轨的分片声明的时长都为 0、来源也没写 BANDWIDTH，算不出主播放列表必填的码率")]
     BandwidthUnknown,
+}
+
+/// 取不到的请求：失败的原因，与服务器在 429/503 中要求（Retry-After）的最短等待。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{kind}")]
+pub struct HttpFailure {
+    pub kind: HttpError,
+    pub retry_after: Option<Duration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -338,10 +338,29 @@ pub enum StallError {
     RefreshPending,
     /// 播放列表仍在列出新分片，但一个都没有下载成功；带最近一次取不到分片或 init 段的原因
     #[error("有新分片，但一个都没有下载成功，最近一次：{0}")]
-    Unrecordable(HttpError),
+    Unrecordable(HttpFailure),
     /// 这条轨看起来已结束（原因同 [`StallCause`]），而其他轨仍在出新分片；播放列表被删除时不可重试
     #[error("这条轨{}，其他轨仍在出新分片", stopped_text(*.0))]
     TrackStopped(StallCause),
+}
+
+impl StallError {
+    fn retryable(&self) -> bool {
+        match self {
+            StallError::RefreshFailed(cause) => cause.retryable(),
+            StallError::RefreshPending => true,
+            StallError::Unrecordable(failure) => failure.kind.retryable(),
+            StallError::TrackStopped(cause) => *cause == StallCause::NoNewSegments,
+        }
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        match self {
+            StallError::RefreshFailed(cause) => cause.retry_after(),
+            StallError::Unrecordable(failure) => failure.retry_after,
+            StallError::RefreshPending | StallError::TrackStopped(_) => None,
+        }
+    }
 }
 
 fn stopped_text(cause: StallCause) -> String {

@@ -6,7 +6,8 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use hs_m3u8_core::hls::SyntaxError;
 use hs_m3u8_core::{
-    Engine, Error, HttpError, LiveEnd, LiveOptions, MissReason, Missed, RefreshCause, Stage,
+    Engine, Error, HttpError, HttpFailure, LiveEnd, LiveOptions, MissReason, Missed, RefreshCause,
+    Stage,
 };
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
@@ -94,10 +95,10 @@ async fn refresh_errors_show_in_progress_until_recovered() {
     .expect("刷新失败应出现在进度里")
     .unwrap()
     .clone();
-    let unavailable = RefreshCause::Http {
+    let unavailable = RefreshCause::Http(HttpFailure {
         kind: HttpError::Status(503),
         retry_after: None,
-    };
+    });
     assert_eq!(failed.refresh_errors, [Some(unavailable)]);
     // 已录 1 秒
     assert_eq!(failed.duration_us, 1_000_000);
