@@ -88,7 +88,9 @@ crates/py ────┼──> crates/core ──> crates/hls
 
 合并调用 `remux` 生成临时文件，核对包数后改名为输出文件；之后按选项删除或保留任务目录。
 
-模块：`request`（请求与选项）、`resolve`（拉取播放列表、选轨）、`selection`（选轨的身份）、`ident`（指纹与摘要）、`vod`（`plan` 点播计划与摘要，纯计算）、`live`（`session` 续录时的会话判定、`window` 每轨的窗口与新分片、`track` 每轨的刷新与停滞、`merge` 合并输入与缺失报告）、`fetch`（分片下载队列、拉取 init 段）、`workdir`（`record` 任务记录与 job.json 格式、`names` 文件名）、`job`（分派与收尾）、`http`、`crypto`、`verify`、`hooks`（回调）、`report`（进度与结果）、`error`、`blocking`（阻塞线程池）。
+开始下载前可用 `Engine::probe` 只解析不下载：请求与回调同下载，返回主播放列表（可选的变体与音轨）、按偏好选中的轨与各轨的媒体播放列表（时长、是否直播、是否加密）。来源与访问方式（地址、选轨偏好、请求配置、回调）合为 `Source`，探测与下载共用。
+
+模块：`request`（请求与选项）、`resolve`（拉取播放列表、选轨）、`probe`（探测）、`selection`（选轨的身份）、`ident`（指纹与摘要）、`vod`（`plan` 点播计划与摘要，纯计算）、`live`（`session` 续录时的会话判定、`window` 每轨的窗口与新分片、`track` 每轨的刷新与停滞、`merge` 合并输入与缺失报告）、`fetch`（分片下载队列、拉取 init 段）、`workdir`（`record` 任务记录与 job.json 格式、`names` 文件名）、`job`（分派与收尾）、`http`、`crypto`、`verify`、`hooks`（回调）、`report`（进度与结果）、`error`、`blocking`（阻塞线程池）。
 
 ### 5.2 任务目录与续传
 

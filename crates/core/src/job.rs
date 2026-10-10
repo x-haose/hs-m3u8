@@ -80,7 +80,7 @@ async fn run_live(task: Task, source: String, resolved: Resolved) -> Result<Outp
         .ok_or(Error::Unsupported(Unsupported::Live))?;
     let record = JobRecord {
         source_digest: source,
-        selection: resolved.selection.clone(),
+        selection: resolved.selection_key(),
         kind: RecordKind::Live {
             url_digest: url_digest(&task.request.source.url),
         },
@@ -106,7 +106,7 @@ async fn run_live(task: Task, source: String, resolved: Resolved) -> Result<Outp
 /// 点播：下载计划中尚未完成的部分，再合并。
 async fn run_vod(task: Task, source: String, resolved: Resolved) -> Result<Output, Error> {
     let streams = resolved.streams();
-    let selection = resolved.selection.clone();
+    let selection = resolved.selection_key();
     let plan = Plan::new(resolved.tracks)?;
     let record = JobRecord {
         source_digest: source,

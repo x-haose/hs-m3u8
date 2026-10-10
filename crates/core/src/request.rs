@@ -11,7 +11,7 @@ use crate::hooks::{Hooks, NoHooks};
 use crate::ident::bare_url;
 use crate::{Error, hls};
 
-/// 来源与访问它的方式。
+/// 来源与访问它的方式；探测（[`crate::Engine::probe`]）与下载（[`JobRequest::source`]）共用。
 #[derive(Clone)]
 pub struct Source {
     /// 主播放列表或媒体播放列表的地址。它去掉用户名、密码、查询串与片段后，连同 `preference`，称为来源：

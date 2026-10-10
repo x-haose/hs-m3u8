@@ -18,6 +18,7 @@ mod http;
 mod ident;
 mod job;
 mod live;
+mod probe;
 mod report;
 mod request;
 mod resolve;
@@ -37,6 +38,7 @@ pub use error::{Error, HttpError, Integrity, JobType, StallError, Unsupported, W
 pub use hooks::{HookError, HookKind, Hooks, NoHooks, Purpose, RequestParts};
 pub use hs_m3u8_hls as hls;
 pub use hs_m3u8_remux::{Report, Shape, StreamKind, StreamReport};
+pub use probe::Probe;
 pub use report::{LiveEnd, LiveReport, MissReason, Missed, Output, Progress, Stage, StallCause};
 pub use request::{HttpOptions, JobRequest, LiveOptions, Resume, RetryPolicy, Source, Timeouts};
 pub use url::Url;
@@ -58,6 +60,14 @@ impl Engine {
         Engine {
             requests: Arc::new(Semaphore::new(max_requests.get())),
         }
+    }
+
+    /// 拉取来源并按偏好选轨，不下载分片、不碰任务目录；请求与回调同下载。用于开始下载前列出可选的清晰度与
+    /// 音轨、查看时长与是否直播。参数错误时立即返回错误；不在 tokio 运行时内调用会 panic。
+    pub async fn probe(&self, source: &Source) -> Result<Probe, Error> {
+        source.validate()?;
+        let http = Http::new(&source.http, source.hooks.clone(), self.requests.clone())?;
+        probe::probe(&http, source).await
     }
 
     /// 校验请求并在当前 tokio 运行时上启动任务；不在 tokio 运行时内调用会 panic。
