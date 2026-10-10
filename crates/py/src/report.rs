@@ -318,7 +318,7 @@ record! {
         pub first: u64,
         /// 最后一个缺失的媒体序号
         pub last: u64,
-        /// 区间里的分片数；大到无法表示时为平台的最大整数
+        /// 区间里的分片数，即 `last - first + 1`；超出 64 位整数时为 2**64 - 1
         pub count: usize,
         /// 缺失的原因
         pub reason: MissReason,

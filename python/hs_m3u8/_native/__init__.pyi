@@ -248,9 +248,10 @@ class Engine:
         r"""
         放弃任务：删除任务目录 `work_dir`（相对路径按当前目录补全），只删本库写的文件。先按其中的记录收拾写到一半的
         输出：删掉临时输出，挪开的旧输出按开始任务时的规则放回或删掉。返回留下的东西，记录已随任务目录删掉，要用户
-        处理：原处是别的东西而没放回的旧输出各一项；收拾不了而按 `unsettled` 记下的；任务目录没删干净（里面有不是本库
-        写的文件，或删除出错）时一项 `LeftoverKind.WorkDir`。目录不存在时什么也不做。协程被取消时，已开始的收拾与删除
-        做完当前一步才停，再次放弃即可接着做。
+        处理：原处是别的东西而没放回的旧输出各一项；收拾不了的（盘读不到或收拾出错），`unsettled` 为默认的
+        `Unsettled.Fail()` 时报错，为 `Unsettled.Report()` 时记下；任务目录没删干净（里面有不是本库写的文件，或删除
+        出错）时一项 `LeftoverKind.WorkDir`。目录不存在时什么也不做。协程被取消时，已开始的收拾与删除做完当前一步才停，
+        再次放弃即可接着做。
         
         路径为空或不合要求时抛 `InvalidInputError`。任务目录正被任务使用时抛 `WorkDirError`
         （`WorkDirProblem.Locked`），不是本库的任务目录时为 `WorkDirProblem.NotEmpty`。记录是另一个格式版本写的
@@ -784,8 +785,8 @@ class Job:
         """
     def stop(self) -> None:
         r"""
-        直播：停止刷新，把已拉到的播放列表处理完、已列出的分片下完后写出，`wait` 返回录到的部分；续录时会话还没定下就
-        立即结束，不录新的分片。点播与只合并不受影响。
+        直播：停止刷新，把已拉到的播放列表处理完、已列出的分片下完后写出，`wait` 返回录到的部分。续录刚开始、还没确定
+        能否接上之前录到的内容时停止，不录新的分片，只写出之前录到的。点播与只合并不受影响。
         """
     async def wait(self) -> Output:
         r"""
@@ -1368,7 +1369,7 @@ class Missed:
     @property
     def count(self) -> builtins.int:
         r"""
-        区间里的分片数；大到无法表示时为平台的最大整数
+        区间里的分片数，即 `last - first + 1`；超出 64 位整数时为 2**64 - 1
         """
     @property
     def reason(self) -> MissReason.Expired | MissReason.Failed | MissReason.InitFailed | MissReason.Unmergeable | MissReason.Unknown:
@@ -2763,8 +2764,8 @@ class Unsettled:
     @typing.final
     class Report(Unsettled):
         r"""
-        记为残留，照常放弃：收拾不了的输出旁的两个保留名各一项（盘读不到时核实不了，不一定还在）——临时输出可删；
-        挪开的旧输出在全部装上之后可删，之前是没能放回原处的旧输出；任务目录本身读不到时一项
+        记为残留，照常放弃：每个收拾不了的输出，它旁边可能留着的写了一半的临时输出与替换时挪开的旧输出各记一项
+        （盘读不到时核实不了，不一定还在），怎么处理见 `Leftover.kind`；任务目录本身读不到时记一项
         `LeftoverKind.WorkDir`。用于盘不再接上、用户确认仍要放弃时
         """
         __match_args__ = ()

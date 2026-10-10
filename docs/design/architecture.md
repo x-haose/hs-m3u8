@@ -235,7 +235,7 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
   - 异常也是 PyO3 类（继承 `Exception`），属性带类型；构造函数为 `(message, *, 自己的属性, 基类的属性可省略)`。PyO3 不给原生基类传参数，说明由 `__init__` 放进 `args`，`__init__` 与构造函数签名相同，类型检查器与 stubtest 才对得上；
   - 数据类、枚举取值与异常都能 pickle 与 copy：`__reduce__` 交出 `functools.partial(类, 各属性)`，按关键字调用构造函数重建；进程池在进程之间传参数、结果与异常要用到；
   - 回调基类 `Hooks` 是可被 Python 继承的 PyO3 类。
-- 类型存根（`python/hs_m3u8/_native/__init__.pyi`）由 pyo3-stub-gen 从这些 Rust 定义生成，说明取自 `///`：存根写的类型就是运行时实际的类型。默认值不是字面量、存根生成写不出的几个构造函数（`Engine`、`Timeouts`、`RetryPolicy`、`LiveOptions`、`JobRequest`），签名以存根语法写在 `crates/py` 里对应类型的旁边，由 stubtest 核对参数与默认值的有无。
+- 类型存根（`python/hs_m3u8/_native/__init__.pyi`）由 pyo3-stub-gen 从这些 Rust 定义生成，说明取自 `///`：存根写的类型就是运行时实际的类型。默认值不是字面量的几个构造函数（`Engine`、`Timeouts`、`RetryPolicy`、`LiveOptions`、`JobRequest`），签名以存根语法手写在 `crates/py` 里对应类型的旁边，默认值写 `...`：PyO3 的运行时签名把这类默认值显示为 `...`，生成的存根却写出具体的值（时长的写法语法都不对），stubtest 核对不过；参数与默认值的有无仍由 stubtest 核对。
 - `python/hs_m3u8`：`__init__.py`（再导出全部公开名字）同样由 pyo3-stub-gen 生成，带 `py.typed`。
 - 只提供异步接口，脚本用 `asyncio.run(...)`：同步版本只是它的包装；核心的写法保证进程在任何时刻退出都不留半个输出、可以续传，Ctrl+C 不需要特殊处理。
 - PyO3 0.29.3（`experimental-async`：异步方法返回 Python 协程，`asyncio.run`、`create_task` 都能直接用）+ maturin 1.15.0 + pyo3-stub-gen 0.23.1；`abi3-py312` wheel（最低 Python 3.12，见 ADR-0001），FFmpeg 静态链接进扩展模块。
@@ -249,14 +249,14 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 - 时长：`datetime.timedelta`；服务器要求的等待 `retry_after` 是整数秒（可能大到超出 `timedelta` 能表示的范围）。
 - 序列：返回 `tuple[T, ...]`，改不了，也就没有「改了却没生效」；传入接受任意序列。请求头传入 `Mapping[str, str]` 或 `(名, 值)` 的可迭代对象（同名可以有多个，不接受 `str`、`bytes`），保存为 `tuple[tuple[str, str], ...]`。
 - 计数与时长：为负或超出范围时抛 `InvalidInputError`，与「该至少为 1 而为 0」同类；构造时只检查 core 的类型表示不了的值，其余（如超时为 0）由 core 在探测、开始任务时检查。
-- 默认值取 `core` 的（`Default` 实现与常量），绑定层不另写数字；可否重试、区间的分片数等也由 `core` 算好、作为字段给出，绑定层不另写规则。
+- 默认值取 `core` 的（`Default` 实现与常量），绑定层不另写数字；说明里写出的默认数字（如超时 15 秒、并发 16）是照抄的，改 `core` 的默认值时同步改这些说明；可否重试、区间的分片数等也由 `core` 算好、作为字段给出，绑定层不另写规则。
 - 说明：中文，每个类、字段、方法、参数都写。请求头的值、key、代理地址里的口令不进 `__repr__`。
 - 异步方法返回协程，在 asyncio 事件循环里 await；协程被取消或丢弃时，所等的操作随之取消。本库内部出错（缺陷）时抛 `pyo3_runtime.PanicException`。
 
 ### 7.3 接口
 
 ```python
-StrPath = str | os.PathLike[str]
+StrPath = str | os.PathLike[str]  # 本节的简写；包里不定义它，存根直接写 str | os.PathLike[str]
 
 
 class Engine:
@@ -309,7 +309,7 @@ HsM3u8Error                       retryable: bool、retry_after: int | None、se
 ├── SourceError                   来源本身不行
 │   ├── PlaylistError             url、reason: Malformed（Empty、NotAPlaylist、NotUtf8、Mixed、Syntax(line, detail)）
 │   ├── NotMediaPlaylistError     url
-│   ├── SourceUnsupportedError    reason: SourceUnsupported（EmptyPlaylist、NoTargetDuration、Encryption、InitChangesWithinGroup、DiscontinuityMismatch）
+│   ├── SourceUnsupportedError    reason: SourceUnsupported（EmptyPlaylist、NoTargetDuration、Encrypted、InitChangesWithinGroup、DiscontinuityMismatch）
 │   ├── IntegrityError            url、reason: IntegrityFailure
 │   └── KeyLengthError            url、length
 ├── HttpError                     url、kind: HttpErrorKind
@@ -371,7 +371,7 @@ HsM3u8Error                       retryable: bool、retry_after: int | None、se
 6. 文档：`cargo doc --workspace --no-deps --document-private-items`，告警即失败（文档注释里的链接须都能解析）
 7. `cargo test --workspace`
 8. 覆盖率：`hls`、`core`、`remux` 各自行覆盖 ≥ 80%（cargo-llvm-cov）
-9. Python：maturin 构建，再按 7.4 检查与测试（Python 绑定阶段加入）
+9. Python：maturin 构建，再按 7.4 检查与测试
 10. 前端：`tsc --noEmit`、lint、构建（GUI 阶段加入）
 
 ## 11. CI 与发布
