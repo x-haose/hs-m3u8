@@ -141,6 +141,10 @@ async fn load_playlist(
     let text = String::from_utf8(body).map_err(|_| malformed(hls::Malformed::NotAPlaylist))?;
     hls::parse(&text, &final_url).map_err(|e| match e {
         hls::Error::Malformed(cause) => malformed(cause),
-        hls::Error::Unsupported { what, .. } => Error::Unsupported(Unsupported::Encryption(what)),
+        hls::Error::Unsupported { line, what } => Error::Unsupported(Unsupported::Encryption {
+            url: Box::new(final_url.clone()),
+            line,
+            what,
+        }),
     })
 }

@@ -8,7 +8,7 @@ use std::time::Duration;
 use aes::cipher::block_padding::Pkcs7;
 use aes::cipher::{BlockModeEncrypt, KeyIvInit};
 use axum::http::StatusCode;
-use hs_m3u8_core::hls::AudioChoice;
+use hs_m3u8_core::hls::{AudioChoice, Encryption};
 use hs_m3u8_core::{
     Error, HookError, Hooks, HttpError, Integrity, KeyOverride, Purpose, RequestParts, Stage,
     Unsupported, Url, WorkDirProblem,
@@ -879,7 +879,8 @@ async fn errors_do_not_reveal_credentials_or_tokens() {
     }
 }
 
-/// 下载前就能判定的失败：输出已存在、不录制直播时遇到直播、各轨不连续段不一致。
+/// 下载前就能判定的失败：输出已存在、不录制直播时遇到直播、独立音频用了 DRM（报出是哪个播放列表的哪一行）、
+/// 各轨不连续段不一致。
 #[tokio::test(flavor = "multi_thread")]
 async fn rejected_before_download() {
     let dir = test_dir("rejected");
@@ -910,6 +911,29 @@ async fn rejected_before_download() {
         "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nv0.ts\n#EXT-X-DISCONTINUITY\n\
          #EXTINF:1,\nv1.ts\n#EXT-X-ENDLIST\n",
     );
+    server.put(
+        "audio.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n\
+         #EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"skd://k\",KEYFORMAT=\"com.apple.streamingkeydelivery\"\n\
+         #EXTINF:1,\na0.aac\n#EXT-X-ENDLIST\n",
+    );
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"x\",URI=\"audio.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO=\"a\"\nvideo.m3u8\n",
+    );
+    let err = run(request(server.url("master.m3u8"), &dir))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            Error::Unsupported(Unsupported::Encryption { url, line: 3, what: Encryption::Drm { .. } })
+                if **url == server.url("audio.m3u8")
+        ),
+        "{err}"
+    );
+
     server.put(
         "audio.m3u8",
         "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\na0.aac\n#EXTINF:1,\na1.aac\n#EXT-X-ENDLIST\n",
