@@ -175,11 +175,12 @@ pub trait Hooks: Send + Sync {
 
 | 类别 | 变体 | 可否重试 |
 |---|---|---|
-| 调用方输入 | `InvalidInput`、`OutputExists`（要求覆盖即可）、`OutputOccupied`（换路径） | 改参数后再试 |
-| 来源内容 | `Playlist`、`NotMediaPlaylist`、`Select`、`Unsupported`（直播被拒、无分片、DRM、SAMPLE-AES、无法合并的布局）、`Integrity`、`KeyLength` | 否 |
-| 外部依赖 | `Http`（`HttpError::retryable`）、`Io`；`Segment`、`Key` 说明出在哪个分片或 key；`LiveStalled`（直播停滞） | 看原因 |
+| 改请求再试 | `InvalidInput`；`OutputExists`（要求覆盖）；`OutputOccupied`（换路径，含上级有一段是文件）；`Select`（选轨偏好与来源不符）；`Unsupported::Live`（开启直播录制）；`Unsupported::Mp4`、`Unsupported::Hls`（内容放不进这种输出，改用另一种） | 改请求后再试 |
+| 来源本身不行 | `Playlist`（内容不是合法的播放列表）、`NotMediaPlaylist`、`Unsupported` 的其余各项（无分片、不支持的加密、无法合并的布局）、`Integrity`、`KeyLength` | 否 |
+| 网络 | `Http`（在最外层时来自播放列表或 init 段的请求）；`Segment`、`Key` 说明出在哪个分片或 key；`LiveStalled`（直播停滞，刷新失败时带 `RefreshCause`） | 看 `Error::retryable`，服务器要求的等待看 `Error::retry_after`，都看包着的原因 |
+| 读写文件、合并 | `Io`；`Remux`（读分片或写 MP4 出错，内容放不进 MP4 的除外） | 否 |
 | 任务目录 | `WorkDir`（`WorkDirProblem`）、`NothingRecorded` | 否 |
-| 其他 | `Hook`、`Remux`、`Cancelled`；`Cleanup`（写输出失败后收拾也没做完，带残留列表） | 否（`Cleanup` 看原来的失败） |
+| 其他 | `Hook`（调用方的回调出错）、`Cancelled`；`Cleanup`（失败后收拾也没做完，带残留列表） | 否（`Cleanup` 看原来的失败） |
 
 - 收尾没删掉或放回的东西（成功时的 `Output::leftovers`、`Cleanup` 里的 `leftovers`）是结构化列表，每项有路径、种类与原因，种类按调用方的处理方式分：可以直接删除的（写了一半的临时输出、被替换的旧输出等本库写的东西）、没能放回原处的旧输出（带原来的路径）、写输出失败后没能撤下的新输出（完整可用）、没删干净的任务目录（里面可能有不是本库写的文件，不要整个删除）。界面据此提供打开位置或删除，不必解析文案。
 - 错误信息已包含原因，不经 `source()` 重复给出；地址只显示到路径，不含用户名、密码与查询串，播放列表里无法解析的地址不显示；代理地址不含用户名与密码。
