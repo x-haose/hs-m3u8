@@ -77,8 +77,7 @@ impl OutputOptions {
     /// 实际使用的任务目录：`work_dir`，未指定时见 [`OutputOptions::work_dir`]；相对路径按当前目录补全为绝对路径，与
     /// 开始任务时一样。未指定 `work_dir` 而输出路径没有文件名时报参数错误。
     pub fn resolved_work_dir(&self) -> Result<PathBuf, Error> {
-        let dir = self.work_dir_as_given()?;
-        std::path::absolute(&dir).map_err(io_error("解析", &dir))
+        absolute(&self.work_dir_as_given()?)
     }
 
     /// 任务目录，未补全：`work_dir`，未指定时见 [`OutputOptions::work_dir`]。
@@ -122,7 +121,7 @@ impl OutputOptions {
             if !ends_with_file_name(path) {
                 return invalid("路径须以文件名结尾", path);
             }
-            absolute.push(std::path::absolute(path).map_err(io_error("解析", path))?);
+            absolute.push(self::absolute(path)?);
         }
         let literal: Vec<PathBuf> = absolute.iter().map(|p| lexical(p)).collect();
         for (i, a) in literal.iter().enumerate() {
@@ -173,6 +172,16 @@ impl ResolvedOutput {
     pub(crate) fn get(&self, kind: OutputKind) -> Option<&PendingOutput> {
         self.outputs.iter().find(|o| o.kind() == kind)
     }
+}
+
+/// `path` 按当前目录补全的绝对路径，去掉结尾的分隔符：带着它，文件系统调用指的是「这一项当作目录」，这一项是文件
+/// 时报「不是目录」，而不是看这一项本身。
+fn absolute(path: &Path) -> Result<PathBuf, Error> {
+    let absolute = std::path::absolute(path).map_err(io_error("解析", path))?;
+    Ok(match (absolute.parent(), absolute.file_name()) {
+        (Some(parent), Some(name)) => parent.join(name),
+        _ => absolute,
+    })
 }
 
 /// 路径的最后一段（结尾的分隔符不算）就是它的文件名。`Path` 解析时略去结尾的 `.`：`out.mp4/.` 的文件名仍是
