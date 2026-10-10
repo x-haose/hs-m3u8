@@ -35,7 +35,7 @@ pub enum Error {
     #[error(transparent)]
     Malformed(#[from] Malformed),
     #[error("第 {line} 行的 EXT-X-KEY：{what}")]
-    Unsupported { line: usize, what: Unsupported },
+    Unsupported { line: usize, what: Encryption },
 }
 
 /// 内容不是合法的播放列表。
@@ -91,7 +91,7 @@ pub enum SyntaxError {
 
 /// 不支持的加密方式。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum Unsupported {
+pub enum Encryption {
     #[error("SAMPLE-AES 加密")]
     SampleAes,
     #[error("DRM 加密（KEYFORMAT={keyformat}）")]

@@ -1,8 +1,8 @@
 //! 媒体播放列表的解析与规范化。
 
 use hs_m3u8_hls::{
-    ByteRange, Error, InitSection, Malformed, MediaPlaylist, Playlist, PlaylistType, SegmentKey,
-    SyntaxError, Unsupported, Url, parse,
+    ByteRange, Encryption, Error, InitSection, Malformed, MediaPlaylist, Playlist, PlaylistType,
+    SegmentKey, SyntaxError, Url, parse,
 };
 
 fn url(s: &str) -> Url {
@@ -151,7 +151,7 @@ fn drm_only_and_sample_aes_are_unsupported() {
         drm,
         Error::Unsupported {
             line: 2,
-            what: Unsupported::Drm {
+            what: Encryption::Drm {
                 keyformat: "com.apple.streamingkeydelivery".into()
             }
         }
@@ -161,7 +161,7 @@ fn drm_only_and_sample_aes_are_unsupported() {
         sample_aes,
         Error::Unsupported {
             line: 2,
-            what: Unsupported::SampleAes
+            what: Encryption::SampleAes
         }
     );
 }
