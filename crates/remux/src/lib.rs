@@ -225,14 +225,16 @@ pub enum Error {
 /// 内容须前后一致、时间戳递增）；或各轨都没有要取的流。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unsupported {
-    #[error("第 {group} 组第 {track} 条轨的{kind}编码 {codec} 不受支持（只支持 H.264、HEVC、AAC）")]
+    #[error(
+        "第 {group} 组第 {track} 条轨的{kind}编码 {codec} 放不进 MP4（只支持 H.264、HEVC、AAC）"
+    )]
     Codec {
         group: usize,
         track: usize,
         kind: StreamKind,
         codec: &'static str,
     },
-    #[error("第 {group} 组第 {track} 条轨的流种类与第 0 组不同")]
+    #[error("第 {group} 组第 {track} 条轨的流种类与第 0 组不同，无法放进同一个 MP4")]
     LayoutChanged { group: usize, track: usize },
     #[error(
         "第 {group} 组第 {track} 条轨的{kind}参数 {found:?} 与第 0 组 {first:?} 不同，无法放进同一条 MP4 轨"
@@ -251,7 +253,7 @@ pub enum Unsupported {
         track: usize,
         kind: StreamKind,
     },
-    #[error("各轨都没有要取的视频或音频流")]
+    #[error("各轨都没有要取的视频或音频流，写不出 MP4")]
     NoStreams,
 }
 

@@ -244,14 +244,18 @@ pub enum Unsupported {
     EmptyPlaylist(Box<Url>),
     #[error("直播播放列表 {} 既没有 EXT-X-TARGETDURATION 也没有分片，无法确定刷新间隔", bare_url(.0))]
     NoTargetDuration(Box<Url>),
-    /// DRM、SAMPLE-AES 等本库解不了的加密
-    #[error("{0}")]
-    Encryption(hs_m3u8_hls::Encryption),
+    /// 播放列表 `url` 第 `line` 行的 EXT-X-KEY 用了本库解不了的加密（DRM、SAMPLE-AES 等）
+    #[error("播放列表 {} 第 {line} 行的 EXT-X-KEY：{what}", bare_url(.url))]
+    Encryption {
+        url: Box<Url>,
+        line: usize,
+        what: hs_m3u8_hls::Encryption,
+    },
     /// 内容放不进 MP4，可只输出本地 HLS（[`crate::Target::Hls`]）：它原样保留分片，不受这些限制
-    #[error("输出 MP4：{0}")]
+    #[error("{0}")]
     Mp4(Mp4Unsupported),
     /// 本地 HLS 表示不了这些内容，可只输出 MP4（[`crate::Target::Mp4`]）
-    #[error("输出本地 HLS：{0}")]
+    #[error("{0}")]
     Hls(HlsUnsupported),
     #[error("同一不连续段内 EXT-X-MAP 发生变化（第 {track} 条轨，不连续段 {discontinuity}）")]
     InitChangesWithinGroup { track: usize, discontinuity: u64 },
@@ -268,10 +272,12 @@ pub enum Unsupported {
 pub enum HlsUnsupported {
     /// 第 `track` 条轨里没有 init 段的不连续段组排在有 init 段（fMP4）的组后面：EXT-X-MAP 一直作用到下一个
     /// EXT-X-MAP，前面的 init 段会被用在后面的组上。直播续录时服务器从 fMP4 换成 TS 会这样
-    #[error("第 {track} 条轨在 fMP4 的段之后又有不用 init 段的段，EXT-X-MAP 无法表示")]
+    #[error("第 {track} 条轨在 fMP4 的段之后又有不用 init 段的段，本地 HLS 无法表示")]
     MixedInit { track: usize },
     /// 音视频分离时主播放列表必须写码率（BANDWIDTH），而某条轨的分片声明的时长都为 0 算不出，来源也没写
-    #[error("某条轨的分片声明的时长都为 0、来源也没写 BANDWIDTH，算不出主播放列表必填的码率")]
+    #[error(
+        "某条轨的分片声明的时长都为 0、来源也没写 BANDWIDTH，算不出本地 HLS 主播放列表必填的码率"
+    )]
     BandwidthUnknown,
 }
 
