@@ -11,7 +11,9 @@ use hs_m3u8_hls::{MediaPlaylist, Playlist, parse};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams, TrackSegments, remux};
 
 use crate::server::Server;
-use crate::{assert_output, engine, expected_long, fixture, fixtures, request, run, test_dir};
+use crate::{
+    apple_double, assert_output, engine, expected_long, fixture, fixtures, request, run, test_dir,
+};
 
 /// 视频与独立音频分离、两个不连续段组的点播（fmp4_a 后接 fmp4_b），返回主播放列表的地址。
 fn put_split_vod(server: &Server) -> Url {
@@ -236,17 +238,21 @@ async fn existing_hls_directories_are_replaced_only_when_written_by_the_library(
     replace.output.overwrite = true;
     std::fs::write(hls.join("0/Thumbs.db"), "资源管理器生成的").unwrap();
     for name in ["._index.m3u8", "._0", "0/._0.ts"] {
-        std::fs::write(hls.join(name), "扩展属性").unwrap();
+        std::fs::write(hls.join(name), apple_double()).unwrap();
     }
     run(replace.clone()).await.unwrap();
     assert!(hls.join("0/0.ts").is_file());
 
-    std::fs::write(hls.join("0/notes.txt"), "别人的文件").unwrap();
-    match run(replace).await {
-        Err(Error::OutputOccupied(p)) => assert_eq!(p, hls),
-        other => panic!("应报有别人的文件：{other:?}"),
+    // 别人的文件，含名字像 AppleDouble 而内容不是的
+    for name in ["0/._notes", "0/notes.txt"] {
+        std::fs::write(hls.join(name), "别人的文件").unwrap();
+        match run(replace.clone()).await {
+            Err(Error::OutputOccupied(p)) => assert_eq!(p, hls),
+            other => panic!("{name} 应算别人的文件：{other:?}"),
+        }
+        assert!(hls.join(name).is_file());
+        std::fs::remove_file(hls.join(name)).unwrap();
     }
-    assert!(hls.join("0/notes.txt").is_file());
 }
 
 /// 两者都要时，HLS 目录在下载期间被别人放进了文件：写出前的检查发现后报错，MP4 与 HLS 都没有写出、
@@ -559,7 +565,7 @@ async fn outputs_inside_the_work_dir_survive_its_removal() {
     let work = dir.join("work");
     std::fs::create_dir(&work).unwrap();
     for name in ["._out.mp4", "._job.json", "._lock"] {
-        std::fs::write(work.join(name), "扩展属性").unwrap();
+        std::fs::write(work.join(name), apple_double()).unwrap();
     }
     std::os::unix::fs::symlink(&work, dir.join("link")).unwrap();
     let target = Target::Mp4(dir.join("link/out.mp4"));
@@ -644,7 +650,7 @@ async fn system_files_in_the_work_dir_do_not_block_its_removal() {
         "tracks/._0",
         "tracks/0/._gone.seg",
     ] {
-        std::fs::write(work.join(name), "扩展属性").unwrap();
+        std::fs::write(work.join(name), apple_double()).unwrap();
     }
     server.ungate("seg1.ts");
 
