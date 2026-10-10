@@ -230,12 +230,12 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 ### 7.1 结构
 
 - `crates/py`：PyO3 绑定（cdylib），模块 `hs_m3u8._native`，只依赖 `core`。对外的类型都是这里定义的 PyO3 类，由 `core` 的类型逐个翻译而来：
-  - 数据类不可变，可比较、可哈希，有按字段的构造函数（除第一个参数外只能按关键字传）、`__repr__` 与 `__match_args__`；
-  - 带数据的枚举（如变体选择、录制的结束原因）每种取值是一个子类，用 `match` 或 `isinstance` 分辨；不带数据的是简单枚举，成员名大写；
+  - 数据类不可变，可比较、可哈希，带按字段列出的 `__repr__`；请求类型有构造函数（除第一个参数外只能按关键字传），结果类型只由本库产生；
+  - 枚举的每种取值是一个子类，带数据的（如变体选择、录制的结束原因）与不带数据的（如 `Stage.Writing()`）一样，用 `match` 或 `isinstance` 分辨：PyO3 的简单枚举在运行时不是 `enum.Enum`，pyo3-stub-gen 却把它写成 `enum.Enum` 的子类，存根与运行时对不上；
   - 异常也是 PyO3 类（继承 `Exception`），属性带类型；
   - 回调基类 `Hooks` 是可被 Python 继承的 PyO3 类。
-- 类型存根 `_native.pyi` 由 pyo3-stub-gen 从这些 Rust 定义生成，说明取自 `///`：存根写的类型就是运行时实际的类型，不另外手写。
-- `python/hs_m3u8`：`__init__.py` 再导出全部公开名字（`__all__`），带 `py.typed`。
+- 类型存根（`python/hs_m3u8/_native/__init__.pyi`）由 pyo3-stub-gen 从这些 Rust 定义生成，说明取自 `///`：存根写的类型就是运行时实际的类型。默认值不是字面量、存根生成写不出的几个构造函数（`Engine`、`Timeouts`、`RetryPolicy`、`LiveOptions`、`JobRequest`），签名以存根语法写在 `crates/py` 里对应类型的旁边，由 stubtest 核对参数与默认值的有无。
+- `python/hs_m3u8`：`__init__.py`（再导出全部公开名字）同样由 pyo3-stub-gen 生成，带 `py.typed`。
 - 只提供异步接口，脚本用 `asyncio.run(...)`：同步版本只是它的包装；核心的写法保证进程在任何时刻退出都不留半个输出、可以续传，Ctrl+C 不需要特殊处理。
 - PyO3 0.29.3 + `pyo3-async-runtimes` 0.29.0（tokio，异步方法返回 asyncio 的 Future）+ maturin 1.15.0 + pyo3-stub-gen 0.23.1；`abi3-py312` wheel（最低 Python 3.12，见 ADR-0001），FFmpeg 静态链接进扩展模块。
 - 回调在 `core` 的阻塞线程池中取得 GIL 后执行，不占用 tokio 工作线程；只调用子类覆盖了的方法，没覆盖的不取 GIL。
@@ -246,7 +246,7 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 - 路径：入参接受 `str | os.PathLike[str]`，返回的一律是 `pathlib.Path`（绝对路径）。地址是 `str`，内容是 `bytes`。
 - 时长：`datetime.timedelta`；服务器要求的等待 `retry_after` 是整数秒（可能大到超出 `timedelta` 能表示的范围）。
 - 序列：返回 `list[T]`。请求头入参接受 `Mapping[str, str]` 或 `(名, 值)` 的序列（同名请求头可以有多个），保存为 `list[tuple[str, str]]`。
-- 默认值取 `core` 的（`Default` 实现与常量），绑定层不另写数字。
+- 默认值取 `core` 的（`Default` 实现与常量），绑定层不另写数字；可否重试、区间的分片数等也由 `core` 算好、作为字段给出，绑定层不另写规则。
 - 说明：中文，每个类、字段、方法、参数都写。请求头的值、key、代理地址里的口令不进 `__repr__`。
 - 异步方法在 asyncio 事件循环中调用；等待被取消时，所等的操作随之取消（同 `asyncio.Task`）。
 
@@ -255,36 +255,38 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 ```python
 StrPath = str | os.PathLike[str]
 
-class Engine:
-    def __init__(self, *, max_requests: int = ...) -> None: ...   # 所有任务合计的在途请求数，默认见 core
-    def probe(self, source: Source) -> Awaitable[Probe]: ...
-    def start(self, request: JobRequest) -> Job: ...               # 参数错误立即抛出
-    def merge_recorded(self, output: OutputOptions) -> Job: ...
-    def discard(self, work_dir: StrPath, *, unsettled: Unsettled = Unsettled.FAIL) -> Awaitable[list[Leftover]]: ...
 
-class Job:                                       # 被回收即取消任务（已开始写出的在后台写完）
-    def progress(self) -> Progress: ...          # 当前的进度快照；要显示进度就定时取
+class Engine:
+    def __init__(self, *, max_requests: int = ...) -> None: ...  # 所有任务合计的在途请求数，默认见 core
+    def probe(self, source: Source) -> Awaitable[Probe]: ...
+    def start(self, request: JobRequest) -> Job: ...  # 参数错误立即抛出
+    def merge_recorded(self, output: OutputOptions) -> Job: ...
+    def discard(self, work_dir: StrPath, *, unsettled: Unsettled = Unsettled.Fail()) -> Awaitable[list[Leftover]]: ...
+
+
+class Job:  # 不再被引用、也没有在等它时取消任务（已开始写出的在后台写完）
+    def progress(self) -> Progress: ...  # 当前的进度快照；要显示进度就定时取
     def cancel(self) -> None: ...
-    def stop(self) -> None: ...                  # 直播：停止刷新，已列出的下完后写出
-    def wait(self) -> Awaitable[Output]: ...     # 可多次等待，得到同一结果或同一异常
+    def stop(self) -> None: ...  # 直播：停止刷新，已列出的下完后写出
+    def wait(self) -> Awaitable[Output]: ...  # 可多次等待，得到同一结果或同一异常
 ```
 
 请求：
 
 - `Source(url, *, preference=Preference(), http=HttpOptions(), hooks=None)`。
 - `Preference(*, variant=VariantChoice.Best(), audio=AudioChoice.Default())`；`VariantChoice`：`Best()`、`Index(index)`；`AudioChoice`：`Default()`、`Language(language)`、`Index(index)`。
-- `HttpOptions(*, headers=(), proxy=None, insecure=False, timeouts=Timeouts(), retry=RetryPolicy())`；`Timeouts(*, connect, read_idle, request)`、`RetryPolicy(*, attempts, base_delay, max_delay)`，各项可省略。
-- `Hooks`：继承它并覆盖需要的方法——`on_playlist(url: str, body: bytes) -> bytes`、`on_request(purpose: Purpose, request: RequestParts) -> RequestParts`、`on_key(url: str, data: bytes) -> bytes`、`on_segment(url: str, data: bytes) -> bytes`；回调抛出的异常使任务失败（`HookError`，`__cause__` 为原异常）。`Purpose`：`PLAYLIST`、`KEY`、`INIT`、`SEGMENT`；`RequestParts(url, *, headers)`。
+- `HttpOptions(*, headers=None, proxy=None, insecure=False, timeouts=Timeouts(), retry=RetryPolicy())`；`Timeouts(*, connect, read_idle, request)`、`RetryPolicy(*, attempts, base_delay, max_delay)`，各项可省略。
+- `Hooks`：继承它并覆盖需要的方法——`on_playlist(url: str, body: bytes) -> bytes`、`on_request(purpose: Purpose, request: RequestParts) -> RequestParts`、`on_key(url: str, data: bytes) -> bytes`、`on_segment(url: str, data: bytes) -> bytes`；回调抛出的异常使任务失败（`HookError`，`__cause__` 为原异常）。`Purpose`：`Playlist()`、`Key()`、`Init()`、`Segment()`；`RequestParts(url, *, headers)`。子类可以定义带参数的 `__init__`。
 - `JobRequest(source, output, *, key=None, concurrency=..., live=LiveOptions())`，`live=None` 时拒绝直播；`KeyOverride(key: bytes, *, iv: bytes | None = None)`；`LiveOptions(*, max_duration=None, stall_timeout=...)`。
 - `OutputOptions(target, *, work_dir=None, overwrite=False, keep_work_dir=False)`，`resolved_work_dir() -> Path`；`Target`：`Mp4(path)`、`Hls(path)`、`Both(*, mp4, hls)`。
-- `Unsettled`：`FAIL`、`REPORT`（见 5.2 放弃任务）。
+- `Unsettled`：`Fail()`、`Report()`（见 5.2 放弃任务）。
 
 结果（字段同 `core`，微秒数改为 `timedelta`，名字去掉 `_us`）：
 
 - `Probe`：`master: MasterInfo | None`、`tracks: list[TrackInfo]`、`live: bool`；`MasterInfo`：`variants: list[VariantInfo]`、`audio: list[AudioInfo]`、`selected: Selected`；`VariantInfo`、`AudioInfo`、`Selected`、`TrackInfo`、`Resolution`。
-- `Progress`：`stage: Stage`、`selected`、`segments_done`、`segments_total`、`segments_failed`、`segments_expired`、`duration: timedelta`、`bytes`、`received`、`refresh_errors: list[RefreshCause | None]`；`Stage`：`PREPARING`、`DOWNLOADING`、`RECORDING`、`WRITING`、`DONE`；`RefreshCause`：`Http(failure)`、`Empty()`、`Syntax(line, detail)`，带 `retryable`、`retry_after`。
-- `HttpFailure`：`kind: HttpErrorKind`、`retry_after: int | None`；`HttpErrorKind`：`Status(code)`、`RangeIgnored(code)`、`Timeout()`、`Certificate(detail)`、`Redirect(detail)`、`Connect(detail)`、`InvalidRequest(detail)`、`Transport(detail)`，带 `retryable`。
-- `Output`：`mp4: Mp4Output | None`、`hls: Path | None`、`segments`、`bytes`、`leftovers: list[Leftover]`、`live: LiveReport | None`；`Mp4Output`：`path`、`report: MediaReport`；`MediaReport`：`streams: list[StreamReport]`；`StreamReport`：`shape: Shape`、`packets`、`skipped_without_dts`、`duration`；`Shape`：`Video(codec, width, height)`、`Audio(codec, sample_rate, channels)`；`StreamKind`：`VIDEO`、`AUDIO`。
+- `Progress`：`stage: Stage`、`selected`、`segments_done`、`segments_total`、`segments_failed`、`segments_expired`、`duration: timedelta`、`bytes`、`received`、`refresh_errors: list[RefreshCause | None]`；`Stage`：`Preparing()`、`Downloading()`、`Recording()`、`Writing()`、`Done()`；`RefreshCause`：`reason: RefreshReason`（`Http(failure)`、`Empty()`、`Syntax(line, detail)`）、`retryable`、`retry_after`。
+- `HttpFailure`：`kind: HttpErrorKind`、`retryable: bool`、`retry_after: int | None`；`HttpErrorKind`：`Status(code)`、`RangeIgnored(code)`、`Timeout()`、`Certificate(detail)`、`Redirect(detail)`、`Connect(detail)`、`InvalidRequest(detail)`、`Transport(detail)`。
+- `Output`：`mp4: Mp4Output | None`、`hls: Path | None`、`segments`、`bytes`、`leftovers: list[Leftover]`、`live: LiveReport | None`；`Mp4Output`：`path`、`report: MediaReport`；`MediaReport`：`streams: list[StreamReport]`；`StreamReport`：`shape: Shape`、`packets`、`skipped_without_dts`、`duration`；`Shape`：`Video(codec, width, height)`、`Audio(codec, sample_rate, channels)`；`StreamKind`：`Video()`、`Audio()`。
 - `Leftover`：`path`、`kind: LeftoverKind`、`cause: str`；`LeftoverKind`：`Removable()`、`Displaced(target)`、`Installed()`、`WorkDir()`。
 - `LiveReport`：`end: LiveEnd | None`、`session_count`、`missed: list[Missed]`；`LiveEnd`：`EndList()`、`Stopped()`、`DurationReached()`、`Stalled(track, cause: StallCause)`、`Restarted(track)`、`Inconsistent(track, sequence)`；`StallCause`：`NoNewSegments()`、`PlaylistGone(status)`；`Missed`：`session`、`track`、`first`、`last`、`reason: MissReason`、`count`；`MissReason`：`Expired()`、`Failed(kind)`、`InitFailed(kind)`、`Unmergeable()`、`Unknown()`。
 
@@ -318,13 +320,14 @@ HsM3u8Error                       retryable: bool、retry_after: int | None、se
 └── JobCancelledError
 ```
 
-`SelectFailure`、`Mp4Unsupported`、`HlsUnsupported`、`SourceUnsupported`（其中不支持的加密为 `Encryption`：`SampleAes()`、`Drm(keyformat)`、`Method(name)`）、`IntegrityFailure`、`StallReason`、`WorkDirProblem` 都是带数据的枚举，取值与字段同 `core` 的对应类型；`HookKind`：`PLAYLIST`、`REQUEST`、`KEY`、`SEGMENT`；`JobType`（`WorkDirProblem.KindMismatch` 用）：`VOD`、`LIVE`。
+`SelectFailure`、`Mp4Unsupported`、`HlsUnsupported`、`SourceUnsupported`（其中不支持的加密为 `Encrypted(url, line, encryption)`，`Encryption`：`SampleAes()`、`Drm(keyformat)`、`Method(name)`）、`IntegrityFailure`、`StallReason`、`WorkDirProblem` 都是带数据的枚举，取值与字段同 `core` 的对应类型；`HookKind`：`Playlist()`、`Request()`、`Key()`、`Segment()`；`JobType`（`WorkDirProblem.KindMismatch` 用）：`Vod()`、`Live()`。
 
 0.1.x 的对应关系：`key` → `JobRequest(key=KeyOverride(...))`；`get_m3u8_func` → `Hooks.on_playlist`；`*_request_before` → `Hooks.on_request`；`key_response_after` → `Hooks.on_key`；`ts_response_after` → `Hooks.on_segment`；`merge`、`del_hls` → `Target`。
 
 ### 7.4 质量门
 
-- ruff（检查与格式）；mypy `--strict` 与 basedpyright（严格）检查 `python/`、测试与示例；stubtest 核对存根与模块；重新生成存根后与仓库里的没有差异。
+- ruff（检查与格式）；mypy `--strict` 与 basedpyright（严格）检查 `python/` 与测试；stubtest 核对存根与模块（不查 `@disjoint_base`：pyo3-stub-gen 不生成它，只影响对多重继承原生类的检查）；重新生成存根与 `__init__.py` 后与仓库里的没有差异。
+- 说明是否齐全由测试检查：导出的每个类、它的属性与方法、枚举的每种取值在运行时都有说明。
 - pytest 端到端：测试内起本地 HTTP 服务，跑探测、下载、回调、取消、续传、异常与放弃任务；Python 3.12 与最新版各跑一遍。
 
 ## 8. 桌面应用（GUI 阶段细化）
