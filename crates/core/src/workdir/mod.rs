@@ -25,7 +25,7 @@ use std::fs::{self, File, TryLockError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-pub(crate) use self::names::{SegmentName, SessionStart};
+pub(crate) use self::names::{SegmentName, SessionStart, is_canonical_number};
 use self::names::{init_file_name, parse_init_name, parse_segment_name, segment_file_name};
 use self::outputs::OUTPUTS_FILE;
 pub(crate) use self::outputs::{
@@ -230,9 +230,7 @@ pub(crate) fn is_system_file(name: &OsStr, kind: fs::FileType) -> bool {
 fn remove_tracks(tracks: &Path, kept: &mut Vec<PathBuf>) -> Result<(), Error> {
     let before = kept.len();
     for (dir, name, kind) in entries(tracks)? {
-        let is_track = name
-            .to_str()
-            .is_some_and(|n| n.parse::<usize>().is_ok_and(|t| t.to_string() == n));
+        let is_track = name.to_str().is_some_and(is_canonical_number);
         if is_system_file(&name, kind) {
             fs::remove_file(&dir).map_err(io_error("删除", &dir))?;
             continue;
