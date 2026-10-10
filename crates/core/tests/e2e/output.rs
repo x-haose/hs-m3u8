@@ -737,7 +737,7 @@ async fn an_output_under_a_file_is_reported_as_occupied() {
     }
 }
 
-/// 下载期间输出所在的目录被删了（如移走、外置盘重新插入）：写出前重建，MP4 与 HLS 照常写出。
+/// 下载期间输出所在的目录被移走或删掉：写出前重建，MP4 与 HLS 照常写出。
 #[tokio::test(flavor = "multi_thread")]
 async fn output_directories_removed_during_the_download_are_recreated() {
     let dir = test_dir("output_dir_removed");
