@@ -52,7 +52,10 @@ pub(crate) fn prepare(options: &ResolvedOutput) -> Result<(), Error> {
     let unsettled = commit::recover(&options.work_dir, &options.outputs)?;
     if let Some(first) = unsettled.first() {
         return Err(Error::Cleanup {
-            failure: Box::new(Error::OutputOccupied(first.target().to_path_buf())),
+            failure: Box::new(Error::OutputOccupied {
+                path: first.target().to_path_buf(),
+                ancestor: None,
+            }),
             leftovers: unsettled.iter().map(commit::unsettled).collect(),
         });
     }

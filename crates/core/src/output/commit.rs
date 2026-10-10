@@ -17,7 +17,7 @@
 
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::hls;
 use crate::entries;
@@ -26,7 +26,7 @@ use crate::workdir::{self, OutputKind, PendingOutput};
 use crate::{Error, Leftover, LeftoverKind};
 
 /// 输出路径上现在的东西。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Occupant {
     /// 什么也没有，且建得出来：最近的已存在的上级是目录
     Nothing,
@@ -34,8 +34,10 @@ pub(super) enum Occupant {
     EmptyDir,
     /// 输出：MP4 路径上的文件，或全是本库写出的文件的 HLS 目录
     Output,
-    /// 别的东西：MP4 路径上的目录，HLS 路径上的文件或有别的文件的目录；或上级有一段是文件，建不出来
+    /// 别的东西：MP4 路径上的目录，HLS 路径上的文件或有别的文件的目录
     Other,
+    /// 什么也没有，但建不出来：最近的已存在的上级不是目录（是文件，或悬空的符号链接）
+    Blocked { ancestor: PathBuf },
 }
 
 /// 输出路径上现在的东西；输出路径本身是符号链接时不跟随。
@@ -43,7 +45,7 @@ fn occupant(o: &PendingOutput) -> Result<Occupant, Error> {
     let target = o.target();
     let meta = match fs::symlink_metadata(target) {
         Ok(meta) => meta,
-        Err(e) if is_absent(&e) => return absent_occupant(target),
+        Err(e) if is_absent(&e) => return occupant_by_ancestor(target),
         Err(cause) => return Err(io_error("检查", target)(cause)),
     };
     match (o.kind(), meta.is_dir()) {
@@ -53,25 +55,38 @@ fn occupant(o: &PendingOutput) -> Result<Occupant, Error> {
     }
 }
 
-/// 不存在的输出路径：最近的已存在的上级是目录时建得出来，是文件时建不出来。上级有一段是文件时，Unix 上报「不是
-/// 目录」，Windows 上报「不存在」，两种都在这里查清。
-fn absent_occupant(target: &Path) -> Result<Occupant, Error> {
+/// 不存在的输出路径看最近的已存在的上级：是目录（跟随符号链接）就建得出来，否则建不出来。上级有一段是文件时，
+/// Unix 上报「不是目录」，Windows 上报「不存在」；上级是悬空的符号链接时报「不存在」，它本身却在。都在这里查清。
+fn occupant_by_ancestor(target: &Path) -> Result<Occupant, Error> {
     for ancestor in target.ancestors().skip(1) {
         match fs::metadata(ancestor) {
             Ok(meta) if meta.is_dir() => return Ok(Occupant::Nothing),
-            Ok(_) => return Ok(Occupant::Other),
-            Err(e) if is_absent(&e) => {}
+            Ok(_) => {}
+            // 跟随后不存在：没有这一项就再往上看，有（悬空的符号链接）就建不出来
+            Err(e) if is_absent(&e) => {
+                if !exists(ancestor).map_err(io_error("检查", ancestor))? {
+                    continue;
+                }
+            }
             Err(cause) => return Err(io_error("检查", ancestor)(cause)),
         }
+        let ancestor = ancestor.to_path_buf();
+        return Ok(Occupant::Blocked { ancestor });
     }
     Ok(Occupant::Nothing)
 }
 
 /// 输出能否写，能写时返回路径上现在的东西：空着、是空目录，或要求覆盖而路径上是输出。是输出而没有要求覆盖时报
-/// [`Error::OutputExists`]；是别的东西时报 [`Error::OutputOccupied`]，覆盖也不替换，以免路径给错时删掉别人的文件。
+/// [`Error::OutputExists`]；是别的东西或建不出来时报 [`Error::OutputOccupied`]，覆盖也不替换，以免路径给错时删掉
+/// 别人的文件。
 pub(super) fn check(o: &PendingOutput, overwrite: bool) -> Result<Occupant, Error> {
+    let occupied = |ancestor| Error::OutputOccupied {
+        path: o.target().to_path_buf(),
+        ancestor,
+    };
     match occupant(o)? {
-        Occupant::Other => Err(Error::OutputOccupied(o.target().to_path_buf())),
+        Occupant::Other => Err(occupied(None)),
+        Occupant::Blocked { ancestor } => Err(occupied(Some(ancestor))),
         Occupant::Output if !overwrite => Err(Error::OutputExists(o.target().to_path_buf())),
         occupant => Ok(occupant),
     }
@@ -121,7 +136,7 @@ fn settle(o: &PendingOutput, restorable: bool) -> Result<bool, Error> {
     }
     if restorable {
         let empty = match occupant(o)? {
-            Occupant::Other => return Ok(false),
+            Occupant::Other | Occupant::Blocked { .. } => return Ok(false),
             Occupant::Output => false,
             Occupant::EmptyDir => {
                 remove_empty_dir(o.target())?;
@@ -190,13 +205,13 @@ impl<'a> Commit<'a> {
         moved: &mut Vec<&'a PendingOutput>,
         installed: &mut Vec<&'a PendingOutput>,
     ) -> Result<(), Error> {
-        for (o, &existing) in self.outputs.iter().zip(existing) {
-            if existing == Occupant::Nothing || !move_aside(o)? {
+        for (o, existing) in self.outputs.iter().zip(existing) {
+            if *existing == Occupant::Nothing || !move_aside(o)? {
                 continue;
             }
             moved.push(o);
             // 挪开的空目录已不为空：检查之后别的任务装上了它的输出，不是本任务可以替换的
-            if existing == Occupant::EmptyDir && !entries::is_empty(o.aside())? {
+            if *existing == Occupant::EmptyDir && !entries::is_empty(o.aside())? {
                 return Err(Error::OutputExists(o.target().to_path_buf()));
             }
         }
@@ -407,7 +422,10 @@ mod tests {
 
         let commit = Commit::begin(&work, &outputs).unwrap();
         assert_eq!(workdir::read_outputs(&work).unwrap().outputs, outputs);
-        assert_eq!(commit.swap(&[Occupant::Output; 2]).unwrap(), []);
+        assert_eq!(
+            commit.swap(&[Occupant::Output, Occupant::Output]).unwrap(),
+            []
+        );
 
         for o in &outputs {
             assert_eq!(read(o, o.target()).as_deref(), Some("新"));
@@ -430,7 +448,11 @@ mod tests {
         assert!(!workdir::read_outputs(&work).unwrap().swapped);
         let (mut moved, mut installed) = (Vec::new(), Vec::new());
         commit
-            .move_and_install(&[Occupant::Output; 2], &mut moved, &mut installed)
+            .move_and_install(
+                &[Occupant::Output, Occupant::Output],
+                &mut moved,
+                &mut installed,
+            )
             .unwrap();
 
         assert!(workdir::read_outputs(&work).unwrap().swapped);
@@ -451,7 +473,9 @@ mod tests {
         put(&outputs[0], outputs[0].temp(), "新");
 
         let commit = Commit::begin(&work, &outputs).unwrap();
-        let failure = commit.swap(&[Occupant::Output; 2]).unwrap_err();
+        let failure = commit
+            .swap(&[Occupant::Output, Occupant::Output])
+            .unwrap_err();
 
         assert!(matches!(failure, Error::Io { .. }), "{failure}");
         for o in &outputs {
@@ -472,7 +496,7 @@ mod tests {
         }
 
         let commit = Commit::begin(&work, &outputs).unwrap();
-        match commit.swap(&[Occupant::Nothing; 2]) {
+        match commit.swap(&[Occupant::Nothing, Occupant::Nothing]) {
             Err(Error::OutputExists(path)) => assert_eq!(path, outputs[0].target()),
             other => panic!("应报已存在：{other:?}"),
         }
@@ -536,17 +560,31 @@ mod tests {
         assert_no_names_left(&outputs, &work);
     }
 
-    /// 输出路径的上级有一段是文件：建不出来，是路径被占用，报输出路径；上级只是缺目录的建得出来。
+    /// 输出路径最近的已存在的上级不是目录（是文件，或悬空的符号链接）：建不出来，报路径被占用，带上挡住它的上级；
+    /// 上级只是缺目录的建得出来。
     #[test]
-    fn an_output_under_a_file_is_occupied() {
+    fn an_output_that_cannot_be_created_is_occupied() {
         let dir = scratch("under_file");
         fs::write(dir.join("file"), "别人的文件").unwrap();
+        let file = dir.join("file");
+        let mut blocked = vec![
+            (dir.join("file/out"), file.clone()),
+            (dir.join("file/sub/out"), file),
+        ];
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.join("gone"), dir.join("link")).unwrap();
+            blocked.push((dir.join("link/sub/out"), dir.join("link")));
+        }
 
         for kind in [OutputKind::Mp4, OutputKind::Hls] {
-            for target in [dir.join("file/out"), dir.join("file/sub/out")] {
+            for (target, ancestor) in &blocked {
                 match check(&pending(kind, target.clone()), true) {
-                    Err(Error::OutputOccupied(path)) => assert_eq!(path, target),
-                    other => panic!("应报路径被占用：{other:?}"),
+                    Err(Error::OutputOccupied {
+                        path,
+                        ancestor: Some(found),
+                    }) => assert_eq!((&path, &found), (target, ancestor)),
+                    other => panic!("应报建不出来：{other:?}"),
                 }
             }
             let creatable = pending(kind, dir.join("new/sub/out"));
