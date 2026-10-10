@@ -5,7 +5,7 @@
 use hs_m3u8_hls::MediaPlaylist;
 use tokio::time::Instant;
 
-use super::session::{Decision, NewUrl, Start, Verdict, Verdicts};
+use super::session::{Decision, NewUrl, Verdict, Verdicts};
 use super::tasks::StoredOverlap;
 use super::track::Fetched;
 use super::window::overlaps;
@@ -138,14 +138,6 @@ impl Recorder<'_> {
                         problem: WorkDirProblem::SourceUnverified,
                     });
                 }
-            }
-        }
-        // 起点先于这个会话的分片落盘：续录时有分片的会话一定有起点
-        for (track, start) in decision.tracks.iter().enumerate() {
-            if let Some(Start::New(start)) = start {
-                self.dir
-                    .record_start(track, decision.session, *start)
-                    .await?;
             }
         }
         self.phase = Phase::Decided {

@@ -247,40 +247,6 @@ async fn a_live_directory_without_live_options_is_a_kind_mismatch() {
     assert!(dir.join("out.mp4.hsdl/job.json").exists());
 }
 
-/// 有分片的会话缺了起点记录（如断电时它的改名没落盘）：续录明确报目录内容矛盾；只合并不需要起点，照常合并。
-#[tokio::test(flavor = "multi_thread")]
-async fn a_missing_session_start_blocks_resuming_but_not_merging() {
-    let dir = test_dir("resume_missing_start");
-    let server = Server::start().await;
-    put_long(&server, "", &[0, 1, 2]);
-    server.put("live.m3u8", playlist(&[0, 1], false));
-    let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 2).await;
-    std::fs::remove_file(dir.join("out.mp4.hsdl/tracks/0/start-0-fresh")).unwrap();
-
-    server.put("live.m3u8", playlist(&[0, 1, 2], true));
-    let err = run(req.clone()).await.unwrap_err();
-    assert!(
-        matches!(
-            err,
-            Error::WorkDir {
-                problem: WorkDirProblem::Corrupt(_),
-                ..
-            }
-        ),
-        "{err}"
-    );
-
-    let mut merge = req;
-    merge.live = merge.live.map(|live| LiveOptions {
-        resume: Resume::MergeOnly,
-        ..live
-    });
-    let output = run(merge).await.unwrap();
-    assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
-    assert_eq!(output.live, report(LiveEnd::MergeOnly, 1, vec![]));
-}
-
 /// 只合并时目录里是点播任务：明确报不是直播录制，不当作「没有录到」。
 #[tokio::test(flavor = "multi_thread")]
 async fn merge_only_rejects_a_vod_directory() {
