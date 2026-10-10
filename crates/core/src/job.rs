@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::fetch::Fetcher;
 use crate::http::Http;
 use crate::ident::{source_digest, url_digest};
+use crate::info::Selected;
 use crate::live::{self, Context, Outcome};
 use crate::output::OutputOptions;
 use crate::output::{self, Content};
@@ -63,7 +64,7 @@ pub(crate) async fn run(
     let selection = resolved
         .master
         .as_ref()
-        .map(|m| Arc::new(m.selection.clone()));
+        .map(|m| Selected::of(&m.playlist, &m.selection));
     task.progress.send_modify(|p| p.selection = selection);
     if resolved.is_live() || continuing_live && request.live.is_some() {
         run_live(task, source, resolved).await

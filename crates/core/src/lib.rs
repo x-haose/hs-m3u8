@@ -17,6 +17,7 @@ mod fetch;
 mod hooks;
 mod http;
 mod ident;
+mod info;
 mod job;
 mod live;
 mod output;
@@ -38,8 +39,10 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 
 pub use error::{Error, HttpError, Integrity, JobType, StallError, Unsupported, WorkDirProblem};
 pub use hooks::{HookError, HookKind, Hooks, NoHooks, Purpose, RequestParts};
-pub use hs_m3u8_hls as hls;
-pub use hs_m3u8_remux::{Report, Shape, StreamKind, StreamReport};
+pub use hs_m3u8_remux::{
+    Error as RemuxError, FfmpegError, Report, Shape, StreamKind, StreamReport,
+};
+pub use info::{AudioInfo, MasterInfo, Selected, TrackInfo, VariantInfo};
 pub use output::{OutputOptions, Target};
 pub use probe::Probe;
 pub use report::{
@@ -50,6 +53,14 @@ pub use request::{
     HttpOptions, JobRequest, KeyOverride, LiveOptions, RetryPolicy, Source, Timeouts,
 };
 pub use url::Url;
+
+/// 公开接口用到的播放列表解析与选轨类型。
+pub mod hls {
+    pub use hs_m3u8_hls::{
+        AudioChoice, Error, Preference, Resolution, SelectError, SyntaxError, Unsupported,
+        VariantChoice,
+    };
+}
 
 pub(crate) use blocking::blocking;
 
