@@ -22,7 +22,7 @@ fn error(text: &str) -> Error {
     parse(text, &url(BASE)).unwrap_err()
 }
 
-/// 解析失败，且是内容不是合法的播放列表。
+/// 解析失败，错误为内容不是合法的播放列表（`Malformed`）。
 fn malformed(text: &str) -> Malformed {
     match error(text) {
         Error::Malformed(malformed) => malformed,
