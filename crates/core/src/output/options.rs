@@ -85,7 +85,8 @@ impl OutputOptions {
         }
     }
 
-    /// 路径都有文件名、互不相同也不互相包含，输出按 `overwrite` 可以写。
+    /// 路径都有文件名、互不相同也不互相包含。只按字面判断，不访问文件系统：输出能否写由
+    /// [`super::check_targets`] 在任务开头查。
     pub(crate) fn validate(&self) -> Result<(), Error> {
         let work_dir = self.resolved_work_dir();
         let mut paths: Vec<&Path> = vec![&work_dir];
@@ -112,7 +113,7 @@ impl OutputOptions {
                 }
             }
         }
-        super::check_targets(self)
+        Ok(())
     }
 }
 
