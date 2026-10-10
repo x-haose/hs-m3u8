@@ -82,22 +82,12 @@ impl MasterInfo {
 impl Selected {
     /// `selection` 为从 `master` 中选出的轨。
     pub(crate) fn of(master: &MasterPlaylist, selection: &Selection) -> Self {
-        let variant = master
-            .variants
-            .iter()
-            .position(|v| *v == selection.variant)
-            .expect("所选变体来自这份主播放列表");
-        let audio = selection.audio.as_ref().map(|a| {
-            let index = master
-                .renditions
-                .iter()
-                .position(|r| *r == a.rendition)
-                .expect("所选音频来自这份主播放列表");
-            audio_info(index, &a.rendition)
-        });
         Selected {
-            variant: variant_info(master, variant),
-            audio,
+            variant: variant_info(master, selection.variant_index),
+            audio: selection
+                .audio
+                .as_ref()
+                .map(|a| audio_info(a.index, &a.rendition)),
         }
     }
 }

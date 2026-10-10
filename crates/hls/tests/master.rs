@@ -200,6 +200,6 @@ fn variant_index_is_bounds_checked() {
     };
     assert_eq!(
         select(&m, &out).unwrap_err(),
-        SelectError::IndexOutOfRange { index: 9, count: 3 }
+        SelectError::VariantIndexOutOfRange { index: 9, count: 3 }
     );
 }

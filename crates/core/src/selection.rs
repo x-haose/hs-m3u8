@@ -43,13 +43,8 @@ pub(crate) struct RenditionKey {
 impl SelectionKey {
     /// `selection` 为从 `master` 中选出的轨。
     pub(crate) fn of(selection: &Selection, master: &MasterPlaylist) -> Self {
-        let position = master
-            .variants
-            .iter()
-            .position(|v| *v == selection.variant)
-            .expect("所选变体来自这份主播放列表");
         let attributes = VariantAttributes::of(&selection.variant);
-        let occurrence = master.variants[..position]
+        let occurrence = master.variants[..selection.variant_index]
             .iter()
             .filter(|v| VariantAttributes::of(v) == attributes)
             .count();
@@ -67,24 +62,27 @@ impl SelectionKey {
 
     /// 在 `master` 中找回这次选轨；找不到时为 None。
     pub(crate) fn find(&self, master: &MasterPlaylist) -> Option<Selection> {
-        let variant = master
+        let (variant_index, variant) = master
             .variants
             .iter()
-            .filter(|v| VariantAttributes::of(v) == self.variant.attributes)
+            .enumerate()
+            .filter(|(_, v)| VariantAttributes::of(v) == self.variant.attributes)
             .nth(self.variant.occurrence)?;
         let audio = match &self.audio {
             None => None,
             Some(key) => {
-                let rendition = master.renditions.iter().find(|r| {
+                let (index, rendition) = master.renditions.iter().enumerate().find(|(_, r)| {
                     r.kind == RenditionKind::Audio && r.uri.is_some() && RenditionKey::of(r) == *key
                 })?;
                 Some(SelectedAudio {
+                    index,
                     uri: rendition.uri.clone()?,
                     rendition: rendition.clone(),
                 })
             }
         };
         Some(Selection {
+            variant_index,
             variant: variant.clone(),
             audio,
         })
