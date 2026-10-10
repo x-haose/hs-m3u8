@@ -714,10 +714,14 @@ async fn an_output_under_a_file_is_reported_as_occupied() {
     let dir = test_dir("output_under_file");
     std::fs::write(dir.join("file"), "别人的文件").unwrap();
     let url = Url::parse("http://127.0.0.1:9/index.m3u8").unwrap();
-    let mp4 = dir.join("file/out.mp4");
+    let file = dir.join("file");
+    let mp4 = file.join("out.mp4");
+    // 结尾带本平台的分隔符：补全后的路径用的也是它，按字节比较才看得出结尾的分隔符去掉了
+    let mut hls = file.clone().into_os_string();
+    hls.push(std::path::MAIN_SEPARATOR_STR);
     let cases = [
-        (Target::Mp4(mp4.clone()), mp4, Some(dir.join("file"))),
-        (Target::Hls(dir.join("file/")), dir.join("file"), None),
+        (Target::Mp4(mp4.clone()), mp4, Some(file.clone())),
+        (Target::Hls(hls.into()), file, None),
     ];
     for (target, occupied, blocking) in cases {
         let mut req = request_to(url.clone(), &dir, target);
