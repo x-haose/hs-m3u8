@@ -25,8 +25,9 @@ pub struct OutputOptions {
     pub keep_work_dir: bool,
 }
 
-/// 输出什么。各路径与任务目录不能相同或互相包含（按字面比较，不跟随符号链接），所在目录不存在时在任务开头与写出前创建；
-/// 相对路径按开始任务时的当前目录补全，之后改变当前目录不影响任务。
+/// 输出什么。各路径与任务目录须以文件名结尾，不能相同或互相包含（按字面比较，不跟随符号链接），所在目录不存在时在任务
+/// 开头与写出前创建；相对路径按开始任务时的当前目录补全，之后改变当前目录不影响任务；补全后最后一段变了（Windows
+/// 去掉结尾的点与空格）时报参数错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     /// MP4 文件
@@ -74,8 +75,8 @@ impl OutputOptions {
         }
     }
 
-    /// 实际使用的任务目录：`work_dir`，未指定时见 [`OutputOptions::work_dir`]；相对路径按当前目录补全为绝对路径，与
-    /// 开始任务时一样。未指定 `work_dir` 而输出路径没有文件名时报参数错误。
+    /// 实际使用的任务目录：`work_dir`，未指定时见 [`OutputOptions::work_dir`]；与开始任务时一样补全为绝对路径、校验
+    /// （见 [`Target`]），不合要求或未指定 `work_dir` 而输出路径没有文件名时报参数错误。
     pub fn resolved_work_dir(&self) -> Result<PathBuf, Error> {
         absolute_path(&self.work_dir_as_given()?)
     }
@@ -94,7 +95,7 @@ impl OutputOptions {
         }
     }
 
-    /// 校验并补全为绝对路径：MP4 路径不以分隔符结尾，各路径都以文件名结尾、互不相同也不互相包含，输出路径补全后
+    /// 校验并补全为绝对路径：MP4 路径不以分隔符结尾，各路径见 [`absolute_path`]、互不相同也不互相包含，输出路径补全后
     /// 是 UTF-8（任务目录记下正在写的输出，记录的写法要求 UTF-8；Unix 上的文件名、Windows 上含孤立代理项的路径可以
     /// 不是）。只按字面判断，不访问文件系统：输出能否写在任务开头查。
     pub(crate) fn resolve(&self) -> Result<ResolvedOutput, Error> {
@@ -116,18 +117,10 @@ impl OutputOptions {
         ];
         let mut paths: Vec<&Path> = vec![&work_dir];
         paths.extend(targets.iter().filter_map(|&(_, path)| path));
-        let mut absolute = Vec::with_capacity(paths.len());
-        for path in &paths {
-            if !ends_with_file_name(path) {
-                return invalid("路径须以文件名结尾", path);
-            }
-            let completed = absolute_path(path)?;
-            // Windows 补全时去掉最后一段结尾的点与空格：`D:\...` 补全成没有文件名的 `D:\`
-            if completed.file_name().is_none() {
-                return invalid("路径须以文件名结尾", path);
-            }
-            absolute.push(completed);
-        }
+        let absolute = paths
+            .iter()
+            .map(|path| absolute_path(path))
+            .collect::<Result<Vec<_>, _>>()?;
         let literal: Vec<PathBuf> = absolute.iter().map(|p| lexical(p)).collect();
         for (i, a) in literal.iter().enumerate() {
             for (j, b) in literal.iter().enumerate() {
@@ -180,13 +173,28 @@ impl ResolvedOutput {
 }
 
 /// `path` 按当前目录补全的绝对路径，去掉结尾的分隔符：带着它，文件系统调用指的是「这一项当作目录」，这一项是文件
-/// 时报「不是目录」，而不是看这一项本身。
+/// 时报「不是目录」，而不是看这一项本身。`path` 须以文件名结尾，补全后仍是这个名字，否则报参数错误：Windows 补全时
+/// 去掉最后一段结尾的点与空格，`D:\x\...` 补全成 `D:\x`、`a.` 补全成 `a`。
 pub(crate) fn absolute_path(path: &Path) -> Result<PathBuf, Error> {
+    if !ends_with_file_name(path) {
+        return Err(Error::InvalidInput(format!(
+            "路径须以文件名结尾：{}",
+            path.display()
+        )));
+    }
     let absolute = std::path::absolute(path).map_err(io_error("解析", path))?;
-    Ok(match (absolute.parent(), absolute.file_name()) {
+    let completed = match (absolute.parent(), absolute.file_name()) {
         (Some(parent), Some(name)) => parent.join(name),
         _ => absolute,
-    })
+    };
+    if completed.file_name() != path.file_name() {
+        return Err(Error::InvalidInput(format!(
+            "路径补全后最后一段变了：{} 补全为 {}",
+            path.display(),
+            completed.display()
+        )));
+    }
+    Ok(completed)
 }
 
 /// 路径的最后一段（结尾的分隔符不算）就是它的文件名。`Path` 解析时略去结尾的 `.`：`out.mp4/.` 的文件名仍是
@@ -247,12 +255,24 @@ mod tests {
         }
     }
 
-    /// 最后一段只有点：Windows 补全时去掉结尾的点，剩下没有文件名的盘符根，报参数错误，不在后面 panic。
+    /// Windows 补全时去掉最后一段结尾的点与空格：只有点的变成上一级（`D:\...` 是没有文件名的盘符根），其余的换了名字，
+    /// 都报参数错误，任务目录也一样。
     #[cfg(windows)]
     #[test]
-    fn paths_that_lose_their_file_name_when_completed_are_rejected() {
-        let mut options = OutputOptions::new(Target::Mp4(r"D:\...".into()));
-        options.work_dir = Some(r"C:\work".into());
-        assert!(matches!(options.resolve(), Err(Error::InvalidInput(_))));
+    fn paths_whose_name_changes_when_completed_are_rejected() {
+        for path in [r"D:\...", r"D:\x\...", r"D:\x\a.", r"D:\x\a "] {
+            let mut options = OutputOptions::new(Target::Mp4(path.into()));
+            options.work_dir = Some(r"C:\work".into());
+            assert!(
+                matches!(options.resolve(), Err(Error::InvalidInput(_))),
+                "{path}"
+            );
+            let mut options = OutputOptions::new(Target::Mp4(r"C:\out.mp4".into()));
+            options.work_dir = Some(path.into());
+            assert!(
+                matches!(options.resolved_work_dir(), Err(Error::InvalidInput(_))),
+                "{path}"
+            );
+        }
     }
 }
