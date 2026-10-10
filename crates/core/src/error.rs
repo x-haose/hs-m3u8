@@ -286,7 +286,7 @@ pub enum WorkDirProblem {
     /// 只合并（[`crate::Resume::MergeOnly`]）只用于直播录制，目录里是点播的下载；点播用同样的请求正常运行即可续传
     #[error("目录里是点播的下载，只合并只用于直播录制")]
     NotLiveRecording,
-    /// 来源（见 [`crate::JobRequest::url`]）与记录的不同
+    /// 来源（见 [`crate::Source::url`]）与记录的不同
     #[error("记录的是另一个来源或选轨偏好")]
     SourceMismatch,
     /// 来源的轨道（所选变体、有无独立音频）与记录的不同

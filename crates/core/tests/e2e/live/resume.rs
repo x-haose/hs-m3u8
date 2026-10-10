@@ -289,7 +289,7 @@ async fn changed_preference_is_rejected() {
     interrupt(&req, |p| p.segments_done == 2).await;
 
     let mut other = req;
-    other.preference.audio_language = Some("en".into());
+    other.source.preference.audio_language = Some("en".into());
     let err = run(other).await.unwrap_err();
     assert!(
         matches!(

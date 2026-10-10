@@ -13,7 +13,7 @@ use url::Url;
 
 use crate::hooks::{HookKind, Hooks, Purpose, RequestParts, run_hook};
 use crate::ident::bare_url;
-use crate::request::{JobRequest, RetryPolicy, check_header};
+use crate::request::{HttpOptions, RetryPolicy, check_header};
 use crate::{Error, HttpError, Integrity};
 
 /// 请求是否计入引擎的在途上限。
@@ -43,16 +43,20 @@ pub(crate) struct Response {
 }
 
 impl Http {
-    pub(crate) fn new(request: &JobRequest, requests: Arc<Semaphore>) -> Result<Self, Error> {
-        let t = request.timeouts;
+    pub(crate) fn new(
+        options: &HttpOptions,
+        hooks: Arc<dyn Hooks>,
+        requests: Arc<Semaphore>,
+    ) -> Result<Self, Error> {
+        let t = options.timeouts;
         let mut builder = reqwest::Client::builder()
             .user_agent(concat!("hs-m3u8/", env!("CARGO_PKG_VERSION")))
             .cookie_store(true)
             .connect_timeout(t.connect)
             .read_timeout(t.read_idle)
             .timeout(t.request)
-            .tls_danger_accept_invalid_certs(request.insecure);
-        if let Some(proxy) = &request.proxy {
+            .tls_danger_accept_invalid_certs(options.insecure);
+        if let Some(proxy) = &options.proxy {
             let proxy = reqwest::Proxy::all(proxy.as_str()).map_err(|e| {
                 Error::InvalidInput(format!(
                     "代理地址不可用 {}：{}",
@@ -67,9 +71,9 @@ impl Http {
             .map_err(|e| Error::InvalidInput(format!("无法创建 HTTP 客户端：{e}")))?;
         Ok(Http {
             client,
-            headers: request.headers.clone(),
-            retry: request.retry,
-            hooks: request.hooks.clone(),
+            headers: options.headers.clone(),
+            retry: options.retry,
+            hooks,
             requests,
             jitter: std::hash::RandomState::new(),
         })

@@ -23,7 +23,7 @@ pub enum Purpose {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestParts {
     pub url: Url,
-    /// 本次请求的请求头（已含 [`crate::JobRequest::headers`]）
+    /// 本次请求的请求头（已含 [`crate::HttpOptions::headers`]）
     pub headers: Vec<(String, String)>,
 }
 

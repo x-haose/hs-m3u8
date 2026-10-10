@@ -11,58 +11,97 @@ use crate::hooks::{Hooks, NoHooks};
 use crate::ident::bare_url;
 use crate::{Error, hls};
 
-/// 一个下载任务的配置。用 [`JobRequest::new`] 取默认值后按需修改字段。
+/// 来源与访问它的方式。
 #[derive(Clone)]
-pub struct JobRequest {
-    /// 主播放列表或媒体播放列表的地址。它去掉用户名、密码、查询串与片段后，连同 `preference`，称为本任务的
-    /// 来源：任务目录记录的来源不同即是另一个任务（[`crate::WorkDirProblem::SourceMismatch`]）；来源相同而完整
-    /// 地址不同（如换了令牌）时，直播续录见 [`crate::Resume::Continue`]
+pub struct Source {
+    /// 主播放列表或媒体播放列表的地址。它去掉用户名、密码、查询串与片段后，连同 `preference`，称为来源：
+    /// 任务目录记录的来源不同即是另一个任务（[`crate::WorkDirProblem::SourceMismatch`]）；来源相同而完整地址
+    /// 不同（如换了令牌）时，直播续录见 [`crate::Resume::Continue`]
     pub url: Url,
-    /// 输出的 MP4 路径；所在目录不存在时在合并前创建
-    pub output: PathBuf,
-    /// 任务目录；None 时为 `<output>.hsdl`。只能是空目录、不存在的目录或本库建立的任务目录
-    pub work_dir: Option<PathBuf>,
-    /// 附加到所有请求的请求头
-    pub headers: Vec<(String, String)>,
     /// 选轨偏好，属于来源（见 `url`）。任务目录里有已完成的分片时按记录的变体与音频找回同一条轨，不按偏好重新选
     pub preference: hls::Preference,
-    /// 本任务同时下载的分片数
-    pub concurrency: NonZeroUsize,
-    pub retry: RetryPolicy,
-    pub timeouts: Timeouts,
+    pub http: HttpOptions,
+    pub hooks: Arc<dyn Hooks>,
+}
+
+impl Source {
+    pub fn new(url: Url) -> Self {
+        Source {
+            url,
+            preference: hls::Preference::default(),
+            http: HttpOptions::default(),
+            hooks: Arc::new(NoHooks),
+        }
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        if !matches!(self.url.scheme(), "http" | "https") {
+            return Err(Error::InvalidInput(format!(
+                "只支持 http/https 地址：{}",
+                bare_url(&self.url)
+            )));
+        }
+        self.http.validate()
+    }
+}
+
+/// 发请求的方式。不实现 `Debug`：请求头常带 Cookie 与令牌，代理地址可能带口令。
+#[derive(Clone, Default)]
+pub struct HttpOptions {
+    /// 附加到所有请求的请求头
+    pub headers: Vec<(String, String)>,
     /// HTTP 或 SOCKS 代理；None 时使用系统代理设置
     pub proxy: Option<Url>,
     /// 不校验 TLS 证书
     pub insecure: bool,
+    pub timeouts: Timeouts,
+    pub retry: RetryPolicy,
+}
+
+impl HttpOptions {
+    fn validate(&self) -> Result<(), Error> {
+        for (name, value) in &self.headers {
+            check_header(name, value).map_err(Error::InvalidInput)?;
+        }
+        let t = self.timeouts;
+        if t.connect.is_zero() || t.read_idle.is_zero() || t.request.is_zero() {
+            return Err(Error::InvalidInput("超时不能为 0".into()));
+        }
+        Ok(())
+    }
+}
+
+/// 一个下载任务的配置。用 [`JobRequest::new`] 取默认值后按需修改字段。
+#[derive(Clone)]
+pub struct JobRequest {
+    pub source: Source,
+    /// 输出的 MP4 路径；所在目录不存在时在合并前创建
+    pub output: PathBuf,
+    /// 任务目录；None 时为 `<output>.hsdl`。只能是空目录、不存在的目录或本库建立的任务目录
+    pub work_dir: Option<PathBuf>,
+    /// 本任务同时下载的分片数
+    pub concurrency: NonZeroUsize,
     /// 输出文件已存在时替换它
     pub overwrite: bool,
     /// 成功后保留任务目录
     pub keep_work_dir: bool,
     /// 直播的录制方式；None 时拒绝直播（[`crate::Unsupported::Live`]）
     pub live: Option<LiveOptions>,
-    pub hooks: Arc<dyn Hooks>,
 }
 
 /// 默认并发：与常见下载器同一量级；站点限流时由调用方调低。
 const DEFAULT_CONCURRENCY: NonZeroUsize = NonZeroUsize::new(16).unwrap();
 
 impl JobRequest {
-    pub fn new(url: Url, output: PathBuf) -> Self {
+    pub fn new(source: Source, output: PathBuf) -> Self {
         JobRequest {
-            url,
+            source,
             output,
             work_dir: None,
-            headers: Vec::new(),
-            preference: hls::Preference::default(),
             concurrency: DEFAULT_CONCURRENCY,
-            retry: RetryPolicy::default(),
-            timeouts: Timeouts::default(),
-            proxy: None,
-            insecure: false,
             overwrite: false,
             keep_work_dir: false,
             live: Some(LiveOptions::default()),
-            hooks: Arc::new(NoHooks),
         }
     }
 
@@ -76,17 +115,8 @@ impl JobRequest {
     }
 
     pub(crate) fn validate(&self) -> Result<(), Error> {
+        self.source.validate()?;
         let invalid = |message: String| Err(Error::InvalidInput(message));
-        if !matches!(self.url.scheme(), "http" | "https") {
-            return invalid(format!("只支持 http/https 地址：{}", bare_url(&self.url)));
-        }
-        for (name, value) in &self.headers {
-            check_header(name, value).map_err(Error::InvalidInput)?;
-        }
-        let t = self.timeouts;
-        if t.connect.is_zero() || t.read_idle.is_zero() || t.request.is_zero() {
-            return invalid("超时不能为 0".into());
-        }
         if let Some(live) = self.live {
             if live.stall_timeout.is_zero() {
                 return invalid("直播的 stall_timeout 不能为 0".into());
@@ -172,7 +202,7 @@ pub enum Resume {
     /// 来源相同而完整地址与记录的不同（如换了令牌）时，要录的各轨都接得上才续录并改记新地址，否则报
     /// [`crate::WorkDirProblem::SourceUnverified`]；这次没有要录的轨（都已录满或已结束）时不改记，直接合并
     Continue,
-    /// 不联网，只把已录到的分片合并成输出。目录须是同一来源（见 [`crate::JobRequest::url`]）的直播录制：来源不同报
+    /// 不联网，只把已录到的分片合并成输出。目录须是同一来源（见 [`crate::Source::url`]）的直播录制：来源不同报
     /// [`crate::WorkDirProblem::SourceMismatch`]，是点播的下载报 [`crate::WorkDirProblem::NotLiveRecording`]；
     /// 没有可合并的分片时报 [`Error::NothingRecorded`]
     MergeOnly,
