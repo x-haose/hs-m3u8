@@ -249,9 +249,7 @@ impl Recorder<'_> {
             .iter()
             .map(|t| {
                 let refreshing = recording && self.ending.is_none() && t.needs_refresh(max_us);
-                t.last_refresh_error()
-                    .filter(|_| refreshing)
-                    .and_then(waitable_refresh_error)
+                t.last_refresh_error().filter(|_| refreshing).cloned()
             })
             .collect()
     }
@@ -399,10 +397,10 @@ impl Recorder<'_> {
         let (playlist, inits) = match result {
             Ok(loaded) => loaded,
             Err(e) => {
-                if waitable_refresh_error(&e).is_none() {
+                let Some(cause) = waitable_refresh_error(&e) else {
                     return Err(e);
-                }
-                self.tracks[track].refresh_failed(e, Instant::now());
+                };
+                self.tracks[track].refresh_failed(cause, Instant::now());
                 return Ok(());
             }
         };
@@ -538,13 +536,18 @@ impl Recorder<'_> {
 /// 没写完）。其余（401/403 等、内容不是播放列表、DRM、回调出错）为 None，使任务失败。
 fn waitable_refresh_error(error: &Error) -> Option<RefreshCause> {
     match error {
-        Error::Playlist { cause, .. } => match **cause {
-            hls::Malformed::Syntax { .. } | hls::Malformed::Empty => {
-                Some(RefreshCause::Playlist((**cause).clone()))
-            }
+        Error::Playlist { cause, .. } => match &**cause {
+            hls::Malformed::Empty => Some(RefreshCause::Empty),
+            hls::Malformed::Syntax { line, kind } => Some(RefreshCause::Syntax {
+                line: *line,
+                kind: kind.clone(),
+            }),
             hls::Malformed::NotAPlaylist | hls::Malformed::Mixed => None,
         },
-        _ => error.missable().map(RefreshCause::Http),
+        _ => error.missable().map(|kind| RefreshCause::Http {
+            kind,
+            retry_after: error.retry_after(),
+        }),
     }
 }
 
