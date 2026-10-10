@@ -21,6 +21,7 @@ use crate::ident::Fingerprint;
 use crate::selection::SelectionKey;
 use crate::verify::id3_len;
 use crate::verify::{Standalone, standalone_format};
+use crate::workdir::is_canonical_number;
 use crate::{Error, Unsupported, WorkDirProblem, workdir};
 
 const INDEX: &str = "index.m3u8";
@@ -374,7 +375,9 @@ fn written_by_us(dir: &Path) -> Result<bool, Error> {
         let name = entry.file_name();
         let ours = match name.to_str() {
             Some(INDEX) => kind.is_file(),
-            Some(name) if is_number(name) && kind.is_dir() => track_written_by_us(&entry.path())?,
+            Some(name) if is_canonical_number(name) && kind.is_dir() => {
+                track_written_by_us(&entry.path())?
+            }
             _ => is_system_file(&entry)?,
         };
         if !ours {
@@ -409,15 +412,9 @@ fn is_track_file_name(name: &str) -> bool {
         return Fingerprint::parse(fingerprint).is_some();
     }
     name.split_once('.').is_some_and(|(n, ext)| {
-        is_number(n) && (ext == FMP4 || Standalone::ALL.into_iter().any(|f| extension(f) == ext))
+        is_canonical_number(n)
+            && (ext == FMP4 || Standalone::ALL.into_iter().any(|f| extension(f) == ext))
     })
-}
-
-/// 规范写法的十进制非负整数：没有多余的前导零。
-fn is_number(text: &str) -> bool {
-    !text.is_empty()
-        && text.bytes().all(|b| b.is_ascii_digit())
-        && (text == "0" || !text.starts_with('0'))
 }
 
 #[cfg(test)]
@@ -577,7 +574,5 @@ mod tests {
         ] {
             assert!(!is_track_file_name(name), "{name}");
         }
-        assert!(is_number("0") && is_number("10"));
-        assert!(!is_number("") && !is_number("00") && !is_number("-1"));
     }
 }

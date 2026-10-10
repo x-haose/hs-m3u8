@@ -110,10 +110,7 @@ pub(crate) async fn record(
     options: LiveOptions,
 ) -> Result<Outcome, Error> {
     let (dir, progress) = (ctx.dir, ctx.progress);
-    progress.send_modify(|p| {
-        p.stage = Stage::Recording;
-        p.refresh_errors = vec![None; tracks.len()];
-    });
+    progress.send_modify(|p| p.stage = Stage::Recording);
     let stored = dir.scan(tracks.len()).await?;
     count_stored(&stored, progress);
     let now = Instant::now();
@@ -156,7 +153,7 @@ pub(crate) async fn record(
         Err(e) => Err(e),
     };
     recorder.tasks.shutdown().await;
-    recorder.clear_refresh_errors();
+    recorder.publish_refresh_errors(false);
     recorder.settle(result, fetcher).await
 }
 
@@ -216,6 +213,7 @@ impl Recorder<'_> {
                 Event::Done(done) => self.on_done(done, fetcher).await?,
                 Event::Downloaded((id, result)) => self.on_finished(id, result)?,
             }
+            self.publish_refresh_errors(true);
         }
     }
 
@@ -238,23 +236,24 @@ impl Recorder<'_> {
     /// 定下结束原因；已有的不变。
     fn end(&mut self, end: LiveEnd) {
         self.ending.get_or_insert(end);
-        self.clear_refresh_errors();
     }
 
-    /// 第 `track` 条轨最近一次刷新失败的原因计入进度；None 为清空。
-    fn note_refresh(&self, track: usize, cause: Option<RefreshCause>) {
+    /// 进度里各轨的刷新失败，从各轨的状态推出：录制中、还会刷新的轨报它最近一次刷新失败的原因，其余为 None。
+    fn publish_refresh_errors(&self, recording: bool) {
+        let max_us = self.max_us();
+        let causes: Vec<Option<RefreshCause>> = self
+            .tracks
+            .iter()
+            .map(|t| {
+                let refreshing = recording && self.ending.is_none() && t.needs_refresh(max_us);
+                t.last_refresh_error()
+                    .filter(|_| refreshing)
+                    .and_then(waitable_refresh_error)
+            })
+            .collect();
         self.progress.send_if_modified(|p| {
-            let changed = p.refresh_errors[track] != cause;
-            p.refresh_errors[track] = cause;
-            changed
-        });
-    }
-
-    /// 不再刷新（结束中或已结束）时清空各轨的刷新失败。
-    fn clear_refresh_errors(&self) {
-        self.progress.send_if_modified(|p| {
-            let changed = p.refresh_errors.iter().any(Option::is_some);
-            p.refresh_errors.fill(None);
+            let changed = p.refresh_errors != causes;
+            p.refresh_errors = causes;
             changed
         });
     }
@@ -392,16 +391,14 @@ impl Recorder<'_> {
         let (playlist, inits) = match result {
             Ok(loaded) => loaded,
             Err(e) => {
-                let Some(cause) = waitable_refresh_error(&e) else {
+                if waitable_refresh_error(&e).is_none() {
                     return Err(e);
-                };
-                self.note_refresh(track, Some(cause));
+                }
                 self.tracks[track].refresh_failed(e, Instant::now());
                 return Ok(());
             }
         };
         self.tracks[track].refreshed();
-        self.note_refresh(track, None);
         let fetched = Fetched { playlist, started };
         if self.tracks[track].is_undecided() {
             return self.undecided(track, fetched).await;
