@@ -2,6 +2,7 @@
 //! 输出与直接用 remux 合并同一批样本文件的结果逐字节比较，解密、顺序或分组的任何错误都会暴露。
 
 mod discard;
+mod http;
 mod live;
 mod output;
 mod server;

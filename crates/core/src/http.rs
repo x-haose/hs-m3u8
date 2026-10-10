@@ -1,6 +1,7 @@
 //! 带重试、超时、取消、全局并发上限与请求回调的 HTTP GET。
 
 use std::hash::BuildHasher;
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -291,17 +292,61 @@ fn backoff_delay(retry: &RetryPolicy, attempt: u32, permille: u32) -> Duration {
     (delay.min(retry.max_delay) / 1000).saturating_mul(permille)
 }
 
-/// 归类传输错误；说明文字不含地址（外层的 [`Error::Http`] 已带只到路径的地址）。
+/// 归类传输错误；说明文字含各层原因，不含地址（外层的 [`Error::Http`] 已带只到路径的地址）。
 fn classify(error: reqwest::Error) -> HttpError {
+    let error = error.without_url();
     if error.is_timeout() {
         HttpError::Timeout
+    } else if error.is_redirect() {
+        HttpError::Redirect(chain_text(&error))
     } else if error.is_builder() {
-        HttpError::InvalidRequest(error.without_url().to_string())
+        HttpError::InvalidRequest(chain_text(&error))
+    } else if let Some(tls) = invalid_certificate(&error) {
+        HttpError::Certificate(tls.to_string())
     } else if error.is_connect() {
-        HttpError::Connect(error.without_url().to_string())
+        HttpError::Connect(chain_text(&error))
     } else {
-        HttpError::Transport(error.without_url().to_string())
+        HttpError::Transport(chain_text(&error))
     }
+}
+
+/// 错误本身与各层原因的说明，以「：」相连。
+fn chain_text(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut text = error.to_string();
+    let mut next = error.source();
+    while let Some(cause) = next {
+        text.push('：');
+        text.push_str(&cause.to_string());
+        next = cause.source();
+    }
+    text
+}
+
+/// 原因链上 TLS 证书校验失败的那一层。rustls 的错误被包在 `io::Error` 里，而 `io::Error::source` 跳过它包着的
+/// 错误，所以每层还要看它包着的。
+fn invalid_certificate<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a rustls::Error> {
+    let mut next = error.source();
+    while let Some(layer) = next {
+        let mut inner = layer;
+        loop {
+            if let Some(tls) = inner.downcast_ref::<rustls::Error>()
+                && matches!(tls, rustls::Error::InvalidCertificate(_))
+            {
+                return Some(tls);
+            }
+            match inner
+                .downcast_ref::<io::Error>()
+                .and_then(io::Error::get_ref)
+            {
+                Some(wrapped) => inner = wrapped,
+                None => break,
+            }
+        }
+        next = layer.source();
+    }
+    None
 }
 
 #[cfg(test)]

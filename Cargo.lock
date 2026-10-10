@@ -579,11 +579,13 @@ dependencies = [
  "hs-m3u8-hls",
  "hs-m3u8-remux",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
  "thiserror",
  "tokio",
+ "tokio-rustls",
  "tokio-util",
  "url",
 ]
@@ -1317,6 +1319,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "rustls-pki-types",
  "rustls-webpki",
