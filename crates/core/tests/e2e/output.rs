@@ -572,6 +572,35 @@ async fn outputs_inside_the_work_dir_survive_its_removal() {
     assert!(work.join("out.mp4").is_file());
 }
 
+/// 删除任务目录时因为有别人的文件而留下了它与 job.json；之后同一输出换一个来源（没有已完成的分片，改为当前任务）：
+/// 只删本库写的文件，别人的文件仍然留着。
+#[tokio::test(flavor = "multi_thread")]
+async fn files_kept_in_the_work_dir_survive_the_next_job() {
+    let dir = test_dir("output_kept_in_tracks");
+    let server = Server::start().await;
+    server.put("seg0.ts", fixture("ts_a/seg0.ts"));
+    server.put("seg1.ts", fixture("ts_a/seg1.ts"));
+    let media = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n#EXT-X-ENDLIST\n";
+    server.put("index.m3u8", media);
+    server.put("other.m3u8", media);
+    let req = request(server.url("index.m3u8"), &dir);
+    let work = req.output.resolved_work_dir().unwrap();
+    let notes = work.join("tracks/0/notes.txt");
+    let gate = server.gate("seg1.ts");
+    let job = engine().start(req).unwrap();
+    gate.arrived.notified().await;
+    std::fs::write(&notes, "别人的文件").unwrap();
+    server.ungate("seg1.ts");
+    job.wait().await.unwrap();
+    assert!(work.join("job.json").is_file() && notes.is_file());
+
+    let mut other = request(server.url("other.m3u8"), &dir);
+    other.output.overwrite = true;
+    run(other).await.unwrap();
+
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "别人的文件");
+}
+
 /// 下载期间系统在任务目录里生成了元数据文件（在访达里打开过；在 exFAT 等卷上，macOS 为每个文件与目录生成
 /// `._<名字>`，主文件不在的也算）：成功后照样删掉整个任务目录。
 #[tokio::test(flavor = "multi_thread")]

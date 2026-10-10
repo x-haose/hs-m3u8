@@ -113,7 +113,7 @@ impl WorkDir {
     /// 已有 `job.json` 时其记录须与 `record` 相符（直播的完整地址除外）：来源不同报
     /// [`WorkDirProblem::SourceMismatch`]，点播与直播不同报 [`WorkDirProblem::KindMismatch`]，轨道不同报
     /// [`WorkDirProblem::TracksMismatch`]，点播的计划不同报 [`WorkDirProblem::PlanChanged`]；但目录里还没有已完成的
-    /// 分片时，直接改为当前任务（没有可丢的内容）。没有 `job.json` 时目录必须不存在或为空
+    /// 分片时，直接改为当前任务：删掉之前的 init 段，不是本库写的文件留下。没有 `job.json` 时目录必须不存在或为空
     /// （`.part` 残留与锁文件除外），以免把别人的目录当成任务目录（成功后会整个删除）。
     pub(crate) async fn open(root: PathBuf, record: JobRecord) -> Result<WorkDir, Error> {
         blocking(move || open(root, record)).await?
@@ -329,7 +329,11 @@ fn open(root: PathBuf, record: JobRecord) -> Result<WorkDir, Error> {
         },
     };
     if previous.is_none() {
-        remove_if_exists(&root.join(TRACKS_DIR))?;
+        // 不是本库写的文件（如删除任务目录时留下的）不影响读写，删除任务目录时照常指出
+        let tracks = root.join(TRACKS_DIR);
+        if exists(&tracks)? {
+            remove_tracks(&tracks, &mut Vec::new())?;
+        }
         write_atomic(&job_path, &encode(&record))?;
     }
     let url_changed = previous.is_some_and(|p| p.url_digest() != record.url_digest());
@@ -396,14 +400,6 @@ fn has_completed_segments(layout: &Layout) -> Result<bool, Error> {
         }
     }
     Ok(false)
-}
-
-fn remove_if_exists(dir: &Path) -> Result<(), Error> {
-    match fs::remove_dir_all(dir) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(cause) => Err(io_error("删除", dir)(cause)),
-    }
 }
 
 /// 一条轨目录中按 `parse` 能识别的文件；目录不存在时为空。
