@@ -28,29 +28,35 @@ pub(super) struct LatestSession {
 }
 
 impl LatestSession {
-    /// 一条轨的分片（按会话、序号排列）中最近一个会话的；`starts` 为该轨各会话的起点。一个分片都没有时为 None。
-    pub(super) fn latest(
+    /// 第 `track` 条轨的分片（按会话、序号排列）中最近一个会话的；`starts` 为该轨各会话的起点。一个分片都没有时
+    /// 为 Ok(None)；这个会话没有起点时目录内容矛盾，返回原因。
+    fn latest(
+        track: usize,
         files: &[SegmentFile],
         starts: &BTreeMap<u32, SessionStart>,
-    ) -> Option<Self> {
-        let session = files.iter().map(|f| f.name.session).max()?;
+    ) -> Result<Option<Self>, String> {
+        let Some(session) = files.iter().map(|f| f.name.session).max() else {
+            return Ok(None);
+        };
         let segments = files
             .iter()
             .filter(|f| f.name.session == session)
             .map(|f| (f.name.sequence, f.name))
             .collect();
-        let start = starts
-            .get(&session)
-            .expect("有分片的会话都有起点，扫描任务目录时已核对");
-        let skipped_through = match *start {
-            SessionStart::Fresh => None,
-            SessionStart::After(through) => Some(through),
+        let skipped_through = match starts.get(&session) {
+            Some(SessionStart::Fresh) => None,
+            Some(SessionStart::After(through)) => Some(*through),
+            None => {
+                return Err(format!(
+                    "第 {track} 条轨会话 {session} 有分片，但没有起点记录"
+                ));
+            }
         };
-        Some(LatestSession {
+        Ok(Some(LatestSession {
             session,
             segments,
             skipped_through,
-        })
+        }))
     }
 
     pub(super) fn segments(&self) -> &BTreeMap<u64, SegmentName> {
@@ -133,25 +139,30 @@ pub(super) struct Verdicts {
 }
 
 impl Verdicts {
-    /// 由目录里已录的内容开始判定；一个分片都没有时为 None（直接录第 0 个会话）。
-    pub(super) fn new(stored: &Stored) -> Option<Self> {
-        let previous_session = stored
+    /// 由目录里已录的内容开始判定；一个分片都没有时为 Ok(None)（直接录第 0 个会话）。某轨最近的会话没有起点时
+    /// 目录内容矛盾，返回原因。
+    pub(super) fn new(stored: &Stored) -> Result<Option<Self>, String> {
+        let Some(previous_session) = stored
             .segments
             .iter()
             .flatten()
             .map(|f| f.name.session)
-            .max()?;
+            .max()
+        else {
+            return Ok(None);
+        };
         let recorded = stored
             .segments
             .iter()
             .zip(&stored.starts)
-            .map(|(files, starts)| LatestSession::latest(files, starts))
-            .collect();
-        Some(Verdicts {
+            .enumerate()
+            .map(|(track, (files, starts))| LatestSession::latest(track, files, starts))
+            .collect::<Result<_, _>>()?;
+        Ok(Some(Verdicts {
             previous_session,
             recorded,
             verdicts: stored.segments.iter().map(|_| None).collect(),
-        })
+        }))
     }
 
     pub(super) fn recorded(&self, track: usize) -> Option<&LatestSession> {
