@@ -88,7 +88,7 @@ async fn run_until_full(req: &JobRequest) {
     first.output.keep_work_dir = true;
     let output = run(first).await.unwrap();
     assert_eq!(output.live.unwrap().end, Some(LiveEnd::DurationReached));
-    std::fs::remove_file(&req.output.path).unwrap();
+    std::fs::remove_file(req.output.target.mp4().unwrap()).unwrap();
 }
 
 fn report(end: LiveEnd, session_count: usize, missed: Vec<Missed>) -> Option<LiveReport> {
@@ -117,7 +117,7 @@ async fn interrupt(req: &JobRequest, until: impl FnMut(&Progress) -> bool) {
     progress.wait_for(until).await.unwrap();
     job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
-    assert!(!req.output.path.exists());
+    assert!(!req.output.target.mp4().unwrap().exists());
 }
 
 /// 视频加独立音频 rendition 的直播源：放 fmp4_a 的 init 段与分片，两条媒体播放列表按 `video` / `audio`

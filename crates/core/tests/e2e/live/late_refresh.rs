@@ -92,7 +92,7 @@ async fn a_late_refresh_with_a_new_init_is_prepared_and_recorded() {
         .expect("晚到的刷新应照常处理")
         .unwrap();
 
-    let dir = req.output.path.parent().unwrap();
+    let dir = req.output.target.mp4().unwrap().parent().unwrap();
     let want = expected_split(dir, &["seg0.m4s", "seg1.m4s"], &["seg0.m4s", "seg1.m4s"]);
     assert_output(&output, &want);
     assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
@@ -134,7 +134,7 @@ async fn stop_after_the_decision_does_not_wait_for_a_late_refresh() {
         .unwrap();
     server.ungate("video/later.m3u8");
 
-    let dir = req.output.path.parent().unwrap();
+    let dir = req.output.target.mp4().unwrap().parent().unwrap();
     let want = expected_split(dir, &["seg0.m4s", "seg1.m4s"], &["seg0.m4s", "seg1.m4s"]);
     assert_output(&output, &want);
     assert_eq!(output.live, report(LiveEnd::Stopped, 1, vec![]));
@@ -168,7 +168,7 @@ async fn a_failed_late_refresh_does_not_skip_held_playlists() {
         .expect("刷新失败后应照常结束")
         .unwrap();
 
-    let dir = req.output.path.parent().unwrap();
+    let dir = req.output.target.mp4().unwrap().parent().unwrap();
     let want = expected_split(dir, &["seg0.m4s", "seg1.m4s"], &["seg0.m4s", "seg1.m4s"]);
     assert_output(&output, &want);
     assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
@@ -195,7 +195,7 @@ async fn a_stall_while_deciding_does_not_wait_for_a_late_refresh() {
         .expect("停滞收尾不应等挂着的刷新")
         .unwrap();
 
-    let dir = req.output.path.parent().unwrap();
+    let dir = req.output.target.mp4().unwrap().parent().unwrap();
     let want = expected_split(dir, &["seg0.m4s", "seg1.m4s"], &["seg0.m4s"]);
     assert_output(&output, &want);
     let end = LiveEnd::Stalled {

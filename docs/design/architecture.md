@@ -8,7 +8,7 @@
 
 目标：
 
-- 下载 HLS 点播流并原样复制（不重编码）为单个 MP4：TS 与 fMP4 分片、AES-128 加密、字节范围分片、不连续段、视频与独立音频 rendition 合流。
+- 下载 HLS 点播流并原样复制（不重编码）为单个 MP4、可直接播放的本地 HLS 目录，或两者都要：TS 与 fMP4 分片、AES-128 加密、字节范围分片、不连续段、视频与独立音频 rendition 合流。
 - 正确性优先：每个分片使用自己的 key 与 IV；失败一律上抛；任何时刻中断都可安全续传；产物要么完整、要么不存在。
 - 同一核心服务三类使用方：Rust 库、Python 包 `hs-m3u8`、Tauri 桌面应用。
 - 站点适配通过回调完成（改写播放列表、修改请求、变换 key、变换分片）。
@@ -86,11 +86,13 @@ crates/py ────┼──> crates/core ──> crates/hls
 - **直播录制**：解析 → 按 5.9 录制 → 合并任务目录中已录到的分片。
 - **直播只合并**：不联网，直接合并任务目录中已录到的分片（`merge_recorded`，与下载共用输出配置 `OutputOptions`，不需要来源）；点播的下载报 `WorkDir(NotLiveRecording)`，结果里没有录制结束原因。
 
-合并调用 `remux` 生成临时文件，核对包数后改名为输出文件；之后按选项删除或保留任务目录。
+输出（`Target`）为 MP4、可直接播放的本地 HLS 目录，或两者都要，内容相同：只放各轨都有的不连续段组。先合并 MP4：`remux` 写临时文件、核对包数、落盘后改名；最常见的失败（编码不受支持）发生在这一步，此时还没有写出任何东西。再写 HLS：在 `<目录>.part` 中备齐（能硬链接就硬链接，跨文件系统等做不了时复制并落盘），改名为目标目录；失败时删掉刚写的 MP4。之后按选项删除或保留任务目录。
+
+本地 HLS 不经 FFmpeg，原样保留已解密的分片，不受 MP4 合并对编码的限制。入口 `index.m3u8` 单轨时为媒体播放列表，音视频分离时为主播放列表（变体属性照抄来源）；各轨的分片在 `<轨道>/` 下按播放顺序编号。扩展名按内容定（TS、AAC、MP3、AC-3、E-AC-3，fMP4 为 `m4s`）：FFmpeg 读 HLS 时核对扩展名与识别出的格式，不一致即拒绝（FFmpeg 9.0.2 的 `extension_picky`，默认开启）。组与组之间加 `EXT-X-DISCONTINUITY`；组内缺失的分片不标出、保留原时间戳，与 MP4 一致：缺失往往只在一条轨上，只给一条轨加不连续标记会让各轨的不连续段编号对不上。
 
 开始下载前可用 `Engine::probe` 只解析不下载：请求与回调同下载，返回主播放列表（可选的变体与音轨）、按偏好选中的轨与各轨的媒体播放列表（时长、是否直播、是否加密）。来源与访问方式（地址、选轨偏好、请求配置、回调）合为 `Source`，探测与下载共用。
 
-模块：`request`（请求与选项）、`resolve`（拉取播放列表、选轨）、`probe`（探测）、`selection`（选轨的身份）、`ident`（指纹与摘要）、`vod`（`plan` 点播计划与摘要，纯计算）、`live`（`session` 续录时的会话判定、`window` 每轨的窗口与新分片、`track` 每轨的刷新与停滞、`merge` 合并输入与缺失报告）、`fetch`（分片下载队列、拉取 init 段）、`workdir`（`record` 任务记录与 job.json 格式、`names` 文件名）、`job`（分派与收尾）、`http`、`crypto`、`verify`、`hooks`（回调）、`report`（进度与结果）、`error`、`blocking`（阻塞线程池）。
+模块：`request`（请求与选项）、`resolve`（拉取播放列表、选轨）、`probe`（探测）、`selection`（选轨的身份）、`ident`（指纹与摘要）、`vod`（`plan` 点播计划与摘要，纯计算）、`live`（`session` 续录时的会话判定、`window` 每轨的窗口与新分片、`track` 每轨的刷新与停滞、`merge` 合并输入与缺失报告）、`fetch`（分片下载队列、拉取 init 段）、`workdir`（`record` 任务记录与 job.json 格式、`names` 文件名）、`output`（MP4 与本地 HLS 输出）、`job`（分派与收尾）、`http`、`crypto`、`verify`、`hooks`（回调）、`report`（进度与结果）、`error`、`blocking`（阻塞线程池）。
 
 ### 5.2 任务目录与续传
 
@@ -113,7 +115,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 - **计划摘要**（点播）= 各轨各分片的序号、时长、不连续段序号、分片身份与 init 段身份的 SHA-256；不含 key URL 与 IV，因为目录里存的是解密后的分片。摘要不同报 `WorkDir(PlanChanged)`。init 段每次重新拉取（地址常带每次会话不同的签名），按完整地址去重，按内容命名，同组内容不同报 `Unsupported(InitChangesWithinGroup)`。
 - 记录与当前任务不一致时报错：来源不同 `SourceMismatch`，点播与直播不同 `KindMismatch`，轨道不同 `TracksMismatch`，计划不同 `PlanChanged`；直播的完整地址不同见 5.9。目录里还没有已完成的分片时（只有 init 段也算没有，它们随时可以重新拉取），直接改为当前任务。没有 `job.json` 的非空目录（`.part` 残留与锁文件除外）不当作任务目录，因为成功后整个目录会被删除。
 - 运行期间持有 `lock` 的排他锁，第二个任务打开同一目录时报 `WorkDir(Locked)`。删除任务目录时持锁删掉其余内容与锁文件，再释放锁、删除目录：释放锁后别的任务即可打开它，看到的不会是删到一半的任务。
-- 输出文件已存在：拒绝覆盖，除非调用方明确要求；开始时与合并前各检查一次。输出所在目录在合并前创建。
+- 输出已存在：MP4 拒绝覆盖，除非调用方明确要求；HLS 目录须不存在或为空，要求覆盖时只在其中全是本库写出的文件时替换，以免路径给错时删掉别人的文件。开始时与合并前各检查一次。输出所在目录在合并前创建。输出与任务目录的路径不能相同或互相包含（按字面比较）：成功后任务目录整个删除。
 - 任务目录位置可配置：库的默认位置在输出文件旁（`OutputOptions::resolved_work_dir`），成功后删除，删除失败记在结果的 `cleanup_error` 里；桌面应用放在应用数据目录，不放在下载目录，避免被网盘同步。
 - 错误信息中不输出请求头的值、Cookie、key 内容，以及地址中的用户名、密码与查询串。
 
@@ -141,7 +143,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 - 校验（不通过即失败，不写盘）：
   - 响应体长度与 `Content-Length`、字节范围一致；
   - 解密后去填充必须合法；key 或 IV 错误时这一步几乎必然失败；
-  - 没有 init 段的分片：MPEG-TS（偏移 0 处、长度够时偏移 188 处为同步字节 `0x47`）、ADTS 音频，或以 ID3 标签开头的打包音频；
+  - 没有 init 段的分片：MPEG-TS（偏移 0 处、长度够时偏移 188 处为同步字节 `0x47`），或 RFC 8216 3.4 的打包音频（AAC 的 ADTS、MP3、AC-3、E-AC-3，前面可有 ID3 标签）；
   - fMP4 分片与 init 段：开头必须是合法的 box 头（`styp`、`moof` 等）。
 
 ### 5.6 进度
@@ -175,7 +177,7 @@ pub trait Hooks: Send + Sync {
 | 来源内容 | `Playlist`、`NotMediaPlaylist`、`Select`、`Unsupported`（直播被拒、无分片、DRM、SAMPLE-AES、无法合并的布局）、`Integrity`、`KeyLength` | 否 |
 | 外部依赖 | `Http`（`HttpError::retryable`）、`Io`；`Segment`、`Key` 说明出在哪个分片或 key；`LiveStalled`（直播停滞） | 看原因 |
 | 任务目录 | `WorkDir`（`WorkDirProblem`）、`NothingRecorded` | 否 |
-| 其他 | `Hook`、`Remux`、`Cancelled` | 否 |
+| 其他 | `Hook`、`Remux`、`Cancelled`；`Cleanup`（写输出失败后清理也失败） | 否（`Cleanup` 看原来的失败） |
 
 - 错误信息已包含原因，不经 `source()` 重复给出；地址只显示到路径，不含用户名、密码与查询串，播放列表里无法解析的地址不显示；代理地址不含用户名与密码。
 - 不变量被违反（代码本不该产生的状态）用 panic 中止当次任务，不降级。

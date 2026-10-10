@@ -162,7 +162,7 @@ async fn continue_finds_the_recorded_variant() {
     assert_eq!(server.hits("hi.m3u8"), 0);
 
     // 记录的变体不在了：明确失败，不改录别的变体
-    std::fs::remove_file(&req.output.path).unwrap();
+    std::fs::remove_file(req.output.target.mp4().unwrap()).unwrap();
     server.put("master.m3u8", format!("#EXTM3U\n{lo}"));
     server.put("lo.m3u8", media("lo", false));
     interrupt(&req, |p| p.segments_done == 2).await;

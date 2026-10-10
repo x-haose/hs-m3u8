@@ -3,14 +3,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use hs_m3u8_remux::{DiscontinuityGroup, TrackSegments};
-
+use crate::output::{GroupSegment, GroupTrack};
 use crate::workdir::{Layout, SegmentFile};
 use crate::{Error, MissReason, Missed, WorkDirProblem};
 
 /// 合并计划。
 pub(crate) struct MergePlan {
-    pub groups: Vec<DiscontinuityGroup>,
+    /// 各组各轨的分片
+    pub groups: Vec<Vec<GroupTrack>>,
     /// 合并进输出的分片数，各轨合计
     pub segments: usize,
     /// 合并进输出的会话数
@@ -51,11 +51,7 @@ pub(crate) fn merge_plan(files: &[Vec<SegmentFile>], layout: &Layout) -> Result<
         .map(|key| merge_group(*key, &by_group, layout))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(MergePlan {
-        segments: groups
-            .iter()
-            .flat_map(|g| &g.tracks)
-            .map(|t| t.segments.len())
-            .sum(),
+        segments: groups.iter().flatten().map(|t| t.segments.len()).sum(),
         sessions: common
             .iter()
             .map(|(session, _)| session)
@@ -101,7 +97,7 @@ fn merge_group(
     key: Key,
     by_group: &[ByGroup<'_>],
     layout: &Layout,
-) -> Result<DiscontinuityGroup, Error> {
+) -> Result<Vec<GroupTrack>, Error> {
     let mut tracks = Vec::with_capacity(by_group.len());
     for (track, groups) in by_group.iter().enumerate() {
         let files = &groups[&key];
@@ -115,12 +111,18 @@ fn merge_group(
                 )),
             });
         }
-        tracks.push(TrackSegments {
+        tracks.push(GroupTrack {
             init: init.map(|f| layout.init(track, f)),
-            segments: files.iter().map(|f| f.path.clone()).collect(),
+            segments: files
+                .iter()
+                .map(|f| GroupSegment {
+                    path: f.path.clone(),
+                    duration_us: f.name.duration_us,
+                })
+                .collect(),
         });
     }
-    Ok(DiscontinuityGroup { tracks })
+    Ok(tracks)
 }
 
 /// 报告中的缺失分片：`known` 为本次运行记下原因的，加上无法合并的，以及空洞中其余的（原因不明），

@@ -19,6 +19,7 @@ mod http;
 mod ident;
 mod job;
 mod live;
+mod output;
 mod probe;
 mod report;
 mod request;
@@ -40,9 +41,12 @@ pub use hooks::{HookError, HookKind, Hooks, NoHooks, Purpose, RequestParts};
 pub use hs_m3u8_hls as hls;
 pub use hs_m3u8_remux::{Report, Shape, StreamKind, StreamReport};
 pub use probe::Probe;
-pub use report::{LiveEnd, LiveReport, MissReason, Missed, Output, Progress, Stage, StallCause};
+pub use report::{
+    LiveEnd, LiveReport, MissReason, Missed, Mp4Output, Output, Progress, Stage, StallCause,
+};
 pub use request::{
-    HttpOptions, JobRequest, KeyOverride, LiveOptions, OutputOptions, RetryPolicy, Source, Timeouts,
+    HttpOptions, JobRequest, KeyOverride, LiveOptions, OutputOptions, RetryPolicy, Source, Target,
+    Timeouts,
 };
 pub use url::Url;
 
