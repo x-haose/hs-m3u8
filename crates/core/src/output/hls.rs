@@ -14,8 +14,9 @@
 use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
+use super::options::sibling;
 use super::{GroupTrack, io_error};
 use crate::ident::Fingerprint;
 use crate::selection::SelectionKey;
@@ -62,9 +63,8 @@ pub(super) fn write(
     selection: Option<&SelectionKey>,
     overwrite: bool,
 ) -> Result<(), Error> {
-    let mut name = target.as_os_str().to_owned();
-    name.push(".part");
-    let stage = PathBuf::from(name);
+    let name = target.file_name().expect("校验过：输出路径都有文件名");
+    let stage = sibling(target, name, ".part");
     remove_stale_stage(&stage)?;
     if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent).map_err(io_error("创建", parent))?;

@@ -250,7 +250,7 @@ async fn a_live_directory_without_live_options_is_a_kind_mismatch() {
         ),
         "{err}"
     );
-    assert!(dir.join("out.mp4.hsdl/job.json").exists());
+    assert!(dir.join("out.hsdl/job.json").exists());
 }
 
 /// 只合并：不联网，把中断前录到的合并成输出，没有录制结束原因。

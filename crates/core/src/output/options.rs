@@ -1,5 +1,6 @@
 //! 输出配置：输出什么、任务目录在哪里，以及与文件系统无关的路径校验。
 
+use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 
 use crate::Error;
@@ -9,8 +10,9 @@ use crate::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputOptions {
     pub target: Target,
-    /// 任务目录；None 时为 `<MP4 路径>.hsdl`，只输出 HLS 时为 `<HLS 目录>.hsdl`。只能是空目录、不存在的目录或
-    /// 本库建立的任务目录
+    /// 任务目录；None 时与输出同级，名为输出的主名加 `.hsdl`：主名为 MP4 文件名去掉扩展名，只输出 HLS 时为
+    /// HLS 目录名。`a.mp4` 与 HLS 目录 `a` 共用 `a.hsdl`，改变输出种类后接着用已下载的分片。只能是空目录、
+    /// 不存在的目录或本库建立的任务目录
     pub work_dir: Option<PathBuf>,
     /// 输出已存在时替换：MP4 文件直接替换；HLS 目录只在其中全是本库写出的文件时替换，否则仍报
     /// [`Error::OutputExists`]，以免路径给错时删掉别人的文件。为 false 时 HLS 目录须不存在或为空
@@ -48,10 +50,11 @@ impl Target {
         }
     }
 
-    /// 默认任务目录所依据的路径：有 MP4 时为它，否则为 HLS 目录。
-    fn primary(&self) -> &Path {
+    /// 默认任务目录所依据的输出与它的主名（见 [`OutputOptions::work_dir`]）；路径没有文件名时为 None。
+    fn primary(&self) -> (&Path, Option<&OsStr>) {
         match self {
-            Target::Mp4(path) | Target::Hls(path) | Target::Both { mp4: path, .. } => path,
+            Target::Mp4(path) | Target::Both { mp4: path, .. } => (path, path.file_stem()),
+            Target::Hls(path) => (path, path.file_name()),
         }
     }
 }
@@ -67,12 +70,19 @@ impl OutputOptions {
     }
 
     /// 实际使用的任务目录：`work_dir`，未指定时见 [`OutputOptions::work_dir`]。
+    /// 输出路径没有文件名（校验会拒绝）时为整个路径加 `.hsdl`。
     pub fn resolved_work_dir(&self) -> PathBuf {
-        self.work_dir.clone().unwrap_or_else(|| {
-            let mut name = self.target.primary().as_os_str().to_owned();
-            name.push(".hsdl");
-            PathBuf::from(name)
-        })
+        if let Some(dir) = &self.work_dir {
+            return dir.clone();
+        }
+        match self.target.primary() {
+            (path, Some(stem)) => sibling(path, stem, ".hsdl"),
+            (path, None) => {
+                let mut name = path.as_os_str().to_owned();
+                name.push(".hsdl");
+                PathBuf::from(name)
+            }
+        }
     }
 
     /// 路径都有文件名、互不相同也不互相包含，输出按 `overwrite` 可以写。
@@ -104,6 +114,14 @@ impl OutputOptions {
         }
         super::check_targets(self)
     }
+}
+
+/// 与 `path` 同级、名为 `name` 加 `suffix` 的路径；`path` 结尾的分隔符不影响结果。
+pub(crate) fn sibling(path: &Path, name: &OsStr, suffix: &str) -> PathBuf {
+    let mut file = OsString::from(name);
+    file.push(suffix);
+    path.parent()
+        .map_or_else(|| PathBuf::from(&file), |p| p.join(&file))
 }
 
 /// 按字面规整成绝对路径：补上当前目录，去掉 `.`，`..` 退一级；不访问文件系统，不跟随符号链接。

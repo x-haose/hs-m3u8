@@ -206,7 +206,7 @@ async fn a_full_directory_keeps_the_recorded_url() {
     };
     let first = run(with_token(1, Some(2))).await.unwrap();
     assert_eq!(first.live.unwrap().end, Some(LiveEnd::DurationReached));
-    let job_json = dir.join("out.mp4.hsdl/job.json");
+    let job_json = dir.join("out.hsdl/job.json");
     let recorded = std::fs::read(&job_json).unwrap();
 
     server.put("seg0.ts", fixture("ts_long/seg2.ts"));
