@@ -80,7 +80,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 
 ### 5.1 任务与流水线
 
-一个任务把一个来源 URL 变成一个输出文件，分三条流程，共用合并与收尾：
+一个任务把一个来源 URL 变成它的输出，分三条流程，共用写出与收尾：
 
 - **点播**：解析（取主播放列表、选轨、取媒体播放列表）→ 计划（各轨分片、不连续段组、计划摘要）→ 拉取 init 段并确认能够合并 → 下载分片 → 合并。
 - **直播录制**：解析 → 按 5.9 录制 → 合并任务目录中已录到的分片。
@@ -142,7 +142,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 - 调用方已知 key 时可给自定义 key（`KeyOverride`，可另给 IV）：加密的分片一律用它解密，不请求 key 地址、不经 `on_key`。
 - 校验（不通过即失败，不写盘）：
   - 响应体长度与 `Content-Length`、字节范围一致；
-  - 解密后去填充必须合法；key 或 IV 错误时这一步几乎必然失败；
+  - 解密后去填充必须合法；key 错误时这一步几乎必然失败。IV 只影响第一个 16 字节块，IV 错误发现不了，所以自定义 IV 只在确知时给；
   - 没有 init 段的分片：MPEG-TS（偏移 0 处、长度够时偏移 188 处为同步字节 `0x47`），或 RFC 8216 3.4 的打包音频（AAC 的 ADTS、MP3、AC-3、E-AC-3，前面可有 ID3 标签）；
   - fMP4 分片与 init 段：开头必须是合法的 box 头（`styp`、`moof` 等）。
 
@@ -233,11 +233,11 @@ async def main():
         on_request=None,             # (req: hs_m3u8.Request) -> None，可改 url 与 headers
         on_playlist=None,            # (url: str, text: str) -> str
         on_segment=None,             # (url: str, data: bytes) -> bytes
-        keep_hls=False,
+        hls_dir=None,                # 另给目录时同时输出可直接播放的本地 HLS；只要 HLS 时 output=None
     )
-    async for p in job.progress():
-        print(p.done_segments, p.total_segments, p.bytes_per_sec)
-    path = await job                 # 失败抛 hs_m3u8.DownloadError 的子类
+    async for p in job.progress():   # 定时采样的进度快照
+        print(p.segments_done, p.segments_total, p.received)
+    result = await job               # 失败抛 hs_m3u8.DownloadError 的子类
 
 hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
 ```

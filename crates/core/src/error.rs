@@ -248,7 +248,8 @@ impl HttpError {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Integrity {
-    #[error("解密后填充不合法（key 或 IV 不对）")]
+    /// 多为 key 不对；IV 不对不会使填充不合法
+    #[error("解密后填充不合法（key 不对或数据损坏）")]
     Padding,
     #[error("密文长度 {0} 不是 16 的整数倍")]
     CipherLength(usize),
