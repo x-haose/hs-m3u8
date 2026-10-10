@@ -332,7 +332,7 @@ HsM3u8Error                       retryable: bool、retry_after: int | None、se
 - ruff（检查与格式）；mypy `--strict` 与 basedpyright（严格）检查 `python/` 与测试；stubtest 核对存根与模块（不查 `@disjoint_base`：pyo3-stub-gen 不生成它，只影响对多重继承原生类的检查）；重新生成存根与 `__init__.py` 后与仓库里的没有差异。
 - 类型用法由测试文件检查：按取值写全的 `match` 经 mypy 与 basedpyright 确认穷尽。
 - 说明是否齐全由测试检查：导出的每个类、它的属性与方法、枚举的每种取值在运行时都有说明，存根里各类的构造函数也有说明。
-- pytest 端到端：测试内起本地 HTTP 服务，跑探测、下载、回调、取消、续传、异常与放弃任务；Python 3.12 与最新版各跑一遍。
+- pytest 端到端：测试内起本地 HTTP 与 HTTPS（自签名证书）服务，跑探测、下载（含 AES-128 与自定义 key、IV）、回调、取消、续传、直播、异常、pickle 与放弃任务；Python 3.12 与最新版各跑一遍。
 
 ## 8. 桌面应用（GUI 阶段细化）
 

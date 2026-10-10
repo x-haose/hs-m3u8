@@ -218,6 +218,32 @@ def test_http_failures_report_the_status_and_whether_to_retry(server: Server) ->
     assert gone.value.leftovers == ()
     assert busy.value.kind == HttpErrorKind.Status(503)
     assert busy.value.retryable
+    assert busy.value.retry_after is None
+
+
+def test_waits_the_server_asks_for_are_reported(server: Server) -> None:
+    # 要求的等待超过退避上限（默认 15 秒）：不再重试，直接失败，等待写在异常里
+    server.status("limited.m3u8", 429, headers=[("Retry-After", "100")])
+
+    with pytest.raises(HttpError) as limited:
+        probe(Source(server.url("limited.m3u8")))
+
+    assert limited.value.kind == HttpErrorKind.Status(429)
+    assert limited.value.retryable
+    assert limited.value.retry_after == 100
+    assert server.hits("limited.m3u8") == 1
+
+
+def test_self_signed_certificates_are_accepted_only_when_insecure(tls_server: Server) -> None:
+    tls_server.put("media.m3u8", MEDIA)
+
+    with pytest.raises(HttpError) as rejected:
+        probe(Source(tls_server.url("media.m3u8"), http=NO_RETRY))
+    accepted = probe(Source(tls_server.url("media.m3u8"), http=HttpOptions(insecure=True)))
+
+    assert isinstance(rejected.value.kind, HttpErrorKind.Certificate)
+    assert not rejected.value.retryable
+    assert accepted.tracks[0].segments == 2
 
 
 def test_malformed_playlists_and_impossible_selections_are_reported(server: Server) -> None:

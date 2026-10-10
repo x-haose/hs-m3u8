@@ -15,16 +15,21 @@ from hs_m3u8 import (
     AudioChoice,
     Engine,
     FileError,
+    Hooks,
     HttpError,
     HttpErrorKind,
     HttpOptions,
+    IntegrityError,
+    IntegrityFailure,
     InvalidInputError,
     JobCancelledError,
     JobRequest,
     KeyOverride,
     Leftover,
+    LeftoverKind,
     LiveEnd,
     LiveOptions,
+    MissReason,
     Output,
     OutputExistsError,
     OutputOptions,
@@ -39,6 +44,7 @@ from hs_m3u8 import (
     Timeouts,
     Unsettled,
     VariantChoice,
+    VolumeUnavailableError,
 )
 
 VOD = """#EXTM3U
@@ -56,6 +62,26 @@ LIVE = """#EXTM3U
 seg0.ts
 #EXTINF:2,
 seg1.ts
+"""
+
+# 播放列表写的 IV 不对，key 地址取不到：只有自定义的 key 与 IV 解得开
+ENCRYPTED = f"""#EXTM3U
+#EXT-X-TARGETDURATION:2
+#EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x{bytes(16).hex()}
+#EXTINF:2,
+seg0.ts
+#EXTINF:2,
+seg1.ts
+#EXT-X-ENDLIST
+"""
+
+# 第二个分片取不到（404），记为缺失
+LIVE_WITH_MISSING = """#EXTM3U
+#EXT-X-TARGETDURATION:1
+#EXTINF:1,
+seg0.ts
+#EXTINF:1,
+missing.ts
 """
 
 # 等请求到达的上限，秒；只在出错时才会等满
@@ -283,16 +309,100 @@ def test_file_errors_carry_the_os_error(server: Server, tmp_path: Path) -> None:
     assert (cause.errno, cause.filename) == (errno.ENOTDIR, str(work_dir))
 
 
-def test_existing_outputs_are_reported_with_their_path(server: Server, tmp_path: Path) -> None:
+def test_existing_outputs_are_reported_and_replaced_on_request(server: Server, tmp_path: Path) -> None:
     put_media(server, VOD)
     target = tmp_path / "out.mp4"
     target.write_bytes(b"old")
 
     with pytest.raises(OutputExistsError) as raised:
         run(one_at_a_time(server, Target.Mp4(target)))
-
     assert raised.value.path == target
     assert server.hits("index.m3u8") == 0
+
+    replace = OutputOptions(Target.Mp4(target), overwrite=True)
+    assert run(JobRequest(Source(server.url("index.m3u8")), replace)).segments == 2
+    assert target.read_bytes() != b"old"
+    assert not replace.resolved_work_dir().exists()
+
+    keep = OutputOptions(Target.Mp4(tmp_path / "kept.mp4"), keep_work_dir=True)
+    assert run(JobRequest(Source(server.url("index.m3u8")), keep)).segments == 2
+    assert keep.resolved_work_dir().is_dir()
+
+
+def test_key_overrides_decrypt_with_their_iv(server: Server, tmp_path: Path) -> None:
+    # 样本由 tests/fixtures/media/encrypt.sh 生成：key 为 00 01 … 0f，IV 为 10 11 … 1f；播放列表写的 IV 不对
+    key, iv = bytes(range(16)), bytes(range(16, 32))
+    server.put("index.m3u8", ENCRYPTED)
+    server.put("seg0.ts", fixture("aes/seg0.ts"))
+    server.put("seg1.ts", fixture("aes/seg1.ts"))
+    output = OutputOptions(Target.Mp4(tmp_path / "out.mp4"))
+
+    with pytest.raises(IntegrityError) as wrong_iv:
+        run(JobRequest(Source(server.url("index.m3u8")), output, key=KeyOverride(key)))
+    decrypted = run(JobRequest(Source(server.url("index.m3u8")), output, key=KeyOverride(key, iv=iv)))
+
+    assert isinstance(wrong_iv.value.reason, IntegrityFailure.UnrecognizedSegment)
+    assert decrypted.segments == 2
+    assert server.hits("key.bin") == 0
+
+
+def test_segment_hooks_transform_segments_before_they_are_checked(server: Server, tmp_path: Path) -> None:
+    put_media(server, VOD)
+    for name in ["seg0.ts", "seg1.ts"]:
+        server.put(name, b"\x89PNG" + fixture(f"ts_a/{name}"))
+    called: list[str] = []
+
+    class StripDisguise(Hooks):
+        def on_segment(self, url: str, data: bytes) -> bytes:
+            called.append(url)
+            return data.removeprefix(b"\x89PNG")
+
+    output = run(
+        JobRequest(
+            Source(server.url("index.m3u8"), hooks=StripDisguise()), OutputOptions(Target.Mp4(tmp_path / "a.mp4"))
+        )
+    )
+
+    assert output.segments == 2
+    assert sorted(called) == [server.url("seg0.ts"), server.url("seg1.ts")]
+
+
+def test_live_recordings_end_at_endlist_and_report_missing_segments(server: Server, tmp_path: Path) -> None:
+    server.put("index.m3u8", LIVE_WITH_MISSING)
+    server.put("seg0.ts", fixture("ts_a/seg0.ts"))
+    gate = server.gate("seg0.ts")
+    request = one_at_a_time(server, Target.Mp4(tmp_path / "out.mp4"))
+
+    async def record() -> tuple[Output, Progress]:
+        job = Engine().start(request)
+        await arrived(gate)
+        server.put("index.m3u8", LIVE_WITH_MISSING + "#EXT-X-ENDLIST\n")
+        gate.release()
+        output = await job.wait()
+        return output, job.progress()
+
+    output, progress = asyncio.run(record())
+
+    assert output.live is not None
+    assert output.live.end == LiveEnd.EndList()
+    assert [(m.first, m.last, m.reason) for m in output.live.missed] == [
+        (1, 1, MissReason.Failed(HttpErrorKind.Status(404)))
+    ]
+    assert (progress.segments_done, progress.segments_failed, progress.segments_expired) == (1, 1, 0)
+    # 读到的字节含播放列表与取不到的请求，多于写进任务目录的分片
+    assert progress.received > progress.bytes > 0
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="只有 Windows 造得出读不到的根（不存在的盘符）")
+def test_unreachable_work_dirs_fail_or_are_reported_as_asked() -> None:
+    letter = next(letter for letter in "ZYXWVUTSRQPONMLKJIHGFED" if not Path(f"{letter}:\\").exists())
+    work_dir = Path(f"{letter}:\\job.hsdl")
+
+    with pytest.raises(VolumeUnavailableError):
+        discard(work_dir)
+    leftovers = asyncio.run(Engine().discard(work_dir, unsettled=Unsettled.Report()))
+
+    assert [(leftover.path, leftover.kind) for leftover in leftovers] == [(work_dir, LeftoverKind.WorkDir())]
 
 
 def test_requests_survive_pickle_by_value(tmp_path: Path) -> None:

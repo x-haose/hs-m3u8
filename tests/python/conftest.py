@@ -1,17 +1,21 @@
-"""端到端测试的公共部分：测试内起本地 HTTP 服务提供 HLS 样本（分片取自 tests/fixtures/media）。"""
+"""端到端测试的公共部分：测试内起本地 HTTP(S) 服务提供 HLS 样本（分片取自 tests/fixtures/media）。"""
 
+import base64
 import copy
 import pickle
 import selectors
 import socket
+import ssl
+import textwrap
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
-MEDIA = Path(__file__).parent.parent / "fixtures" / "media"
+FIXTURES = Path(__file__).parent.parent / "fixtures"
+MEDIA = FIXTURES / "media"
 
 
 def fixture(name: str) -> bytes:
@@ -75,22 +79,26 @@ class Gate:
 class Server:
     """本地 HTTP 服务：按路径返回放进来的内容或状态码，记下各路径被请求的次数与最近一次的请求头。"""
 
-    def __init__(self) -> None:
-        """在 127.0.0.1 的随机端口上开始服务。"""
+    def __init__(self, tls: ssl.SSLContext | None = None) -> None:
+        """在 127.0.0.1 的随机端口上开始服务；给了 `tls` 时为 HTTPS。"""
         self._lock = threading.Lock()
         self._bodies: dict[str, bytes] = {}
-        self._statuses: dict[str, int] = {}
+        self._statuses: dict[str, tuple[int, list[tuple[str, str]]]] = {}
         self._hits: dict[str, int] = {}
         self._headers: dict[str, list[tuple[str, str]]] = {}
         self._gates: dict[str, Gate] = {}
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), self._handler())
+        self._scheme = "http"
+        if tls is not None:
+            self._httpd.socket = tls.wrap_socket(self._httpd.socket, server_side=True)
+            self._scheme = "https"
         self._thread = threading.Thread(target=self._httpd.serve_forever)
         self._thread.start()
 
     def url(self, path: str) -> str:
         """`path`（不以 / 开头）的完整地址。"""
         host, port = self._httpd.server_address[:2]
-        return f"http://{host!s}:{port}/{path}"
+        return f"{self._scheme}://{host!s}:{port}/{path}"
 
     def put(self, path: str, body: bytes | str) -> None:
         """`path` 返回 200 与 `body`（`str` 按 UTF-8 编码）。"""
@@ -98,10 +106,10 @@ class Server:
             self._bodies[path] = body.encode() if isinstance(body, str) else body
             self._statuses.pop(path, None)
 
-    def status(self, path: str, code: int) -> None:
-        """`path` 返回状态码 `code`，没有内容。"""
+    def status(self, path: str, code: int, headers: Iterable[tuple[str, str]] = ()) -> None:
+        """`path` 返回状态码 `code` 与响应头 `headers`，没有内容。"""
         with self._lock:
-            self._statuses[path] = code
+            self._statuses[path] = (code, list(headers))
 
     def gate(self, path: str) -> Gate:
         """之后对 `path` 的请求先停住，等返回的闸门放行。"""
@@ -132,8 +140,10 @@ class Server:
         for gate in gates:
             gate.close()
 
-    def respond(self, path: str, headers: list[tuple[str, str]], client: socket.socket) -> tuple[int, bytes] | None:
-        """记下这次请求，有闸门时先停住，再返回状态码与内容；停住期间客户端 `client` 断开时返回 None。
+    def respond(
+        self, path: str, headers: list[tuple[str, str]], client: socket.socket
+    ) -> tuple[int, list[tuple[str, str]], bytes] | None:
+        """记下这次请求，有闸门时先停住，再返回状态码、响应头与内容；停住期间客户端 `client` 断开时返回 None。
 
         设了状态码的返回它，放了内容的返回 200，都没有的返回 404。
         """
@@ -145,10 +155,11 @@ class Server:
             return None
         with self._lock:
             if path in self._statuses:
-                return self._statuses[path], b""
+                code, extra = self._statuses[path]
+                return code, extra, b""
             if path in self._bodies:
-                return 200, self._bodies[path]
-            return 404, b""
+                return 200, [], self._bodies[path]
+            return 404, [], b""
 
     def _handler(self) -> type[BaseHTTPRequestHandler]:
         server = self
@@ -160,8 +171,10 @@ class Server:
                 if response is None:
                     self.close_connection = True
                     return
-                status, body = response
+                status, extra, body = response
                 self.send_response(status)
+                for name, value in extra:
+                    self.send_header(name, value)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -173,5 +186,24 @@ class Server:
 def server() -> Iterator[Server]:
     """每个测试一个本地 HTTP 服务，测试结束时停止。"""
     instance = Server()
+    yield instance
+    instance.close()
+
+
+def pem(kind: str, der: bytes) -> str:
+    """DER 转为 PEM：Python 的 ssl 只从 PEM 文件加载证书与私钥。"""
+    body = textwrap.fill(base64.b64encode(der).decode(), 64)
+    return f"-----BEGIN {kind}-----\n{body}\n-----END {kind}-----\n"
+
+
+@pytest.fixture
+def tls_server(tmp_path: Path) -> Iterator[Server]:
+    """用 tests/fixtures/tls 的自签名证书（CN 为 localhost，含 IP 127.0.0.1）提供 HTTPS 的本地服务。"""
+    cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
+    cert.write_text(pem("CERTIFICATE", (FIXTURES / "tls" / "cert.der").read_bytes()))
+    key.write_text(pem("PRIVATE KEY", (FIXTURES / "tls" / "key.der").read_bytes()))
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    instance = Server(context)
     yield instance
     instance.close()
