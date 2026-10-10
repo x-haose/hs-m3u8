@@ -18,7 +18,8 @@ use crate::resolve::{self, Resolved};
 use crate::vod::{self, Plan};
 use crate::workdir::{self, JobRecord, Lock, RecordKind, Stored, WorkDir, read_resumable};
 use crate::{
-    Error, Leftover, LiveReport, Output, Progress, Stage, Unsupported, WorkDirProblem, blocking,
+    Error, Leftover, LeftoverKind, LiveReport, Output, Progress, Stage, Unsettled, Unsupported,
+    WorkDirProblem, blocking,
 };
 
 /// 一次运行用到的共享对象。
@@ -187,12 +188,21 @@ pub(crate) async fn merge_recorded(
 }
 
 /// 放弃任务（见 [`crate::Engine::discard`]）：加锁，按记录收拾写到一半的输出，再删除任务目录。
-pub(crate) async fn discard(root: PathBuf) -> Result<Vec<Leftover>, Error> {
-    let Some(lock) = WorkDir::lock_existing(root.clone()).await? else {
-        return Ok(Vec::new());
+pub(crate) async fn discard(root: PathBuf, unsettled: Unsettled) -> Result<Vec<Leftover>, Error> {
+    let lock = match WorkDir::lock_existing(root.clone()).await {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return Ok(Vec::new()),
+        Err(failure @ Error::VolumeUnavailable { .. }) if unsettled == Unsettled::Report => {
+            return Ok(vec![Leftover {
+                path: root,
+                kind: LeftoverKind::WorkDir,
+                cause: failure.to_string(),
+            }]);
+        }
+        Err(failure) => return Err(failure),
     };
     let work_dir = root.clone();
-    let mut leftovers = blocking(move || output::recover_recorded(&work_dir)).await??;
+    let mut leftovers = blocking(move || output::recover_recorded(&work_dir, unsettled)).await??;
     leftovers.extend(workdir::remove(root, lock).await);
     Ok(leftovers)
 }

@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use super::hls;
 use crate::error::io_error;
 use crate::workdir::{self, OutputKind, PendingOutput};
-use crate::{Error, Leftover, LeftoverKind, entries, volume};
+use crate::{Error, Leftover, LeftoverKind, Unsettled, entries, volume};
 
 /// 输出路径上现在的东西。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +118,50 @@ pub(super) fn recover(
             .map_err(io_error("删除", &workdir::outputs_file(work_dir)))?;
     }
     Ok(unsettled)
+}
+
+/// 放弃任务时按记录收拾，规则同 [`recover`]，记录不删（随任务目录删掉）。返回留下的东西：原处是别的东西而没放回的
+/// 旧输出各一项；收拾某个输出出错时，`mode` 为 [`Unsettled::Report`] 就把它的两个保留名记为残留（见 [`given_up`]）、
+/// 接着收拾其余的，否则报错。要读写文件系统，在阻塞线程池中调用；调用方已对任务目录加锁。
+pub(crate) fn recover_recorded(work_dir: &Path, mode: Unsettled) -> Result<Vec<Leftover>, Error> {
+    let record = workdir::read_outputs(work_dir)?;
+    let mut leftovers = Vec::new();
+    for o in &record.outputs {
+        match settle(o, !record.swapped) {
+            Ok(true) => {}
+            Ok(false) => leftovers.push(unsettled(o)),
+            Err(failure) if mode == Unsettled::Report => {
+                leftovers.extend(given_up(o, record.swapped, &failure));
+            }
+            Err(failure) => return Err(failure),
+        }
+    }
+    Ok(leftovers)
+}
+
+/// 收拾不了的输出 `o` 的两个保留名，各记一项残留，不一定还在：临时输出可删；挪开的旧输出在全部装上之后（`swapped`）
+/// 可删，之前是没能放回原处的旧输出。
+fn given_up(o: &PendingOutput, swapped: bool, failure: &Error) -> [Leftover; 2] {
+    let cause = format!("没收拾（不一定还在）：{failure}");
+    let aside = if swapped {
+        LeftoverKind::Removable
+    } else {
+        LeftoverKind::Displaced {
+            target: o.target().to_path_buf(),
+        }
+    };
+    [
+        Leftover {
+            path: o.temp().to_path_buf(),
+            kind: LeftoverKind::Removable,
+            cause: cause.clone(),
+        },
+        Leftover {
+            path: o.aside().to_path_buf(),
+            kind: aside,
+            cause,
+        },
+    ]
 }
 
 /// [`recover`] 留着的旧输出，作为残留报出。

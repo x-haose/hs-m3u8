@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use hs_m3u8_remux::{DiscontinuityGroup, Report, Streams, TrackSegments};
 
+pub(crate) use self::commit::recover_recorded;
 pub use self::options::{OutputOptions, Target};
 pub(crate) use self::options::{ResolvedOutput, absolute_path};
 
@@ -74,13 +75,6 @@ fn create_dirs(options: &ResolvedOutput) -> Result<(), Error> {
         fs::create_dir_all(dir).map_err(io_error("创建", dir))?;
     }
     Ok(())
-}
-
-/// 放弃任务时按任务目录里的记录收拾写到一半的输出（见 [`commit::recover`]），返回没能放回的旧输出。要读写文件系统，
-/// 在阻塞线程池中调用；调用方已对任务目录加锁。
-pub(crate) fn recover_recorded(work_dir: &Path) -> Result<Vec<Leftover>, Error> {
-    let unsettled = commit::recover(work_dir, &[])?;
-    Ok(unsettled.iter().map(commit::unsettled).collect())
 }
 
 /// 各输出能否写（见 [`commit::check`]），顺序同各输出。

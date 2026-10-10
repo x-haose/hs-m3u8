@@ -146,23 +146,37 @@ impl Engine {
     }
 
     /// 放弃任务：删除任务目录 `work_dir`（相对路径按当前目录补全），只删本库写的文件。先按其中的记录收拾写到一半
-    /// 的输出：删掉临时输出，没能放回原处的旧输出按 [`LeftoverKind::Displaced`] 说的放回或删掉。返回留下的东西：
-    /// 原处是别的东西而没放回的旧输出各一项；任务目录没删干净（里面有不是本库写的文件，或删除出错）时一项
-    /// [`LeftoverKind::WorkDir`]。目录不存在时什么也不做。
+    /// 的输出：删掉临时输出，挪开的旧输出按开始任务时的规则放回或删掉。返回留下的东西，记录已随任务目录删掉，要用户
+    /// 处理：原处是别的东西而没放回的旧输出各一项；收拾不了而按 `unsettled` 记下的；任务目录没删干净（里面有不是本库
+    /// 写的文件，或删除出错）时一项 [`LeftoverKind::WorkDir`]。目录不存在时什么也不做。
     ///
     /// 路径为空或不合要求（见 [`Target`]）时报参数错误。任务目录正被任务使用时报 [`WorkDirProblem::Locked`]，不是
-    /// 本库的任务目录（没有 `job.json` 且不为空）时报 [`WorkDirProblem::NotEmpty`]；任务目录或输出所在的盘不在、共享
-    /// 连不上时报 [`Error::VolumeUnavailable`]，接上后重试；收拾输出失败时报错，任务目录与记录都留着，可以重试。记录
-    /// （`outputs.json`）是另一个格式版本写的时报 [`WorkDirProblem::UnsupportedVersion`]、无法解析时报
-    /// [`WorkDirProblem::Corrupt`]，什么也不动：不知道它记着什么就不收拾，可用写下它的版本放弃。输出所在的盘不再
-    /// 接上或记录读不懂时，可由用户删掉记录（写了一半的临时输出与没能放回的旧输出以 `hsdl-` 开头，留在输出旁）后再
-    /// 放弃。`job.json` 不读：它是另一个版本写的也照常删除。不在 tokio 运行时内调用会 panic。
-    pub async fn discard(&self, work_dir: &Path) -> Result<Vec<Leftover>, Error> {
+    /// 本库的任务目录（没有 `job.json` 且不为空）时报 [`WorkDirProblem::NotEmpty`]。记录（`outputs.json`）是另一个
+    /// 格式版本写的时报 [`WorkDirProblem::UnsupportedVersion`]、无法解析时报 [`WorkDirProblem::Corrupt`]，什么也不动：
+    /// 不知道它记着什么就不收拾，可用写下它的版本放弃，或由用户删掉记录（写了一半的临时输出与没能放回的旧输出以
+    /// `hsdl-` 开头，留在输出旁）后再放弃。`job.json` 不读：它是另一个版本写的也照常删除。不在 tokio 运行时内调用会
+    /// panic。
+    pub async fn discard(
+        &self,
+        work_dir: &Path,
+        unsettled: Unsettled,
+    ) -> Result<Vec<Leftover>, Error> {
         if work_dir.as_os_str().is_empty() {
             return Err(Error::InvalidInput("任务目录路径为空".to_owned()));
         }
-        job::discard(output::absolute_path(work_dir)?).await
+        job::discard(output::absolute_path(work_dir)?, unsettled).await
     }
+}
+
+/// 放弃任务（[`Engine::discard`]）时，任务目录或记录里的输出所在的盘读不到，或收拾输出出错，怎么办。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unsettled {
+    /// 报错（盘读不到时为 [`Error::VolumeUnavailable`]），任务目录与记录都留着，接上或排除后重试
+    Fail,
+    /// 记为残留，照常放弃：收拾不了的输出旁的两个保留名各一项（盘读不到时核实不了，不一定还在）——临时输出可删；挪开
+    /// 的旧输出在全部装上之后可删，之前是没能放回原处的旧输出；任务目录本身读不到时一项 [`LeftoverKind::WorkDir`]。
+    /// 用于盘不再接上、用户确认仍要放弃时
+    Report,
 }
 
 /// 读到的响应体字节计入 [`Progress::received`]。
