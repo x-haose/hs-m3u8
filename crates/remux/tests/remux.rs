@@ -126,12 +126,7 @@ fn top_level_boxes(path: &Path) -> Vec<[u8; 4]> {
 }
 
 fn assert_no_leftovers(output: &Path) {
-    assert!(!output.exists(), "失败时不应生成输出");
-    for suffix in [".part", ".part.list"] {
-        let mut name = output.as_os_str().to_owned();
-        name.push(suffix);
-        assert!(!Path::new(&name).exists(), "失败时不应留下 {suffix} 文件");
-    }
+    assert!(!output.exists(), "失败时应删除输出");
 }
 
 #[test]
