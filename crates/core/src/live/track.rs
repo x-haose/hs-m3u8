@@ -23,15 +23,14 @@ const LISTING_TARGETS: u32 = 2;
 /// 设得比目标时长还短而被判为停滞。
 const STALL_TARGETS: u32 = 3;
 
+/// 网络刷新的状态。准备暂存的播放列表另记（[`LiveTrack`] 的 `preparing`），两者互不等待。
 enum Refresh {
     Due(Instant),
     InFlight {
         started: Instant,
     },
-    /// 在准备暂存的播放列表（拉它要用的 init 段）；处理完暂存的才再刷新
-    Preparing {
-        started: Instant,
-    },
+    /// 拉到的播放列表还没处理完（含首次拉到的）；处理到它时再安排下次刷新
+    Waiting,
     /// 服务器要求的等待长到无法表示：不再刷新，由停滞判定或停止结束录制
     Suspended,
     /// 出现了 EXT-X-ENDLIST，或这条轨不再刷新、不再处理
@@ -75,6 +74,8 @@ pub(super) struct LiveTrack {
     role: Role,
     /// 拉到、还没处理的播放列表，按拉到的先后：会话定下之前暂存，定下后逐份准备好再处理
     pending: VecDeque<Fetched>,
+    /// 正在准备的那份开始准备的时刻；没有在准备的为 None
+    preparing: Option<Instant>,
     /// 之前各会话已录到的时长，微秒
     recorded_us: u64,
     /// 最近一次有分片下载成功的时刻（或录制开始、会话定下的时刻）
@@ -103,12 +104,13 @@ impl LiveTrack {
         Ok(LiveTrack {
             url,
             target,
-            refresh: Refresh::Due(now),
+            refresh: Refresh::Waiting,
             role: Role::Undecided {
                 candidate: false,
                 seen: None,
             },
             pending: VecDeque::new(),
+            preparing: None,
             recorded_us,
             last_recorded: now,
             last_listed: now,
@@ -186,15 +188,14 @@ impl LiveTrack {
         !self.is_ended() && !self.is_full(max_us)
     }
 
-    /// 下次刷新的时刻；在途、在准备暂存的、暂停或已结束时为 None。
+    /// 下次刷新的时刻。会话定下后，暂存的处理完才再刷新：刷新时按已处理到的位置决定拉哪些新 init 段。
+    /// 在途、等处理、暂停或已结束时为 None。
     pub(super) fn due_at(&self) -> Option<Instant> {
-        match self.refresh {
-            Refresh::Due(at) => Some(at),
-            Refresh::InFlight { .. }
-            | Refresh::Preparing { .. }
-            | Refresh::Suspended
-            | Refresh::Ended => None,
-        }
+        let Refresh::Due(at) = self.refresh else {
+            return None;
+        };
+        let held = self.window().is_some() && self.has_held();
+        (!held).then_some(at)
     }
 
     /// 发起刷新。
@@ -206,9 +207,15 @@ impl LiveTrack {
         }
     }
 
-    /// 刷新拿到了播放列表；处理它时再安排下次刷新。
-    pub(super) fn refreshed(&mut self, now: Instant) {
-        self.refresh = Refresh::Due(now);
+    /// 刷新返回了（成功、失败或在结束中被丢弃）：不再在途。
+    pub(super) fn refresh_returned(&mut self) {
+        if let Refresh::InFlight { .. } = self.refresh {
+            self.refresh = Refresh::Waiting;
+        }
+    }
+
+    /// 刷新拿到了播放列表。
+    pub(super) fn refreshed(&mut self) {
         self.last_refresh_error = None;
     }
 
@@ -264,23 +271,26 @@ impl LiveTrack {
         }
     }
 
-    /// 取出最早暂存的播放列表，开始准备它；刷新或准备在途、或没有暂存的时为 None。
+    /// 取出最早暂存的播放列表，开始准备它；会话还没定下、已有一份在准备、或没有暂存的时为 None。
+    /// 不等在途的刷新：那是会话定下之前发起的，结果只会排在暂存的后面。
     pub(super) fn start_preparing(&mut self, now: Instant) -> Option<(Fetched, InitsToFetch)> {
-        if matches!(
-            self.refresh,
-            Refresh::InFlight { .. } | Refresh::Preparing { .. }
-        ) {
+        if self.preparing.is_some() {
             return None;
         }
         let inits = self.window()?.inits_to_fetch();
         let fetched = self.pending.pop_front()?;
-        self.refresh = Refresh::Preparing { started: now };
+        self.preparing = Some(now);
         Some((fetched, inits))
+    }
+
+    /// 正在准备的那份准备好了，接着处理它。
+    pub(super) fn prepared(&mut self) {
+        self.preparing = None;
     }
 
     /// 有暂存还没处理完的播放列表（含正在准备的）。
     pub(super) fn has_held(&self) -> bool {
-        !self.pending.is_empty() || matches!(self.refresh, Refresh::Preparing { .. })
+        !self.pending.is_empty() || self.preparing.is_some()
     }
 
     /// 之后不再刷新、不再处理这条轨（服务器前后矛盾、编码器重启）。
@@ -339,14 +349,27 @@ impl LiveTrack {
         self.last_download_failure = Some(kind);
     }
 
-    /// 处理完一份播放列表后安排下次刷新（RFC 8216 6.3.4）：有变化后从开始拉取起至少等一个目标时长，没变化时等半个。
+    /// 处理完一份播放列表后安排下次刷新（RFC 8216 6.3.4）：有变化后从开始拉取起至少等一个目标时长，没变化时等半个；
+    /// 上次刷新失败时服务器要求等更久则按它的。刷新在途（结果会再安排）、暂停或已结束时不变。
     fn schedule(&mut self, changed: bool, ended: bool, started: Instant, now: Instant) {
+        if !matches!(self.refresh, Refresh::Waiting | Refresh::Due(_)) {
+            return;
+        }
+        let asked = self
+            .last_refresh_error
+            .as_ref()
+            .and_then(Error::retry_after)
+            .and_then(|wait| now.checked_add(wait));
         self.refresh = if ended {
             Refresh::Ended
         } else if changed {
-            Refresh::Due((started + self.target).max(now + MIN_REFRESH))
+            Refresh::Due(
+                (started + self.target)
+                    .max(now + MIN_REFRESH)
+                    .max(asked.unwrap_or(now)),
+            )
         } else {
-            Refresh::Due(now + self.half_target())
+            Refresh::Due((now + self.half_target()).max(asked.unwrap_or(now)))
         };
     }
 
@@ -382,9 +405,11 @@ impl LiveTrack {
         now: Instant,
         others_live: bool,
     ) -> Result<StallCause, StallError> {
-        if let Refresh::InFlight { started } | Refresh::Preparing { started } = self.refresh
-            && now.duration_since(started) >= self.target
-        {
+        let pending_since = match self.refresh {
+            Refresh::InFlight { started } => Some(started),
+            _ => self.preparing,
+        };
+        if pending_since.is_some_and(|started| now.duration_since(started) >= self.target) {
             return Err(StallError::RefreshPending);
         }
         let ended = match self.last_refresh_error.take() {

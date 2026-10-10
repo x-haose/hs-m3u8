@@ -206,13 +206,13 @@ impl Recorder<'_> {
         }
     }
 
-    /// 录制结束时的结束原因；还没结束时为 None。
+    /// 录制结束时的结束原因；还没结束时为 None。暂存的播放列表都处理完才算结束：判定期间拉到的候选可能
+    /// 已带 ENDLIST，这条轨已算结束，候选还没处理。
     fn finished(&self) -> Option<LiveEnd> {
-        if matches!(self.phase, Phase::Deciding(_)) {
+        if matches!(self.phase, Phase::Deciding(_)) || self.tracks.iter().any(LiveTrack::has_held) {
             return None;
         }
         match &self.ending {
-            Some(_) if self.tracks.iter().any(LiveTrack::has_held) => None,
             Some(end) => Some(end.clone()),
             None if self.tracks.iter().all(LiveTrack::is_ended) => Some(LiveEnd::EndList),
             None if !self.tracks.iter().any(|t| t.needs_refresh(self.max_us())) => {
@@ -326,37 +326,17 @@ impl Recorder<'_> {
                 started,
                 result,
             } => {
-                // 结束中不再处理新拉到的
-                if self.ending.is_some() {
-                    return Ok(());
-                }
-                let (playlist, inits) = match result {
-                    Ok(loaded) => loaded,
-                    Err(e) if waitable_refresh_error(&e) => {
-                        self.tracks[track].refresh_failed(e, Instant::now());
-                        return Ok(());
-                    }
-                    Err(e) => return Err(e),
-                };
-                self.tracks[track].refreshed(Instant::now());
-                let fetched = Fetched { playlist, started };
-                if self.tracks[track].is_undecided() {
-                    return self.undecided(track, fetched).await;
-                }
-                match inits {
-                    Some(inits) => self.process(track, fetched, inits, fetcher).await,
-                    // 会话定下之前发起的刷新：暂存，与之前暂存的一起按顺序处理
-                    None => {
-                        self.hold(track, fetched);
-                        Ok(())
-                    }
-                }
+                self.tracks[track].refresh_returned();
+                let handled = self.refreshed(track, started, result, fetcher).await;
+                self.prepare_next(track);
+                handled
             }
             Done::Prepared {
                 track,
                 fetched,
                 result,
             } => {
+                self.tracks[track].prepared();
                 self.process(track, fetched, result?, fetcher).await?;
                 self.prepare_next(track);
                 Ok(())
@@ -365,11 +345,38 @@ impl Recorder<'_> {
         }
     }
 
-    /// 会话定下后暂存第 `track` 条轨的一份播放列表，等轮到它时准备、处理。这次不录的轨不刷新，
-    /// 结束中拉到的不暂存，所以只有要录的轨走到这里。
-    fn hold(&mut self, track: usize, fetched: Fetched) {
-        self.tracks[track].hold(fetched);
-        self.prepare_next(track);
+    /// 第 `track` 条轨一次刷新的结果：可以再试的失败安排下次刷新，其余失败上抛；结束中拉到的不再处理。
+    /// 会话定下之前发起、定下之后才返回的，暂存起来排在之前暂存的后面（这次不录的轨不刷新，所以只有要录的轨）。
+    async fn refreshed(
+        &mut self,
+        track: usize,
+        started: Instant,
+        result: Result<(hls::MediaPlaylist, Option<NewInits>), Error>,
+        fetcher: &mut Fetcher,
+    ) -> Result<(), Error> {
+        if self.ending.is_some() {
+            return Ok(());
+        }
+        let (playlist, inits) = match result {
+            Ok(loaded) => loaded,
+            Err(e) if waitable_refresh_error(&e) => {
+                self.tracks[track].refresh_failed(e, Instant::now());
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+        self.tracks[track].refreshed();
+        let fetched = Fetched { playlist, started };
+        if self.tracks[track].is_undecided() {
+            return self.undecided(track, fetched).await;
+        }
+        match inits {
+            Some(inits) => self.process(track, fetched, inits, fetcher).await,
+            None => {
+                self.tracks[track].hold(fetched);
+                Ok(())
+            }
+        }
     }
 
     /// 第 `track` 条轨没有在途的刷新或准备时，开始准备最早暂存的播放列表。

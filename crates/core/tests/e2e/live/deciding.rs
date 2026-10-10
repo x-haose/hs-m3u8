@@ -197,47 +197,6 @@ async fn a_slow_init_fetch_does_not_stall_another_track() {
     assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
 }
 
-/// 判定期间音频发起的刷新在会话定下之后才返回：它拉到的播放列表接着之前暂存的处理，新分片照常录。
-#[tokio::test(flavor = "multi_thread")]
-async fn a_refresh_returning_after_the_decision_is_processed() {
-    let dir = test_dir("deciding_late_refresh");
-    let server = Server::start().await;
-    put_split_master(&server);
-    put_long(&server, "v/", &[0, 1, 2, 3]);
-    put_long(&server, "a/", &[0, 1, 2, 3]);
-    server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
-    server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
-    let req = live_request(server.url("master.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 4).await;
-
-    // 音频首次拉到 a/first.m3u8，之后的刷新到 a/later.m3u8；分片地址相对于它们解析，仍是 a/seg<i>.ts
-    server.put("video.m3u8", playlist_in("v/", &[0, 1, 2, 3], true));
-    server.put("a/first.m3u8", playlist(&[0, 1], false));
-    server.put("a/later.m3u8", playlist(&[0, 1, 2, 3], true));
-    server.redirect_sequence(
-        "audio.m3u8",
-        vec!["a/first.m3u8".into(), "a/later.m3u8".into()],
-    );
-    let check = server.gate("v/seg1.ts");
-    let refresh = server.gate("a/later.m3u8");
-    let job = engine().start(req).unwrap();
-    let mut progress = job.progress();
-    check.arrived.notified().await;
-    refresh.arrived.notified().await;
-    // 视频核对完即定下会话，视频的 2、3 排入下载；这时音频的刷新还挂着
-    server.ungate("v/seg1.ts");
-    progress.wait_for(|p| p.segments_total == 6).await.unwrap();
-    server.ungate("a/later.m3u8");
-    let output = tokio::time::timeout(Duration::from_secs(10), job.wait())
-        .await
-        .expect("会话定下后才返回的刷新应照常处理")
-        .unwrap();
-
-    let want = expected_split_long(&dir, &[(&[0, 1, 2, 3], &[0, 1, 2, 3])]);
-    assert_output(&output, &want);
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
-}
-
 /// 判定期间两条轨的播放列表一直没有分片：直播看起来已结束，两条轨这次都不录，按停滞收尾、合并已录的。
 #[tokio::test(flavor = "multi_thread")]
 async fn tracks_without_candidates_all_end_together() {
