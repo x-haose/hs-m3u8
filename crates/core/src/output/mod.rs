@@ -4,21 +4,20 @@ mod commit;
 mod hls;
 mod options;
 
-use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use hs_m3u8_remux::{DiscontinuityGroup, Report, Streams, TrackSegments};
 
+pub(crate) use self::options::ResolvedOutput;
 pub use self::options::{OutputOptions, Target};
 
-use self::options::{lexical_absolute, sibling};
+use self::commit::{Commit, Existing};
 use crate::error::io_error;
-use crate::ident::Fingerprint;
 use crate::selection::SelectionKey;
-use crate::workdir::{self, PendingOutput, WorkDir};
-use crate::{Error, Leftover, LeftoverKind, LiveReport, Mp4Output, Output, blocking};
+use crate::workdir::{OutputKind, PendingOutput, WorkDir};
+use crate::{Error, Leftover, LiveReport, Mp4Output, Output, blocking};
 
 /// 交给输出的内容。
 pub(crate) struct Content {
@@ -47,28 +46,43 @@ pub(crate) struct GroupSegment {
     pub duration_us: u64,
 }
 
-/// 输出能否写：MP4 不存在，或是文件且允许覆盖；HLS 目录见 [`hls::check`]。
-pub(crate) fn check_targets(options: &OutputOptions) -> Result<(), Error> {
-    if let Some(mp4) = options.target.mp4() {
-        match fs::symlink_metadata(mp4) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(cause) => return Err(io_error("检查", mp4)(cause)),
-            Ok(meta) if meta.is_dir() => return Err(Error::OutputOccupied(mp4.to_path_buf())),
-            Ok(_) if !options.overwrite => return Err(Error::OutputExists(mp4.to_path_buf())),
-            Ok(_) => {}
-        }
-    }
-    if let Some(dir) = options.target.hls() {
-        hls::check(dir, options.overwrite)?;
-    }
+/// 任务开头：收拾上次写输出留下的（见 [`commit::recover`]），再检查各输出能否写。要读写文件系统，在阻塞线程池中
+/// 调用；任务目录已存在时调用方已加锁。
+pub(crate) fn prepare(options: &ResolvedOutput) -> Result<(), Error> {
+    commit::recover(&options.work_dir, &options.outputs)?;
+    check_all(options)?;
     Ok(())
+}
+
+/// 各输出能否写（见 [`check`]），顺序同各输出。
+fn check_all(options: &ResolvedOutput) -> Result<Vec<Existing>, Error> {
+    options
+        .outputs
+        .iter()
+        .map(|o| check(o, options.overwrite))
+        .collect()
+}
+
+/// 输出能否写，能写时返回路径上已有的东西：MP4 不存在，或是文件且允许覆盖；HLS 目录见 [`hls::check`]。
+fn check(output: &PendingOutput, overwrite: bool) -> Result<Existing, Error> {
+    let target = &output.target;
+    match output.kind {
+        OutputKind::Mp4 => match fs::symlink_metadata(target) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Existing::Nothing),
+            Err(cause) => Err(io_error("检查", target)(cause)),
+            Ok(meta) if meta.is_dir() => Err(Error::OutputOccupied(target.clone())),
+            Ok(_) if !overwrite => Err(Error::OutputExists(target.clone())),
+            Ok(_) => Ok(Existing::Output),
+        },
+        OutputKind::Hls => hls::check(target, overwrite),
+    }
 }
 
 /// 写出输出，按选项删除任务目录。`bytes` 为任务目录中已完成的分片与 init 段的字节数。
 pub(crate) async fn write(
     dir: WorkDir,
     content: Content,
-    options: &OutputOptions,
+    options: &ResolvedOutput,
     bytes: u64,
 ) -> Result<Output, Error> {
     let Content {
@@ -78,16 +92,15 @@ pub(crate) async fn write(
         selection,
         live,
     } = content;
-    let (work_dir, files) = (dir.layout().root().to_path_buf(), options.clone());
+    let files = options.clone();
     let (mp4, mut leftovers) =
-        blocking(move || write_files(&work_dir, &streams, &groups, selection.as_ref(), &files))
-            .await??;
+        blocking(move || write_files(&streams, &groups, selection.as_ref(), &files)).await??;
     if !options.keep_work_dir {
         leftovers.extend(dir.remove().await);
     }
     Ok(Output {
         mp4,
-        hls: options.target.hls().map(Path::to_path_buf),
+        hls: options.get(OutputKind::Hls).map(|o| o.target.clone()),
         segments,
         bytes,
         leftovers,
@@ -95,90 +108,51 @@ pub(crate) async fn write(
     })
 }
 
-/// 一个输出的临时名与旧输出挪开后的名字：与输出同级，名为 `hsdl-<任务目录指纹>.<种类>.part` 与 `.old`。定长，
-/// 不随输出名变长；同一任务目录同一时间只有一个任务（任务目录的锁），以它区分，几个任务输出到同一处时各写各的。
-fn pending(target: &Path, fingerprint: Fingerprint, kind: &str, dir: bool) -> PendingOutput {
-    let name = |suffix: &str| OsString::from(format!("hsdl-{fingerprint}.{kind}.{suffix}"));
-    PendingOutput {
-        target: target.to_path_buf(),
-        temp: sibling(target, &name("part"), ""),
-        aside: sibling(target, &name("old"), ""),
-        dir,
-    }
-}
-
 /// 先把 MP4 合并到临时名、HLS 备齐到准备目录，都成功后再换上（见 [`commit`]）。最常见的失败（编码不受支持）发生在
-/// 合并 MP4 时，此时还没有动到输出；任一步失败都删掉本次写出的，等于没有写过。写之前把临时名记进任务目录，
-/// 上次中断留下的先按记录清掉。成功时另返回收尾没删掉的东西。
+/// 合并 MP4 时，此时还没有动到输出；任一步失败都撤回，等于没有写过。成功时另返回收尾没删掉的东西。
 fn write_files(
-    work_dir: &Path,
     streams: &[Streams],
     groups: &[Vec<GroupTrack>],
     selection: Option<&SelectionKey>,
-    options: &OutputOptions,
+    options: &ResolvedOutput,
 ) -> Result<(Option<Mp4Output>, Vec<Leftover>), Error> {
-    check_targets(options)?;
-    if options.target.hls().is_some() {
+    check_all(options)?;
+    if options.get(OutputKind::Hls).is_some() {
         hls::check_content(groups, selection)?;
     }
-    commit::recover(&workdir::read_outputs(work_dir)?)?;
-    let fingerprint =
-        Fingerprint::of_content(lexical_absolute(work_dir)?.as_os_str().as_encoded_bytes());
-    let mp4 = options
-        .target
-        .mp4()
-        .map(|path| pending(path, fingerprint, "mp4", false));
-    let hls = options
-        .target
-        .hls()
-        .map(|path| pending(path, fingerprint, "hls", true));
-    let outputs: Vec<PendingOutput> = mp4.iter().chain(&hls).cloned().collect();
-    workdir::record_outputs(work_dir, &outputs)?;
-    let written = write_temps(
-        work_dir,
-        streams,
-        groups,
-        selection,
-        mp4.as_ref(),
-        hls.as_ref(),
-    )
-    .and_then(|report| {
-        // 写出期间输出路径可能已被别人占用；开始时检查过，换上前再查一次
-        check_targets(options)?;
-        Ok((report, commit::swap_in(&outputs)?))
+    let commit = Commit::begin(&options.work_dir, &options.outputs)?;
+    let written = write_temps(streams, groups, selection, options).and_then(|report| {
+        // 写出期间输出路径可能已被别人占用；开始时检查过，换上前再查一次，按这次的结果换
+        Ok((report, check_all(options)?))
     });
-    let (report, mut leftovers) = match written {
+    let (report, existing) = match written {
         Ok(written) => written,
-        Err(failure) => return Err(discard(failure, work_dir, &outputs)),
+        Err(failure) => return Err(commit.abandon(failure)),
     };
-    if let Err(e) = workdir::clear_outputs(work_dir) {
-        leftovers.push(Leftover {
-            path: workdir::outputs_file(work_dir),
-            kind: LeftoverKind::Removable,
-            cause: e.to_string(),
+    let leftovers = commit.swap(&existing)?;
+    let mp4 = options
+        .get(OutputKind::Mp4)
+        .zip(report)
+        .map(|(mp4, report)| Mp4Output {
+            path: mp4.target.clone(),
+            report,
         });
-    }
-    let mp4 = mp4.zip(report).map(|(mp4, report)| Mp4Output {
-        path: mp4.target,
-        report,
-    });
     Ok((mp4, leftovers))
 }
 
+/// 写出各临时输出；失败时可能留有写了一半的，由调用方删除。
 fn write_temps(
-    work_dir: &Path,
     streams: &[Streams],
     groups: &[Vec<GroupTrack>],
     selection: Option<&SelectionKey>,
-    mp4: Option<&PendingOutput>,
-    hls: Option<&PendingOutput>,
+    options: &ResolvedOutput,
 ) -> Result<Option<Report>, Error> {
-    let report = match mp4 {
+    let report = match options.get(OutputKind::Mp4) {
         Some(mp4) => Some(write_mp4(&mp4.temp, streams, groups)?),
         None => None,
     };
-    if let Some(hls) = hls {
-        hls::stage(&hls.temp, work_dir, groups, selection)?;
+    if let Some(hls) = options.get(OutputKind::Hls) {
+        hls::stage(&hls.temp, &options.work_dir, groups, selection)?;
     }
     Ok(report)
 }
@@ -205,26 +179,4 @@ fn write_mp4(
         fs::create_dir_all(parent).map_err(io_error("创建", parent))?;
     }
     Ok(hs_m3u8_remux::remux(streams, &groups, temp)?)
-}
-
-/// 失败后删掉本次写出的临时输出（已不存在的不算），删完后删掉任务目录里的记录；删除也失败时把两者一并返回，
-/// 记录留着，下次运行再清。
-fn discard(failure: Error, work_dir: &Path, outputs: &[PendingOutput]) -> Error {
-    let removed = outputs
-        .iter()
-        .try_for_each(|o| commit::remove(&o.temp, o.dir).map_err(|e| (o.temp.clone(), e)));
-    let cleared = removed.and_then(|()| {
-        workdir::clear_outputs(work_dir).map_err(|e| (workdir::outputs_file(work_dir), e))
-    });
-    match cleared {
-        Ok(()) => failure,
-        Err((path, cause)) => Error::Cleanup {
-            failure: Box::new(failure),
-            leftovers: vec![Leftover {
-                path,
-                kind: LeftoverKind::Removable,
-                cause: cause.to_string(),
-            }],
-        },
-    }
 }

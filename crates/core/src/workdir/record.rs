@@ -11,9 +11,9 @@ use crate::selection::{
 };
 use crate::{Error, JobType, WorkDirProblem};
 
-/// 任务目录格式的版本：job.json 的字段，分片与 init 段的文件名，以及其中指纹与摘要的编码。任何一项
-/// 改变都要升；读到别的版本一律拒绝。
-const FORMAT_VERSION: u32 = 5;
+/// 任务目录格式的版本：job.json 与 outputs.json 的字段，分片与 init 段的文件名，以及其中指纹与摘要的编码。
+/// 任何一项改变都要升；两个文件都带它，读到别的版本一律拒绝。
+pub(super) const FORMAT_VERSION: u32 = 6;
 
 /// 任务目录记录的任务；续传、续录时须与当前请求相符。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +156,19 @@ struct Version {
     format_version: u32,
 }
 
+/// 任务目录里名为 `file` 的 JSON 文件的格式版本是不是 [`FORMAT_VERSION`]；不是或读不出时返回原因。
+pub(super) fn check_version(bytes: &[u8], file: &str) -> Result<(), String> {
+    let version: Version =
+        serde_json::from_slice(bytes).map_err(|e| format!("{file} 无法解析：{e}"))?;
+    if version.format_version != FORMAT_VERSION {
+        return Err(format!(
+            "{file} 的格式版本 {} 不受支持（支持 {FORMAT_VERSION}）",
+            version.format_version
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn encode(record: &JobRecord) -> Vec<u8> {
     let format_version = FORMAT_VERSION;
     let source_digest = record.source_digest.clone();
@@ -180,13 +193,7 @@ pub(super) fn encode(record: &JobRecord) -> Vec<u8> {
 /// 解析 `job.json`；失败时返回原因。
 pub(super) fn decode(bytes: &[u8]) -> Result<JobRecord, String> {
     let unreadable = |e: serde_json::Error| format!("job.json 无法解析：{e}");
-    let version: Version = serde_json::from_slice(bytes).map_err(unreadable)?;
-    if version.format_version != FORMAT_VERSION {
-        return Err(format!(
-            "job.json 的格式版本 {} 不受支持（支持 {FORMAT_VERSION}）",
-            version.format_version
-        ));
-    }
+    check_version(bytes, "job.json")?;
     let (source_digest, selection, kind) =
         match serde_json::from_slice(bytes).map_err(unreadable)? {
             JobFile::Vod {
@@ -294,7 +301,7 @@ mod tests {
         let bytes = encode(&live);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"kind":"live","format_version":5,"source_digest":"ab","selection":{"variant":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"],"audio_group":"aud","occurrence":1},"audio":{"group_id":"aud","language":"en","name":null,"occurrence":2}},"url_digest":"cd"}"#
+            r#"{"kind":"live","format_version":6,"source_digest":"ab","selection":{"variant":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"],"audio_group":"aud","occurrence":1},"audio":{"group_id":"aud","language":"en","name":null,"occurrence":2}},"url_digest":"cd"}"#
         );
         assert_eq!(decode(&bytes), Ok(live));
         let vod = JobRecord {
@@ -308,11 +315,11 @@ mod tests {
 
         for rejected in [
             r#"{"kind":"vod","format_version":1,"plan_digest":"cd"}"#,
-            r#"{"kind":"vod","format_version":4,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
-            r#"{"kind":"vod","format_version":5,"source_digest":"a","selection":null,"plan_digest":"p","extra":1}"#,
-            r#"{"format_version":5,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
-            r#"{"kind":"vod","format_version":5,"source_digest":"a","selection":null,"url_digest":"u"}"#,
-            r#"{"kind":"live","format_version":5,"source_digest":"a","selection":{"variant":{"bandwidth":1,"resolution":null,"codecs":[],"audio_group":null,"occurrence":0,"uri":"x"},"audio":null},"url_digest":"u"}"#,
+            r#"{"kind":"vod","format_version":5,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
+            r#"{"kind":"vod","format_version":6,"source_digest":"a","selection":null,"plan_digest":"p","extra":1}"#,
+            r#"{"format_version":6,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
+            r#"{"kind":"vod","format_version":6,"source_digest":"a","selection":null,"url_digest":"u"}"#,
+            r#"{"kind":"live","format_version":6,"source_digest":"a","selection":{"variant":{"bandwidth":1,"resolution":null,"codecs":[],"audio_group":null,"occurrence":0,"uri":"x"},"audio":null},"url_digest":"u"}"#,
         ] {
             assert!(decode(rejected.as_bytes()).is_err(), "{rejected}");
         }

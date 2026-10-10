@@ -76,7 +76,8 @@ pub enum Stage {
 pub struct Output {
     /// 生成的 MP4；没要 MP4（[`crate::Target::Hls`]）时为 None
     pub mp4: Option<Mp4Output>,
-    /// 生成的本地 HLS 目录；没要 HLS 时为 None。入口为其中的 `index.m3u8`：单轨时是媒体播放列表，视频与独立音频
+    /// 生成的本地 HLS 目录（绝对路径，相对路径按开始任务时的当前目录补全）；没要 HLS 时为 None。入口为其中的
+    /// `index.m3u8`：单轨时是媒体播放列表，视频与独立音频
     /// 分离时是主播放列表；各轨的分片、init 段（与分离时这条轨的 `index.m3u8`）在 `<轨道编号>/` 下。
     /// 内容与 MP4 相同：只放各轨都有的不连续段组，组内缺失的分片不标出、保留原时间戳
     pub hls: Option<PathBuf>,
@@ -104,7 +105,8 @@ pub struct Leftover {
 pub enum LeftoverKind {
     /// 本库写的、可以直接删除的东西：写了一半的临时输出、已被新输出替换的旧输出、任务目录里的记录
     Removable,
-    /// 写输出失败后没能放回原处的旧输出，原来的路径为 `target`
+    /// 写输出失败后没能放回原处的旧输出，原来的路径为 `target`。下次用同一任务目录运行时（或放弃任务时），原处
+    /// 空着就放回，原处已有输出就删掉（要求覆盖时才会挪开旧输出）
     Displaced { target: PathBuf },
     /// 写输出失败后没能撤下的新输出：完整可用，留在原处
     Installed,
@@ -133,6 +135,7 @@ impl fmt::Display for Leftover {
 /// 生成的 MP4。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mp4Output {
+    /// 绝对路径，相对路径按开始任务时的当前目录补全
     pub path: PathBuf,
     /// 各路输出流的编码参数、包数与时长
     pub report: Report,

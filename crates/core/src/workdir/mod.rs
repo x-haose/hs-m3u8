@@ -28,7 +28,7 @@ pub(crate) use self::names::{SegmentName, SessionStart};
 use self::names::{init_file_name, parse_init_name, parse_segment_name, segment_file_name};
 use self::outputs::OUTPUTS_FILE;
 pub(crate) use self::outputs::{
-    PendingOutput, clear_outputs, outputs_file, read_outputs, record_outputs,
+    OutputKind, PendingOutput, clear_outputs, outputs_file, read_outputs, record_outputs,
 };
 pub(crate) use self::record::{JobRecord, RecordKind};
 use self::record::{decode, encode};
@@ -97,6 +97,12 @@ impl Layout {
     }
 }
 
+/// 任务目录的排他锁：同一任务目录同一时间只有一个任务。
+pub(crate) struct Lock {
+    /// 加了锁的锁文件，关闭（drop）即释放
+    _file: File,
+}
+
 /// 已打开并加锁的任务目录；锁在 drop 时释放。
 pub(crate) struct WorkDir {
     layout: Layout,
@@ -104,19 +110,38 @@ pub(crate) struct WorkDir {
     record: JobRecord,
     /// 见 [`WorkDir::url_changed`]
     url_changed: bool,
-    lock: File,
+    lock: Lock,
 }
 
 impl WorkDir {
-    /// 打开或新建任务目录并加锁。
+    /// 任务目录已存在时加锁，不存在时为 None、什么也不建；检查同 [`WorkDir::open`]（没有 `job.json` 时须为空）。
+    /// 任务开头用它挡住同时使用这个目录的任务，再收拾上次写输出留下的东西；锁随后交给 [`WorkDir::open`]。
+    pub(crate) async fn lock_existing(root: PathBuf) -> Result<Option<Lock>, Error> {
+        blocking(move || {
+            if !exists(&root)? {
+                return Ok(None);
+            }
+            if !exists(&root.join(JOB_FILE))? {
+                ensure_empty(&root)?;
+            }
+            acquire(&root).map(Some)
+        })
+        .await?
+    }
+
+    /// 打开或新建任务目录并加锁；`lock` 为 [`WorkDir::lock_existing`] 已加上的锁。
     ///
     /// 已有 `job.json` 时其记录须与 `record` 相符（直播的完整地址除外）：来源不同报
     /// [`WorkDirProblem::SourceMismatch`]，点播与直播不同报 [`WorkDirProblem::KindMismatch`]，轨道不同报
     /// [`WorkDirProblem::TracksMismatch`]，点播的计划不同报 [`WorkDirProblem::PlanChanged`]；但目录里还没有已完成的
     /// 分片时，直接改为当前任务：删掉之前的 init 段，不是本库写的文件留下。没有 `job.json` 时目录必须不存在或为空
     /// （`.part` 残留与锁文件除外），以免把别人的目录当成任务目录（成功后会整个删除）。
-    pub(crate) async fn open(root: PathBuf, record: JobRecord) -> Result<WorkDir, Error> {
-        blocking(move || open(root, record)).await?
+    pub(crate) async fn open(
+        root: PathBuf,
+        record: JobRecord,
+        lock: Option<Lock>,
+    ) -> Result<WorkDir, Error> {
+        blocking(move || open(root, record, lock)).await?
     }
 
     pub(crate) fn layout(&self) -> &Layout {
@@ -198,7 +223,7 @@ impl WorkDir {
 }
 
 /// [`WorkDir::remove`]：持着 `lock` 删除，返回不是本库写的、留下的文件。
-fn remove_locked(root: &Path, lock: File) -> Result<Vec<PathBuf>, Error> {
+fn remove_locked(root: &Path, lock: Lock) -> Result<Vec<PathBuf>, Error> {
     let (mut kept, mut system) = (Vec::new(), Vec::new());
     let mut job = None;
     for entry in entries::list(root)? {
@@ -303,7 +328,8 @@ fn remove_system_file(entry: &entries::Entry, remaining: &[PathBuf]) -> Result<(
 }
 
 /// 有可续的内容时读取任务目录的记录；目录或 `job.json` 不存在，或还没有已完成的分片时为 None（按当前请求
-/// 从头开始，见 [`WorkDir::open`]）。不加锁，只用于决定走哪条流程、按什么选轨；[`WorkDir::open`] 加锁后再核对。
+/// 从头开始，见 [`WorkDir::open`]）。用于决定走哪条流程、按什么选轨；目录在任务开头已存在时调用方已加锁，
+/// 之后才建立的目录由 [`WorkDir::open`] 加锁后再核对。
 pub(crate) async fn read_resumable(root: PathBuf) -> Result<Option<JobRecord>, Error> {
     blocking(move || {
         let Some(record) = read_job(&root)? else {
@@ -326,13 +352,18 @@ fn read_job(root: &Path) -> Result<Option<JobRecord>, Error> {
     }
 }
 
-fn open(root: PathBuf, record: JobRecord) -> Result<WorkDir, Error> {
-    fs::create_dir_all(&root).map_err(io_error("创建", &root))?;
+fn open(root: PathBuf, record: JobRecord, lock: Option<Lock>) -> Result<WorkDir, Error> {
     let job_path = root.join(JOB_FILE);
-    if !exists(&job_path)? {
-        ensure_empty(&root)?;
-    }
-    let lock = lock(&root)?;
+    let lock = match lock {
+        Some(lock) => lock,
+        None => {
+            fs::create_dir_all(&root).map_err(io_error("创建", &root))?;
+            if !exists(&job_path)? {
+                ensure_empty(&root)?;
+            }
+            acquire(&root)?
+        }
+    };
     let layout = Layout { root: root.clone() };
     let previous = match read_job(&root)? {
         None => None,
@@ -377,7 +408,7 @@ fn ensure_empty(root: &Path) -> Result<(), Error> {
 }
 
 /// 打开锁文件并加排他锁；已被别的任务锁住时报 [`WorkDirProblem::Locked`]。
-fn lock(root: &Path) -> Result<File, Error> {
+fn acquire(root: &Path) -> Result<Lock, Error> {
     let path = root.join(LOCK_FILE);
     let file = File::options()
         .create(true)
@@ -386,7 +417,7 @@ fn lock(root: &Path) -> Result<File, Error> {
         .open(&path)
         .map_err(io_error("创建", &path))?;
     match file.try_lock() {
-        Ok(()) => Ok(file),
+        Ok(()) => Ok(Lock { _file: file }),
         Err(TryLockError::WouldBlock) => Err(Error::WorkDir {
             path: root.to_path_buf(),
             problem: WorkDirProblem::Locked,

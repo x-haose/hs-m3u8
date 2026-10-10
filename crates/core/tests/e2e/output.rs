@@ -125,7 +125,7 @@ fn request_to(url: Url, dir: &Path, target: Target) -> JobRequest {
 }
 
 /// 两者都要：音视频分离、两个不连续段组。HLS 的主播放列表码率按文件算、编码照抄来源，各轨分片按顺序编号、
-/// 组间加不连续标记；按它列出的文件合并与 MP4 相同。任务目录已删除。
+/// 组间加不连续标记；按它列出的文件合并与 MP4 相同。任务目录与临时名都已删除。
 #[tokio::test(flavor = "multi_thread")]
 async fn split_source_writes_both_outputs() {
     let dir = test_dir("output_both");
@@ -134,6 +134,7 @@ async fn split_source_writes_both_outputs() {
 
     let output = run(request_to(url, &dir, both(&dir))).await.unwrap();
 
+    assert_eq!(names_in(&dir), ["out", "out.mp4"]);
     let hls = dir.join("out");
     assert_eq!(output.hls.as_deref(), Some(hls.as_path()));
     let mp4 = output.mp4.as_ref().unwrap();
@@ -167,8 +168,16 @@ async fn split_source_writes_both_outputs() {
     for name in ["0/0.m4s", "0/2.m4s", "1/4.m4s"] {
         assert!(hls.join(name).is_file(), "{name}");
     }
-    assert!(!dir.join("out.hsdl").exists());
-    assert!(!dir.join("out.part").exists());
+}
+
+/// 目录里各项的名字，排好序。
+fn names_in(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
 }
 
 /// 只要 HLS：不经 FFmpeg，MP4 合并不支持的编码（这里是 MP3 音频）照样输出；分片原样放进目录。
@@ -263,12 +272,7 @@ async fn outputs_taken_during_the_download_leave_nothing_behind() {
         Err(Error::OutputOccupied(path)) => assert_eq!(path, dir.join("out")),
         other => panic!("应报有别人的文件：{other:?}"),
     }
-    let mut left: Vec<String> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .collect();
-    left.sort();
-    assert_eq!(left, ["out", "out.hsdl"]);
+    assert_eq!(names_in(&dir), ["out", "out.hsdl"]);
 
     std::fs::remove_dir_all(dir.join("out")).unwrap();
     let output = run(req).await.unwrap();
@@ -390,8 +394,8 @@ async fn live_holes_and_sessions_in_hls() {
     assert_output(&output, &expected_long(&dir, &[0, 2, 3], &[2, 1]));
 }
 
-/// 合并 MP4 时编码不受支持（MP3 音频）而失败，任务目录保留；改为输出 HLS 后用同一个默认任务目录，
-/// 不重新下载。HLS 目录路径带结尾的分隔符也照常。
+/// 合并 MP4 时编码不受支持（MP3 音频）而失败，写了一半的临时输出删掉、任务目录保留；改为输出 HLS 后用同一个
+/// 默认任务目录，不重新下载。HLS 目录路径带结尾的分隔符也照常。
 #[tokio::test(flavor = "multi_thread")]
 async fn switching_to_hls_after_an_unsupported_codec_reuses_the_download() {
     let dir = test_dir("output_switch");
@@ -407,6 +411,7 @@ async fn switching_to_hls_after_an_unsupported_codec_reuses_the_download() {
         Err(Error::Remux(_)) => {}
         other => panic!("MP3 音频应合并失败：{other:?}"),
     }
+    assert_eq!(names_in(&dir), ["out.hsdl"]);
     assert!(dir.join("out.hsdl/job.json").exists());
 
     let mut hls = dir.join("out").into_os_string();
@@ -705,14 +710,38 @@ async fn long_output_names_are_written() {
     assert!(output.mp4.unwrap().path.is_file());
 }
 
-/// 要求覆盖、两者都要，旧的 HLS 目录里有删不掉的内容：新的 MP4 与 HLS 照常换上，旧的挪开后删不掉，
-/// 记在 leftovers 里；任务目录里不留正在写的输出的记录。
+/// 要求覆盖、两者都要，旧的 HLS 目录里有删不掉的内容：新的 MP4 与 HLS 照常换上，旧的挪开后删不掉，记在
+/// leftovers 里，任务目录里不留记录。之后再要求覆盖时，任务开头、联网之前先删这个残留，删不掉就报它的路径；能删了
+/// 即照常覆盖。以 root 运行时权限位不起作用，造不出删不掉的情形，不测。
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn old_outputs_that_cannot_be_removed_are_reported() {
-    use std::os::unix::fs::PermissionsExt;
+async fn old_outputs_that_cannot_be_removed_are_reported_and_removed_later() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    /// 结束时（含断言失败）恢复目录权限，免得下次删不掉测试目录。
+    struct Writable(PathBuf);
+    impl Drop for Writable {
+        fn drop(&mut self) {
+            make_writable(&self.0);
+        }
+    }
+    fn make_writable(dir: &Path) {
+        let writable = std::fs::Permissions::from_mode(0o755);
+        if std::fs::set_permissions(dir, writable).is_err() {
+            return;
+        }
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                make_writable(&entry.path());
+            }
+        }
+    }
 
     let dir = test_dir("output_old_kept");
+    if std::fs::metadata(&dir).unwrap().uid() == 0 {
+        return;
+    }
+    let _writable = Writable(dir.clone());
     let server = Server::start().await;
     server.put("seg0.ts", fixture("ts_a/seg0.ts"));
     server.put(
@@ -721,29 +750,68 @@ async fn old_outputs_that_cannot_be_removed_are_reported() {
     );
     let mut req = request_to(server.url("index.m3u8"), &dir, both(&dir));
     run(req.clone()).await.unwrap();
-    let old_track = dir.join("out/0");
-    std::fs::set_permissions(&old_track, std::fs::Permissions::from_mode(0o555)).unwrap();
+    std::fs::set_permissions(dir.join("out/0"), std::fs::Permissions::from_mode(0o555)).unwrap();
 
     req.output.overwrite = true;
     req.output.keep_work_dir = true;
-    let output = run(req).await.unwrap();
+    let output = run(req.clone()).await.unwrap();
 
     let [leftover] = &output.leftovers[..] else {
         panic!("旧的 HLS 应删不掉：{:?}", output.leftovers);
     };
     assert_eq!(leftover.kind, LeftoverKind::Removable);
-    assert!(
-        leftover.path.to_string_lossy().ends_with(".hls.old"),
-        "{leftover}"
-    );
+    let old = leftover.path.clone();
+    assert!(old.to_string_lossy().ends_with(".hls.old"), "{leftover}");
     assert_hls_matches(&dir.join("out"), &output.mp4.unwrap().path);
     assert!(!dir.join("out.hsdl/outputs.json").exists());
-    let kept: Vec<_> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| p.to_string_lossy().ends_with(".hls.old"))
-        .collect();
-    for old in &kept {
-        std::fs::set_permissions(old.join("0"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let hits = server.hits("index.m3u8");
+    match run(req.clone()).await {
+        Err(Error::Io { path, .. }) => assert_eq!(path, old),
+        other => panic!("应报删不掉的残留：{other:?}"),
     }
+    assert_eq!(server.hits("index.m3u8"), hits, "应在联网之前");
+
+    make_writable(&old);
+    run(req).await.unwrap();
+    assert!(!old.exists());
+}
+
+/// 上次在换上输出的中途被杀（旧输出已挪开、新的还没装上）：再次运行时在任务开头、联网之前按任务目录里的记录
+/// 删掉临时输出、把旧输出放回，不要求覆盖时随即报已存在。
+#[tokio::test(flavor = "multi_thread")]
+async fn interrupted_swaps_are_recovered_before_anything_else() {
+    let dir = test_dir("output_recover");
+    let server = Server::start().await;
+    server.status("seg0.ts", StatusCode::NOT_FOUND);
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n",
+    );
+    let req = request(server.url("index.m3u8"), &dir);
+    // 分片取不到而失败，留下任务目录
+    assert!(matches!(run(req.clone()).await, Err(Error::Segment { .. })));
+    let work = req.output.resolved_work_dir().unwrap();
+    let (target, temp, aside) = (
+        dir.join("out.mp4"),
+        dir.join("stale.part"),
+        dir.join("stale.old"),
+    );
+    std::fs::write(&temp, "写了一半").unwrap();
+    std::fs::write(&aside, "旧").unwrap();
+    let record = serde_json::json!({
+        "format_version": 6,
+        "outputs": [{"kind": "mp4", "target": target, "temp": temp, "aside": aside}],
+    });
+    std::fs::write(work.join("outputs.json"), record.to_string()).unwrap();
+    let hits = server.hits("index.m3u8");
+
+    match run(req).await {
+        Err(Error::OutputExists(path)) => assert_eq!(path, target),
+        other => panic!("应报已存在：{other:?}"),
+    }
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "旧");
+    assert_eq!(names_in(&dir), ["out.hsdl", "out.mp4"]);
+    assert!(!work.join("outputs.json").exists());
+    assert_eq!(server.hits("index.m3u8"), hits, "应在联网之前");
 }

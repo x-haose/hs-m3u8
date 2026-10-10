@@ -8,7 +8,7 @@ use url::Url;
 
 use crate::hooks::{Hooks, NoHooks};
 use crate::ident::bare_url;
-use crate::output::OutputOptions;
+use crate::output::{OutputOptions, ResolvedOutput};
 use crate::{Error, hls};
 
 /// 来源与访问它的方式；探测（[`crate::Engine::probe`]）与下载（[`JobRequest::source`]）共用。
@@ -115,7 +115,8 @@ impl JobRequest {
         }
     }
 
-    pub(crate) fn validate(&self) -> Result<(), Error> {
+    /// 校验请求，返回补全为绝对路径的输出配置（见 [`OutputOptions::resolve`]）。
+    pub(crate) fn validate(&self) -> Result<ResolvedOutput, Error> {
         self.source.validate()?;
         let invalid = |message: String| Err(Error::InvalidInput(message));
         if let Some(live) = self.live {
@@ -126,7 +127,7 @@ impl JobRequest {
                 return invalid("直播的 max_duration 不能为 0".into());
             }
         }
-        self.output.validate()
+        self.output.resolve()
     }
 }
 

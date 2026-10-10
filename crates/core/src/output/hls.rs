@@ -17,13 +17,14 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use super::GroupTrack;
+use super::commit::Existing;
 use crate::entries::{self, is_canonical_number};
 use crate::error::io_error;
 use crate::ident::Fingerprint;
 use crate::selection::SelectionKey;
 use crate::verify::id3_len;
 use crate::verify::{Standalone, standalone_format};
-use crate::{Error, Leftover, LeftoverKind, Unsupported, WorkDirProblem};
+use crate::{Error, Unsupported, WorkDirProblem};
 
 const INDEX: &str = "index.m3u8";
 
@@ -42,20 +43,22 @@ fn extension(format: Standalone) -> &'static str {
     }
 }
 
-/// 目标目录能否写：不存在、没有内容（系统自动生成的元数据文件不算，见 [`entries::Entry::is_system_file`]），或
-/// `overwrite` 且其中全是本库写出的文件。全是本库写出的文件而没有要求覆盖时报 [`Error::OutputExists`]；有别的文件或不是目录时报
-/// [`Error::OutputOccupied`]，覆盖也不替换。
-pub(super) fn check(dir: &Path, overwrite: bool) -> Result<(), Error> {
+/// 目标目录能否写，能写时返回路径上已有的东西：不存在、没有内容（系统自动生成的元数据文件不算，见
+/// [`entries::Entry::is_system_file`]），或 `overwrite` 且其中全是本库写出的文件。全是本库写出的文件而没有要求覆盖时
+/// 报 [`Error::OutputExists`]；不是目录或有别的文件时报 [`Error::OutputOccupied`]，覆盖也不替换。
+pub(super) fn check(dir: &Path, overwrite: bool) -> Result<Existing, Error> {
     let meta = match fs::symlink_metadata(dir) {
         Ok(meta) => meta,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Existing::Nothing),
         Err(cause) => return Err(io_error("检查", dir)(cause)),
     };
     if !meta.is_dir() || !written_by_us(dir)? {
         return Err(Error::OutputOccupied(dir.to_path_buf()));
     }
-    if overwrite || entries::is_empty(dir)? {
-        Ok(())
+    if overwrite {
+        Ok(Existing::Output)
+    } else if entries::is_empty(dir)? {
+        Ok(Existing::EmptyDir)
     } else {
         Err(Error::OutputExists(dir.to_path_buf()))
     }
@@ -104,42 +107,19 @@ fn check_layout(has_init: &[Vec<bool>]) -> Result<(), Error> {
     Ok(())
 }
 
-/// 在准备目录 `stage` 里备齐 HLS 输出；`work_dir` 为分片所在的任务目录，用于报告目录内容无法识别。上次中断
-/// 留下的同名准备目录全是本库写出的文件才删，否则报已存在、什么也不动；备齐失败时删掉 `stage`。
+/// 在准备目录 `stage`（还不存在）里备齐 HLS 输出；`work_dir` 为分片所在的任务目录，用于报告目录内容无法识别。
+/// 失败时 `stage` 里可能留有备了一半的内容，由调用方删除。
 pub(super) fn stage(
     stage: &Path,
     work_dir: &Path,
     groups: &[Vec<GroupTrack>],
     selection: Option<&SelectionKey>,
 ) -> Result<(), Error> {
-    remove_stale_stage(stage)?;
     if let Some(parent) = stage.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent).map_err(io_error("创建", parent))?;
     }
     fs::create_dir(stage).map_err(io_error("创建", stage))?;
-    fill(stage, work_dir, groups, selection).map_err(|failure| match fs::remove_dir_all(stage) {
-        Ok(()) => failure,
-        Err(cause) => Error::Cleanup {
-            failure: Box::new(failure),
-            leftovers: vec![Leftover {
-                path: stage.to_path_buf(),
-                kind: LeftoverKind::Removable,
-                cause: cause.to_string(),
-            }],
-        },
-    })
-}
-
-/// 上次中断留下的准备目录：全是本库写出的文件才删，否则报已存在。
-fn remove_stale_stage(stage: &Path) -> Result<(), Error> {
-    match fs::symlink_metadata(stage) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(cause) => Err(io_error("检查", stage)(cause)),
-        Ok(meta) if meta.is_dir() && written_by_us(stage)? => {
-            fs::remove_dir_all(stage).map_err(io_error("删除", stage))
-        }
-        Ok(_) => Err(Error::OutputOccupied(stage.to_path_buf())),
-    }
+    fill(stage, work_dir, groups, selection)
 }
 
 /// 在 `stage` 里放好各轨的分片、init 段与播放列表。
