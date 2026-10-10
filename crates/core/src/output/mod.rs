@@ -121,11 +121,7 @@ fn write_files(
 ) -> Result<(Option<Mp4Output>, Vec<String>), Error> {
     check_targets(options)?;
     if options.target.hls().is_some() {
-        let has_init: Vec<Vec<bool>> = groups
-            .iter()
-            .map(|g| g.iter().map(|t| t.init.is_some()).collect())
-            .collect();
-        hls::check_layout(&has_init)?;
+        hls::check_content(groups, selection)?;
     }
     commit::recover(&workdir::read_outputs(work_dir)?)?;
     let fingerprint =

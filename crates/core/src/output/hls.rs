@@ -61,10 +61,36 @@ pub(super) fn check(dir: &Path, overwrite: bool) -> Result<(), Error> {
     }
 }
 
+/// 本地 HLS 能否写出这些内容：见 [`check_layout`]；音视频分离时主播放列表必须写码率，某条轨的分片声明的时长都为 0
+/// （算不出峰值码率，见 [`TrackFiles::peak_bps`]）而来源也没写时报 [`Unsupported::HlsBandwidthUnknown`]。只看声明，
+/// 在合并 MP4 之前判定。
+pub(super) fn check_content(
+    groups: &[Vec<GroupTrack>],
+    selection: Option<&SelectionKey>,
+) -> Result<(), Error> {
+    let has_init: Vec<Vec<bool>> = groups
+        .iter()
+        .map(|g| g.iter().map(|t| t.init.is_some()).collect())
+        .collect();
+    check_layout(&has_init)?;
+    let tracks = groups.first().map_or(0, Vec::len);
+    let measurable = (0..tracks).all(|track| {
+        groups
+            .iter()
+            .flat_map(|g| &g[track].segments)
+            .any(|s| s.duration_us > 0)
+    });
+    let source = selection.and_then(|s| s.variant.attributes.bandwidth);
+    if tracks == 2 && !measurable && source.is_none() {
+        return Err(Error::Unsupported(Unsupported::HlsBandwidthUnknown));
+    }
+    Ok(())
+}
+
 /// 本地 HLS 能否表示这些组：`has_init[g][t]` 为第 g 组第 t 条轨是否有 init 段。EXT-X-MAP 一直作用到下一个
 /// EXT-X-MAP，没有 init 段的组排在有的组后面时，播放器会把前面的 init 段用在它上面；反过来（先 TS 后 fMP4）可以。
 /// 点播的播放列表本身也是这样解析的，不会出现这种排列，只有直播跨会话续录时服务器换了格式才会。
-pub(super) fn check_layout(has_init: &[Vec<bool>]) -> Result<(), Error> {
+fn check_layout(has_init: &[Vec<bool>]) -> Result<(), Error> {
     let tracks = has_init.first().map_or(0, Vec::len);
     for track in 0..tracks {
         let mut fmp4_seen = false;
@@ -144,7 +170,7 @@ fn fill(
                 .zip(audio.peak_bps)
                 .map(|(v, a)| v.saturating_add(a))
                 .or(selection.variant.attributes.bandwidth)
-                .ok_or(Error::Unsupported(Unsupported::HlsBandwidthUnknown))?;
+                .expect("写出前已确认算得出码率（check_content）");
             write_file(&stage.join(INDEX), &master_playlist(selection, bandwidth))
         }
         (tracks, selection) => panic!(
