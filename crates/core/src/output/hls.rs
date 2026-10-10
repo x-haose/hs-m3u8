@@ -3,7 +3,7 @@
 //! ```text
 //! index.m3u8              入口：单轨时为媒体播放列表；视频与独立音频分离时为主播放列表
 //! <轨道>/index.m3u8        音视频分离时这条轨的媒体播放列表
-//! <轨道>/<n>.<扩展名>       分片，n 为这条轨里的播放顺序（从 0 起）；fMP4 为 m4s，其余见 Standalone::extension
+//! <轨道>/<n>.<扩展名>       分片，n 为这条轨里的播放顺序（从 0 起）；扩展名见 extension
 //! <轨道>/init-<指纹>.mp4    fMP4 的 init 段，文件名同任务目录
 //! ```
 //!
@@ -24,8 +24,20 @@ use crate::{Error, WorkDirProblem};
 
 const INDEX: &str = "index.m3u8";
 
-/// 分片可能用到的扩展名。
-const EXTENSIONS: [&str; 6] = ["m4s", "ts", "aac", "mp3", "ac3", "eac3"];
+/// fMP4 分片的扩展名。
+const FMP4: &str = "m4s";
+
+/// 没有 init 段的分片的扩展名，与 FFmpeg 识别出的格式对应：FFmpeg 读 HLS 时核对分片的扩展名与识别出的格式
+/// （`extension_picky`，默认开启），不一致即拒绝。
+fn extension(format: Standalone) -> &'static str {
+    match format {
+        Standalone::Ts => "ts",
+        Standalone::Aac => "aac",
+        Standalone::Mp3 => "mp3",
+        Standalone::Ac3 => "ac3",
+        Standalone::Eac3 => "eac3",
+    }
+}
 
 /// 目标目录能否写：不存在、为空，或 `overwrite` 且其中全是本库写出的文件。
 pub(super) fn check(dir: &Path, overwrite: bool) -> Result<(), Error> {
@@ -145,13 +157,13 @@ fn fill_track<'a>(
         };
         let first = &group.segments.first().expect("每组每轨至少一个分片").path;
         // 同一不连续段组内文件格式不变（RFC 8216 6.2.1：格式变化处必须有 EXT-X-DISCONTINUITY）
-        let extension = match group.init {
-            Some(_) => "m4s",
-            None => sniff(first, work_dir)?.extension(),
+        let ext = match group.init {
+            Some(_) => FMP4,
+            None => extension(sniff(first, work_dir)?),
         };
         let mut segments = Vec::with_capacity(group.segments.len());
         for segment in &group.segments {
-            let name = format!("{index}.{extension}");
+            let name = format!("{index}.{ext}");
             place(&segment.path, &dir.join(&name))?;
             segments.push((name, segment.duration_us));
             index += 1;
@@ -327,8 +339,9 @@ fn is_track_file_name(name: &str) -> bool {
     {
         return Fingerprint::parse(fingerprint).is_some();
     }
-    name.split_once('.')
-        .is_some_and(|(n, extension)| is_number(n) && EXTENSIONS.contains(&extension))
+    name.split_once('.').is_some_and(|(n, ext)| {
+        is_number(n) && (ext == FMP4 || Standalone::ALL.into_iter().any(|f| extension(f) == ext))
+    })
 }
 
 /// 规范写法的十进制非负整数：没有多余的前导零。

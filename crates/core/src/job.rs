@@ -10,8 +10,9 @@ use crate::fetch::Fetcher;
 use crate::http::Http;
 use crate::ident::{source_digest, url_digest};
 use crate::live::{self, Context, Outcome};
-use crate::output::{self, MergeInput};
-use crate::request::{JobRequest, OutputOptions};
+use crate::output::OutputOptions;
+use crate::output::{self, Content};
+use crate::request::JobRequest;
 use crate::resolve::{self, Resolved};
 use crate::vod::{self, Plan};
 use crate::workdir::{JobRecord, RecordKind, Stored, WorkDir, read_resumable};
@@ -124,7 +125,7 @@ async fn run_vod(task: Task, source: String, resolved: Resolved) -> Result<Outpu
         &task.cancel,
     )
     .await?;
-    let input = MergeInput {
+    let input = Content {
         streams,
         groups,
         segments: plan.segment_count(),
@@ -160,7 +161,7 @@ fn merge_live(
     stored: &Stored,
     streams: Vec<Streams>,
     recording: Option<Outcome>,
-) -> Result<MergeInput, Error> {
+) -> Result<Content, Error> {
     let plan = live::merge_plan(&stored.segments, dir.layout())?;
     if plan.groups.is_empty() {
         return Err(Error::NothingRecorded);
@@ -174,7 +175,7 @@ fn merge_live(
         session_count: plan.sessions,
         missed: live::report_missed(&plan, known),
     };
-    Ok(MergeInput {
+    Ok(Content {
         streams,
         segments: plan.segments,
         groups: plan.groups,
@@ -195,7 +196,7 @@ impl Task {
     }
 
     /// 合并为输出文件，按选项删除任务目录。
-    async fn finish(self, dir: WorkDir, input: MergeInput) -> Result<Output, Error> {
+    async fn finish(self, dir: WorkDir, input: Content) -> Result<Output, Error> {
         // 简化：合并阶段不响应取消（remux 不可中断），合并耗时成为问题时给 remux 加 FFmpeg 中断回调。
         if self.cancel.is_cancelled() {
             return Err(Error::Cancelled);

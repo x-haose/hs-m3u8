@@ -1,5 +1,6 @@
 //! 所选变体与音频 rendition 的身份：记在任务目录里，续传、续录时按它在主播放列表中找回同一条轨，
-//! 不受主播放列表增删变体、地址换令牌的影响。
+//! 不受主播放列表增删变体、地址换令牌的影响。本地 HLS 的主播放列表也用它写变体与音频的属性（只合并时
+//! 只有它可用），身份里去掉的属性不会出现在那里。
 
 use hs_m3u8_hls::{
     MasterPlaylist, Rendition, RenditionKind, Resolution, SelectedAudio, Selection, Variant,

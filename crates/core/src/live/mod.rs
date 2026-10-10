@@ -31,7 +31,7 @@ use self::session::Verdicts;
 use self::tasks::{Done, Tasks};
 use self::track::{Fetched, LiveTrack};
 use self::window::{NewInits, Scope};
-use crate::fetch::{Direct, Fetcher, Finished, ItemId, count_done};
+use crate::fetch::{Direct, Fetcher, Finished, ItemInfo, count_done};
 use crate::hooks::Hooks;
 use crate::http::Http;
 use crate::request::LiveOptions;
@@ -167,13 +167,14 @@ fn live_tracks(
 ) -> Result<Vec<LiveTrack>, Error> {
     tracks
         .iter()
-        .zip(&stored.segments)
-        .map(|(track, files)| {
-            let recorded_us = files
-                .iter()
-                .map(|f| f.name.duration_us)
-                .fold(0u64, u64::saturating_add);
-            LiveTrack::new(track.url.clone(), &track.playlist, recorded_us, now)
+        .enumerate()
+        .map(|(i, track)| {
+            LiveTrack::new(
+                track.url.clone(),
+                &track.playlist,
+                stored.duration_us(i),
+                now,
+            )
         })
         .collect()
 }
@@ -182,12 +183,7 @@ fn live_tracks(
 fn count_stored(stored: &Stored, progress: &watch::Sender<Progress>) {
     let done = stored.segments.iter().map(Vec::len).sum();
     let bytes = stored.bytes();
-    let duration_us = stored.segments.first().map_or(0, |files| {
-        files
-            .iter()
-            .map(|f| f.name.duration_us)
-            .fold(0u64, u64::saturating_add)
-    });
+    let duration_us = stored.duration_us(0);
     progress.send_modify(|p| {
         p.segments_done = done;
         p.segments_total = done;
@@ -473,7 +469,7 @@ impl Recorder<'_> {
     }
 
     /// 一个分片的下载结果：取不到的记为缺失，其余失败上抛。
-    fn on_finished(&mut self, id: ItemId, result: Result<u64, Error>) -> Result<(), Error> {
+    fn on_finished(&mut self, id: ItemInfo, result: Result<u64, Error>) -> Result<(), Error> {
         let error = match result {
             Ok(len) => {
                 count_done(self.progress, id, len);
