@@ -167,6 +167,8 @@ pub(super) struct Window {
     group_inits: HashMap<u64, Option<Fingerprint>>,
     /// 已排入下载与记为缺失的分片声明时长之和（含之前各会话录到的），微秒
     recorded_us: u64,
+    /// 这条轨在这个会话的起点，写进每个分片的文件名
+    start: SessionStart,
 }
 
 impl Window {
@@ -181,10 +183,14 @@ impl Window {
             inits: Vec::new(),
             group_inits: HashMap::new(),
             recorded_us,
+            start: SessionStart::Fresh,
         };
         match start {
             Start::New(SessionStart::Fresh) => {}
-            Start::New(SessionStart::After(through)) => window.processed.last = Some(through),
+            Start::New(after @ SessionStart::After(through)) => {
+                window.start = after;
+                window.processed.last = Some(through);
+            }
             Start::Continue(earlier) => window.continue_from(&earlier),
         }
         window
@@ -192,6 +198,7 @@ impl Window {
 
     /// 接着之前的会话：比对基准、编号与各组的 init 段都沿用它的分片。
     fn continue_from(&mut self, recorded: &LatestSession) {
+        self.start = recorded.start();
         self.previous = listed_of(recorded);
         for name in recorded.segments().values() {
             self.group_inits.insert(name.discontinuity, name.init);
@@ -400,6 +407,7 @@ impl Window {
         self.claim_group(scope.track, discontinuity, init)?;
         let name = SegmentName {
             session: scope.session,
+            start: self.start,
             sequence: segment.sequence,
             discontinuity,
             init,

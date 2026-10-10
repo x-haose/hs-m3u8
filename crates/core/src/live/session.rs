@@ -23,39 +23,36 @@ pub(super) struct LatestSession {
     session: u32,
     /// 序号 → 文件名记录的信息
     segments: BTreeMap<u64, SegmentName>,
-    /// 这条轨在这个会话的起点跳过到的序号；补录不越过它。从窗口起点录的为 None
-    skipped_through: Option<u64>,
+    /// 这条轨在这个会话的起点
+    start: SessionStart,
 }
 
 impl LatestSession {
-    /// 第 `track` 条轨的分片（按会话、序号排列）中最近一个会话的；`starts` 为该轨各会话的起点。一个分片都没有时
-    /// 为 Ok(None)；这个会话没有起点时目录内容矛盾，返回原因。
-    fn latest(
-        track: usize,
-        files: &[SegmentFile],
-        starts: &BTreeMap<u32, SessionStart>,
-    ) -> Result<Option<Self>, String> {
+    /// 第 `track` 条轨的分片（按会话、序号排列）中最近一个会话的。一个分片都没有时为 Ok(None)；这个会话的分片
+    /// 记的起点不一致时目录内容矛盾，返回原因。
+    fn latest(track: usize, files: &[SegmentFile]) -> Result<Option<Self>, String> {
         let Some(session) = files.iter().map(|f| f.name.session).max() else {
             return Ok(None);
         };
-        let segments = files
+        let segments: BTreeMap<u64, SegmentName> = files
             .iter()
             .filter(|f| f.name.session == session)
             .map(|f| (f.name.sequence, f.name))
             .collect();
-        let skipped_through = match starts.get(&session) {
-            Some(SessionStart::Fresh) => None,
-            Some(SessionStart::After(through)) => Some(*through),
-            None => {
-                return Err(format!(
-                    "第 {track} 条轨会话 {session} 有分片，但没有起点记录"
-                ));
-            }
-        };
+        let start = segments
+            .values()
+            .next()
+            .expect("最近的会话至少有一个分片")
+            .start;
+        if segments.values().any(|name| name.start != start) {
+            return Err(format!(
+                "第 {track} 条轨会话 {session} 的分片记的起点不一致"
+            ));
+        }
         Ok(Some(LatestSession {
             session,
             segments,
-            skipped_through,
+            start,
         }))
     }
 
@@ -71,8 +68,16 @@ impl LatestSession {
             .expect("最近的会话至少有一个分片")
     }
 
+    pub(super) fn start(&self) -> SessionStart {
+        self.start
+    }
+
+    /// 这条轨在这个会话的起点跳过到的序号；补录不越过它。从窗口起点录的为 None。
     pub(super) fn skipped_through(&self) -> Option<u64> {
-        self.skipped_through
+        match self.start {
+            SessionStart::Fresh => None,
+            SessionStart::After(through) => Some(through),
+        }
     }
 }
 
@@ -139,8 +144,8 @@ pub(super) struct Verdicts {
 }
 
 impl Verdicts {
-    /// 由目录里已录的内容开始判定；一个分片都没有时为 Ok(None)（直接录第 0 个会话）。某轨最近的会话没有起点时
-    /// 目录内容矛盾，返回原因。
+    /// 由目录里已录的内容开始判定；一个分片都没有时为 Ok(None)（直接录第 0 个会话）。某轨最近的会话里分片记的
+    /// 起点不一致时目录内容矛盾，返回原因。
     pub(super) fn new(stored: &Stored) -> Result<Option<Self>, String> {
         let Some(previous_session) = stored
             .segments
@@ -154,9 +159,8 @@ impl Verdicts {
         let recorded = stored
             .segments
             .iter()
-            .zip(&stored.starts)
             .enumerate()
-            .map(|(track, (files, starts))| LatestSession::latest(track, files, starts))
+            .map(|(track, files)| LatestSession::latest(track, files))
             .collect::<Result<_, _>>()?;
         Ok(Some(Verdicts {
             previous_session,

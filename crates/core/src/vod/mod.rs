@@ -11,7 +11,7 @@ pub(crate) use self::plan::Plan;
 use crate::fetch::{Fetcher, Item, count_done, fetch_init};
 use crate::http::{Http, Permit};
 use crate::ident::Fingerprint;
-use crate::workdir::{self, Layout, SegmentName};
+use crate::workdir::{self, Layout, SegmentName, SessionStart};
 use crate::{Error, Progress, Stage, blocking};
 
 /// 下载计划中的 init 段与尚未完成的分片，返回合并输入；返回 `Ok` 即全部已在任务目录中。
@@ -106,6 +106,7 @@ fn names(plan: &Plan, inits: &[Vec<Fingerprint>]) -> Vec<Vec<SegmentName>> {
 fn segment_name(segment: &Segment, init: Option<Fingerprint>) -> SegmentName {
     SegmentName {
         session: 0,
+        start: SessionStart::Fresh,
         sequence: segment.sequence,
         discontinuity: segment.discontinuity,
         init,
