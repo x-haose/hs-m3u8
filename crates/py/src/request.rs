@@ -714,10 +714,10 @@ impl HttpOptions {
     }
 }
 
-/// 解析 `what`（如「来源地址」）；解析不了时抛 `InvalidInputError`，说明里只显示到路径。
+/// 解析 `what`（如「来源地址」）；解析不了时抛 `InvalidInputError`。说明里不带地址：解析不了就没法只显示到路径，
+/// 原样带上可能泄露令牌。
 fn parse_url(py: Python<'_>, what: &str, url: &str) -> PyResult<Url> {
-    Url::parse(url)
-        .map_err(|cause| invalid_input(py, format!("{what}无法解析（{cause}）：{}", bare_url(url))))
+    Url::parse(url).map_err(|cause| invalid_input(py, format!("{what}无法解析（{cause}）")))
 }
 
 impl Target {
