@@ -19,8 +19,9 @@ impl Recorder<'_> {
     pub(super) async fn start(&mut self, first: Vec<Fetched>) -> Result<(), Error> {
         if matches!(self.phase, Phase::Decided { .. }) {
             let tracks = first.len();
+            let now = Instant::now();
             for (track, fetched) in first.into_iter().enumerate() {
-                self.tracks[track].hold(fetched);
+                self.tracks[track].hold(fetched, now);
             }
             return self.enter_session(Decision::first(tracks)).await;
         }
@@ -82,7 +83,7 @@ impl Recorder<'_> {
             t.mark_candidate();
             self.check(track, &fetched.playlist);
         }
-        self.tracks[track].hold(fetched);
+        self.tracks[track].hold(fetched, Instant::now());
     }
 
     /// 核对第 `track` 条轨的候选 `playlist` 能否接着它最近的会话录；没有录过分片时没有可核对的，没有重叠时直接
