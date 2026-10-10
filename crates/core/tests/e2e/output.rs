@@ -702,19 +702,30 @@ async fn invalid_output_paths_are_rejected() {
     }
 }
 
-/// 输出路径的上一级是文件：任务开头检查输出时报路径被占用，指向输出路径本身，不是内部的临时名。
+/// 输出路径的上一级是文件，或 HLS 路径以分隔符结尾而那里是文件：任务开头检查输出时报路径被占用，指向输出路径
+/// 本身，不是内部的临时名。
 #[tokio::test(flavor = "multi_thread")]
 async fn an_output_under_a_file_is_reported_as_occupied() {
     let dir = test_dir("output_under_file");
     std::fs::write(dir.join("file"), "别人的文件").unwrap();
     let url = Url::parse("http://127.0.0.1:9/index.m3u8").unwrap();
-    let target = dir.join("file/out.mp4");
-    let mut req = request_to(url, &dir, Target::Mp4(target.clone()));
-    req.output.work_dir = Some(dir.join("work"));
+    let cases = [
+        (
+            Target::Mp4(dir.join("file/out.mp4")),
+            dir.join("file/out.mp4"),
+        ),
+        (Target::Hls(dir.join("file/")), dir.join("file")),
+    ];
+    for (target, occupied) in cases {
+        let mut req = request_to(url.clone(), &dir, target);
+        req.output.work_dir = Some(dir.join("work"));
 
-    match run(req).await {
-        Err(Error::OutputOccupied(path)) => assert_eq!(path, target),
-        other => panic!("应报路径被占用：{other:?}"),
+        match run(req).await {
+            Err(Error::OutputOccupied(path)) => {
+                assert_eq!(path.as_os_str(), occupied.as_os_str())
+            }
+            other => panic!("应报路径被占用：{other:?}"),
+        }
     }
 }
 
