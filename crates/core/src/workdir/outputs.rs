@@ -92,9 +92,9 @@ pub(crate) fn read_outputs(root: &Path) -> Result<OutputsRecord, Error> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(OutputsRecord::default()),
         Err(cause) => return Err(io_error("读取", &path)(cause)),
     };
-    decode(&bytes).map_err(|reason| Error::WorkDir {
+    decode(&bytes).map_err(|problem| Error::WorkDir {
         path: root.to_path_buf(),
-        problem: WorkDirProblem::Corrupt(reason),
+        problem,
     })
 }
 
@@ -169,11 +169,11 @@ fn encode(outputs: &[PendingOutput], swapped: bool) -> Vec<u8> {
         .expect("OutputsFile 只含字符串、整数、布尔、数组与枚举，序列化不会失败")
 }
 
-/// 解析 `outputs.json`；失败时返回原因。
-fn decode(bytes: &[u8]) -> Result<OutputsRecord, String> {
+/// 解析 `outputs.json`。
+fn decode(bytes: &[u8]) -> Result<OutputsRecord, WorkDirProblem> {
     check_version(bytes, OUTPUTS_FILE)?;
-    let file: OutputsFile =
-        serde_json::from_slice(bytes).map_err(|e| format!("{OUTPUTS_FILE} 无法解析：{e}"))?;
+    let file: OutputsFile = serde_json::from_slice(bytes)
+        .map_err(|e| WorkDirProblem::Corrupt(format!("{OUTPUTS_FILE} 无法解析：{e}")))?;
     let outputs = file
         .outputs
         .into_iter()
@@ -193,7 +193,8 @@ fn decode(bytes: &[u8]) -> Result<OutputsRecord, String> {
             };
             Ok(PendingOutput::new(kind, target, fingerprint))
         })
-        .collect::<Result<_, String>>()?;
+        .collect::<Result<_, String>>()
+        .map_err(WorkDirProblem::Corrupt)?;
     Ok(OutputsRecord {
         swapped: file.swapped,
         outputs,

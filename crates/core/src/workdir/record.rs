@@ -156,15 +156,17 @@ struct Version {
     format_version: u32,
 }
 
-/// 任务目录里名为 `file` 的 JSON 文件的格式版本是不是 [`FORMAT_VERSION`]；不是或读不出时返回原因。
-pub(super) fn check_version(bytes: &[u8], file: &str) -> Result<(), String> {
-    let version: Version =
-        serde_json::from_slice(bytes).map_err(|e| format!("{file} 无法解析：{e}"))?;
+/// 任务目录里名为 `file` 的 JSON 文件的格式版本是不是 [`FORMAT_VERSION`]：读不出版本号为内容无法识别，是别的
+/// 版本为版本不受支持。
+pub(super) fn check_version(bytes: &[u8], file: &'static str) -> Result<(), WorkDirProblem> {
+    let version: Version = serde_json::from_slice(bytes)
+        .map_err(|e| WorkDirProblem::Corrupt(format!("{file} 无法解析：{e}")))?;
     if version.format_version != FORMAT_VERSION {
-        return Err(format!(
-            "{file} 的格式版本 {} 不受支持（支持 {FORMAT_VERSION}）",
-            version.format_version
-        ));
+        return Err(WorkDirProblem::UnsupportedVersion {
+            file,
+            found: version.format_version,
+            supported: FORMAT_VERSION,
+        });
     }
     Ok(())
 }
@@ -190,9 +192,9 @@ pub(super) fn encode(record: &JobRecord) -> Vec<u8> {
     serde_json::to_vec(&file).expect("JobFile 只含字符串、整数、数组与枚举，序列化不会失败")
 }
 
-/// 解析 `job.json`；失败时返回原因。
-pub(super) fn decode(bytes: &[u8]) -> Result<JobRecord, String> {
-    let unreadable = |e: serde_json::Error| format!("job.json 无法解析：{e}");
+/// 解析 `job.json`。
+pub(super) fn decode(bytes: &[u8]) -> Result<JobRecord, WorkDirProblem> {
+    let unreadable = |e| WorkDirProblem::Corrupt(format!("job.json 无法解析：{e}"));
     check_version(bytes, "job.json")?;
     let (source_digest, selection, kind) =
         match serde_json::from_slice(bytes).map_err(unreadable)? {
@@ -313,6 +315,14 @@ mod tests {
         };
         assert_eq!(decode(&encode(&vod)), Ok(vod));
 
+        assert_eq!(
+            decode(br#"{"kind":"vod","format_version":8}"#),
+            Err(WorkDirProblem::UnsupportedVersion {
+                file: "job.json",
+                found: 8,
+                supported: 7
+            })
+        );
         for rejected in [
             r#"{"kind":"vod","format_version":1,"plan_digest":"cd"}"#,
             r#"{"kind":"vod","format_version":6,"source_digest":"a","selection":null,"plan_digest":"p"}"#,

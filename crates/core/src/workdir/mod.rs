@@ -347,9 +347,9 @@ pub(crate) async fn read_resumable(root: PathBuf) -> Result<Option<JobRecord>, E
 fn read_job(root: &Path) -> Result<Option<JobRecord>, Error> {
     let job_path = root.join(JOB_FILE);
     match fs::read(&job_path) {
-        Ok(bytes) => decode(&bytes).map(Some).map_err(|reason| Error::WorkDir {
+        Ok(bytes) => decode(&bytes).map(Some).map_err(|problem| Error::WorkDir {
             path: root.to_path_buf(),
-            problem: WorkDirProblem::Corrupt(reason),
+            problem,
         }),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(cause) => Err(io_error("读取", &job_path)(cause)),
