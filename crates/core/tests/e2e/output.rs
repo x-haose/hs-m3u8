@@ -697,9 +697,9 @@ async fn invalid_output_paths_are_rejected() {
     }
 }
 
-/// 输出路径的上一级是文件：任务开头检查输出时报错，指向输出路径本身，不是内部的临时名。
+/// 输出路径的上一级是文件：任务开头检查输出时报路径被占用，指向输出路径本身，不是内部的临时名。
 #[tokio::test(flavor = "multi_thread")]
-async fn an_output_under_a_file_is_reported_by_its_own_path() {
+async fn an_output_under_a_file_is_reported_as_occupied() {
     let dir = test_dir("output_under_file");
     std::fs::write(dir.join("file"), "别人的文件").unwrap();
     let url = Url::parse("http://127.0.0.1:9/index.m3u8").unwrap();
@@ -708,8 +708,8 @@ async fn an_output_under_a_file_is_reported_by_its_own_path() {
     req.output.work_dir = Some(dir.join("work"));
 
     match run(req).await {
-        Err(Error::Io { path, .. }) => assert_eq!(path, target),
-        other => panic!("应报检查输出路径失败：{other:?}"),
+        Err(Error::OutputOccupied(path)) => assert_eq!(path, target),
+        other => panic!("应报路径被占用：{other:?}"),
     }
 }
 
