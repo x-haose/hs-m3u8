@@ -110,7 +110,6 @@ pub(crate) async fn record(
     options: LiveOptions,
 ) -> Result<Outcome, Error> {
     let (dir, progress) = (ctx.dir, ctx.progress);
-    progress.send_modify(|p| p.stage = Stage::Recording);
     let stored = dir.scan(tracks.len()).await?;
     count_stored(&stored, progress);
     let now = Instant::now();
@@ -136,6 +135,11 @@ pub(crate) async fn record(
         phase,
         ending: None,
     };
+    let refresh_errors = recorder.refresh_errors(true);
+    progress.send_modify(|p| {
+        p.stage = Stage::Recording;
+        p.refresh_errors = refresh_errors;
+    });
     let signals = Signals {
         cancel: ctx.cancel,
         stop: ctx.stop,
@@ -239,10 +243,9 @@ impl Recorder<'_> {
     }
 
     /// 进度里各轨的刷新失败，从各轨的状态推出：录制中、还会刷新的轨报它最近一次刷新失败的原因，其余为 None。
-    fn publish_refresh_errors(&self, recording: bool) {
+    fn refresh_errors(&self, recording: bool) -> Vec<Option<RefreshCause>> {
         let max_us = self.max_us();
-        let causes: Vec<Option<RefreshCause>> = self
-            .tracks
+        self.tracks
             .iter()
             .map(|t| {
                 let refreshing = recording && self.ending.is_none() && t.needs_refresh(max_us);
@@ -250,7 +253,12 @@ impl Recorder<'_> {
                     .filter(|_| refreshing)
                     .and_then(waitable_refresh_error)
             })
-            .collect();
+            .collect()
+    }
+
+    /// 把 [`Recorder::refresh_errors`] 发布到进度。
+    fn publish_refresh_errors(&self, recording: bool) {
+        let causes = self.refresh_errors(recording);
         self.progress.send_if_modified(|p| {
             let changed = p.refresh_errors != causes;
             p.refresh_errors = causes;
