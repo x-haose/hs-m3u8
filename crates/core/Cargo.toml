@@ -14,6 +14,7 @@ cbc.workspace = true
 hs-m3u8-hls = { path = "../hls" }
 hs-m3u8-remux = { path = "../remux" }
 reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -25,6 +26,7 @@ url.workspace = true
 [dev-dependencies]
 axum.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
+tokio-rustls.workspace = true
 
 [lints]
 workspace = true

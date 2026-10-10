@@ -134,7 +134,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 ### 5.4 HTTP
 
 - `reqwest` 0.13.5（rustls）。请求配置包括请求头（Cookie、User-Agent 都经请求头传入）与代理；Cookie 在任务内由响应自动保存。
-- 证书校验默认开启；关闭必须显式写 `insecure: true`。
+- 证书校验默认开启；关闭必须显式写 `insecure: true`。证书校验失败报 `HttpError::Certificate`、跟随重定向失败（循环、次数过多）报 `HttpError::Redirect`，都不重试；rustls 的证书错误包在 `io::Error` 里，沿原因链逐层取出它包着的错误才认得出，故直接依赖 rustls（与 reqwest 用的同一个 0.23.45）。连接与传输错误的说明带上各层原因。
 - 字节范围分片用 `Range` 请求头；响应必须是 206 且长度一致，否则视为错误。
 - key 按 key URL 去重，只取一次，缓存在任务内存里。
 
@@ -311,4 +311,4 @@ hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
 
 ## 依据的版本（2026-10-08 查 crates.io）
 
-tokio 1.53.2、tokio-util 0.7.19、reqwest 0.13.5、axum 0.8.9（2026-10-09 查，仅测试用）、aes 0.9.3、cbc 0.2.1、url 2.5.8、thiserror 2.0.21、serde 1.0.229、serde_json 1.0.151、sha2 0.11.0、rusqlite 0.40.2、pyo3 0.29.3、pyo3-async-runtimes 0.29.0、maturin 1.15.0、ffmpeg-next 9.0.0、tauri 2.12.1、cargo-deny 0.20.2、cargo-llvm-cov 0.9.1（2026-10-09 查）、libc 0.2.190（2026-10-10 查，仅测试用）。
+tokio 1.53.2、tokio-util 0.7.19、rustls 0.23.45 与 tokio-rustls 0.26.6（2026-10-10，取 Cargo.lock 中 reqwest 已用的版本；后者仅测试用）、reqwest 0.13.5、axum 0.8.9（2026-10-09 查，仅测试用）、aes 0.9.3、cbc 0.2.1、url 2.5.8、thiserror 2.0.21、serde 1.0.229、serde_json 1.0.151、sha2 0.11.0、rusqlite 0.40.2、pyo3 0.29.3、pyo3-async-runtimes 0.29.0、maturin 1.15.0、ffmpeg-next 9.0.0、tauri 2.12.1、cargo-deny 0.20.2、cargo-llvm-cov 0.9.1（2026-10-09 查）、libc 0.2.190（2026-10-10 查，仅测试用）。

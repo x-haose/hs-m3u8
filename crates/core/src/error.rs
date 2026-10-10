@@ -291,6 +291,12 @@ pub enum HttpError {
     RangeIgnored(u16),
     #[error("超时")]
     Timeout,
+    /// TLS 证书校验失败（自签名、过期、与域名不符等）；确认来源可信时可设 [`crate::HttpOptions::insecure`]
+    #[error("证书校验失败：{0}")]
+    Certificate(String),
+    /// 跟随重定向失败（循环、次数过多）
+    #[error("重定向失败：{0}")]
+    Redirect(String),
     #[error("连接失败：{0}")]
     Connect(String),
     /// 请求无法构造：地址能解析，HTTP 库却不接受（如超过 65534 字节）。回调改出的地址与请求头不合法时报
@@ -307,7 +313,10 @@ impl HttpError {
         match self {
             HttpError::Status(code) => matches!(code, 408 | 429 | 500..=599),
             HttpError::Timeout | HttpError::Connect(_) | HttpError::Transport(_) => true,
-            HttpError::RangeIgnored(_) | HttpError::InvalidRequest(_) => false,
+            HttpError::RangeIgnored(_)
+            | HttpError::Certificate(_)
+            | HttpError::Redirect(_)
+            | HttpError::InvalidRequest(_) => false,
         }
     }
 }
