@@ -334,7 +334,7 @@ fn paths_with_quotes_and_spaces_are_read() {
 }
 
 #[test]
-fn timestamps_going_back_within_a_group_fail_and_leave_no_files() {
+fn timestamps_going_back_within_a_group_fail() {
     let dir = work_dir("regression");
     let output = dir.join("out.mp4");
     // 节目 B 接在 A 后面却放在同一组：时间戳回退，相当于漏标 EXT-X-DISCONTINUITY
