@@ -46,6 +46,9 @@ pub enum Malformed {
     Empty,
     #[error("不是 HLS 播放列表：第一行应为 #EXTM3U")]
     NotAPlaylist,
+    /// 不是 UTF-8 文本（RFC 8216 4.1 要求 UTF-8）；站点用了别的编码时须在解析前转码
+    #[error("播放列表不是 UTF-8 文本")]
+    NotUtf8,
     #[error("同时含有主播放列表（EXT-X-STREAM-INF）与媒体播放列表（EXTINF）的标签")]
     Mixed,
     #[error("第 {line} 行：{kind}")]
@@ -98,6 +101,12 @@ pub enum Encryption {
     Drm { keyformat: String },
     #[error("未知的加密方式 {0}")]
     Method(String),
+}
+
+/// 解析拉到的播放列表内容：须为 UTF-8（RFC 8216 4.1），否则报 [`Malformed::NotUtf8`]；其余同 [`parse`]。
+pub fn parse_bytes(body: &[u8], url: &Url) -> Result<Playlist, Error> {
+    let text = std::str::from_utf8(body).map_err(|_| Malformed::NotUtf8)?;
+    parse(text, url)
 }
 
 /// 解析播放列表。`url` 为该播放列表的最终 URL（跟随重定向之后），所有相对 URI 按它解析。

@@ -69,7 +69,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 - 不连续段序号 = `EXT-X-DISCONTINUITY-SEQUENCE`（缺省 0）加上此前出现的 `EXT-X-DISCONTINUITY` 个数。
 - 媒体序号、不连续段序号、字节范围的结束位置超出 64 位整数时报错。
 - 所有 URI 按**该播放列表的最终 URL**（跟随重定向之后）解析。
-- 解析错误分两类：内容不是合法的播放列表为 `Malformed`（为空 `Empty`、首行不是 `#EXTM3U` 为 `NotAPlaylist`、主与媒体播放列表的标签混在一起为 `Mixed`、带行号的 `Syntax`），用了不支持的加密为 `Unsupported`（带 `hls::Encryption`）。
+- 解析错误分两类：内容不是合法的播放列表为 `Malformed`（为空 `Empty`、首行不是 `#EXTM3U` 为 `NotAPlaylist`、不是 UTF-8 文本为 `NotUtf8`（RFC 8216 4.1；别的编码由调用方在 `on_playlist` 回调中转码）、主与媒体播放列表的标签混在一起为 `Mixed`、带行号的 `Syntax`），用了不支持的加密为 `Unsupported`（带 `hls::Encryption`）。
 
 选轨（`select`）：
 
@@ -304,7 +304,7 @@ HsM3u8Error                       retryable: bool、retry_after: int | None、se
 │   ├── Mp4UnsupportedError       reason: Mp4Unsupported；可只输出本地 HLS
 │   └── HlsUnsupportedError       reason: HlsUnsupported；可只输出 MP4
 ├── SourceError                   来源本身不行
-│   ├── PlaylistError             url、reason: Malformed（Empty、NotAPlaylist、Mixed、Syntax(line, detail)）
+│   ├── PlaylistError             url、reason: Malformed（Empty、NotAPlaylist、NotUtf8、Mixed、Syntax(line, detail)）
 │   ├── NotMediaPlaylistError     url
 │   ├── SourceUnsupportedError    reason: SourceUnsupported（EmptyPlaylist、NoTargetDuration、Encryption、InitChangesWithinGroup、DiscontinuityMismatch）
 │   ├── IntegrityError            url、reason: IntegrityFailure

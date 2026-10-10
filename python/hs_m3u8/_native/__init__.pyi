@@ -1084,6 +1084,14 @@ class Malformed:
         def __new__(cls) -> Malformed.NotAPlaylist: ...
     
     @typing.final
+    class NotUtf8(Malformed):
+        r"""
+        不是 UTF-8 文本；站点用了别的编码时在 `Hooks.on_playlist` 中转码
+        """
+        __match_args__ = ()
+        def __new__(cls) -> Malformed.NotUtf8: ...
+    
+    @typing.final
     class Mixed(Malformed):
         r"""
         同时含有主播放列表（EXT-X-STREAM-INF）与媒体播放列表（EXTINF）的标签

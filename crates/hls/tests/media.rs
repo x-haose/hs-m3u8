@@ -2,7 +2,7 @@
 
 use hs_m3u8_hls::{
     ByteRange, Encryption, Error, InitSection, Malformed, MediaPlaylist, Playlist, PlaylistType,
-    SegmentKey, SyntaxError, Url, parse,
+    SegmentKey, SyntaxError, Url, parse, parse_bytes,
 };
 
 fn url(s: &str) -> Url {
@@ -295,6 +295,12 @@ fn malformed_input_is_reported_with_its_line() {
         malformed("<html><body>403 Forbidden</body></html>"),
         Malformed::NotAPlaylist
     );
+    // 不是 UTF-8 的内容（这里是 GBK 编码的「标题」）单独报出，不当作「不是播放列表」
+    let gbk = b"#EXTM3U\n#EXTINF:4,\xb1\xea\xcc\xe2\na.ts\n";
+    match parse_bytes(gbk, &url("https://example.com/a.m3u8")) {
+        Err(Error::Malformed(Malformed::NotUtf8)) => {}
+        other => panic!("应报不是 UTF-8：{other:?}"),
+    }
     // 空内容与「不是播放列表」分开：前者多为服务器还没写完
     for empty in ["", " \r\n", "\u{FEFF}\n"] {
         assert_eq!(malformed(empty), Malformed::Empty);

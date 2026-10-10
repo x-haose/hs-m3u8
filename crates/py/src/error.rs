@@ -73,6 +73,8 @@ variants! {
         Empty {},
         /// 第一行不是 #EXTM3U
         NotAPlaylist {},
+        /// 不是 UTF-8 文本；站点用了别的编码时在 `Hooks.on_playlist` 中转码
+        NotUtf8 {},
         /// 同时含有主播放列表（EXT-X-STREAM-INF）与媒体播放列表（EXTINF）的标签
         Mixed {},
         /// 语法错误
@@ -810,6 +812,7 @@ impl From<core::hls::Malformed> for Malformed {
         match error {
             E::Empty => Malformed::Empty {},
             E::NotAPlaylist => Malformed::NotAPlaylist {},
+            E::NotUtf8 => Malformed::NotUtf8 {},
             E::Mixed => Malformed::Mixed {},
             E::Syntax { line, kind } => Malformed::Syntax {
                 line,

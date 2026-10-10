@@ -543,7 +543,7 @@ fn waitable_refresh_error(error: &Error) -> Option<RefreshCause> {
                 line: *line,
                 kind: kind.clone(),
             }),
-            hls::Malformed::NotAPlaylist | hls::Malformed::Mixed => None,
+            hls::Malformed::NotAPlaylist | hls::Malformed::NotUtf8 | hls::Malformed::Mixed => None,
         },
         _ => error.missable().map(RefreshCause::Http),
     }
