@@ -237,7 +237,7 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 - 类型存根 `_native.pyi` 由 pyo3-stub-gen 从这些 Rust 定义生成，说明取自 `///`：存根写的类型就是运行时实际的类型，不另外手写。
 - `python/hs_m3u8`：`__init__.py` 再导出全部公开名字（`__all__`），带 `py.typed`。
 - 只提供异步接口，脚本用 `asyncio.run(...)`：同步版本只是它的包装；核心的写法保证进程在任何时刻退出都不留半个输出、可以续传，Ctrl+C 不需要特殊处理。
-- PyO3 0.29.3 + `pyo3-async-runtimes` 0.29.0（tokio，异步方法返回 asyncio 的 Future）+ maturin 1.15.0 + pyo3-stub-gen 0.23.1；`abi3-py311` wheel（最低 Python 3.11），FFmpeg 静态链接进扩展模块。
+- PyO3 0.29.3 + `pyo3-async-runtimes` 0.29.0（tokio，异步方法返回 asyncio 的 Future）+ maturin 1.15.0 + pyo3-stub-gen 0.23.1；`abi3-py312` wheel（最低 Python 3.12，见 ADR-0001），FFmpeg 静态链接进扩展模块。
 - 回调在 `core` 的阻塞线程池中取得 GIL 后执行，不占用 tokio 工作线程；只调用子类覆盖了的方法，没覆盖的不取 GIL。
 
 ### 7.2 约定
@@ -325,7 +325,7 @@ HsM3u8Error                       retryable: bool、retry_after: int | None、se
 ### 7.4 质量门
 
 - ruff（检查与格式）；mypy `--strict` 与 basedpyright（严格）检查 `python/`、测试与示例；stubtest 核对存根与模块；重新生成存根后与仓库里的没有差异。
-- pytest 端到端：测试内起本地 HTTP 服务，跑探测、下载、回调、取消、续传、异常与放弃任务；Python 3.11 与最新版各跑一遍。
+- pytest 端到端：测试内起本地 HTTP 服务，跑探测、下载、回调、取消、续传、异常与放弃任务；Python 3.12 与最新版各跑一遍。
 
 ## 8. 桌面应用（GUI 阶段细化）
 

@@ -12,7 +12,7 @@
    - 修掉 0.1.x 审查出的全部问题；
    - 支持音视频分离；
    - macOS、Windows、Linux 三平台 CI 通过。
-4. Python 绑定以 `hs-m3u8` 1.0.0 发布，最低 Python 3.11，API 不兼容 0.1.x，README 提供迁移说明。
+4. Python 绑定以 `hs-m3u8` 1.0.0 发布，最低 Python 3.12，API 不兼容 0.1.x，README 提供迁移说明。
 5. 桌面应用在 master 上继续开发，与 Python 包分开发版。
 
 ## 考虑过的方案

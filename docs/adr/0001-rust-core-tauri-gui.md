@@ -16,7 +16,7 @@ GUI 要分发给他人使用，美观与分发体验是一等需求。
 
 1. 下载核心用 Rust 重写。
 2. 桌面应用用 Tauri 2（当前 2.12.x 稳定版），前端技术栈见 ADR-0005；界面设计在写 GUI 时另行确定。
-3. 保留 Python 绑定（PyO3 + maturin），以 PyPI 包名 `hs-m3u8` 继续发布，服务现有用户与按站点编写的适配脚本；最低 Python 3.11。
+3. 保留 Python 绑定（PyO3 + maturin），以 PyPI 包名 `hs-m3u8` 继续发布，服务现有用户与按站点编写的适配脚本；最低 Python 3.12。
 4. 不做 Go 绑定。
 5. 发布平台：macOS 只发 arm64；Windows x64；Linux x64。macOS 签名与公证在购买开发者账号后补上；Windows 不购买代码签名证书。
 
@@ -63,7 +63,7 @@ x-iztro 是纯计算核心 + 无状态 JSON 桥接，Go 经 wasm32-wasip1 + waze
 - 0.1.x 只做严重问题的修复，不再加功能；Rust 版 Python 绑定以 1.0.0 发布，API 不兼容 0.1.x。
 - 资源嗅探（从网页里发现 m3u8）放在 GUI 之后：Tauri 2 的 `on_web_resource_request` 只作用于 `tauri://` 协议，看不到外部请求；可行路线是内嵌浏览器 + 注入脚本（`initialization_script_for_all_frames`）+ `cookies_for_url`，worker 内请求不可见，需原型验证。
 - 本机与 CI 的 Rust 工具链用 `rust-toolchain.toml` 锁定（当前稳定版 1.99.0，2026-09-28）。
-- Python 3.10 已于 2026-10-01 停止支持（devguide），故最低版本取 3.11，用 PyO3 的 `abi3-py311` 每平台出一个 wheel。
+- 最低 Python 取 3.12，用 PyO3 的 `abi3-py312` 每平台出一个 wheel：开启 abi3 时，只有 3.12 及以上能用 Rust 定义继承 `Exception` 的类（PyO3 0.29 指南），而异常要带有类型的字段、与其他类型一样从 Rust 生成存根。
 - 未签名的代价：macOS 首次打开会被系统拦截，需在「系统设置 → 隐私与安全性」中放行；Windows 会出现 SmartScreen 提示，需点「更多信息 → 仍要运行」。自动更新包的签名密钥由我们自行生成，与上述证书无关，必须配置。
 - 只发 arm64 意味着 Intel 芯片的 Mac 无法使用。
 
