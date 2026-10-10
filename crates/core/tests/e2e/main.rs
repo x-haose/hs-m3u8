@@ -1,6 +1,7 @@
 //! core 的端到端测试：测试内起本地 HTTP 服务提供 HLS（分片取自 tests/fixtures/media），跑完整任务。
 //! 输出与直接用 remux 合并同一批样本文件的结果逐字节比较，解密、顺序或分组的任何错误都会暴露。
 
+mod discard;
 mod live;
 mod output;
 mod server;

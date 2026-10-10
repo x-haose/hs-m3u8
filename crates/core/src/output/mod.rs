@@ -54,6 +54,12 @@ pub(crate) fn prepare(options: &ResolvedOutput) -> Result<(), Error> {
     Ok(())
 }
 
+/// 放弃任务时按任务目录里的记录收拾写到一半的输出（见 [`commit::recover`]）。要读写文件系统，在阻塞线程池中
+/// 调用；调用方已对任务目录加锁。
+pub(crate) fn recover_recorded(work_dir: &Path) -> Result<(), Error> {
+    commit::recover(work_dir, &[])
+}
+
 /// 各输出能否写（见 [`check`]），顺序同各输出。
 fn check_all(options: &ResolvedOutput) -> Result<Vec<Existing>, Error> {
     options

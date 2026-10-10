@@ -201,25 +201,29 @@ impl WorkDir {
     /// std 打开文件时允许删除，Windows 上持有句柄也能删。
     pub(crate) async fn remove(self) -> Option<Leftover> {
         let WorkDir { layout, lock, .. } = self;
-        let root = layout.root;
-        let removed = blocking({
-            let root = root.clone();
-            move || remove_locked(&root, lock)
-        })
-        .await;
-        let cause = match removed.and_then(|r| r) {
-            Ok(kept) => match kept.first() {
-                Some(first) => format!("留有不是本库写的文件：{}", first.display()),
-                None => return None,
-            },
-            Err(e) => e.to_string(),
-        };
-        Some(Leftover {
-            path: root,
-            kind: LeftoverKind::WorkDir,
-            cause,
-        })
+        remove(layout.root, lock).await
     }
+}
+
+/// 持着 `lock` 删除任务目录 `root`，同 [`WorkDir::remove`]；用于不打开任务、直接放弃它。
+pub(crate) async fn remove(root: PathBuf, lock: Lock) -> Option<Leftover> {
+    let removed = blocking({
+        let root = root.clone();
+        move || remove_locked(&root, lock)
+    })
+    .await;
+    let cause = match removed.and_then(|r| r) {
+        Ok(kept) => match kept.first() {
+            Some(first) => format!("留有不是本库写的文件：{}", first.display()),
+            None => return None,
+        },
+        Err(e) => e.to_string(),
+    };
+    Some(Leftover {
+        path: root,
+        kind: LeftoverKind::WorkDir,
+        cause,
+    })
 }
 
 /// [`WorkDir::remove`]：持着 `lock` 删除，返回不是本库写的、留下的文件。

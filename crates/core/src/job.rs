@@ -1,5 +1,6 @@
 //! 任务编排：点播下载、直播录制、直播只合并三条流程，共用写出与收尾。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use hs_m3u8_remux::Streams;
@@ -15,8 +16,10 @@ use crate::output::{self, Content, ResolvedOutput};
 use crate::request::JobRequest;
 use crate::resolve::{self, Resolved};
 use crate::vod::{self, Plan};
-use crate::workdir::{JobRecord, Lock, RecordKind, Stored, WorkDir, read_resumable};
-use crate::{Error, LiveReport, Output, Progress, Stage, Unsupported, WorkDirProblem, blocking};
+use crate::workdir::{self, JobRecord, Lock, RecordKind, Stored, WorkDir, read_resumable};
+use crate::{
+    Error, Leftover, LiveReport, Output, Progress, Stage, Unsupported, WorkDirProblem, blocking,
+};
 
 /// 一次运行用到的共享对象。
 struct Task {
@@ -181,6 +184,16 @@ pub(crate) async fn merge_recorded(
     live::count_stored(&stored, &progress);
     let content = merge_live(&dir, &stored, streams, None)?;
     finish(dir, content, &output, &cancel, &progress).await
+}
+
+/// 放弃任务（见 [`crate::Engine::discard`]）：加锁，按记录收拾写到一半的输出，再删除任务目录。
+pub(crate) async fn discard(root: PathBuf) -> Result<Vec<Leftover>, Error> {
+    let Some(lock) = WorkDir::lock_existing(root.clone()).await? else {
+        return Ok(Vec::new());
+    };
+    let work_dir = root.clone();
+    blocking(move || output::recover_recorded(&work_dir)).await??;
+    Ok(workdir::remove(root, lock).await.into_iter().collect())
 }
 
 /// 合并直播录到的分片；`recording` 为本次运行的录制，只合并时为 None。
