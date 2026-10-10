@@ -475,7 +475,8 @@ async fn hls_accepts_ts_before_fmp4() {
     assert!(hls.join("0/0.ts").is_file() && hls.join("0/1.m4s").is_file());
 }
 
-/// 音频分片声明的时长都为 0，算不出峰值码率：主播放列表用来源写的 BANDWIDTH；来源也没写时报错。
+/// 音频分片声明的时长都为 0，算不出峰值码率：主播放列表用来源写的 BANDWIDTH；来源也没写时报错，两者都要时
+/// 在合并 MP4 之前就报。
 #[tokio::test(flavor = "multi_thread")]
 async fn bandwidth_falls_back_to_the_source_and_fails_without_it() {
     let dir = test_dir("output_bandwidth");
@@ -493,10 +494,15 @@ async fn bandwidth_falls_back_to_the_source_and_fails_without_it() {
     assert_eq!(master.variants[0].bandwidth, Some(200_000));
 
     server.put("master.m3u8", SPLIT_MASTER.replace("BANDWIDTH=200000,", ""));
-    match run(request_to(url, &dir, Target::Hls(dir.join("other")))).await {
+    let other = Target::Both {
+        mp4: dir.join("other.mp4"),
+        hls: dir.join("other"),
+    };
+    match run(request_to(url, &dir, other)).await {
         Err(Error::Unsupported(Unsupported::HlsBandwidthUnknown)) => {}
         other => panic!("应报算不出码率：{other:?}"),
     }
+    assert!(!dir.join("other.mp4").exists() && !dir.join("other").exists());
 }
 
 /// 直播续录时服务器从 fMP4 换成了 TS，另起会话：同一条轨有的组用 init 段、有的不用，本地 HLS 无法表示，

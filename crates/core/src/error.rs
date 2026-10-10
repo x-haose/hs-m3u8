@@ -219,8 +219,10 @@ pub enum Unsupported {
     /// 换成 TS 会这样
     #[error("第 {track} 条轨在 fMP4 的段之后又有不用 init 段的段，本地 HLS 无法表示")]
     HlsMixedInit { track: usize },
-    /// 本地 HLS 的主播放列表必须写码率（BANDWIDTH），而分片声明的时长都为 0 算不出，来源也没写
-    #[error("分片声明的时长都为 0、来源也没写 BANDWIDTH，算不出本地 HLS 主播放列表必填的码率")]
+    /// 本地 HLS 的主播放列表必须写码率（BANDWIDTH），而某条轨的分片声明的时长都为 0 算不出，来源也没写
+    #[error(
+        "某条轨的分片声明的时长都为 0、来源也没写 BANDWIDTH，算不出本地 HLS 主播放列表必填的码率"
+    )]
     HlsBandwidthUnknown,
     #[error("同一不连续段内 EXT-X-MAP 发生变化（第 {track} 条轨，不连续段 {discontinuity}）")]
     InitChangesWithinGroup { track: usize, discontinuity: u64 },
