@@ -114,9 +114,9 @@ fn missed(first: u64, last: u64, reason: MissReason) -> Missed {
 /// 运行到 `until` 成立后取消；任务以取消结束，不生成输出，任务目录保留。
 async fn interrupt(req: &JobRequest, until: impl FnMut(&Progress) -> bool) {
     let job = engine().start(req.clone()).unwrap();
-    let mut progress = job.progress();
+    let mut progress = job.control().progress();
     progress.wait_for(until).await.unwrap();
-    job.cancel();
+    job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
     assert!(!req.output.exists());
 }

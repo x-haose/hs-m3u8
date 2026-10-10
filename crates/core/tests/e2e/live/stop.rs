@@ -1,4 +1,4 @@
-//! 停止录制（[`hs_m3u8_core::Job::stop`]）：会话定下之前立即结束；定下之后把已拉到的播放列表处理完、
+//! 停止录制（[`hs_m3u8_core::JobControl::stop`]）：会话定下之前立即结束；定下之后把已拉到的播放列表处理完、
 //! 已列出的分片下完，再合并。
 
 use std::time::Duration;
@@ -22,9 +22,9 @@ async fn stop_merges_what_was_recorded() {
     let job = engine()
         .start(live_request(server.url("live.m3u8"), &dir, STALL))
         .unwrap();
-    let mut progress = job.progress();
+    let mut progress = job.control().progress();
     progress.wait_for(|p| p.segments_done == 2).await.unwrap();
-    job.stop();
+    job.control().stop();
     let output = job.wait().await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
@@ -45,7 +45,7 @@ async fn stop_is_observed_while_checking() {
     let gate = server.gate("seg1.ts");
     let job = engine().start(req).unwrap();
     gate.arrived.notified().await;
-    job.stop();
+    job.control().stop();
     // 不响应 stop 时任务会一直挂着：给一个远大于正常用时的上限，超过即失败
     let output = tokio::time::timeout(Duration::from_secs(10), job.wait())
         .await
@@ -67,7 +67,7 @@ async fn stop_right_after_start_records_every_track() {
         let job = engine()
             .start(live_request(server.url("master.m3u8"), &dir, STALL))
             .unwrap();
-        job.stop();
+        job.control().stop();
         let output = job.wait().await.unwrap();
         assert_output(&output, &expected_split(&dir, &video, &audio));
         assert_eq!(output.live, report(LiveEnd::Stopped, 1, vec![]));
@@ -85,7 +85,7 @@ async fn stop_right_after_start_records_the_first_playlist() {
         let job = engine()
             .start(live_request(server.url("live.m3u8"), &dir, STALL))
             .unwrap();
-        job.stop();
+        job.control().stop();
         let output = job.wait().await.unwrap();
         assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
         assert_eq!(output.live, report(LiveEnd::Stopped, 1, vec![]));

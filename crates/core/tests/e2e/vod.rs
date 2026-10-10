@@ -75,7 +75,7 @@ async fn aes128_explicit_and_sequence_iv() {
     let mut req = request(server.url("index.m3u8"), &dir);
     req.concurrency = NonZeroUsize::new(4).unwrap();
     let job = engine().start(req).unwrap();
-    let progress = job.progress();
+    let progress = job.control().progress();
     let output = job.wait().await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
@@ -346,7 +346,7 @@ async fn resume_finds_the_same_redundant_variant() {
     let gate = server.gate("b/seg1.ts");
     let job = engine().start(req.clone()).unwrap();
     gate.arrived.notified().await;
-    job.cancel();
+    job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
     server.ungate("b/seg1.ts");
 
@@ -378,7 +378,7 @@ async fn selection_is_not_kept_without_completed_segments() {
     let gate = server.gate("b/seg0.ts");
     let job = engine().start(req.clone()).unwrap();
     gate.arrived.notified().await;
-    job.cancel();
+    job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
     server.ungate("b/seg0.ts");
 
@@ -424,7 +424,7 @@ async fn cancel_lock_and_resume() {
         ),
         "{second}"
     );
-    job.cancel();
+    job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
     assert!(!req.output.exists());
 

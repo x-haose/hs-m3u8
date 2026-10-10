@@ -157,7 +157,7 @@ pub(crate) fn check_output(output: &Path, overwrite: bool) -> Result<(), Error> 
 /// 直播录制方式。
 ///
 /// 录制从当前播放列表里的全部分片开始，按 RFC 8216 6.3.4 的节奏刷新，直到所有轨出现 EXT-X-ENDLIST、
-/// 调用 [`crate::Job::stop`]、各轨都录满 `max_duration`、任一轨停滞，或服务器的播放列表前后矛盾
+/// 调用 [`crate::JobControl::stop`]、各轨都录满 `max_duration`、任一轨停滞，或服务器的播放列表前后矛盾
 /// （序号回退、同一序号换了分片）。结束后把已拉到的播放列表处理完、已列出的分片下完再合并，结束原因见
 /// [`crate::LiveEnd`]。
 ///

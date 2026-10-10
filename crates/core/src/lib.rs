@@ -80,25 +80,50 @@ impl Engine {
             progress_tx,
         ));
         Ok(Job {
-            cancel: cancel.clone(),
-            stop,
-            progress,
+            control: JobControl {
+                cancel: cancel.clone(),
+                stop,
+                progress,
+            },
             task,
             _guard: cancel.drop_guard(),
         })
     }
 }
 
-/// 运行中的任务。丢弃句柄即取消任务；已进入合并阶段的任务仍会在后台完成合并并写出输出。
+/// 运行中的任务：等结果用 [`Job::wait`]，取消、停止与读进度用 [`Job::control`]。丢弃句柄即取消任务；已进入
+/// 合并阶段的任务仍会在后台完成合并并写出输出。
 pub struct Job {
-    cancel: CancellationToken,
-    stop: CancellationToken,
-    progress: watch::Receiver<Progress>,
+    control: JobControl,
     task: JoinHandle<Result<Output, Error>>,
     _guard: DropGuard,
 }
 
 impl Job {
+    /// 控制句柄；与本句柄分开持有，等结果期间也能取消、停止。
+    pub fn control(&self) -> JobControl {
+        self.control.clone()
+    }
+
+    /// 等待任务结束。任务内部 panic（不变量被违反）原样传播；运行时关闭导致任务被取消时返回 [`Error::Cancelled`]。
+    pub async fn wait(self) -> Result<Output, Error> {
+        match self.task.await {
+            Ok(result) => result,
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(_) => Err(Error::Cancelled),
+        }
+    }
+}
+
+/// 任务的控制句柄，可克隆。只持有它不会让任务继续运行（见 [`Job`]）；任务结束后调用不起作用。
+#[derive(Clone)]
+pub struct JobControl {
+    cancel: CancellationToken,
+    stop: CancellationToken,
+    progress: watch::Receiver<Progress>,
+}
+
+impl JobControl {
     pub fn progress(&self) -> watch::Receiver<Progress> {
         self.progress.clone()
     }
@@ -113,14 +138,5 @@ impl Job {
     /// 会话还没定下就立即结束，不录新的分片。点播不受影响。
     pub fn stop(&self) {
         self.stop.cancel();
-    }
-
-    /// 等待任务结束。任务内部 panic（不变量被违反）原样传播；运行时关闭导致任务被取消时返回 [`Error::Cancelled`]。
-    pub async fn wait(self) -> Result<Output, Error> {
-        match self.task.await {
-            Ok(result) => result,
-            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
-            Err(_) => Err(Error::Cancelled),
-        }
     }
 }

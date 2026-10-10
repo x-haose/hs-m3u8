@@ -27,10 +27,10 @@ async fn in_flight_first_segment_is_refilled() {
     req.concurrency = NonZeroUsize::new(2).unwrap();
     let gate = server.gate("seg0.ts");
     let job = engine().start(req.clone()).unwrap();
-    let mut progress = job.progress();
+    let mut progress = job.control().progress();
     gate.arrived.notified().await;
     progress.wait_for(|p| p.segments_done == 3).await.unwrap();
-    job.cancel();
+    job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
     server.ungate("seg0.ts");
 

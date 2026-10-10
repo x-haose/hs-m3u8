@@ -408,7 +408,7 @@ async fn init_only_directory_accepts_a_new_token() {
     let job = engine().start(with_token(1)).unwrap();
     // init 段先于分片落盘；分片的请求到达时 init 段已在目录里
     gate.arrived.notified().await;
-    job.cancel();
+    job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
     server.ungate("video/seg0.m4s");
 
