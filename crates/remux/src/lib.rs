@@ -190,25 +190,8 @@ pub enum Error {
     NoStreams { track: usize },
     #[error("第 {track} 条轨的{kind}流与前面的轨重复")]
     DuplicateKind { track: usize, kind: StreamKind },
-    #[error("第 {group} 组第 {track} 条轨的{kind}编码 {codec} 不受支持（只支持 H.264、HEVC、AAC）")]
-    UnsupportedCodec {
-        group: usize,
-        track: usize,
-        kind: StreamKind,
-        codec: &'static str,
-    },
-    #[error("第 {group} 组第 {track} 条轨的流种类与第 0 组不同")]
-    LayoutChanged { group: usize, track: usize },
-    #[error(
-        "第 {group} 组第 {track} 条轨的{kind}参数 {found:?} 与第 0 组 {first:?} 不同，无法放进同一条 MP4 轨"
-    )]
-    ParamsChanged {
-        group: usize,
-        track: usize,
-        kind: StreamKind,
-        first: Shape,
-        found: Shape,
-    },
+    #[error("{0}")]
+    Unsupported(Unsupported),
     #[error("创建输出 {path} 失败：{cause}")]
     OpenOutput { path: PathBuf, cause: FfmpegError },
     #[error("MP4 封装器不接受选项 {0:?}")]
@@ -236,6 +219,30 @@ pub enum Error {
         action: &'static str,
         path: PathBuf,
         cause: io::Error,
+    },
+}
+
+/// 内容放不进 MP4：编码不受支持，或后续组与第 0 组的流种类、编码参数不同（同一条 MP4 轨的内容须前后一致）。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Unsupported {
+    #[error("第 {group} 组第 {track} 条轨的{kind}编码 {codec} 不受支持（只支持 H.264、HEVC、AAC）")]
+    Codec {
+        group: usize,
+        track: usize,
+        kind: StreamKind,
+        codec: &'static str,
+    },
+    #[error("第 {group} 组第 {track} 条轨的流种类与第 0 组不同")]
+    LayoutChanged { group: usize, track: usize },
+    #[error(
+        "第 {group} 组第 {track} 条轨的{kind}参数 {found:?} 与第 0 组 {first:?} 不同，无法放进同一条 MP4 轨"
+    )]
+    ParamsChanged {
+        group: usize,
+        track: usize,
+        kind: StreamKind,
+        first: Shape,
+        found: Shape,
     },
 }
 
@@ -374,12 +381,12 @@ fn open_selected(
         };
         let id = stream.parameters().id();
         if !kind.accepts(id) {
-            return Err(Error::UnsupportedCodec {
+            return Err(Error::Unsupported(Unsupported::Codec {
                 group,
                 track,
                 kind,
                 codec: id.name(),
-            });
+            }));
         }
         selected.push(Selected {
             index: stream.index(),
@@ -636,17 +643,20 @@ fn open_group(
                 .zip(expected)
                 .any(|(s, e)| s.shape.kind() != e.shape.kind())
         {
-            return Err(Error::LayoutChanged { group, track });
+            return Err(Error::Unsupported(Unsupported::LayoutChanged {
+                group,
+                track,
+            }));
         }
         for (s, e) in selected.iter().zip(expected) {
             if s.shape != e.shape {
-                return Err(Error::ParamsChanged {
+                return Err(Error::Unsupported(Unsupported::ParamsChanged {
                     group,
                     track,
                     kind: s.shape.kind(),
                     first: e.shape,
                     found: s.shape,
-                });
+                }));
             }
         }
         let indices: Vec<usize> = expected.iter().map(|e| e.out).collect();

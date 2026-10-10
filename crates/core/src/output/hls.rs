@@ -24,7 +24,7 @@ use crate::ident::Fingerprint;
 use crate::selection::SelectionKey;
 use crate::verify::id3_len;
 use crate::verify::{Standalone, standalone_format};
-use crate::{Error, Unsupported, WorkDirProblem};
+use crate::{Error, HlsUnsupported, Unsupported, WorkDirProblem};
 
 const INDEX: &str = "index.m3u8";
 
@@ -56,7 +56,7 @@ pub(super) fn occupant(dir: &Path) -> Result<Occupant, Error> {
 }
 
 /// 本地 HLS 能否写出这些内容：见 [`check_layout`]；音视频分离时主播放列表必须写码率，某条轨的分片声明的时长都为 0
-/// （算不出峰值码率，见 [`TrackFiles::peak_bps`]）而来源也没写时报 [`Unsupported::HlsBandwidthUnknown`]。只看声明，
+/// （算不出峰值码率，见 [`TrackFiles::peak_bps`]）而来源也没写时报 [`HlsUnsupported::BandwidthUnknown`]。只看声明，
 /// 在合并 MP4 之前判定。
 pub(super) fn check_content(
     groups: &[Vec<GroupTrack>],
@@ -76,7 +76,9 @@ pub(super) fn check_content(
     });
     let source = selection.and_then(|s| s.variant.attributes.bandwidth);
     if tracks == 2 && !measurable && source.is_none() {
-        return Err(Error::Unsupported(Unsupported::HlsBandwidthUnknown));
+        return Err(Error::Unsupported(Unsupported::Hls(
+            HlsUnsupported::BandwidthUnknown,
+        )));
     }
     Ok(())
 }
@@ -91,7 +93,9 @@ fn check_layout(has_init: &[Vec<bool>]) -> Result<(), Error> {
         for group in has_init {
             fmp4_seen |= group[track];
             if fmp4_seen && !group[track] {
-                return Err(Error::Unsupported(Unsupported::HlsMixedInit { track }));
+                return Err(Error::Unsupported(Unsupported::Hls(
+                    HlsUnsupported::MixedInit { track },
+                )));
             }
         }
     }
@@ -521,7 +525,9 @@ mod tests {
         assert!(
             matches!(
                 rejected,
-                Err(Error::Unsupported(Unsupported::HlsMixedInit { track: 1 }))
+                Err(Error::Unsupported(Unsupported::Hls(
+                    HlsUnsupported::MixedInit { track: 1 }
+                )))
             ),
             "{rejected:?}"
         );
