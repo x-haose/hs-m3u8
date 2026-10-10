@@ -5,7 +5,6 @@ mod hls;
 mod options;
 
 use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
 
 use hs_m3u8_remux::{DiscontinuityGroup, Report, Streams, TrackSegments};
@@ -13,10 +12,10 @@ use hs_m3u8_remux::{DiscontinuityGroup, Report, Streams, TrackSegments};
 pub(crate) use self::options::ResolvedOutput;
 pub use self::options::{OutputOptions, Target};
 
-use self::commit::{Commit, Existing};
+use self::commit::{Commit, Occupant};
 use crate::error::io_error;
 use crate::selection::SelectionKey;
-use crate::workdir::{OutputKind, PendingOutput, WorkDir};
+use crate::workdir::{OutputKind, WorkDir};
 use crate::{Error, Leftover, LiveReport, Mp4Output, Output, blocking};
 
 /// 交给输出的内容。
@@ -46,42 +45,35 @@ pub(crate) struct GroupSegment {
     pub duration_us: u64,
 }
 
-/// 任务开头：收拾上次写输出留下的（见 [`commit::recover`]），再检查各输出能否写。要读写文件系统，在阻塞线程池中
-/// 调用；任务目录已存在时调用方已加锁。
+/// 任务开头：收拾上次写输出留下的（见 [`commit::recover`]），再检查各输出能否写。上次没能放回的旧输出原处是别的
+/// 东西时报 [`Error::Cleanup`]（原因为 [`Error::OutputOccupied`]），要用户处理。要读写文件系统，在阻塞线程池中调用；
+/// 任务目录已存在时调用方已加锁。
 pub(crate) fn prepare(options: &ResolvedOutput) -> Result<(), Error> {
-    commit::recover(&options.work_dir, &options.outputs)?;
+    let unsettled = commit::recover(&options.work_dir, &options.outputs)?;
+    if let Some(first) = unsettled.first() {
+        return Err(Error::Cleanup {
+            failure: Box::new(Error::OutputOccupied(first.target().to_path_buf())),
+            leftovers: unsettled.iter().map(commit::unsettled).collect(),
+        });
+    }
     check_all(options)?;
     Ok(())
 }
 
-/// 放弃任务时按任务目录里的记录收拾写到一半的输出（见 [`commit::recover`]）。要读写文件系统，在阻塞线程池中
-/// 调用；调用方已对任务目录加锁。
-pub(crate) fn recover_recorded(work_dir: &Path) -> Result<(), Error> {
-    commit::recover(work_dir, &[])
+/// 放弃任务时按任务目录里的记录收拾写到一半的输出（见 [`commit::recover`]），返回没能放回的旧输出。要读写文件系统，
+/// 在阻塞线程池中调用；调用方已对任务目录加锁。
+pub(crate) fn recover_recorded(work_dir: &Path) -> Result<Vec<Leftover>, Error> {
+    let unsettled = commit::recover(work_dir, &[])?;
+    Ok(unsettled.iter().map(commit::unsettled).collect())
 }
 
-/// 各输出能否写（见 [`check`]），顺序同各输出。
-fn check_all(options: &ResolvedOutput) -> Result<Vec<Existing>, Error> {
+/// 各输出能否写（见 [`commit::check`]），顺序同各输出。
+fn check_all(options: &ResolvedOutput) -> Result<Vec<Occupant>, Error> {
     options
         .outputs
         .iter()
-        .map(|o| check(o, options.overwrite))
+        .map(|o| commit::check(o, options.overwrite))
         .collect()
-}
-
-/// 输出能否写，能写时返回路径上已有的东西：MP4 不存在，或是文件且允许覆盖；HLS 目录见 [`hls::check`]。
-fn check(output: &PendingOutput, overwrite: bool) -> Result<Existing, Error> {
-    let target = &output.target;
-    match output.kind {
-        OutputKind::Mp4 => match fs::symlink_metadata(target) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Existing::Nothing),
-            Err(cause) => Err(io_error("检查", target)(cause)),
-            Ok(meta) if meta.is_dir() => Err(Error::OutputOccupied(target.clone())),
-            Ok(_) if !overwrite => Err(Error::OutputExists(target.clone())),
-            Ok(_) => Ok(Existing::Output),
-        },
-        OutputKind::Hls => hls::check(target, overwrite),
-    }
 }
 
 /// 写出输出，按选项删除任务目录。`bytes` 为任务目录中已完成的分片与 init 段的字节数。
@@ -106,7 +98,9 @@ pub(crate) async fn write(
     }
     Ok(Output {
         mp4,
-        hls: options.get(OutputKind::Hls).map(|o| o.target.clone()),
+        hls: options
+            .get(OutputKind::Hls)
+            .map(|o| o.target().to_path_buf()),
         segments,
         bytes,
         leftovers,
@@ -140,7 +134,7 @@ fn write_files(
         .get(OutputKind::Mp4)
         .zip(report)
         .map(|(mp4, report)| Mp4Output {
-            path: mp4.target.clone(),
+            path: mp4.target().to_path_buf(),
             report,
         });
     Ok((mp4, leftovers))
@@ -154,11 +148,11 @@ fn write_temps(
     options: &ResolvedOutput,
 ) -> Result<Option<Report>, Error> {
     let report = match options.get(OutputKind::Mp4) {
-        Some(mp4) => Some(write_mp4(&mp4.temp, streams, groups)?),
+        Some(mp4) => Some(write_mp4(mp4.temp(), streams, groups)?),
         None => None,
     };
     if let Some(hls) = options.get(OutputKind::Hls) {
-        hls::stage(&hls.temp, &options.work_dir, groups, selection)?;
+        hls::stage(hls.temp(), &options.work_dir, groups, selection)?;
     }
     Ok(report)
 }

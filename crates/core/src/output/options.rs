@@ -3,7 +3,6 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 
-use super::commit;
 use crate::Error;
 use crate::error::io_error;
 use crate::ident::Fingerprint;
@@ -75,9 +74,15 @@ impl OutputOptions {
         }
     }
 
-    /// 实际使用的任务目录：`work_dir`，未指定时见 [`OutputOptions::work_dir`]。
-    /// 未指定 `work_dir` 而输出路径没有文件名时报参数错误。
+    /// 实际使用的任务目录：`work_dir`，未指定时见 [`OutputOptions::work_dir`]；相对路径按当前目录补全为绝对路径，与
+    /// 开始任务时一样。未指定 `work_dir` 而输出路径没有文件名时报参数错误。
     pub fn resolved_work_dir(&self) -> Result<PathBuf, Error> {
+        let dir = self.work_dir_as_given()?;
+        std::path::absolute(&dir).map_err(io_error("解析", &dir))
+    }
+
+    /// 任务目录，未补全：`work_dir`，未指定时见 [`OutputOptions::work_dir`]。
+    fn work_dir_as_given(&self) -> Result<PathBuf, Error> {
         if let Some(dir) = &self.work_dir {
             return Ok(dir.clone());
         }
@@ -105,7 +110,7 @@ impl OutputOptions {
         {
             return invalid("MP4 路径是文件，不能以路径分隔符结尾", mp4);
         }
-        let work_dir = self.resolved_work_dir()?;
+        let work_dir = self.work_dir_as_given()?;
         let targets = [
             (OutputKind::Mp4, self.target.mp4()),
             (OutputKind::Hls, self.target.hls()),
@@ -143,7 +148,7 @@ impl OutputOptions {
             if target.to_str().is_none() {
                 return invalid("输出路径须为 UTF-8", path);
             }
-            outputs.push(commit::pending(kind, target, fingerprint));
+            outputs.push(PendingOutput::new(kind, target, fingerprint));
         }
         Ok(ResolvedOutput {
             outputs,
@@ -166,7 +171,7 @@ pub(crate) struct ResolvedOutput {
 
 impl ResolvedOutput {
     pub(crate) fn get(&self, kind: OutputKind) -> Option<&PendingOutput> {
-        self.outputs.iter().find(|o| o.kind == kind)
+        self.outputs.iter().find(|o| o.kind() == kind)
     }
 }
 
@@ -219,9 +224,10 @@ mod tests {
         let resolved = options.resolve().unwrap();
         let cwd = std::env::current_dir().unwrap();
         assert_eq!(resolved.work_dir, cwd.join("a/out.hsdl"));
+        assert_eq!(options.resolved_work_dir().unwrap(), resolved.work_dir);
         for (o, target) in resolved.outputs.iter().zip(["a/out.mp4", "a/out"]) {
-            assert_eq!(o.target, cwd.join(target));
-            for name in [&o.temp, &o.aside] {
+            assert_eq!(o.target(), cwd.join(target));
+            for name in [o.temp(), o.aside()] {
                 assert_eq!(name.parent(), Some(cwd.join("a").as_path()));
             }
         }

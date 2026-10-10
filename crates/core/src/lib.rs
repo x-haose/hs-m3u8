@@ -139,14 +139,19 @@ impl Engine {
     }
 
     /// 放弃任务：删除任务目录 `work_dir`（相对路径按当前目录补全），只删本库写的文件。先按其中的记录收拾写到一半
-    /// 的输出：删掉临时输出，把没能放回原处的旧输出放回（原处已有输出时删掉它，见 [`LeftoverKind::Displaced`]）。
-    /// 返回留下的东西：里面有不是本库写的文件（例如经符号链接写进去的输出）而没删干净时为一项
+    /// 的输出：删掉临时输出，没能放回原处的旧输出按 [`LeftoverKind::Displaced`] 说的放回或删掉。返回留下的东西：
+    /// 原处是别的东西而没放回的旧输出各一项；任务目录没删干净（里面有不是本库写的文件，或删除出错）时一项
     /// [`LeftoverKind::WorkDir`]。目录不存在时什么也不做。
     ///
-    /// 任务目录正被任务使用时报 [`WorkDirProblem::Locked`]，不是本库的任务目录（没有 `job.json` 且不为空）时报
-    /// [`WorkDirProblem::NotEmpty`]；收拾输出失败时报错，任务目录与记录都留着，可以重试。不在 tokio 运行时内调用会
-    /// panic。
+    /// 路径为空时报参数错误。任务目录正被任务使用时报 [`WorkDirProblem::Locked`]，不是本库的任务目录（没有 `job.json`
+    /// 且不为空）时报 [`WorkDirProblem::NotEmpty`]；收拾输出失败时报错，任务目录与记录都留着，可以重试。记录
+    /// （`outputs.json`）是另一个版本写的、无法识别时报 [`WorkDirProblem::Corrupt`]，什么也不动：不知道它记着什么就不
+    /// 收拾，可用写下它的版本放弃，或由用户删掉它（写了一半的临时输出与没能放回的旧输出以 `hsdl-` 开头，留在输出
+    /// 旁）后再放弃。不在 tokio 运行时内调用会 panic。
     pub async fn discard(&self, work_dir: &Path) -> Result<Vec<Leftover>, Error> {
+        if work_dir.as_os_str().is_empty() {
+            return Err(Error::InvalidInput("任务目录路径为空".to_owned()));
+        }
         let root = std::path::absolute(work_dir).map_err(error::io_error("解析", work_dir))?;
         job::discard(root).await
     }

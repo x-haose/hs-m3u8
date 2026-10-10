@@ -13,7 +13,7 @@ use crate::{Error, JobType, WorkDirProblem};
 
 /// 任务目录格式的版本：job.json 与 outputs.json 的字段，分片与 init 段的文件名，以及其中指纹与摘要的编码。
 /// 任何一项改变都要升；两个文件都带它，读到别的版本一律拒绝。
-pub(super) const FORMAT_VERSION: u32 = 6;
+pub(super) const FORMAT_VERSION: u32 = 7;
 
 /// 任务目录记录的任务；续传、续录时须与当前请求相符。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,7 +301,7 @@ mod tests {
         let bytes = encode(&live);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"kind":"live","format_version":6,"source_digest":"ab","selection":{"variant":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"],"audio_group":"aud","occurrence":1},"audio":{"group_id":"aud","language":"en","name":null,"occurrence":2}},"url_digest":"cd"}"#
+            r#"{"kind":"live","format_version":7,"source_digest":"ab","selection":{"variant":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"],"audio_group":"aud","occurrence":1},"audio":{"group_id":"aud","language":"en","name":null,"occurrence":2}},"url_digest":"cd"}"#
         );
         assert_eq!(decode(&bytes), Ok(live));
         let vod = JobRecord {
@@ -315,11 +315,11 @@ mod tests {
 
         for rejected in [
             r#"{"kind":"vod","format_version":1,"plan_digest":"cd"}"#,
-            r#"{"kind":"vod","format_version":5,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
-            r#"{"kind":"vod","format_version":6,"source_digest":"a","selection":null,"plan_digest":"p","extra":1}"#,
-            r#"{"format_version":6,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
-            r#"{"kind":"vod","format_version":6,"source_digest":"a","selection":null,"url_digest":"u"}"#,
-            r#"{"kind":"live","format_version":6,"source_digest":"a","selection":{"variant":{"bandwidth":1,"resolution":null,"codecs":[],"audio_group":null,"occurrence":0,"uri":"x"},"audio":null},"url_digest":"u"}"#,
+            r#"{"kind":"vod","format_version":6,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
+            r#"{"kind":"vod","format_version":7,"source_digest":"a","selection":null,"plan_digest":"p","extra":1}"#,
+            r#"{"format_version":7,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
+            r#"{"kind":"vod","format_version":7,"source_digest":"a","selection":null,"url_digest":"u"}"#,
+            r#"{"kind":"live","format_version":7,"source_digest":"a","selection":{"variant":{"bandwidth":1,"resolution":null,"codecs":[],"audio_group":null,"occurrence":0,"uri":"x"},"audio":null},"url_digest":"u"}"#,
         ] {
             assert!(decode(rejected.as_bytes()).is_err(), "{rejected}");
         }

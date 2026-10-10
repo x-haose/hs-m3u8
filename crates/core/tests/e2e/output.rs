@@ -733,8 +733,8 @@ async fn long_output_names_are_written() {
 }
 
 /// 要求覆盖、两者都要，旧的 HLS 目录里有删不掉的内容：新的 MP4 与 HLS 照常换上，旧的挪开后删不掉，记在
-/// leftovers 里，任务目录里不留记录。之后再要求覆盖时，任务开头、联网之前先删这个残留，删不掉就报它的路径；能删了
-/// 即照常覆盖。以 root 运行时权限位不起作用，造不出删不掉的情形，不测。
+/// leftovers 里，任务目录里不留记录。之后再运行时，任务开头、联网之前先删这个残留，删不掉就报它的路径；能删了即照常
+/// 运行，新输出被挪走了也不会把它放回去。以 root 运行时权限位不起作用，造不出删不掉的情形，不测。
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn old_outputs_that_cannot_be_removed_are_reported_and_removed_later() {
@@ -772,6 +772,9 @@ async fn old_outputs_that_cannot_be_removed_are_reported_and_removed_later() {
     );
     let mut req = request_to(server.url("index.m3u8"), &dir, both(&dir));
     run(req.clone()).await.unwrap();
+    let index = dir.join("out/index.m3u8");
+    let marked = std::fs::read_to_string(&index).unwrap() + "#旧的\n";
+    std::fs::write(&index, marked).unwrap();
     std::fs::set_permissions(dir.join("out/0"), std::fs::Permissions::from_mode(0o555)).unwrap();
 
     req.output.overwrite = true;
@@ -794,9 +797,14 @@ async fn old_outputs_that_cannot_be_removed_are_reported_and_removed_later() {
     }
     assert_eq!(server.hits("index.m3u8"), hits, "应在联网之前");
 
+    // 新输出被挪走后不要求覆盖再运行：旧的只删不放回
     make_writable(&old);
+    std::fs::rename(dir.join("out"), dir.join("moved")).unwrap();
+    std::fs::rename(dir.join("out.mp4"), dir.join("moved.mp4")).unwrap();
+    req.output.overwrite = false;
     run(req).await.unwrap();
     assert!(!old.exists());
+    assert!(!std::fs::read_to_string(&index).unwrap().contains("#旧的"));
 }
 
 /// 上次在换上输出的中途被杀（旧输出已挪开、新的还没装上）：再次运行时在任务开头、联网之前按任务目录里的记录
@@ -814,16 +822,18 @@ async fn interrupted_swaps_are_recovered_before_anything_else() {
     // 分片取不到而失败，留下任务目录
     assert!(matches!(run(req.clone()).await, Err(Error::Segment { .. })));
     let work = req.output.resolved_work_dir().unwrap();
+    // 保留名由输出路径与记录里的指纹定下
     let (target, temp, aside) = (
         dir.join("out.mp4"),
-        dir.join("stale.part"),
-        dir.join("stale.old"),
+        dir.join("hsdl-0123456789abcdef.mp4.part"),
+        dir.join("hsdl-0123456789abcdef.mp4.old"),
     );
     std::fs::write(&temp, "写了一半").unwrap();
     std::fs::write(&aside, "旧").unwrap();
     let record = serde_json::json!({
-        "format_version": 6,
-        "outputs": [{"kind": "mp4", "target": target, "temp": temp, "aside": aside}],
+        "format_version": 7,
+        "swapped": false,
+        "outputs": [{"kind": "mp4", "target": target, "fingerprint": "0123456789abcdef"}],
     });
     std::fs::write(work.join("outputs.json"), record.to_string()).unwrap();
     let hits = server.hits("index.m3u8");

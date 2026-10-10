@@ -21,16 +21,18 @@ async fn discarding_restores_outputs_and_removes_only_library_files() {
     let req = request(server.url("index.m3u8"), &dir);
     assert!(matches!(run(req.clone()).await, Err(Error::Segment { .. })));
     let work = req.output.resolved_work_dir().unwrap();
+    // 保留名由输出路径与记录里的指纹定下
     let (target, temp, aside) = (
         dir.join("out.mp4"),
-        dir.join("stale.part"),
-        dir.join("stale.old"),
+        dir.join("hsdl-0123456789abcdef.mp4.part"),
+        dir.join("hsdl-0123456789abcdef.mp4.old"),
     );
     std::fs::write(&temp, "写了一半").unwrap();
     std::fs::write(&aside, "旧").unwrap();
     let record = serde_json::json!({
-        "format_version": 6,
-        "outputs": [{"kind": "mp4", "target": target, "temp": temp, "aside": aside}],
+        "format_version": 7,
+        "swapped": false,
+        "outputs": [{"kind": "mp4", "target": target, "fingerprint": "0123456789abcdef"}],
     });
     std::fs::write(work.join("outputs.json"), record.to_string()).unwrap();
     std::fs::write(work.join("notes.txt"), "别人的文件").unwrap();
