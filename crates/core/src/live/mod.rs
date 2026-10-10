@@ -539,10 +539,10 @@ impl Recorder<'_> {
 fn waitable_refresh_error(error: &Error) -> Option<RefreshCause> {
     match error {
         Error::Playlist { cause, .. } => match **cause {
-            hls::Error::Syntax { .. } | hls::Error::Empty => {
+            hls::Malformed::Syntax { .. } | hls::Malformed::Empty => {
                 Some(RefreshCause::Playlist((**cause).clone()))
             }
-            _ => None,
+            hls::Malformed::NotAPlaylist | hls::Malformed::Mixed => None,
         },
         _ => error.missable().map(RefreshCause::Http),
     }

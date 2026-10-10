@@ -3,7 +3,7 @@
 use url::Url;
 
 use crate::line::{Attributes, LineKind, lines};
-use crate::{Error, SyntaxError, parse_u64, resolve};
+use crate::{Malformed, SyntaxError, parse_u64, resolve};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MasterPlaylist {
@@ -50,7 +50,7 @@ pub enum RenditionKind {
     ClosedCaptions,
 }
 
-pub(crate) fn parse(text: &str, url: &Url) -> Result<MasterPlaylist, Error> {
+pub(crate) fn parse(text: &str, url: &Url) -> Result<MasterPlaylist, Malformed> {
     let mut playlist = MasterPlaylist {
         variants: Vec::new(),
         renditions: Vec::new(),
@@ -59,7 +59,7 @@ pub(crate) fn parse(text: &str, url: &Url) -> Result<MasterPlaylist, Error> {
     let mut pending: Option<(usize, StreamInf)> = None;
 
     for line in lines(text).skip(1) {
-        let at = |kind| Error::Syntax {
+        let at = |kind| Malformed::Syntax {
             line: line.number,
             kind,
         };
@@ -103,8 +103,8 @@ pub(crate) fn parse(text: &str, url: &Url) -> Result<MasterPlaylist, Error> {
     Ok(playlist)
 }
 
-fn stream_inf_without_uri(line: usize) -> Error {
-    Error::Syntax {
+fn stream_inf_without_uri(line: usize) -> Malformed {
+    Malformed::Syntax {
         line,
         kind: SyntaxError::InfoWithoutUri {
             tag: "EXT-X-STREAM-INF",

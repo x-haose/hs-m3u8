@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use url::Url;
 
 use crate::line::{Attributes, LineKind, lines};
-use crate::{Error, SyntaxError, Unsupported, parse_seconds_us, parse_u64, resolve};
+use crate::{Error, Malformed, SyntaxError, Unsupported, parse_seconds_us, parse_u64, resolve};
 
 /// 媒体播放列表。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,7 +122,7 @@ pub(crate) fn parse(text: &str, url: &Url) -> Result<MediaPlaylist, Error> {
 
 impl Parser<'_> {
     fn tag(&mut self, line: usize, name: &str, value: Option<&str>) -> Result<(), Error> {
-        let at = |kind| Error::Syntax { line, kind };
+        let at = |kind| Error::from(Malformed::Syntax { line, kind });
         let required = |tag| value.ok_or(at(SyntaxError::MissingValue { tag }));
         match name {
             "EXTINF" => {
@@ -218,7 +218,7 @@ impl Parser<'_> {
 
     /// URI 行：用此前读到的属性与当前生效的 key、init 段组成一个分片。
     fn uri(&mut self, line: usize, uri: &str) -> Result<(), Error> {
-        let at = |kind| Error::Syntax { line, kind };
+        let at = |kind| Error::from(Malformed::Syntax { line, kind });
         let (_, duration_us) = self
             .pending
             .duration
@@ -257,7 +257,7 @@ impl Parser<'_> {
             self.last_range = None;
             return Ok(None);
         };
-        let at = |kind| Error::Syntax { line, kind };
+        let at = |kind| Error::from(Malformed::Syntax { line, kind });
         let offset = match offset {
             Some(offset) => offset,
             None => match &self.last_range {
@@ -274,9 +274,11 @@ impl Parser<'_> {
 
     /// 末尾不能留下没有 URI 行的 EXTINF 或 BYTERANGE。
     fn finish(self) -> Result<MediaPlaylist, Error> {
-        let dangling = |line, tag| Error::Syntax {
-            line,
-            kind: SyntaxError::InfoWithoutUri { tag },
+        let dangling = |line, tag| {
+            Error::from(Malformed::Syntax {
+                line,
+                kind: SyntaxError::InfoWithoutUri { tag },
+            })
         };
         if let Some((line, _)) = self.pending.duration {
             return Err(dangling(line, "EXTINF"));

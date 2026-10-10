@@ -54,7 +54,7 @@ pub enum RefreshCause {
     Http(HttpError),
     /// 内容为空或语法错误，多为服务器还没写完
     #[error(transparent)]
-    Playlist(hls::Error),
+    Playlist(hls::Malformed),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

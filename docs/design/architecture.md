@@ -69,7 +69,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 - 不连续段序号 = `EXT-X-DISCONTINUITY-SEQUENCE`（缺省 0）加上此前出现的 `EXT-X-DISCONTINUITY` 个数。
 - 媒体序号、不连续段序号、字节范围的结束位置超出 64 位整数时报错。
 - 所有 URI 按**该播放列表的最终 URL**（跟随重定向之后）解析。
-- 内容为空报 `Empty`，首行不是 `#EXTM3U` 报 `NotAPlaylist`。
+- 解析错误分两类：内容不是合法的播放列表为 `Malformed`（为空 `Empty`、首行不是 `#EXTM3U` 为 `NotAPlaylist`、主与媒体播放列表的标签混在一起为 `Mixed`、带行号的 `Syntax`），用了不支持的加密为 `Unsupported`。
 
 选轨（`select`）：
 

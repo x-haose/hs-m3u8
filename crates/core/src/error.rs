@@ -35,11 +35,11 @@ pub enum Error {
     /// HLS 而那里不是目录或目录里有不是本库写出的文件，或上级有一段是文件
     #[error("路径已被占用，覆盖也不会替换：{}", .0.display())]
     OutputOccupied(PathBuf),
-    /// 不是播放列表或语法错误
+    /// 内容不是合法的播放列表；用了不支持的加密是 [`Unsupported::Encryption`]
     #[error("解析播放列表 {} 失败：{cause}", bare_url(.url))]
     Playlist {
         url: Box<Url>,
-        cause: Box<hs_m3u8_hls::Error>,
+        cause: Box<hs_m3u8_hls::Malformed>,
     },
     /// 应为媒体播放列表的地址（变体、音频 rendition）返回了主播放列表
     #[error("{} 应为媒体播放列表，实际是主播放列表", bare_url(.url))]
@@ -223,12 +223,9 @@ pub enum Unsupported {
     EmptyPlaylist(Box<Url>),
     #[error("直播播放列表 {} 既没有 EXT-X-TARGETDURATION 也没有分片，无法确定刷新间隔", bare_url(.0))]
     NoTargetDuration(Box<Url>),
-    #[error("DRM 加密（KEYFORMAT={keyformat}）")]
-    Drm { keyformat: String },
-    #[error("SAMPLE-AES 加密")]
-    SampleAes,
-    #[error("未知的加密方式 {0}")]
-    KeyMethod(String),
+    /// DRM、SAMPLE-AES 等本库解不了的加密
+    #[error("{0}")]
+    Encryption(hs_m3u8_hls::Unsupported),
     /// 第 `track` 条轨里没有 init 段的不连续段组排在有 init 段（fMP4）的组后面：EXT-X-MAP 一直作用到下一个
     /// EXT-X-MAP，前面的 init 段会被用在后面的组上，本地 HLS 无法表示，可只输出 MP4。直播续录时服务器从 fMP4
     /// 换成 TS 会这样
