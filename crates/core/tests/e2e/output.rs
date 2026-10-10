@@ -24,29 +24,29 @@ fn put_split_vod(server: &Server) -> Url {
             }
         }
     }
-    let media = |kind: &str, a: usize, b: usize| {
-        let mut text = format!(
-            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"fmp4_a/{kind}/init.mp4\"\n"
-        );
-        for i in 0..a {
-            text += &format!("#EXTINF:1,\nfmp4_a/{kind}/seg{i}.m4s\n");
-        }
-        text += &format!("#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"fmp4_b/{kind}/init.mp4\"\n");
-        for i in 0..b {
-            text += &format!("#EXTINF:1,\nfmp4_b/{kind}/seg{i}.m4s\n");
-        }
-        text + "#EXT-X-ENDLIST\n"
-    };
-    server.put("video.m3u8", media("video", 2, 1));
-    server.put("audio.m3u8", media("audio", 3, 2));
-    server.put(
-        "master.m3u8",
-        "#EXTM3U\n\
-         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"main\",LANGUAGE=\"en\",DEFAULT=YES,URI=\"audio.m3u8\"\n\
-         #EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=320x180,CODECS=\"avc1.64000d,mp4a.40.2\",AUDIO=\"aud\"\n\
-         video.m3u8\n",
-    );
+    server.put("video.m3u8", split_media("video", 2, 1, "1"));
+    server.put("audio.m3u8", split_media("audio", 3, 2, "1"));
+    server.put("master.m3u8", SPLIT_MASTER);
     server.url("master.m3u8")
+}
+
+const SPLIT_MASTER: &str = "#EXTM3U\n\
+     #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"main\",LANGUAGE=\"en\",DEFAULT=YES,URI=\"audio.m3u8\"\n\
+     #EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=320x180,CODECS=\"avc1.64000d,mp4a.40.2\",AUDIO=\"aud\"\n\
+     video.m3u8\n";
+
+/// 分离点播一条轨的媒体播放列表：fmp4_a 的 `a` 个分片、不连续标记、fmp4_b 的 `b` 个分片，每个声明 `duration` 秒。
+fn split_media(kind: &str, a: usize, b: usize, duration: &str) -> String {
+    let mut text =
+        format!("#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"fmp4_a/{kind}/init.mp4\"\n");
+    for i in 0..a {
+        text += &format!("#EXTINF:{duration},\nfmp4_a/{kind}/seg{i}.m4s\n");
+    }
+    text += &format!("#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"fmp4_b/{kind}/init.mp4\"\n");
+    for i in 0..b {
+        text += &format!("#EXTINF:{duration},\nfmp4_b/{kind}/seg{i}.m4s\n");
+    }
+    text + "#EXT-X-ENDLIST\n"
 }
 
 fn read_playlist(path: &Path) -> Playlist {
@@ -443,6 +443,56 @@ async fn long_id3_tags_before_packed_audio_are_skipped() {
     .unwrap();
 
     assert!(hls.join("0/0.aac").is_file());
+}
+
+/// 同一条轨先 TS 后 fMP4（EXT-X-MAP 只作用于其后的分片）：本地 HLS 照常写出。
+#[tokio::test(flavor = "multi_thread")]
+async fn hls_accepts_ts_before_fmp4() {
+    let dir = test_dir("output_ts_then_fmp4");
+    let server = Server::start().await;
+    server.put("seg0.ts", fixture("ts_a/seg0.ts"));
+    server.put("init.mp4", fixture("fmp4_a/video/init.mp4"));
+    server.put("seg0.m4s", fixture("fmp4_a/video/seg0.m4s"));
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXT-X-DISCONTINUITY\n\
+         #EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\nseg0.m4s\n#EXT-X-ENDLIST\n",
+    );
+    let hls = dir.join("out");
+
+    run(request_to(
+        server.url("index.m3u8"),
+        &dir,
+        Target::Hls(hls.clone()),
+    ))
+    .await
+    .unwrap();
+
+    assert!(hls.join("0/0.ts").is_file() && hls.join("0/1.m4s").is_file());
+}
+
+/// 音频分片声明的时长都为 0，算不出峰值码率：主播放列表用来源写的 BANDWIDTH；来源也没写时报错。
+#[tokio::test(flavor = "multi_thread")]
+async fn bandwidth_falls_back_to_the_source_and_fails_without_it() {
+    let dir = test_dir("output_bandwidth");
+    let server = Server::start().await;
+    let url = put_split_vod(&server);
+    server.put("audio.m3u8", split_media("audio", 3, 2, "0"));
+
+    let hls = dir.join("out");
+    run(request_to(url.clone(), &dir, Target::Hls(hls.clone())))
+        .await
+        .unwrap();
+    let Playlist::Master(master) = read_playlist(&hls.join("index.m3u8")) else {
+        panic!("应为主播放列表");
+    };
+    assert_eq!(master.variants[0].bandwidth, Some(200_000));
+
+    server.put("master.m3u8", SPLIT_MASTER.replace("BANDWIDTH=200000,", ""));
+    match run(request_to(url, &dir, Target::Hls(dir.join("other")))).await {
+        Err(Error::Unsupported(Unsupported::HlsBandwidthUnknown)) => {}
+        other => panic!("应报算不出码率：{other:?}"),
+    }
 }
 
 /// 直播续录时服务器从 fMP4 换成了 TS，另起会话：同一条轨有的组用 init 段、有的不用，本地 HLS 无法表示，

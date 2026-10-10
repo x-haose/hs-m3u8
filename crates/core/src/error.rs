@@ -204,10 +204,14 @@ pub enum Unsupported {
     SampleAes,
     #[error("未知的加密方式 {0}")]
     KeyMethod(String),
-    /// 第 `track` 条轨有的不连续段组用 init 段（fMP4）、有的不用：EXT-X-MAP 一直作用到下一个 EXT-X-MAP，
-    /// 本地 HLS 无法表示，可只输出 MP4。直播续录时服务器换了格式会这样
-    #[error("第 {track} 条轨有的段用 init 段（fMP4）、有的不用，本地 HLS 无法表示")]
+    /// 第 `track` 条轨里没有 init 段的不连续段组排在有 init 段（fMP4）的组后面：EXT-X-MAP 一直作用到下一个
+    /// EXT-X-MAP，前面的 init 段会被用在后面的组上，本地 HLS 无法表示，可只输出 MP4。直播续录时服务器从 fMP4
+    /// 换成 TS 会这样
+    #[error("第 {track} 条轨在 fMP4 的段之后又有不用 init 段的段，本地 HLS 无法表示")]
     HlsMixedInit { track: usize },
+    /// 本地 HLS 的主播放列表必须写码率（BANDWIDTH），而分片声明的时长都为 0 算不出，来源也没写
+    #[error("分片声明的时长都为 0、来源也没写 BANDWIDTH，算不出本地 HLS 主播放列表必填的码率")]
+    HlsBandwidthUnknown,
     #[error("同一不连续段内 EXT-X-MAP 发生变化（第 {track} 条轨，不连续段 {discontinuity}）")]
     InitChangesWithinGroup { track: usize, discontinuity: u64 },
     #[error("各轨的不连续段不一致：第 0 条轨 {first:?}，第 {track} 条轨 {found:?}")]
