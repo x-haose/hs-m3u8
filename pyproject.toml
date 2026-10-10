@@ -54,7 +54,7 @@ generate-init-py = true
 line-length = 120
 target-version = "py312"
 src = ["python", "tests/python"]
-# 生成的文件不格式化、不检查（类型检查照常检查它们）；src/ 是 0.1.x 留在本地的示例，不属于本项目
+# 生成的文件不格式化、不检查（类型检查照常检查它们）；src/ 下是 0.1.x 留在本地、未纳入版本库的文件
 extend-exclude = ["python/hs_m3u8/__init__.py", "python/hs_m3u8/_native/__init__.pyi", "src"]
 
 [tool.ruff.lint]
