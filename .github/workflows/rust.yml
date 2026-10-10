@@ -60,6 +60,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # Python 开发环境（.venv，Python 3.12 即支持的最低版本）：绑定 crate 的构建脚本要用，Python 的检查与测试也用
+      - uses: astral-sh/setup-uv@v10
+        with:
+          version: "0.13.0"
+
+      - name: Python 开发环境
+        run: uv sync --locked
+        env:
+          UV_PYTHON: "3.12"
+
       # 检查项定义在 Makefile 的 rs_* 目标里。依赖图、许可证与覆盖率与平台无关，只在 Linux 上查
       - name: 安装 cargo-deny 与 cargo-llvm-cov（Linux）
         if: runner.os == 'Linux'
@@ -69,14 +79,20 @@ jobs:
 
       - name: 全部检查（Linux）
         if: runner.os == 'Linux'
-        run: make rs_check
+        run: make rs_check py_check
+
+      # abi3 的 wheel 在更新的 Python 上也要能用
+      - name: 最新版 Python 上的测试（Linux）
+        if: runner.os == 'Linux'
+        run: make py_test VENV=.venv-latest UV_PYTHON=3.15
 
       - name: 格式、clippy、测试（macOS）
         if: runner.os == 'macOS'
-        run: make rs_fmt rs_clippy rs_test
+        run: make rs_fmt rs_clippy rs_test py_test
 
       # Windows 的 make 只在 MSYS2 里，而 MSYS2 的 link.exe 会遮住 MSVC 的链接器，所以直接运行与 Makefile 的
-      # rs_fmt、rs_clippy、rs_test 相同的命令。每条命令单独一步：PowerShell 里一步跑几条命令时，只有最后一条的退出码算数
+      # rs_fmt、rs_clippy、rs_test、py_test 相同的命令。每条命令单独一步：PowerShell 里一步跑几条命令时，只有最后一条的
+      # 退出码算数
       - name: 格式（Windows）
         if: runner.os == 'Windows'
         run: cargo fmt --all --check
@@ -84,7 +100,19 @@ jobs:
       - name: clippy（Windows）
         if: runner.os == 'Windows'
         run: cargo clippy --workspace --all-targets -- -D warnings
+        env:
+          PYO3_PYTHON: ${{ github.workspace }}\.venv\Scripts\python.exe
 
       - name: 测试（Windows）
         if: runner.os == 'Windows'
         run: cargo test --workspace
+        env:
+          PYO3_PYTHON: ${{ github.workspace }}\.venv\Scripts\python.exe
+
+      - name: Python 绑定构建（Windows）
+        if: runner.os == 'Windows'
+        run: uv run --no-sync maturin develop --uv
+
+      - name: Python 测试（Windows）
+        if: runner.os == 'Windows'
+        run: uv run --no-sync pytest
