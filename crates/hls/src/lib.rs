@@ -15,7 +15,8 @@ mod select;
 pub use master::{MasterPlaylist, Rendition, RenditionKind, Resolution, Variant};
 pub use media::{ByteRange, InitSection, MediaPlaylist, PlaylistType, Segment, SegmentKey};
 pub use select::{
-    AudioChoice, Preference, SelectError, SelectedAudio, Selection, VariantChoice, select,
+    AudioChoice, Preference, SelectError, SelectedAudio, Selection, VariantChoice,
+    audio_renditions, select,
 };
 pub use url::Url;
 

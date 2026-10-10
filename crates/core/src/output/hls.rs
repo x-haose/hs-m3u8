@@ -323,10 +323,11 @@ fn media_playlist(groups: &[PlaylistGroup], prefix: &str) -> String {
 /// 音频组固定为 `audio`。名称与语言照抄来源，带有引号或换行（带引号的字符串里不允许）
 /// 时不用：没有可用的名称时名称为 `audio`，语言不写。
 fn master_playlist(selection: &SelectionKey, bandwidth: Option<u64>) -> String {
-    let audio = selection
+    let audio = &selection
         .audio
         .as_ref()
-        .expect("两条轨时第 1 条是独立的音频 rendition");
+        .expect("两条轨时第 1 条是独立的音频 rendition")
+        .attributes;
     let quotable = |text: &&str| !text.contains(['"', '\r', '\n']);
     let language = audio.language.as_deref().filter(quotable);
     let name = audio
@@ -436,7 +437,7 @@ mod tests {
     use hs_m3u8_hls::{Playlist, Resolution, Url, parse};
 
     use super::*;
-    use crate::selection::{RenditionKey, VariantAttributes, VariantKey};
+    use crate::selection::{AudioAttributes, AudioKey, VariantAttributes, VariantKey};
 
     fn url() -> Url {
         Url::parse("file:///out/index.m3u8").unwrap()
@@ -508,10 +509,13 @@ mod tests {
                 },
                 occurrence: 0,
             },
-            audio: Some(RenditionKey {
-                group_id: "source-group".into(),
-                language: language.map(str::to_owned),
-                name: name.map(str::to_owned),
+            audio: Some(AudioKey {
+                attributes: AudioAttributes {
+                    group_id: "source-group".into(),
+                    language: language.map(str::to_owned),
+                    name: name.map(str::to_owned),
+                },
+                occurrence: 0,
             }),
         }
     }

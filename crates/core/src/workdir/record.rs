@@ -6,12 +6,14 @@ use hs_m3u8_hls::Resolution;
 use hs_m3u8_remux::Streams;
 use serde::{Deserialize, Serialize};
 
-use crate::selection::{RenditionKey, SelectionKey, VariantAttributes, VariantKey, track_streams};
+use crate::selection::{
+    AudioAttributes, AudioKey, SelectionKey, VariantAttributes, VariantKey, track_streams,
+};
 use crate::{Error, JobType, WorkDirProblem};
 
 /// 任务目录格式的版本：job.json 的字段，分片与 init 段的文件名，以及其中指纹与摘要的编码。任何一项
 /// 改变都要升；读到别的版本一律拒绝。
-const FORMAT_VERSION: u32 = 4;
+const FORMAT_VERSION: u32 = 5;
 
 /// 任务目录记录的任务；续传、续录时须与当前请求相符。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -145,6 +147,7 @@ struct RenditionFile {
     group_id: String,
     language: Option<String>,
     name: Option<String>,
+    occurrence: usize,
 }
 
 /// 先只读版本号：不认识的版本直接拒绝，不按当前格式去解释它。
@@ -218,9 +221,10 @@ impl From<&SelectionKey> for SelectionFile {
                 occurrence: key.variant.occurrence,
             },
             audio: key.audio.as_ref().map(|a| RenditionFile {
-                group_id: a.group_id.clone(),
-                language: a.language.clone(),
-                name: a.name.clone(),
+                group_id: a.attributes.group_id.clone(),
+                language: a.attributes.language.clone(),
+                name: a.attributes.name.clone(),
+                occurrence: a.occurrence,
             }),
         }
     }
@@ -241,10 +245,13 @@ impl From<SelectionFile> for SelectionKey {
                 },
                 occurrence: v.occurrence,
             },
-            audio: file.audio.map(|a| RenditionKey {
-                group_id: a.group_id,
-                language: a.language,
-                name: a.name,
+            audio: file.audio.map(|a| AudioKey {
+                attributes: AudioAttributes {
+                    group_id: a.group_id,
+                    language: a.language,
+                    name: a.name,
+                },
+                occurrence: a.occurrence,
             }),
         }
     }
@@ -271,10 +278,13 @@ mod tests {
                     },
                     occurrence: 1,
                 },
-                audio: Some(RenditionKey {
-                    group_id: "aud".into(),
-                    language: Some("en".into()),
-                    name: None,
+                audio: Some(AudioKey {
+                    attributes: AudioAttributes {
+                        group_id: "aud".into(),
+                        language: Some("en".into()),
+                        name: None,
+                    },
+                    occurrence: 2,
                 }),
             }),
             kind: RecordKind::Live {
@@ -284,7 +294,7 @@ mod tests {
         let bytes = encode(&live);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"kind":"live","format_version":4,"source_digest":"ab","selection":{"variant":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"],"audio_group":"aud","occurrence":1},"audio":{"group_id":"aud","language":"en","name":null}},"url_digest":"cd"}"#
+            r#"{"kind":"live","format_version":5,"source_digest":"ab","selection":{"variant":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"],"audio_group":"aud","occurrence":1},"audio":{"group_id":"aud","language":"en","name":null,"occurrence":2}},"url_digest":"cd"}"#
         );
         assert_eq!(decode(&bytes), Ok(live));
         let vod = JobRecord {
@@ -298,11 +308,11 @@ mod tests {
 
         for rejected in [
             r#"{"kind":"vod","format_version":1,"plan_digest":"cd"}"#,
-            r#"{"kind":"vod","format_version":3,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
-            r#"{"kind":"vod","format_version":4,"source_digest":"a","selection":null,"plan_digest":"p","extra":1}"#,
-            r#"{"format_version":4,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
-            r#"{"kind":"vod","format_version":4,"source_digest":"a","selection":null,"url_digest":"u"}"#,
-            r#"{"kind":"live","format_version":4,"source_digest":"a","selection":{"variant":{"bandwidth":1,"resolution":null,"codecs":[],"audio_group":null,"occurrence":0,"uri":"x"},"audio":null},"url_digest":"u"}"#,
+            r#"{"kind":"vod","format_version":4,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
+            r#"{"kind":"vod","format_version":5,"source_digest":"a","selection":null,"plan_digest":"p","extra":1}"#,
+            r#"{"format_version":5,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
+            r#"{"kind":"vod","format_version":5,"source_digest":"a","selection":null,"url_digest":"u"}"#,
+            r#"{"kind":"live","format_version":5,"source_digest":"a","selection":{"variant":{"bandwidth":1,"resolution":null,"codecs":[],"audio_group":null,"occurrence":0,"uri":"x"},"audio":null},"url_digest":"u"}"#,
         ] {
             assert!(decode(rejected.as_bytes()).is_err(), "{rejected}");
         }
