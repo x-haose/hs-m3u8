@@ -179,12 +179,12 @@ impl LiveTrack {
         max_us.is_some_and(|max| recorded >= max)
     }
 
-    /// 出现了 EXT-X-ENDLIST，或这条轨不再刷新、不再处理（判定期间看起来已结束、服务器前后矛盾、编码器重启）。
     /// 最近一次刷新失败的原因；之后刷新成功即清空。
     pub(super) fn last_refresh_error(&self) -> Option<&Error> {
         self.last_refresh_error.as_ref()
     }
 
+    /// 出现了 EXT-X-ENDLIST，或这条轨不再刷新、不再处理（判定期间看起来已结束、服务器前后矛盾、编码器重启）。
     pub(super) fn is_ended(&self) -> bool {
         matches!(self.refresh, Refresh::Ended)
     }
