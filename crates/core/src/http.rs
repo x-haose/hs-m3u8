@@ -7,14 +7,14 @@ use std::time::Duration;
 use hs_m3u8_hls::ByteRange;
 use reqwest::StatusCode;
 use reqwest::header::{RANGE, RETRY_AFTER};
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::hooks::{HookKind, Hooks, Purpose, RequestParts, run_hook};
 use crate::ident::bare_url;
 use crate::request::{HttpOptions, RetryPolicy, check_header};
-use crate::{Error, HttpError, Integrity, Progress};
+use crate::{Error, HttpError, Integrity};
 
 /// 请求是否计入引擎的在途上限。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,10 +32,13 @@ pub(crate) struct Http {
     hooks: Arc<dyn Hooks>,
     /// 引擎内所有任务共享；[`Permit::Required`] 的每次尝试从发出请求到读完响应体占用一个名额
     requests: Arc<Semaphore>,
-    /// 读到的响应体字节计入 [`Progress::received`]；探测时没有进度，为 None
-    progress: Option<watch::Sender<Progress>>,
+    /// 每读到一块响应体，以它的字节数调用；不需要计数（探测）时为 None
+    on_received: Option<OnReceived>,
     jitter: std::hash::RandomState,
 }
+
+/// 读到响应体时的回调，参数为这一块的字节数。
+pub(crate) type OnReceived = Box<dyn Fn(u64) + Send + Sync>;
 
 /// 一次成功的请求。
 pub(crate) struct Response {
@@ -49,7 +52,7 @@ impl Http {
         options: &HttpOptions,
         hooks: Arc<dyn Hooks>,
         requests: Arc<Semaphore>,
-        progress: Option<watch::Sender<Progress>>,
+        on_received: Option<OnReceived>,
     ) -> Result<Self, Error> {
         let t = options.timeouts;
         let mut builder = reqwest::Client::builder()
@@ -78,7 +81,7 @@ impl Http {
             retry: options.retry,
             hooks,
             requests,
-            progress,
+            on_received,
             jitter: std::hash::RandomState::new(),
         })
     }
@@ -230,8 +233,8 @@ impl Http {
                 chunk = response.chunk() => chunk.map_err(|e| http_error(url, classify(e)))?,
             };
             let Some(chunk) = chunk else { break };
-            if let Some(progress) = &self.progress {
-                progress.send_modify(|p| p.received += chunk.len() as u64);
+            if let Some(on_received) = &self.on_received {
+                on_received(chunk.len() as u64);
             }
             body.extend_from_slice(&chunk);
         }
