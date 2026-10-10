@@ -41,7 +41,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 pub use error::{
-    Error, HlsUnsupported, HttpError, Integrity, JobType, StallError, Unsupported, WorkDirProblem,
+    Error, HlsUnsupported, HttpError, HttpFailure, Integrity, JobType, StallError, Unsupported,
+    WorkDirProblem,
 };
 pub use hooks::{HookError, HookKind, Hooks, NoHooks, Purpose, RequestParts};
 pub use info::{AudioInfo, MasterInfo, Selected, TrackInfo, VariantInfo};

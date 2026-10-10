@@ -10,7 +10,7 @@ use crate::fetch::Item;
 use crate::ident::Fingerprint;
 use crate::workdir::SessionStart;
 use crate::workdir::{Layout, SegmentName};
-use crate::{Error, HttpError, LiveEnd, MissReason, Missed, Unsupported};
+use crate::{Error, HttpFailure, LiveEnd, MissReason, Missed, Unsupported};
 
 /// 媒体序号回退且与上次窗口没有重叠，连续出现这么多次才认定编码器重启；一次多半是 CDN 返回了旧缓存。
 const RESTART_CONFIRMATIONS: u32 = 2;
@@ -100,6 +100,8 @@ pub(super) struct Update {
     pub expired: Option<Missed>,
     /// init 段取不到、记为缺失的新分片，每项一个分片
     pub init_failed: Vec<Missed>,
+    /// `init_failed` 中最后一个取不到的原因
+    pub init_failure: Option<HttpFailure>,
     /// 出现了要录的新分片（排入下载或记为缺失）
     pub any_new: bool,
     /// 窗口有变化（出现新分片或窗口前移）；决定下次刷新的时刻
@@ -115,6 +117,7 @@ impl Update {
             init_files: Vec::new(),
             expired: None,
             init_failed: Vec::new(),
+            init_failure: None,
             any_new: false,
             changed: false,
             ended,
@@ -132,7 +135,7 @@ struct ReadyInit {
 /// 重试后仍取不到的新 init 段；引用它的新分片记为缺失。
 struct FailedInit {
     init: InitSection,
-    kind: HttpError,
+    failure: HttpFailure,
 }
 
 /// 一份播放列表中各分片的身份与内容已知的 init 段；处理完后成为下一次比对的基准。
@@ -147,7 +150,7 @@ enum InitState {
     Absent,
     Ready(Fingerprint),
     /// 取不到
-    Failed(HttpError),
+    Failed(HttpFailure),
 }
 
 /// 一条轨的窗口状态。
@@ -393,14 +396,15 @@ impl Window {
         let init = match init {
             InitState::Absent => None,
             InitState::Ready(fingerprint) => Some(fingerprint),
-            InitState::Failed(kind) => {
+            InitState::Failed(failure) => {
                 update.init_failed.push(Missed {
                     session: scope.session,
                     track: scope.track,
                     first: segment.sequence,
                     last: segment.sequence,
-                    reason: MissReason::InitFailed(kind),
+                    reason: MissReason::InitFailed(failure.kind.clone()),
                 });
+                update.init_failure = Some(failure);
                 return Ok(());
             }
         };
@@ -455,12 +459,12 @@ fn new_segment_init(
     if let Some((_, fingerprint)) = inits.iter().find(|(i, _)| i == init) {
         return InitState::Ready(*fingerprint);
     }
-    let kind = failed
+    let failure = failed
         .iter()
         .find(|f| f.init == *init)
-        .map(|f| f.kind.clone())
+        .map(|f| f.failure.clone())
         .expect("新分片引用的新 init 段不是拉到了就是记了失败");
-    InitState::Failed(kind)
+    InitState::Failed(failure)
 }
 
 /// 与上一份播放列表比对：重叠的分片身份须一致，且给出一致的不连续段编号偏移。
@@ -538,7 +542,7 @@ fn split_fetched(fetched: NewInits) -> Result<(Vec<ReadyInit>, Vec<FailedInit>),
                 data,
             }),
             Err(e) => match e.missable() {
-                Some(kind) => failed.push(FailedInit { init, kind }),
+                Some(failure) => failed.push(FailedInit { init, failure }),
                 None => return Err(e),
             },
         }

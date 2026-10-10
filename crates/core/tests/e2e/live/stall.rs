@@ -3,7 +3,9 @@
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use hs_m3u8_core::{Error, HttpError, LiveEnd, MissReason, RefreshCause, StallCause, StallError};
+use hs_m3u8_core::{
+    Error, HttpError, HttpFailure, LiveEnd, MissReason, RefreshCause, StallCause, StallError,
+};
 
 use super::{
     STALL, expected_split, live_request, missed, playlist, playlist_with_target, put_long,
@@ -27,10 +29,10 @@ async fn removed_playlist_ends_recording() {
     let mut progress = job.control().progress();
     progress.wait_for(|p| p.segments_total == 2).await.unwrap();
     server.remove("live.m3u8");
-    let gone = Some(RefreshCause::Http {
+    let gone = Some(RefreshCause::Http(HttpFailure {
         kind: HttpError::Status(404),
         retry_after: None,
-    });
+    }));
     progress
         .wait_for(|p| p.refresh_errors == [gone.clone()])
         .await
@@ -149,10 +151,10 @@ async fn one_failing_track_fails_the_recording() {
         } => assert!(
             matches!(
                 cause,
-                RefreshCause::Http {
+                RefreshCause::Http(HttpFailure {
                     kind: HttpError::Status(500),
                     ..
-                }
+                })
             ),
             "{cause}"
         ),
@@ -199,7 +201,10 @@ async fn a_track_that_records_nothing_fails_the_recording() {
             err,
             Error::LiveStalled {
                 track: 1,
-                cause: StallError::Unrecordable(HttpError::Status(404))
+                cause: StallError::Unrecordable(HttpFailure {
+                    kind: HttpError::Status(404),
+                    retry_after: None
+                })
             }
         ),
         "{err}"
@@ -207,14 +212,16 @@ async fn a_track_that_records_nothing_fails_the_recording() {
     assert!(!err.retryable());
 }
 
-/// 分片一直 503（CDN 临时故障）：一个都录不到，任务失败，但可以稍后重试（续录）。
+/// 分片一直 503（CDN 临时故障，要求一小时后再试）：一个都录不到，任务失败，但可以稍后重试（续录），带上服务器
+/// 要求的等待。
 #[tokio::test(flavor = "multi_thread")]
 async fn segments_that_keep_failing_temporarily_are_retryable() {
     let dir = test_dir("live_segments_503");
     let server = Server::start().await;
     let windows: Vec<String> = (0..100u64).map(|n| playlist(&[n, n + 1], false)).collect();
     for n in 0..=100u64 {
-        server.status(&format!("seg{n}.ts"), StatusCode::SERVICE_UNAVAILABLE);
+        let path = format!("seg{n}.ts");
+        server.status_retry_after(&path, StatusCode::SERVICE_UNAVAILABLE, "3600");
     }
     server.put_sequence("live.m3u8", windows);
 
@@ -231,7 +238,44 @@ async fn segments_that_keep_failing_temporarily_are_retryable() {
             err,
             Error::LiveStalled {
                 track: 0,
-                cause: StallError::Unrecordable(HttpError::Status(503))
+                cause: StallError::Unrecordable(HttpFailure {
+                    kind: HttpError::Status(503),
+                    ..
+                })
+            }
+        ),
+        "{err}"
+    );
+    assert!(err.retryable());
+    assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
+}
+
+/// 刷新一直拿到空内容（如源站重启中）：等到停滞，任务失败；录制时已当作暂时故障，可以稍后续录。
+#[tokio::test(flavor = "multi_thread")]
+async fn playlists_that_stay_empty_stall_retryably() {
+    let dir = test_dir("live_stays_empty");
+    let server = Server::start().await;
+    put_long(&server, "", &[0]);
+    server.put("live.m3u8", playlist(&[0], false));
+    let job = engine()
+        .start(live_request(
+            server.url("live.m3u8"),
+            &dir,
+            Duration::from_millis(500),
+        ))
+        .unwrap();
+    let mut progress = job.control().progress();
+    progress.wait_for(|p| p.segments_done == 1).await.unwrap();
+    server.put("live.m3u8", "");
+
+    let err = job.wait().await.unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::LiveStalled {
+                track: 0,
+                cause: StallError::RefreshFailed(RefreshCause::Empty),
             }
         ),
         "{err}"

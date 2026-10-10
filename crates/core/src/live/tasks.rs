@@ -16,7 +16,7 @@ use crate::error::io_error;
 use crate::fetch::{self, Direct};
 use crate::hooks::Hooks;
 use crate::http::{Http, Permit};
-use crate::{Error, HttpError, blocking, resolve};
+use crate::{Error, HttpError, HttpFailure, blocking, resolve};
 
 /// 一个后台任务的结果。
 pub(super) enum Done {
@@ -154,7 +154,10 @@ async fn check(
         let data = match direct.fetch(track, &segment, cancel).await {
             Ok(data) => data,
             Err(e) => match e.missable() {
-                Some(HttpError::Status(404 | 410)) => continue,
+                Some(HttpFailure {
+                    kind: HttpError::Status(404 | 410),
+                    ..
+                }) => continue,
                 Some(_) => {
                     transient = Some(e);
                     continue;

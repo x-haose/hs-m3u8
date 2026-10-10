@@ -12,7 +12,7 @@ use super::session::Start;
 use super::window::{InitsToFetch, NewInits, Scope, Update, Window};
 use crate::ident::Fingerprint;
 use crate::{
-    Error, HttpError, LiveEnd, MissReason, RefreshCause, StallCause, StallError, Unsupported,
+    Error, HttpError, HttpFailure, LiveEnd, RefreshCause, StallCause, StallError, Unsupported,
 };
 
 /// 两次刷新之间的最短间隔，防止 TARGETDURATION 为 0 或极小时空转。
@@ -88,7 +88,7 @@ pub(super) struct LiveTrack {
     /// 排入下载、还没有结果的分片数
     outstanding: usize,
     /// 最近一次取不到分片或 init 段的原因
-    last_download_failure: Option<HttpError>,
+    last_download_failure: Option<HttpFailure>,
     /// 最近一次刷新失败的原因；刷新成功即清空
     last_refresh_error: Option<RefreshCause>,
 }
@@ -231,7 +231,7 @@ impl LiveTrack {
     pub(super) fn refresh_failed(&mut self, cause: RefreshCause, now: Instant) {
         let wait = self
             .half_target()
-            .max(asked_wait(&cause).unwrap_or_default());
+            .max(cause.retry_after().unwrap_or_default());
         self.refresh = now
             .checked_add(wait)
             .map_or(Refresh::Suspended, Refresh::Due);
@@ -333,16 +333,8 @@ impl LiveTrack {
         if update.any_new {
             self.last_listed = now;
         }
-        let failure = update
-            .init_failed
-            .iter()
-            .rev()
-            .find_map(|m| match &m.reason {
-                MissReason::InitFailed(kind) => Some(kind),
-                _ => None,
-            });
-        if let Some(kind) = failure {
-            self.last_download_failure = Some(kind.clone());
+        if let Some(failure) = &update.init_failure {
+            self.last_download_failure = Some(failure.clone());
         }
         self.outstanding += update.items.len();
         self.schedule(update.changed, update.ended, started, now);
@@ -356,9 +348,9 @@ impl LiveTrack {
     }
 
     /// 本轨排入下载的一个分片取不到，记为缺失。
-    pub(super) fn segment_missed(&mut self, kind: HttpError) {
+    pub(super) fn segment_missed(&mut self, failure: HttpFailure) {
         self.outstanding -= 1;
-        self.last_download_failure = Some(kind);
+        self.last_download_failure = Some(failure);
     }
 
     /// 处理完一份播放列表后安排下次刷新（RFC 8216 6.3.4）：有变化后从开始拉取起至少等一个目标时长，没变化时等半个；
@@ -370,7 +362,7 @@ impl LiveTrack {
         let asked = self
             .last_refresh_error
             .as_ref()
-            .and_then(asked_wait)
+            .and_then(RefreshCause::retry_after)
             .and_then(|wait| now.checked_add(wait));
         self.refresh = if ended {
             Refresh::Ended
@@ -425,16 +417,16 @@ impl LiveTrack {
             return Err(StallError::RefreshPending);
         }
         let ended = match self.last_refresh_error.take() {
-            Some(RefreshCause::Http {
+            Some(RefreshCause::Http(HttpFailure {
                 kind: HttpError::Status(status @ (404 | 410)),
                 ..
-            }) => StallCause::PlaylistGone(status),
+            })) => StallCause::PlaylistGone(status),
             Some(cause) => return Err(StallError::RefreshFailed(cause)),
             None if self.is_live(now) => {
-                let kind = self.last_download_failure.clone().expect(
+                let failure = self.last_download_failure.clone().expect(
                     "仍在列出新分片、没有在途的下载又没有录到：新分片都记了缺失，有失败原因",
                 );
-                return Err(StallError::Unrecordable(kind));
+                return Err(StallError::Unrecordable(failure));
             }
             None => StallCause::NoNewSegments,
         };
@@ -471,14 +463,6 @@ fn joined(older: &MediaPlaylist, newer: &MediaPlaylist) -> Option<MediaPlaylist>
         segments: segments.into_values().cloned().collect(),
         ..newer.clone()
     })
-}
-
-/// 服务器在刷新失败时要求的等待。
-fn asked_wait(cause: &RefreshCause) -> Option<Duration> {
-    match cause {
-        RefreshCause::Http { retry_after, .. } => *retry_after,
-        RefreshCause::Empty | RefreshCause::Syntax { .. } => None,
-    }
 }
 
 fn identity(segment: &Segment) -> Fingerprint {

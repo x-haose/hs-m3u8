@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::info::Selected;
 use crate::remux::Report;
-use crate::{HttpError, hls};
+use crate::{HttpError, HttpFailure, hls};
 
 /// 任务进度快照。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -50,19 +50,34 @@ impl Progress {
 /// 直播一次刷新失败的原因；这类失败等下次刷新，不使任务立即失败。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RefreshCause {
-    /// 取不到：404/410，或重试后仍失败的临时故障。`retry_after` 为服务器在 429/503 中要求（Retry-After）的最短
-    /// 等待，下次刷新不早于它
-    #[error("{kind}")]
-    Http {
-        kind: HttpError,
-        retry_after: Option<Duration>,
-    },
+    /// 取不到：404/410，或重试后仍失败的临时故障
+    #[error(transparent)]
+    Http(HttpFailure),
     /// 内容为空，多为服务器还没写完
     #[error("播放列表为空")]
     Empty,
     /// 语法错误，多为服务器还没写完
     #[error("第 {line} 行：{kind}")]
     Syntax { line: usize, kind: hls::SyntaxError },
+}
+
+impl RefreshCause {
+    /// 服务器要求的最短等待，下次刷新不早于它。
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            RefreshCause::Http(failure) => failure.retry_after,
+            RefreshCause::Empty | RefreshCause::Syntax { .. } => None,
+        }
+    }
+
+    /// 一直这样失败到停滞（[`crate::StallError::RefreshFailed`]）时，稍后续录可能成功：取不到的看原因；内容不完整
+    /// 的录制时已当作暂时故障等下次刷新，同样可以。
+    pub fn retryable(&self) -> bool {
+        match self {
+            RefreshCause::Http(failure) => failure.kind.retryable(),
+            RefreshCause::Empty | RefreshCause::Syntax { .. } => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
