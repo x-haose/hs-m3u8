@@ -181,10 +181,17 @@ impl Error {
         }
     }
 
-    /// 服务器在 429/503 中要求（Retry-After）的最短等待；其他错误为 None。
+    /// 服务器在 429/503 中要求（Retry-After）的最短等待，像 [`Error::retryable`] 一样看包着的原因；没有这样的
+    /// 要求时为 None。
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
             Error::Http { retry_after, .. } => *retry_after,
+            Error::Segment { cause, .. } | Error::Key { cause, .. } => cause.retry_after(),
+            Error::Cleanup { failure, .. } => failure.retry_after(),
+            Error::LiveStalled {
+                cause: StallError::RefreshFailed(error),
+                ..
+            } => error.retry_after(),
             _ => None,
         }
     }
