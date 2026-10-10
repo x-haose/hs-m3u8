@@ -121,7 +121,12 @@ impl OutputOptions {
             if !ends_with_file_name(path) {
                 return invalid("路径须以文件名结尾", path);
             }
-            absolute.push(absolute_path(path)?);
+            let completed = absolute_path(path)?;
+            // Windows 补全时去掉最后一段结尾的点与空格：`D:\...` 补全成没有文件名的 `D:\`
+            if completed.file_name().is_none() {
+                return invalid("路径须以文件名结尾", path);
+            }
+            absolute.push(completed);
         }
         let literal: Vec<PathBuf> = absolute.iter().map(|p| lexical(p)).collect();
         for (i, a) in literal.iter().enumerate() {
@@ -240,5 +245,14 @@ mod tests {
                 assert_eq!(name.parent(), Some(cwd.join("a").as_path()));
             }
         }
+    }
+
+    /// 最后一段只有点：Windows 补全时去掉结尾的点，剩下没有文件名的盘符根，报参数错误，不在后面 panic。
+    #[cfg(windows)]
+    #[test]
+    fn paths_that_lose_their_file_name_when_completed_are_rejected() {
+        let mut options = OutputOptions::new(Target::Mp4(r"D:\...".into()));
+        options.work_dir = Some(r"C:\work".into());
+        assert!(matches!(options.resolve(), Err(Error::InvalidInput(_))));
     }
 }
