@@ -7,7 +7,7 @@
 //! <轨道>/init-<指纹>.mp4    fMP4 的 init 段，文件名同任务目录
 //! ```
 //!
-//! 先在 `<目录>.part` 里备齐，最后改名为目标目录。只放各轨都有的不连续段组（与 MP4 相同），组与组之间加
+//! 先在准备目录里备齐，最后改名为目标目录。只放各轨都有的不连续段组（与 MP4 相同），组与组之间加
 //! EXT-X-DISCONTINUITY；组内缺失的分片不标出，保留原时间戳，与 MP4 一致：缺失往往只在一条轨上，只给一条轨
 //! 加不连续标记会让各轨的不连续段编号对不上（RFC 8216 6.2.4 要求各轨一致）。
 
@@ -16,7 +16,6 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::Path;
 
-use super::options::sibling;
 use super::{GroupTrack, io_error};
 use crate::ident::Fingerprint;
 use crate::selection::SelectionKey;
@@ -55,40 +54,40 @@ pub(super) fn check(dir: &Path, overwrite: bool) -> Result<(), Error> {
     }
 }
 
-/// 写出 HLS 目录 `target`；`work_dir` 为分片所在的任务目录，用于报告目录内容无法识别。
-pub(super) fn write(
-    target: &Path,
+/// 在准备目录 `stage` 里备齐 HLS 输出；`work_dir` 为分片所在的任务目录，用于报告目录内容无法识别。上次中断
+/// 留下的同名准备目录全是本库写出的文件才删，否则报已存在、什么也不动；备齐失败时删掉 `stage`。
+pub(super) fn stage(
+    stage: &Path,
     work_dir: &Path,
     groups: &[Vec<GroupTrack>],
     selection: Option<&SelectionKey>,
-    overwrite: bool,
 ) -> Result<(), Error> {
-    let name = target.file_name().expect("校验过：输出路径都有文件名");
-    let stage = sibling(target, name, ".part");
-    remove_stale_stage(&stage)?;
-    if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+    remove_stale_stage(stage)?;
+    if let Some(parent) = stage.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent).map_err(io_error("创建", parent))?;
     }
-    fs::create_dir(&stage).map_err(io_error("创建", &stage))?;
-    let written = fill(&stage, work_dir, groups, selection).and_then(|()| {
-        // 开始时检查过；备齐期间目标可能被别人占用，替换前再查一次
-        check(target, overwrite)?;
-        match fs::remove_dir_all(target) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(io_error("删除", target)(e)),
-            _ => fs::rename(&stage, target).map_err(io_error("重命名", &stage)),
-        }
-    });
-    written.map_err(|failure| match fs::remove_dir_all(&stage) {
+    fs::create_dir(stage).map_err(io_error("创建", stage))?;
+    fill(stage, work_dir, groups, selection).map_err(|failure| match fs::remove_dir_all(stage) {
         Ok(()) => failure,
         Err(cause) => Error::Cleanup {
             failure: Box::new(failure),
-            path: stage.clone(),
+            path: stage.to_path_buf(),
             cause,
         },
     })
 }
 
-/// 上次中断留下的 `<目录>.part`：全是本库写出的文件才删，否则报已存在。
+/// 备齐的 `stage` 改名为 `target`：`target` 已存在时按 [`check`] 替换。备齐期间 `target` 可能被别人占用，
+/// 替换前再查一次；改名时 `target` 又被别人写进了内容则改名失败，不会混在一起。
+pub(super) fn replace(stage: &Path, target: &Path, overwrite: bool) -> Result<(), Error> {
+    check(target, overwrite)?;
+    match fs::remove_dir_all(target) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(io_error("删除", target)(e)),
+        _ => fs::rename(stage, target).map_err(io_error("重命名", stage)),
+    }
+}
+
+/// 上次中断留下的准备目录：全是本库写出的文件才删，否则报已存在。
 fn remove_stale_stage(stage: &Path) -> Result<(), Error> {
     match fs::symlink_metadata(stage) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -191,18 +190,25 @@ fn sniff(path: &Path, work_dir: &Path) -> Result<Standalone, Error> {
     })
 }
 
-/// 把 `src` 放到 `dst`：能硬链接就硬链接，不占额外空间；做不了时（跨文件系统、文件系统不支持）复制并落盘，
-/// 复制也失败才报错。
+/// 把 `src` 放到新文件 `dst`：能硬链接就硬链接，不占额外空间；做不了时（跨文件系统、文件系统不支持）复制并落盘。
+/// `dst` 已存在时报错，不写穿已有的文件：它可能是别处文件的硬链接。
 fn place(src: &Path, dst: &Path) -> Result<(), Error> {
-    if fs::hard_link(src, dst).is_ok() {
-        return Ok(());
+    match fs::hard_link(src, dst) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(io_error("链接", dst)(e));
+        }
+        Err(_) => {}
     }
-    fs::copy(src, dst).map_err(io_error("复制", src))?;
-    File::options()
+    let mut to = File::options()
         .write(true)
+        .create_new(true)
         .open(dst)
-        .and_then(|file| file.sync_all())
-        .map_err(io_error("落盘", dst))
+        .map_err(io_error("创建", dst))?;
+    File::open(src)
+        .and_then(|mut from| io::copy(&mut from, &mut to))
+        .map_err(io_error("复制", src))?;
+    to.sync_all().map_err(io_error("落盘", dst))
 }
 
 fn write_file(path: &Path, text: &str) -> Result<(), Error> {

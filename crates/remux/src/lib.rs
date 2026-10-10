@@ -8,14 +8,13 @@
 //!   不检查编码；同一类流只能来自一条轨；后续组的流布局与编码参数必须与第一组一致。
 //! - 只接受 H.264、HEVC 视频与 AAC 音频，与 FFmpeg 构建启用的组件一致。
 //!
-//! 输出先写 `<输出>.part`，写完回读核对每路流的包数、落盘后改名；任一步失败都删除临时文件并返回错误。
-//! 已存在的输出文件会被替换。错误信息已包含原因，不经 `source()` 重复给出。
+//! 输出写完回读核对每路流的包数并落盘，任一步失败都删除输出并返回错误；输出要么完整、要么不存在由调用方
+//! 写到临时路径、成功后改名来保证。错误信息已包含原因，不经 `source()` 重复给出。
 
 mod chain;
 mod ffi;
 
 use std::collections::VecDeque;
-use std::ffi::OsString;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -246,7 +245,8 @@ pub enum Error {
     },
 }
 
-/// 把各不连续段组的分片复制进 `output`（MP4，moov 前置）。`streams[i]` 为第 i 条轨贡献的流种类。
+/// 把各不连续段组的分片复制进 `output`（MP4，moov 前置），写完回读核对每路流的包数并落盘；任一步失败都删除
+/// `output` 并返回错误。已存在的 `output` 会被替换。`streams[i]` 为第 i 条轨贡献的流种类。
 pub fn remux(
     streams: &[Streams],
     groups: &[DiscontinuityGroup],
@@ -254,29 +254,25 @@ pub fn remux(
 ) -> Result<Report, Error> {
     init()?;
     validate(streams, groups)?;
-    let part = with_suffix(output, ".part");
-    if ffmpeg_path(&part).is_none() {
+    if ffmpeg_path(output).is_none() {
         return Err(Error::NonUtf8Path(output.to_path_buf()));
     }
-    write_verified(streams, groups, &part)
-        .and_then(|report| commit(&part, output).map(|()| report))
-        .map_err(|failure| discard(&part, failure))
+    write_verified(streams, groups, output)
+        .and_then(|report| sync(output).map(|()| report))
+        .map_err(|failure| discard(output, failure))
 }
 
-/// 临时文件落盘后改名为输出：调用方随后可能删掉原始分片，断电时输出不能只剩改了名而内容没写下的文件。
-/// Windows 上落盘要求写权限，所以以可写方式打开。
-fn commit(part: &Path, output: &Path) -> Result<(), Error> {
-    let io = |action, cause| Error::Io {
-        action,
-        path: part.to_path_buf(),
-        cause,
-    };
+/// 落盘。Windows 上落盘要求写权限，所以以可写方式打开。
+fn sync(path: &Path) -> Result<(), Error> {
     std::fs::File::options()
         .write(true)
-        .open(part)
+        .open(path)
         .and_then(|file| file.sync_all())
-        .map_err(|cause| io("落盘", cause))?;
-    std::fs::rename(part, output).map_err(|cause| io("重命名", cause))
+        .map_err(|cause| Error::Io {
+            action: "落盘",
+            path: path.to_path_buf(),
+            cause,
+        })
 }
 
 fn init() -> Result<(), Error> {
@@ -314,12 +310,6 @@ fn validate(streams: &[Streams], groups: &[DiscontinuityGroup]) -> Result<(), Er
         }
     }
     Ok(())
-}
-
-fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = OsString::from(path.as_os_str());
-    name.push(suffix);
-    PathBuf::from(name)
 }
 
 /// 删除失败任务留下的临时文件；删除本身失败时把两个错误一并返回。

@@ -11,7 +11,7 @@ use hs_m3u8_core::{Error, JobRequest, LiveOptions, Output, Target, Url};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams, TrackSegments, remux};
 
 use crate::server::Server;
-use crate::{assert_output, expected_long, fixture, fixtures, request, run, test_dir};
+use crate::{assert_output, engine, expected_long, fixture, fixtures, request, run, test_dir};
 
 /// 视频与独立音频分离、两个不连续段组的点播（fmp4_a 后接 fmp4_b），返回主播放列表的地址。
 fn put_split_vod(server: &Server) -> Url {
@@ -215,33 +215,100 @@ async fn existing_hls_directories_are_replaced_only_when_written_by_the_library(
     assert!(hls.join("0/notes.txt").is_file());
 }
 
-/// 两者都要时写 HLS 失败（`<目录>.part` 被别人占用）：刚写的 MP4 删掉，任务目录保留；腾出来后再运行，
-/// 已下载的分片不重下。
+/// 两者都要时，HLS 目录在下载期间被别人放进了文件：改名前的检查发现后报已存在，MP4 与 HLS 都没有写出、
+/// 也不留临时文件，任务目录保留；腾出来后再运行，已下载的分片不重下。
 #[tokio::test(flavor = "multi_thread")]
-async fn a_failed_hls_output_removes_the_new_mp4() {
-    let dir = test_dir("output_hls_failed");
+async fn outputs_taken_during_the_download_leave_nothing_behind() {
+    let dir = test_dir("output_taken");
     let server = Server::start().await;
     server.put("seg0.ts", fixture("ts_a/seg0.ts"));
     server.put(
         "index.m3u8",
         "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n",
     );
-    let stage = dir.join("out.part");
-    std::fs::create_dir(&stage).unwrap();
-    std::fs::write(stage.join("notes.txt"), "别人的文件").unwrap();
     let req = request_to(server.url("index.m3u8"), &dir, both(&dir));
+    let gate = server.gate("seg0.ts");
+    let job = engine().start(req.clone()).unwrap();
+    gate.arrived.notified().await;
+    std::fs::create_dir(dir.join("out")).unwrap();
+    std::fs::write(dir.join("out/notes.txt"), "别人的文件").unwrap();
+    server.ungate("seg0.ts");
 
-    match run(req.clone()).await {
-        Err(Error::OutputExists(path)) => assert_eq!(path, stage),
+    match job.wait().await {
+        Err(Error::OutputExists(path)) => assert_eq!(path, dir.join("out")),
         other => panic!("应报输出已存在：{other:?}"),
     }
-    assert!(!dir.join("out.mp4").exists());
-    assert!(dir.join("out.hsdl/job.json").exists());
+    let mut left: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["out", "out.hsdl"]);
 
-    std::fs::remove_dir_all(&stage).unwrap();
+    std::fs::remove_dir_all(dir.join("out")).unwrap();
     let output = run(req).await.unwrap();
     assert_hls_matches(&dir.join("out"), &output.mp4.unwrap().path);
     assert_eq!(server.hits("seg0.ts"), 1);
+}
+
+/// 两个任务（任务目录不同）同时输出到同一个 HLS 目录：各在自己的准备目录里备齐，先改名的成功，另一个报已存在；
+/// 输出只含成功一方的分片，两个任务目录里的分片都还是各自的内容。
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_jobs_to_one_hls_directory_do_not_mix() {
+    let dir = test_dir("output_concurrent");
+    let server = Server::start().await;
+    let sources = [("a", [0, 1]), ("b", [2, 3])];
+    for (name, indices) in sources {
+        let mut playlist = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:1\n");
+        for (n, i) in indices.iter().enumerate() {
+            server.put(
+                &format!("{name}/seg{n}.ts"),
+                fixture(&format!("ts_long/seg{i}.ts")),
+            );
+            playlist += &format!("#EXTINF:1,\nseg{n}.ts\n");
+        }
+        server.put(&format!("{name}/index.m3u8"), playlist + "#EXT-X-ENDLIST\n");
+    }
+    let hls = dir.join("out");
+    let mut jobs = Vec::new();
+    for (name, _) in sources {
+        let url = server.url(&format!("{name}/index.m3u8"));
+        let mut req = request_to(url, &dir, Target::Hls(hls.clone()));
+        req.output.work_dir = Some(dir.join(format!("{name}.hsdl")));
+        req.output.keep_work_dir = true;
+        let gate = server.gate(&format!("{name}/seg1.ts"));
+        jobs.push(engine().start(req).unwrap());
+        gate.arrived.notified().await;
+    }
+    for (name, _) in sources {
+        server.ungate(&format!("{name}/seg1.ts"));
+    }
+    let mut won = Vec::new();
+    for ((name, indices), job) in sources.into_iter().zip(jobs) {
+        match job.wait().await {
+            Ok(_) => won.push(indices),
+            Err(Error::OutputExists(path)) => assert_eq!(path, hls),
+            Err(other) => panic!("{name}：{other}"),
+        }
+        // 任务目录里的分片仍是这个任务自己的内容
+        let mut stored: Vec<Vec<u8>> = std::fs::read_dir(dir.join(format!("{name}.hsdl/tracks/0")))
+            .unwrap()
+            .map(|e| std::fs::read(e.unwrap().path()).unwrap())
+            .collect();
+        stored.sort();
+        let mut own = indices
+            .map(|i| fixture(&format!("ts_long/seg{i}.ts")))
+            .to_vec();
+        own.sort();
+        assert_eq!(stored, own, "{name} 的任务目录");
+    }
+    let [indices] = won[..] else {
+        panic!("应恰好一个成功：{won:?}");
+    };
+    for (n, i) in indices.iter().enumerate() {
+        let written = std::fs::read(hls.join(format!("0/{n}.ts"))).unwrap();
+        assert_eq!(written, fixture(&format!("ts_long/seg{i}.ts")));
+    }
 }
 
 /// 直播：中途一个分片取不到（缺失），之后续录另起了会话。HLS 里缺失处不加标记、保留时间戳，会话之间加
