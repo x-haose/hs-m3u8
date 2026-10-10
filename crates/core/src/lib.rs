@@ -45,6 +45,8 @@ pub use error::{
     WorkDirProblem,
 };
 pub use hooks::{HookError, HookKind, Hooks, NoHooks, Purpose, RequestParts};
+/// 内容放不进 MP4 的原因（[`Unsupported::Mp4`]）；本地 HLS 表示不了的见 [`HlsUnsupported`]。
+pub use hs_m3u8_remux::Unsupported as Mp4Unsupported;
 pub use info::{AudioInfo, MasterInfo, Selected, TrackInfo, VariantInfo};
 pub use output::{OutputOptions, Target};
 pub use probe::Probe;
@@ -59,15 +61,13 @@ pub use url::Url;
 
 /// 公开接口用到的合并报告与合并错误的类型。
 pub mod remux {
-    pub use hs_m3u8_remux::{
-        Error, FfmpegError, Report, Shape, StreamKind, StreamReport, Unsupported,
-    };
+    pub use hs_m3u8_remux::{Error, FfmpegError, Report, Shape, StreamKind, StreamReport};
 }
 
 /// 公开接口用到的播放列表解析与选轨类型。
 pub mod hls {
     pub use hs_m3u8_hls::{
-        AudioChoice, Malformed, Preference, Resolution, SelectError, SyntaxError, Unsupported,
+        AudioChoice, Encryption, Malformed, Preference, Resolution, SelectError, SyntaxError,
         VariantChoice,
     };
 }

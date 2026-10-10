@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
 use hs_m3u8_core::{
-    Error, HlsUnsupported, JobRequest, LiveOptions, Target, Unsupported, Url, remux,
+    Error, HlsUnsupported, JobRequest, LiveOptions, Mp4Unsupported, Target, Unsupported, Url,
 };
 use hs_m3u8_hls::{MediaPlaylist, Playlist, parse};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams, TrackSegments, remux};
@@ -422,9 +422,8 @@ async fn switching_to_hls_after_an_unsupported_codec_reuses_the_download() {
     let url = server.url("index.m3u8");
     let mp4 = request_to(url.clone(), &dir, Target::Mp4(dir.join("out.mp4")));
     match run(mp4).await {
-        Err(Error::Unsupported(Unsupported::Mp4(remux::Unsupported::Codec {
-            codec: "mp3",
-            ..
+        Err(Error::Unsupported(Unsupported::Mp4(Mp4Unsupported::Codec {
+            codec: "mp3", ..
         }))) => {}
         other => panic!("MP3 音频应合并失败：{other:?}"),
     }

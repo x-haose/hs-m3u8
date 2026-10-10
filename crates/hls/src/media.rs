@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use url::Url;
 
 use crate::line::{Attributes, LineKind, lines};
-use crate::{Error, Malformed, SyntaxError, Unsupported, parse_seconds_us, parse_u64, resolve};
+use crate::{Encryption, Error, Malformed, SyntaxError, parse_seconds_us, parse_u64, resolve};
 
 /// 媒体播放列表。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,7 +299,7 @@ fn segment_key(
         return match keys.iter().next() {
             Some((format, tag)) => Err(Error::Unsupported {
                 line: tag.line,
-                what: Unsupported::Drm {
+                what: Encryption::Drm {
                     keyformat: format.clone(),
                 },
             }),
@@ -315,8 +315,8 @@ fn segment_key(
             uri: identity.uri.clone(),
             iv: identity.iv.unwrap_or(u128::from(sequence).to_be_bytes()),
         })),
-        "SAMPLE-AES" | "SAMPLE-AES-CTR" => Err(unsupported(Unsupported::SampleAes)),
-        other => Err(unsupported(Unsupported::Method(other.to_owned()))),
+        "SAMPLE-AES" | "SAMPLE-AES-CTR" => Err(unsupported(Encryption::SampleAes)),
+        other => Err(unsupported(Encryption::Method(other.to_owned()))),
     }
 }
 

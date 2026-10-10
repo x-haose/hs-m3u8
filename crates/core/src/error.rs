@@ -25,7 +25,7 @@ use url::Url;
 
 use crate::hooks::{HookError, HookKind};
 use crate::ident::bare_url;
-use crate::{Leftover, RefreshCause, StallCause};
+use crate::{Leftover, Mp4Unsupported, RefreshCause, StallCause};
 
 #[derive(thiserror::Error)]
 pub enum Error {
@@ -246,10 +246,10 @@ pub enum Unsupported {
     NoTargetDuration(Box<Url>),
     /// DRM、SAMPLE-AES 等本库解不了的加密
     #[error("{0}")]
-    Encryption(hs_m3u8_hls::Unsupported),
+    Encryption(hs_m3u8_hls::Encryption),
     /// 内容放不进 MP4，可只输出本地 HLS（[`crate::Target::Hls`]）：它原样保留分片，不受这些限制
     #[error("输出 MP4：{0}")]
-    Mp4(hs_m3u8_remux::Unsupported),
+    Mp4(Mp4Unsupported),
     /// 本地 HLS 表示不了这些内容，可只输出 MP4（[`crate::Target::Mp4`]）
     #[error("输出本地 HLS：{0}")]
     Hls(HlsUnsupported),
