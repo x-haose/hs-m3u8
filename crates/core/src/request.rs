@@ -56,7 +56,7 @@ impl Source {
 pub struct HttpOptions {
     /// 附加到所有请求的请求头
     pub headers: Vec<(String, String)>,
-    /// HTTP 或 SOCKS 代理；None 时使用系统代理设置
+    /// HTTP 或 SOCKS 代理，协议为 http、https、socks4、socks4a、socks5、socks5h；None 时使用系统代理设置
     pub proxy: Option<Url>,
     /// 不校验 TLS 证书
     pub insecure: bool,
@@ -72,6 +72,18 @@ impl HttpOptions {
         let t = self.timeouts;
         if t.connect.is_zero() || t.read_idle.is_zero() || t.request.is_zero() {
             return Err(Error::InvalidInput("超时不能为 0".into()));
+        }
+        // 只放行 HTTP 库支持的协议：协议写错（如 sock5）时代理不起作用、请求直连，用户以为走了代理
+        if let Some(proxy) = &self.proxy
+            && !matches!(
+                proxy.scheme(),
+                "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
+            )
+        {
+            return Err(Error::InvalidInput(format!(
+                "代理只支持 http、https、socks4、socks4a、socks5、socks5h：{}",
+                bare_url(proxy)
+            )));
         }
         Ok(())
     }

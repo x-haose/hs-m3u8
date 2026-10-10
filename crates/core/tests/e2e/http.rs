@@ -1,4 +1,4 @@
-//! 请求失败的归类：重试也不会成功的证书校验失败、重定向失败不重试，原因写在错误里。
+//! 请求失败的归类：重试也不会成功的证书校验失败、重定向失败不重试，原因写在错误里；代理的协议写错时报参数错误。
 
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -88,4 +88,22 @@ async fn redirect_loops_are_reported_without_retrying() {
         "{err}"
     );
     assert!(!err.retryable());
+}
+
+/// 代理的协议写错（如 sock5）：报参数错误，不发出请求。不报的话代理不起作用，请求直连。
+#[tokio::test(flavor = "multi_thread")]
+async fn proxies_with_unknown_schemes_are_rejected() {
+    let server = Server::start().await;
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n",
+    );
+    let mut source = Source::new(server.url("index.m3u8"));
+    source.http.proxy = Some(Url::parse("sock5://127.0.0.1:9").unwrap());
+
+    match engine().probe(&source).await {
+        Err(Error::InvalidInput(message)) => assert!(message.contains("sock5"), "{message}"),
+        other => panic!("应报参数错误：{other:?}"),
+    }
+    assert_eq!(server.hits("index.m3u8"), 0);
 }
