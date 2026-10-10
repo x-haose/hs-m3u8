@@ -92,7 +92,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 
 开始下载前可用 `Engine::probe` 只解析不下载：请求与回调同下载，返回可选的变体与音轨（带下标，按下标选用）、按偏好选中的轨、各轨概况（分片数、时长、是否结束、是否加密）与是否直播。探测结果与进度里的所选轨道都是 core 自己的描述类型，不含地址：地址常带令牌，而它们常被打进日志与界面。来源与访问方式（地址、选轨偏好、请求配置、回调）合为 `Source`，探测与下载共用。
 
-模块：`request`（请求与选项）、`resolve`（拉取播放列表、选轨）、`probe`（探测）、`selection`（选轨的身份）、`ident`（指纹与摘要）、`vod`（`plan` 点播计划与摘要，纯计算）、`live`（`session` 续录时的会话判定、`window` 每轨的窗口与新分片、`track` 每轨的刷新与停滞、`merge` 合并输入与缺失报告）、`fetch`（分片下载队列、拉取 init 段）、`workdir`（`record` 任务记录与 job.json 格式、`names` 文件名）、`output`（MP4 与本地 HLS 输出）、`job`（分派与收尾）、`http`、`crypto`、`verify`、`hooks`（回调）、`report`（进度与结果）、`error`、`blocking`（阻塞线程池）。
+模块：`request`（请求与选项）、`resolve`（拉取播放列表、选轨）、`probe`（探测）、`selection`（选轨的身份）、`ident`（指纹与摘要）、`info`（对外描述来源的类型，不含地址）、`vod`（`plan` 点播计划与摘要，纯计算）、`live`（`session` 续录时的会话判定、`window` 每轨的窗口与新分片、`track` 每轨的刷新与停滞、`merge` 合并输入与缺失报告）、`fetch`（分片下载队列、拉取 init 段）、`workdir`（`record` 任务记录与 job.json 格式、`names` 文件名、`outputs` 正在写的输出的记录）、`output`（`options` 输出配置与路径校验、`hls` 本地 HLS、`commit` 换上输出）、`job`（分派与收尾）、`http`、`crypto`、`verify`、`hooks`（回调）、`report`（进度与结果）、`error`、`blocking`（阻塞线程池）。
 
 ### 5.2 任务目录与续传
 
@@ -116,7 +116,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 - **计划摘要**（点播）= 各轨各分片的序号、时长、不连续段序号、分片身份与 init 段身份的 SHA-256；不含 key URL 与 IV，因为目录里存的是解密后的分片。摘要不同报 `WorkDir(PlanChanged)`。init 段每次重新拉取（地址常带每次会话不同的签名），按完整地址去重，按内容命名，同组内容不同报 `Unsupported(InitChangesWithinGroup)`。
 - 记录与当前任务不一致时报错：来源不同 `SourceMismatch`，点播与直播不同 `KindMismatch`，轨道不同 `TracksMismatch`，计划不同 `PlanChanged`；直播的完整地址不同见 5.9。目录里还没有已完成的分片时（只有 init 段也算没有，它们随时可以重新拉取），直接改为当前任务。没有 `job.json` 的非空目录（`.part` 残留与锁文件除外）不当作任务目录，因为成功后整个目录会被删除。
 - 运行期间持有 `lock` 的排他锁，第二个任务打开同一目录时报 `WorkDir(Locked)`。删除任务目录时只删本库写的文件（`job.json`、分片、init 段与它们的 `.part`）、系统自动生成的元数据文件（`.DS_Store`、`Thumbs.db`、`desktop.ini`）与因此变空的目录，其他文件（例如经符号链接或只差大小写的路径写进来的输出）留下，记为删除失败，`job.json` 也留下，目录仍是任务目录、下次照常使用；判断目录是否为空时同样不算系统元数据文件；持锁删完后删锁文件，再释放锁、删除目录：释放锁后别的任务即可打开它，看到的不会是删到一半的任务。
-- 输出已存在：MP4 拒绝覆盖，除非调用方明确要求；HLS 目录须不存在或为空，要求覆盖时只在其中全是本库写出的文件时替换（系统自动生成的 `.DS_Store`、`Thumbs.db`、`desktop.ini` 不算）；有别的文件时报 `OutputOccupied`，覆盖也不替换，以免路径给错时删掉别人的文件。任务开头（在阻塞线程池中，结果经 `Job::wait` 返回，`Engine::start` 只做不访问文件系统的参数校验）与改名前各检查一次。输出所在目录在合并前创建。输出与任务目录的路径不能相同或互相包含（按字面比较）：成功后任务目录整个删除。
+- 输出已存在：MP4 拒绝覆盖，除非调用方明确要求；HLS 目录须不存在或为空，要求覆盖时只在其中全是本库写出的文件时替换（系统自动生成的 `.DS_Store`、`Thumbs.db`、`desktop.ini` 不算）；有别的文件时报 `OutputOccupied`，覆盖也不替换，以免路径给错时删掉别人的文件。任务开头（在阻塞线程池中，结果经 `Job::wait` 返回，`Engine::start` 只做不访问文件系统的参数校验）与写出前、换上前各检查一次。输出所在目录在写出前创建。输出与任务目录的路径不能相同或互相包含（按字面比较）：成功后要删除任务目录。
 - 任务目录位置可配置：库的默认位置与输出同级，名为输出的主名（MP4 去掉扩展名，只输出 HLS 时为目录名）加 `.hsdl`（`OutputOptions::resolved_work_dir`），`a.mp4` 与 HLS 目录 `a` 共用，合并 MP4 失败后改为输出 HLS 不必重下；成功后删除，删除失败记在结果的 `cleanup_error` 里；桌面应用放在应用数据目录，不放在下载目录，避免被网盘同步。
 - 错误信息中不输出请求头的值、Cookie、key 内容，以及地址中的用户名、密码与查询串。
 

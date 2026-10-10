@@ -124,7 +124,7 @@ fn request_to(url: Url, dir: &Path, target: Target) -> JobRequest {
     req
 }
 
-/// 两者都要：音视频分离、两个不连续段组。HLS 的主播放列表照抄来源的变体属性，各轨分片按顺序编号、
+/// 两者都要：音视频分离、两个不连续段组。HLS 的主播放列表码率按文件算、编码照抄来源，各轨分片按顺序编号、
 /// 组间加不连续标记；按它列出的文件合并与 MP4 相同。任务目录已删除。
 #[tokio::test(flavor = "multi_thread")]
 async fn split_source_writes_both_outputs() {
