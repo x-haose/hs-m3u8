@@ -48,6 +48,7 @@ pub use error::{
 pub use hooks::{HookError, HookKind, Hooks, NoHooks, Purpose, RequestParts};
 /// 内容放不进 MP4 的原因（[`Unsupported::Mp4`]）；本地 HLS 表示不了的见 [`HlsUnsupported`]。
 pub use hs_m3u8_remux::Unsupported as Mp4Unsupported;
+pub use ident::bare_url;
 pub use info::{AudioInfo, MasterInfo, Selected, TrackInfo, VariantInfo};
 pub use output::{OutputOptions, Target};
 pub use probe::Probe;
@@ -84,6 +85,11 @@ pub struct Engine {
 }
 
 impl Engine {
+    /// `max_requests` 的默认值：默认并发（[`JobRequest::DEFAULT_CONCURRENCY`]）的四倍，四个任务同时跑都不受这个
+    /// 上限限制。
+    pub const DEFAULT_MAX_REQUESTS: NonZeroUsize =
+        NonZeroUsize::new(JobRequest::DEFAULT_CONCURRENCY.get() * 4).unwrap();
+
     /// `max_requests`：所有任务合计同时在途的 key、分片与点播 init 段请求数。播放列表与直播刷新时新出现的
     /// init 段不占名额，以免直播刷新排在其他任务的大批下载之后。
     pub fn new(max_requests: NonZeroUsize) -> Self {

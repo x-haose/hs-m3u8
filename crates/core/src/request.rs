@@ -101,16 +101,16 @@ pub struct KeyOverride {
     pub iv: Option<[u8; 16]>,
 }
 
-/// 默认并发：与常见下载器同一量级；站点限流时由调用方调低。
-const DEFAULT_CONCURRENCY: NonZeroUsize = NonZeroUsize::new(16).unwrap();
-
 impl JobRequest {
+    /// `concurrency` 的默认值：与常见下载器同一量级；站点限流时由调用方调低。
+    pub const DEFAULT_CONCURRENCY: NonZeroUsize = NonZeroUsize::new(16).unwrap();
+
     pub fn new(source: Source, output: OutputOptions) -> Self {
         JobRequest {
             source,
             output,
             key: None,
-            concurrency: DEFAULT_CONCURRENCY,
+            concurrency: Self::DEFAULT_CONCURRENCY,
             live: Some(LiveOptions::default()),
         }
     }

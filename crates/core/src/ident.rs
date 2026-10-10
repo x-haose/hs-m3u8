@@ -90,8 +90,8 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// 错误信息里地址的写法：去掉用户名、密码、查询串与片段，这些部分常带凭据或令牌。
-pub(crate) fn bare_url(url: &Url) -> String {
+/// 错误信息与日志里地址的写法：去掉用户名、密码、查询串与片段，这些部分常带凭据或令牌。
+pub fn bare_url(url: &Url) -> String {
     match url.host_str() {
         Some(host) => {
             let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
