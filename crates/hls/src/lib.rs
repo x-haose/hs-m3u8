@@ -20,7 +20,7 @@ pub use url::Url;
 use line::{LineKind, lines};
 
 /// 解析结果：主播放列表或媒体播放列表。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Playlist {
     Master(MasterPlaylist),
     Media(MediaPlaylist),

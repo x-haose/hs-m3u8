@@ -22,7 +22,7 @@ pub enum VariantChoice {
 }
 
 /// 选轨结果：所选变体，以及（音频不在变体里时）独立的音频 rendition。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
     pub variant: Variant,
     /// 独立的音频 rendition；None 表示音频混在变体流里（或没有音频）

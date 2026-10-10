@@ -8,7 +8,7 @@ use crate::request::Source;
 use crate::{Error, resolve};
 
 /// 探测结果。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probe {
     /// 来源是主播放列表时为它，列出可选的变体与音频 rendition（按下标选用见 [`crate::hls::VariantChoice::Index`]）；
     /// 来源本身是媒体播放列表时为 None

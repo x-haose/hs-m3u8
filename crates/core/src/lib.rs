@@ -42,7 +42,8 @@ pub use hs_m3u8_hls as hls;
 pub use hs_m3u8_remux::{Report, Shape, StreamKind, StreamReport};
 pub use probe::Probe;
 pub use report::{
-    LiveEnd, LiveReport, MissReason, Missed, Mp4Output, Output, Progress, Stage, StallCause,
+    LiveEnd, LiveReport, MissReason, Missed, Mp4Output, Output, Progress, RefreshError,
+    RefreshFailure, Stage, StallCause,
 };
 pub use request::{
     HttpOptions, JobRequest, KeyOverride, LiveOptions, OutputOptions, RetryPolicy, Source, Target,
@@ -83,7 +84,12 @@ impl Engine {
     /// 音轨、查看时长与是否直播。参数错误时立即返回错误；不在 tokio 运行时内调用会 panic。
     pub async fn probe(&self, source: &Source) -> Result<Probe, Error> {
         source.validate()?;
-        let http = Http::new(&source.http, source.hooks.clone(), self.requests.clone())?;
+        let http = Http::new(
+            &source.http,
+            source.hooks.clone(),
+            self.requests.clone(),
+            None,
+        )?;
         probe::probe(&http, source).await
     }
 
@@ -91,14 +97,15 @@ impl Engine {
     /// 参数错误与输出已存在时立即返回错误。
     pub fn start(&self, request: JobRequest) -> Result<Job, Error> {
         request.validate()?;
+        let (progress_tx, progress) = watch::channel(Progress::default());
         let http = Http::new(
             &request.source.http,
             request.source.hooks.clone(),
             self.requests.clone(),
+            Some(progress_tx.clone()),
         )?;
         let cancel = CancellationToken::new();
         let stop = CancellationToken::new();
-        let (progress_tx, progress) = watch::channel(Progress::default());
         let task = tokio::spawn(job::run(
             request,
             http,

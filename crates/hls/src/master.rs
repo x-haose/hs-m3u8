@@ -5,14 +5,14 @@ use url::Url;
 use crate::line::{Attributes, LineKind, lines};
 use crate::{Error, SyntaxError, parse_u64, resolve};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MasterPlaylist {
     /// 按出现顺序
     pub variants: Vec<Variant>,
     pub renditions: Vec<Rendition>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Variant {
     pub uri: Url,
     /// BANDWIDTH，bit/s；规范要求必填，缺失时为 None
