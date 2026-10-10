@@ -51,14 +51,37 @@ fn occupant(o: &PendingOutput) -> Result<Occupant, Error> {
     }
 }
 
-/// 输出能否写，能写时返回路径上现在的东西：空着、是空目录，或要求覆盖而路径上是输出。是输出而没有要求覆盖时报
-/// [`Error::OutputExists`]；是别的东西时报 [`Error::OutputOccupied`]，覆盖也不替换，以免路径给错时删掉别人的文件。
+/// 输出能否写，能写时返回路径上现在的东西：空着（且建得出来，见 [`ensure_creatable`]）、是空目录，或要求覆盖而路径
+/// 上是输出。是输出而没有要求覆盖时报 [`Error::OutputExists`]；是别的东西时报 [`Error::OutputOccupied`]，覆盖也不
+/// 替换，以免路径给错时删掉别人的文件。
 pub(super) fn check(o: &PendingOutput, overwrite: bool) -> Result<Occupant, Error> {
     match occupant(o)? {
         Occupant::Other => Err(Error::OutputOccupied(o.target().to_path_buf())),
         Occupant::Output if !overwrite => Err(Error::OutputExists(o.target().to_path_buf())),
+        Occupant::Nothing => {
+            ensure_creatable(o.target())?;
+            Ok(Occupant::Nothing)
+        }
         occupant => Ok(occupant),
     }
+}
+
+/// 不存在的输出路径建得出来：它最近的已存在的上级是目录（跟随符号链接）。路径中间有一段是文件时，Unix 上检查输出
+/// 路径本身就报「不是目录」，Windows 上却报「不存在」，在这里查出来，不等到下载完写出时才失败。
+fn ensure_creatable(target: &Path) -> Result<(), Error> {
+    for ancestor in target.ancestors().skip(1) {
+        match fs::metadata(ancestor) {
+            Ok(meta) if meta.is_dir() => return Ok(()),
+            Ok(_) => {
+                let reason = format!("上级 {} 不是目录", ancestor.display());
+                let cause = io::Error::new(io::ErrorKind::NotADirectory, reason);
+                return Err(io_error("检查", target)(cause));
+            }
+            Err(e) if is_absent(&e) => {}
+            Err(cause) => return Err(io_error("检查", ancestor)(cause)),
+        }
+    }
+    Ok(())
 }
 
 /// 收拾上次留下的：先按记录，再按本次各输出 `current` 的名字（没有记录的），规则见模块说明。返回旧输出因原处是别的
@@ -518,6 +541,20 @@ mod tests {
         assert_eq!(recover(&work, &[]).unwrap(), []);
         assert_eq!(read(mp4, mp4.target()).as_deref(), Some("别人的"));
         assert_no_names_left(&outputs, &work);
+    }
+
+    /// 不存在的输出路径中间有一段是文件：建不出来，报输出路径；中间只是缺目录的建得出来。
+    #[test]
+    fn an_output_under_a_file_cannot_be_created() {
+        let dir = scratch("under_file");
+        fs::write(dir.join("file"), "别人的文件").unwrap();
+        let target = dir.join("file/sub/out.mp4");
+
+        match ensure_creatable(&target) {
+            Err(Error::Io { path, .. }) => assert_eq!(path, target),
+            other => panic!("应报建不出来：{other:?}"),
+        }
+        assert!(ensure_creatable(&dir.join("new/sub/out.mp4")).is_ok());
     }
 
     /// 换上没做完时中断：临时输出删掉；挪开的旧输出原处空着就放回，原处是新输出就删掉。
