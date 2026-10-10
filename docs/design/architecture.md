@@ -230,9 +230,10 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 ### 7.1 结构
 
 - `crates/py`：PyO3 绑定（cdylib），模块 `hs_m3u8._native`，只依赖 `core`。对外的类型都是这里定义的 PyO3 类，由 `core` 的类型逐个翻译而来：
-  - 数据类不可变，可比较、可哈希，带按字段列出的 `__repr__`；请求类型有构造函数（除第一个参数外只能按关键字传），结果类型只由本库产生；
+  - 数据类不可变，按值比较、可哈希（`Source` 里的回调按对象身份），带按字段列出的 `__repr__`；都有构造函数，除 `Source` 的地址、`JobRequest` 的来源与输出、`OutputOptions` 的输出等打头的参数外只能按关键字传，结果类型的各参数都必须给（用于在测试里模拟结果）；
   - 枚举的每种取值是一个子类，带数据的（如变体选择、录制的结束原因）与不带数据的（如 `Stage.Writing()`）一样，用 `match` 或 `isinstance` 分辨：PyO3 的简单枚举在运行时不是 `enum.Enum`，pyo3-stub-gen 却把它写成 `enum.Enum` 的子类，存根与运行时对不上；
-  - 异常也是 PyO3 类（继承 `Exception`），属性带类型；
+  - 异常也是 PyO3 类（继承 `Exception`），属性带类型；构造函数为 `(message, *, 自己的属性, 基类的属性可省略)`。PyO3 不给原生基类传参数，说明由 `__init__` 放进 `args`，`__init__` 与构造函数签名相同，类型检查器与 stubtest 才对得上；
+  - 数据类、枚举取值与异常都能 pickle 与 copy：`__reduce__` 交出 `functools.partial(类, 各属性)`，按关键字调用构造函数重建；进程池在进程之间传参数、结果与异常要用到；
   - 回调基类 `Hooks` 是可被 Python 继承的 PyO3 类。
 - 类型存根（`python/hs_m3u8/_native/__init__.pyi`）由 pyo3-stub-gen 从这些 Rust 定义生成，说明取自 `///`：存根写的类型就是运行时实际的类型。默认值不是字面量、存根生成写不出的几个构造函数（`Engine`、`Timeouts`、`RetryPolicy`、`LiveOptions`、`JobRequest`），签名以存根语法写在 `crates/py` 里对应类型的旁边，由 stubtest 核对参数与默认值的有无。
 - `python/hs_m3u8`：`__init__.py`（再导出全部公开名字）同样由 pyo3-stub-gen 生成，带 `py.typed`。
@@ -328,7 +329,7 @@ HsM3u8Error                       retryable: bool、retry_after: int | None、se
 ### 7.4 质量门
 
 - ruff（检查与格式）；mypy `--strict` 与 basedpyright（严格）检查 `python/` 与测试；stubtest 核对存根与模块（不查 `@disjoint_base`：pyo3-stub-gen 不生成它，只影响对多重继承原生类的检查）；重新生成存根与 `__init__.py` 后与仓库里的没有差异。
-- 说明是否齐全由测试检查：导出的每个类、它的属性与方法、枚举的每种取值在运行时都有说明。
+- 说明是否齐全由测试检查：导出的每个类、它的属性与方法、枚举的每种取值在运行时都有说明，存根里各类的构造函数也有说明。
 - pytest 端到端：测试内起本地 HTTP 服务，跑探测、下载、回调、取消、续传、异常与放弃任务；Python 3.12 与最新版各跑一遍。
 
 ## 8. 桌面应用（GUI 阶段细化）

@@ -5,7 +5,7 @@ from datetime import timedelta
 
 import pytest
 
-from conftest import Server
+from conftest import Server, assert_survives_pickle
 from hs_m3u8 import (
     AudioChoice,
     Engine,
@@ -90,6 +90,7 @@ def test_master_playlists_list_their_tracks_and_the_selection(server: Server) ->
     assert not result.tracks[0].encrypted
     assert result.tracks[0].ended
     assert not result.live
+    assert_survives_pickle(result)
 
 
 def test_preferences_choose_the_variant_and_audio(server: Server) -> None:

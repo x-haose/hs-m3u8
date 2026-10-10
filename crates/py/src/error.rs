@@ -6,12 +6,13 @@
 use hs_m3u8_core as core;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
+use pyo3::types::PyTuple;
 use pyo3::{PyClass, PyClassInitializer};
-use pyo3_stub_gen::derive::gen_stub_pyclass;
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use crate::hooks::PyHookError;
 use crate::path::PyPath;
-use crate::record::{record, variants};
+use crate::record::{partial, record, variants};
 use crate::report::{
     HttpErrorKind, HttpFailure, Leftover, RefreshCause, Shape, StallCause, StreamKind,
 };
@@ -333,6 +334,8 @@ variants! {
 }
 
 /// 本库所有异常的基类。`str(异常)` 是完整说明（地址只显示到路径，不含查询串与凭据）。
+///
+/// 各异常类都能构造（如在测试里模拟失败）：说明按位置给出，其余按关键字，本类的属性可省略。可以 pickle 与 copy。
 #[gen_stub_pyclass]
 #[pyclass(module = "hs_m3u8._native", extends = PyException, subclass, frozen, get_all)]
 pub struct HsM3u8Error {
@@ -342,216 +345,422 @@ pub struct HsM3u8Error {
     pub retry_after: Option<u64>,
     /// 出错的分片；不是分片的失败时为 None
     pub segment: Option<SegmentRef>,
-    /// 出错的 key 的地址（播放列表里写的）；不是取 key 的失败时为 None
+    /// 取 key 的请求或回调出错时，key 的地址（播放列表里写的）；其余为 None（key 长度不对时地址在
+    /// `KeyLengthError.url`）
     pub key_url: Option<String>,
     /// 失败后收拾也没做完而留下的东西；都做完时为空
     pub leftovers: Vec<Leftover>,
 }
 
-/// 改请求再试：参数不对、输出路径不能用、选轨偏好与来源不符、没开启直播录制、内容放不进所选的输出。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = HsM3u8Error, subclass, frozen)]
-pub struct RequestError;
+/// 本类属性的名字：pickle 时与各子类自己的属性一起交给构造函数。
+const BASE_FIELDS: [&str; 5] = [
+    "retryable",
+    "retry_after",
+    "segment",
+    "key_url",
+    "leftovers",
+];
 
-/// 参数不对。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = RequestError, frozen)]
-pub struct InvalidInputError;
+#[gen_stub_pymethods]
+#[pymethods]
+impl HsM3u8Error {
+    /// `message` 为说明（`str(异常)`）；其余各参数即同名属性，`leftovers` 为 None 时为空。
+    #[new]
+    #[pyo3(signature = (
+        message,
+        *,
+        retryable = false,
+        retry_after = None,
+        segment = None,
+        key_url = None,
+        leftovers = None,
+    ))]
+    fn new(
+        message: String,
+        retryable: bool,
+        retry_after: Option<u64>,
+        segment: Option<SegmentRef>,
+        key_url: Option<String>,
+        leftovers: Option<Vec<Leftover>>,
+    ) -> Self {
+        // 说明由 __init__ 放进 args
+        let _ = message;
+        HsM3u8Error {
+            retryable,
+            retry_after,
+            segment,
+            key_url,
+            leftovers: leftovers.unwrap_or_default(),
+        }
+    }
 
-/// 输出已存在；要求覆盖（`OutputOptions.overwrite`）即可替换。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = RequestError, frozen, get_all)]
-pub struct OutputExistsError {
-    /// 输出路径
-    pub path: PyPath,
+    /// 同构造函数：把说明放进 `args`。
+    #[pyo3(signature = (
+        message,
+        *,
+        retryable = false,
+        retry_after = None,
+        segment = None,
+        key_url = None,
+        leftovers = None,
+    ))]
+    fn __init__(
+        slf: &Bound<'_, Self>,
+        message: String,
+        retryable: bool,
+        retry_after: Option<u64>,
+        segment: Option<SegmentRef>,
+        key_url: Option<String>,
+        leftovers: Option<Vec<Leftover>>,
+    ) -> PyResult<()> {
+        // 其余参数已由构造函数用过；收同样的参数，签名才与构造函数一致
+        let _ = (retryable, retry_after, segment, key_url, leftovers);
+        slf.setattr("args", (message,))
+    }
+
+    #[gen_stub(skip)]
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        reduce(slf.as_any(), &[])
+    }
 }
 
-/// 输出路径用不了，覆盖也不会替换（以免路径给错时删掉别人的文件），换一个路径：要输出 MP4 而那里是目录，要输出
-/// HLS 而那里不是目录或目录里有不是本库写出的文件；或那里什么也没有，而最近的已存在的上级不是目录，建不出来。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = RequestError, frozen, get_all)]
-pub struct OutputOccupiedError {
-    /// 输出路径
-    pub path: PyPath,
-    /// 建不出来时，挡住它的上级（文件，或悬空的符号链接）；路径本身被占用时为 None
-    pub ancestor: Option<PyPath>,
+impl HsM3u8Error {
+    /// 不在分片与 key 里、没有残留的失败。
+    fn plain(retryable: bool, retry_after: Option<u64>) -> Self {
+        HsM3u8Error {
+            retryable,
+            retry_after,
+            segment: None,
+            key_url: None,
+            leftovers: Vec::new(),
+        }
+    }
 }
 
-/// 选轨偏好与来源不符。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = RequestError, frozen, get_all)]
-pub struct SelectError {
-    /// 选不出的原因
-    pub reason: SelectFailure,
+/// 异常的 pickle：`(partial(类, 各属性), args, __dict__)`，`__dict__` 里是 `add_note` 等加上的东西；`fields` 为
+/// 基类之外的属性。
+fn reduce<'py>(object: &Bound<'py, PyAny>, fields: &[&str]) -> PyResult<Bound<'py, PyTuple>> {
+    let fields: Vec<&str> = fields.iter().chain(&BASE_FIELDS).copied().collect();
+    let rebuild = partial(object, &fields)?;
+    let args = object.getattr("args")?;
+    let state = object.getattr("__dict__")?;
+    PyTuple::new(object.py(), [rebuild, args, state])
 }
 
-/// 来源是直播，而请求没开启直播录制（`JobRequest.live` 为 None）。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = RequestError, frozen)]
-pub struct LiveNotEnabledError;
-
-/// 内容放不进 MP4；可只输出本地 HLS（`Target.Hls`）。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = RequestError, frozen, get_all)]
-pub struct Mp4UnsupportedError {
-    /// 放不进的原因
-    pub reason: Mp4Unsupported,
+/// 异常的直接上级：建立异常时依次初始化到它为止的各层。
+trait Parent: PyClass {
+    fn initializer<L: PyClass<BaseType = Self>>(
+        base: HsM3u8Error,
+        leaf: L,
+    ) -> PyClassInitializer<L>;
 }
 
-/// 本地 HLS 表示不了这些内容；可只输出 MP4（`Target.Mp4`）。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = RequestError, frozen, get_all)]
-pub struct HlsUnsupportedError {
-    /// 表示不了的原因
-    pub reason: HlsUnsupported,
+impl Parent for HsM3u8Error {
+    fn initializer<L: PyClass<BaseType = Self>>(
+        base: HsM3u8Error,
+        leaf: L,
+    ) -> PyClassInitializer<L> {
+        PyClassInitializer::from(base).add_subclass(leaf)
+    }
 }
 
-/// 来源本身不行，同样的请求再试也不会成功。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = HsM3u8Error, subclass, frozen)]
-pub struct SourceError;
-
-/// 内容不是合法的播放列表；用了不支持的加密是 `SourceUnsupportedError`。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = SourceError, frozen, get_all)]
-pub struct PlaylistError {
-    /// 播放列表的地址（重定向之后的）
-    pub url: String,
-    /// 不合法的原因
-    pub reason: Malformed,
+impl Parent for RequestError {
+    fn initializer<L: PyClass<BaseType = Self>>(
+        base: HsM3u8Error,
+        leaf: L,
+    ) -> PyClassInitializer<L> {
+        PyClassInitializer::from(base)
+            .add_subclass(RequestError {})
+            .add_subclass(leaf)
+    }
 }
 
-/// 应为媒体播放列表的地址（变体、音频 rendition）返回了主播放列表。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = SourceError, frozen, get_all)]
-pub struct NotMediaPlaylistError {
-    /// 这个地址
-    pub url: String,
+impl Parent for SourceError {
+    fn initializer<L: PyClass<BaseType = Self>>(
+        base: HsM3u8Error,
+        leaf: L,
+    ) -> PyClassInitializer<L> {
+        PyClassInitializer::from(base)
+            .add_subclass(SourceError {})
+            .add_subclass(leaf)
+    }
 }
 
-/// 来源用到了不支持的特性。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = SourceError, frozen, get_all)]
-pub struct SourceUnsupportedError {
-    /// 哪个特性
-    pub reason: SourceUnsupported,
+/// `HsM3u8Error` 的子类：属性只读，构造函数为 `(message, *, 自己的属性, 基类的属性可省略)`。`__init__` 与构造函数
+/// 签名相同：Python 调用类时两者收同样的参数，类型检查器与 stubtest 都按此核对。
+macro_rules! exception {
+    (
+        $(#[$meta:meta])*
+        pub struct $name:ident extends $parent:ident $(, $subclass:ident)? {
+            $(
+                $(#[$field_meta:meta])*
+                pub $field:ident : $ty:ty
+            ),* $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        #[gen_stub_pyclass]
+        #[pyclass(module = "hs_m3u8._native", extends = $parent, $($subclass,)? frozen, get_all)]
+        pub struct $name { $( $(#[$field_meta])* pub $field: $ty ),* }
+
+        #[gen_stub_pymethods]
+        #[pymethods]
+        impl $name {
+            /// `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
+            /// None 时为空。
+            #[new]
+            #[pyo3(signature = (
+                message,
+                *,
+                $($field,)*
+                retryable = false,
+                retry_after = None,
+                segment = None,
+                key_url = None,
+                leftovers = None,
+            ))]
+            fn new(
+                message: String,
+                $($field: $ty,)*
+                retryable: bool,
+                retry_after: Option<u64>,
+                segment: Option<SegmentRef>,
+                key_url: Option<String>,
+                leftovers: Option<Vec<Leftover>>,
+            ) -> PyClassInitializer<Self> {
+                let base = HsM3u8Error::new(message, retryable, retry_after, segment, key_url, leftovers);
+                <$parent as Parent>::initializer(base, $name { $($field),* })
+            }
+
+            /// 同构造函数：把说明放进 `args`。
+            #[pyo3(signature = (
+                message,
+                *,
+                $($field,)*
+                retryable = false,
+                retry_after = None,
+                segment = None,
+                key_url = None,
+                leftovers = None,
+            ))]
+            fn __init__(
+                slf: &Bound<'_, Self>,
+                message: String,
+                $($field: $ty,)*
+                retryable: bool,
+                retry_after: Option<u64>,
+                segment: Option<SegmentRef>,
+                key_url: Option<String>,
+                leftovers: Option<Vec<Leftover>>,
+            ) -> PyResult<()> {
+                // 其余参数已由构造函数用过；收同样的参数，签名才与构造函数一致
+                let _ = ($($field,)* retryable, retry_after, segment, key_url, leftovers);
+                slf.setattr("args", (message,))
+            }
+
+            #[gen_stub(skip)]
+            fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+                reduce(slf.as_any(), &[$(stringify!($field)),*])
+            }
+        }
+    };
 }
 
-/// 数据校验失败（解密后的内容不对）。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = SourceError, frozen, get_all)]
-pub struct IntegrityError {
-    /// 出错的分片或 init 段的地址
-    pub url: String,
-    /// 失败的原因
-    pub reason: IntegrityFailure,
+exception! {
+    /// 改请求再试：参数不对、输出路径不能用、选轨偏好与来源不符、没开启直播录制、内容放不进所选的输出。
+    pub struct RequestError extends HsM3u8Error, subclass {}
 }
 
-/// key 不是 16 字节。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = SourceError, frozen, get_all)]
-pub struct KeyLengthError {
-    /// key 的地址
-    pub url: String,
-    /// 实际的字节数
-    pub length: usize,
+exception! {
+    /// 参数不对。
+    pub struct InvalidInputError extends RequestError {}
 }
 
-/// 请求失败；在分片、key 的请求里出错时，`segment`、`key_url` 指出是哪个。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = HsM3u8Error, frozen, get_all)]
-pub struct HttpError {
-    /// 请求的地址（可能带令牌；异常的说明里只显示到路径）
-    pub url: String,
-    /// 失败的原因
-    pub kind: HttpErrorKind,
+exception! {
+    /// 输出已存在；要求覆盖（`OutputOptions.overwrite`）即可替换。
+    pub struct OutputExistsError extends RequestError {
+        /// 输出路径
+        pub path: PyPath,
+    }
 }
 
-/// 直播的一条轨长时间没有录到新分片，且不是直播正常结束；任务目录保留，可稍后续录。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = HsM3u8Error, frozen, get_all)]
-pub struct LiveStalledError {
-    /// 第几条轨
-    pub track: usize,
-    /// 停滞的原因
-    pub reason: StallReason,
+exception! {
+    /// 输出路径用不了，覆盖也不会替换（以免路径给错时删掉别人的文件），换一个路径：要输出 MP4 而那里是目录，要输出
+    /// HLS 而那里不是目录或目录里有不是本库写出的文件；或那里什么也没有，而最近的已存在的上级不是目录，建不出来。
+    pub struct OutputOccupiedError extends RequestError {
+        /// 输出路径
+        pub path: PyPath,
+        /// 建不出来时，挡住它的上级（文件，或悬空的符号链接）；路径本身被占用时为 None
+        pub ancestor: Option<PyPath>,
+    }
 }
 
-/// 读写文件失败。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = HsM3u8Error, frozen, get_all)]
-pub struct FileError {
-    /// 做的是什么（读取、删除……）
-    pub action: String,
-    /// 操作的路径
-    pub path: PyPath,
+exception! {
+    /// 选轨偏好与来源不符。
+    pub struct SelectError extends RequestError {
+        /// 选不出的原因
+        pub reason: SelectFailure,
+    }
 }
 
-/// 路径的根（Windows 的盘符、网络共享）读不到：盘不在、共享连不上或没有权限；接上后再试。根下的东西看不到不当作
-/// 没有，不据此删东西、丢记录。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = HsM3u8Error, frozen, get_all)]
-pub struct VolumeUnavailableError {
-    /// 读不到的根
-    pub root: PyPath,
+exception! {
+    /// 来源是直播，而请求没开启直播录制（`JobRequest.live` 为 None）。
+    pub struct LiveNotEnabledError extends RequestError {}
 }
 
-/// 合并 MP4 失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是 `Mp4UnsupportedError`。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = HsM3u8Error, frozen)]
-pub struct RemuxError;
-
-/// 任务目录不能使用。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = HsM3u8Error, frozen, get_all)]
-pub struct WorkDirError {
-    /// 任务目录
-    pub path: PyPath,
-    /// 不能使用的原因
-    pub problem: WorkDirProblem,
+exception! {
+    /// 内容放不进 MP4；可只输出本地 HLS（`Target.Hls`）。
+    pub struct Mp4UnsupportedError extends RequestError {
+        /// 放不进的原因
+        pub reason: Mp4Unsupported,
+    }
 }
 
-/// 直播没有录到可合并的分片。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = HsM3u8Error, frozen)]
-pub struct NothingRecordedError;
-
-/// 回调抛出了异常，任务失败、不重试；`__cause__` 为回调抛出的异常。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = HsM3u8Error, frozen, get_all)]
-pub struct HookError {
-    /// 哪个回调
-    pub hook: HookKind,
+exception! {
+    /// 本地 HLS 表示不了这些内容；可只输出 MP4（`Target.Mp4`）。
+    pub struct HlsUnsupportedError extends RequestError {
+        /// 表示不了的原因
+        pub reason: HlsUnsupported,
+    }
 }
 
-/// 任务已取消。
-#[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", extends = HsM3u8Error, frozen)]
-pub struct JobCancelledError;
+exception! {
+    /// 来源本身不行，同样的请求再试也不会成功。
+    pub struct SourceError extends HsM3u8Error, subclass {}
+}
+
+exception! {
+    /// 内容不是合法的播放列表；用了不支持的加密是 `SourceUnsupportedError`。
+    pub struct PlaylistError extends SourceError {
+        /// 播放列表的地址（重定向之后的）
+        pub url: String,
+        /// 不合法的原因
+        pub reason: Malformed,
+    }
+}
+
+exception! {
+    /// 应为媒体播放列表的地址（变体、音频 rendition）返回了主播放列表。
+    pub struct NotMediaPlaylistError extends SourceError {
+        /// 这个地址
+        pub url: String,
+    }
+}
+
+exception! {
+    /// 来源用到了不支持的特性。
+    pub struct SourceUnsupportedError extends SourceError {
+        /// 哪个特性
+        pub reason: SourceUnsupported,
+    }
+}
+
+exception! {
+    /// 数据校验失败（解密后的内容不对）。
+    pub struct IntegrityError extends SourceError {
+        /// 出错的分片或 init 段的地址
+        pub url: String,
+        /// 失败的原因
+        pub reason: IntegrityFailure,
+    }
+}
+
+exception! {
+    /// key 不是 16 字节。
+    pub struct KeyLengthError extends SourceError {
+        /// key 的地址
+        pub url: String,
+        /// 实际的字节数
+        pub length: usize,
+    }
+}
+
+exception! {
+    /// 请求失败；在分片、key 的请求里出错时，`segment`、`key_url` 指出是哪个。
+    pub struct HttpError extends HsM3u8Error {
+        /// 请求的地址（可能带令牌；异常的说明里只显示到路径）
+        pub url: String,
+        /// 失败的原因
+        pub kind: HttpErrorKind,
+    }
+}
+
+exception! {
+    /// 直播的一条轨长时间没有录到新分片，且不是直播正常结束；任务目录保留，可稍后续录。
+    pub struct LiveStalledError extends HsM3u8Error {
+        /// 第几条轨
+        pub track: usize,
+        /// 停滞的原因
+        pub reason: StallReason,
+    }
+}
+
+exception! {
+    /// 读写文件失败。
+    pub struct FileError extends HsM3u8Error {
+        /// 做的是什么（读取、删除……）
+        pub action: String,
+        /// 操作的路径
+        pub path: PyPath,
+    }
+}
+
+exception! {
+    /// 路径的根（Windows 的盘符、网络共享）读不到：盘不在、共享连不上或没有权限；接上后再试。根下的东西看不到不当作
+    /// 没有，不据此删东西、丢记录。
+    pub struct VolumeUnavailableError extends HsM3u8Error {
+        /// 读不到的根
+        pub root: PyPath,
+    }
+}
+
+exception! {
+    /// 合并 MP4 失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是 `Mp4UnsupportedError`。
+    pub struct RemuxError extends HsM3u8Error {}
+}
+
+exception! {
+    /// 任务目录不能使用。
+    pub struct WorkDirError extends HsM3u8Error {
+        /// 任务目录
+        pub path: PyPath,
+        /// 不能使用的原因
+        pub problem: WorkDirProblem,
+    }
+}
+
+exception! {
+    /// 直播没有录到可合并的分片。
+    pub struct NothingRecordedError extends HsM3u8Error {}
+}
+
+exception! {
+    /// 回调抛出了异常，任务失败、不重试；`__cause__` 为回调抛出的异常。
+    pub struct HookError extends HsM3u8Error {
+        /// 哪个回调
+        pub hook: HookKind,
+    }
+}
+
+exception! {
+    /// 任务已取消。
+    pub struct JobCancelledError extends HsM3u8Error {}
+}
 
 /// 把 core 的错误翻译为 Python 异常；翻译本身出错时（如内存不足）抛那个错误。
 pub(crate) fn to_pyerr(py: Python<'_>, error: core::Error) -> PyErr {
-    let base = HsM3u8Error {
-        retryable: error.retryable(),
-        retry_after: error.retry_after().map(|wait| wait.as_secs()),
-        segment: None,
-        key_url: None,
-        leftovers: Vec::new(),
-    };
+    let base = HsM3u8Error::plain(
+        error.retryable(),
+        error.retry_after().map(|wait| wait.as_secs()),
+    );
     let message = error.to_string();
     exception(py, error, base, message).unwrap_or_else(|failure| failure)
 }
 
 /// 参数在 Python 侧就能判定不对时抛的 `InvalidInputError`。
 pub(crate) fn invalid_input(py: Python<'_>, message: String) -> PyErr {
-    let base = HsM3u8Error {
-        retryable: false,
-        retry_after: None,
-        segment: None,
-        key_url: None,
-        leftovers: Vec::new(),
-    };
-    request_error(py, base, InvalidInputError)
+    let base = HsM3u8Error::plain(false, None);
+    instance(py, RequestError::initializer(base, InvalidInputError {}))
         .and_then(|object| raised(object, message))
         .unwrap_or_else(|failure| failure)
 }
@@ -587,57 +796,80 @@ fn exception(
             return exception(py, *failure, base, message);
         }
         E::Hook { hook, cause } => {
-            let object = direct(py, base, HookError { hook: hook.into() })?;
+            let object = instance(
+                py,
+                HsM3u8Error::initializer(base, HookError { hook: hook.into() }),
+            )?;
             let error = raised(object, message)?;
             if let Some(PyHookError(original)) = cause.downcast_ref::<PyHookError>() {
                 error.set_cause(py, Some(original.clone_ref(py)));
             }
             return Ok(error);
         }
-        E::InvalidInput(_) => request_error(py, base, InvalidInputError)?,
-        E::OutputExists(path) => request_error(py, base, OutputExistsError { path: path.into() })?,
-        E::OutputOccupied { path, ancestor } => request_error(
+        E::InvalidInput(_) => instance(py, RequestError::initializer(base, InvalidInputError {}))?,
+        E::OutputExists(path) => instance(
             py,
-            base,
-            OutputOccupiedError {
-                path: path.into(),
-                ancestor: ancestor.map(PyPath::from),
-            },
+            RequestError::initializer(base, OutputExistsError { path: path.into() }),
         )?,
-        E::Select(failure) => request_error(
+        E::OutputOccupied { path, ancestor } => instance(
             py,
-            base,
-            SelectError {
-                reason: failure.into(),
-            },
+            RequestError::initializer(
+                base,
+                OutputOccupiedError {
+                    path: path.into(),
+                    ancestor: ancestor.map(PyPath::from),
+                },
+            ),
+        )?,
+        E::Select(failure) => instance(
+            py,
+            RequestError::initializer(
+                base,
+                SelectError {
+                    reason: failure.into(),
+                },
+            ),
         )?,
         E::Unsupported(unsupported) => {
             use core::Unsupported as U;
-            let source = |reason| SourceUnsupportedError { reason };
+            let unsupported_source = |reason| SourceUnsupportedError { reason };
             match unsupported {
-                U::Live => request_error(py, base, LiveNotEnabledError)?,
-                U::Mp4(reason) => request_error(
+                U::Live => instance(py, RequestError::initializer(base, LiveNotEnabledError {}))?,
+                U::Mp4(reason) => instance(
                     py,
-                    base,
-                    Mp4UnsupportedError {
-                        reason: reason.into(),
-                    },
+                    RequestError::initializer(
+                        base,
+                        Mp4UnsupportedError {
+                            reason: reason.into(),
+                        },
+                    ),
                 )?,
-                U::Hls(reason) => request_error(
+                U::Hls(reason) => instance(
                     py,
-                    base,
-                    HlsUnsupportedError {
-                        reason: reason.into(),
-                    },
+                    RequestError::initializer(
+                        base,
+                        HlsUnsupportedError {
+                            reason: reason.into(),
+                        },
+                    ),
                 )?,
                 U::EmptyPlaylist(url) => {
-                    let url = url.to_string();
-                    source_error(py, base, source(SourceUnsupported::EmptyPlaylist { url }))?
+                    let reason = SourceUnsupported::EmptyPlaylist {
+                        url: url.to_string(),
+                    };
+                    instance(
+                        py,
+                        SourceError::initializer(base, unsupported_source(reason)),
+                    )?
                 }
                 U::NoTargetDuration(url) => {
-                    let url = url.to_string();
-                    let reason = SourceUnsupported::NoTargetDuration { url };
-                    source_error(py, base, source(reason))?
+                    let reason = SourceUnsupported::NoTargetDuration {
+                        url: url.to_string(),
+                    };
+                    instance(
+                        py,
+                        SourceError::initializer(base, unsupported_source(reason)),
+                    )?
                 }
                 U::Encryption { url, line, what } => {
                     let reason = SourceUnsupported::Encrypted {
@@ -645,7 +877,10 @@ fn exception(
                         line,
                         encryption: what.into(),
                     };
-                    source_error(py, base, source(reason))?
+                    instance(
+                        py,
+                        SourceError::initializer(base, unsupported_source(reason)),
+                    )?
                 }
                 U::InitChangesWithinGroup {
                     track,
@@ -655,7 +890,10 @@ fn exception(
                         track,
                         discontinuity,
                     };
-                    source_error(py, base, source(reason))?
+                    instance(
+                        py,
+                        SourceError::initializer(base, unsupported_source(reason)),
+                    )?
                 }
                 U::DiscontinuityMismatch {
                     track,
@@ -667,111 +905,109 @@ fn exception(
                         first,
                         found,
                     };
-                    source_error(py, base, source(reason))?
+                    instance(
+                        py,
+                        SourceError::initializer(base, unsupported_source(reason)),
+                    )?
                 }
             }
         }
-        E::Playlist { url, cause } => source_error(
+        E::Playlist { url, cause } => instance(
             py,
-            base,
-            PlaylistError {
-                url: url.to_string(),
-                reason: (*cause).into(),
-            },
+            SourceError::initializer(
+                base,
+                PlaylistError {
+                    url: url.to_string(),
+                    reason: (*cause).into(),
+                },
+            ),
         )?,
-        E::NotMediaPlaylist { url } => source_error(
+        E::NotMediaPlaylist { url } => instance(
             py,
-            base,
-            NotMediaPlaylistError {
-                url: url.to_string(),
-            },
+            SourceError::initializer(
+                base,
+                NotMediaPlaylistError {
+                    url: url.to_string(),
+                },
+            ),
         )?,
-        E::Integrity { url, kind } => source_error(
+        E::Integrity { url, kind } => instance(
             py,
-            base,
-            IntegrityError {
-                url: url.to_string(),
-                reason: kind.into(),
-            },
+            SourceError::initializer(
+                base,
+                IntegrityError {
+                    url: url.to_string(),
+                    reason: kind.into(),
+                },
+            ),
         )?,
-        E::KeyLength { url, length } => source_error(
+        E::KeyLength { url, length } => instance(
             py,
-            base,
-            KeyLengthError {
-                url: url.to_string(),
-                length,
-            },
+            SourceError::initializer(
+                base,
+                KeyLengthError {
+                    url: url.to_string(),
+                    length,
+                },
+            ),
         )?,
-        E::Http { url, kind, .. } => direct(
+        E::Http { url, kind, .. } => instance(
             py,
-            base,
-            HttpError {
-                url: url.to_string(),
-                kind: kind.into(),
-            },
+            HsM3u8Error::initializer(
+                base,
+                HttpError {
+                    url: url.to_string(),
+                    kind: kind.into(),
+                },
+            ),
         )?,
-        E::LiveStalled { track, cause } => direct(
+        E::LiveStalled { track, cause } => instance(
             py,
-            base,
-            LiveStalledError {
-                track,
-                reason: cause.into(),
-            },
+            HsM3u8Error::initializer(
+                base,
+                LiveStalledError {
+                    track,
+                    reason: cause.into(),
+                },
+            ),
         )?,
-        E::Io { action, path, .. } => direct(
+        E::Io { action, path, .. } => instance(
             py,
-            base,
-            FileError {
-                action: action.to_owned(),
-                path: path.into(),
-            },
+            HsM3u8Error::initializer(
+                base,
+                FileError {
+                    action: action.to_owned(),
+                    path: path.into(),
+                },
+            ),
         )?,
-        E::VolumeUnavailable { root, .. } => {
-            direct(py, base, VolumeUnavailableError { root: root.into() })?
+        E::VolumeUnavailable { root, .. } => instance(
+            py,
+            HsM3u8Error::initializer(base, VolumeUnavailableError { root: root.into() }),
+        )?,
+        E::Remux(_) => instance(py, HsM3u8Error::initializer(base, RemuxError {}))?,
+        E::WorkDir { path, problem } => instance(
+            py,
+            HsM3u8Error::initializer(
+                base,
+                WorkDirError {
+                    path: path.into(),
+                    problem: problem.into(),
+                },
+            ),
+        )?,
+        E::NothingRecorded => {
+            instance(py, HsM3u8Error::initializer(base, NothingRecordedError {}))?
         }
-        E::Remux(_) => direct(py, base, RemuxError)?,
-        E::WorkDir { path, problem } => direct(
-            py,
-            base,
-            WorkDirError {
-                path: path.into(),
-                problem: problem.into(),
-            },
-        )?,
-        E::NothingRecorded => direct(py, base, NothingRecordedError)?,
-        E::Cancelled => direct(py, base, JobCancelledError)?,
+        E::Cancelled => instance(py, HsM3u8Error::initializer(base, JobCancelledError {}))?,
     };
     raised(object, message)
 }
 
-/// 直接继承基类的异常。
-fn direct<'py, L>(py: Python<'py>, base: HsM3u8Error, leaf: L) -> PyResult<Bound<'py, PyAny>>
-where
-    L: PyClass<BaseType = HsM3u8Error>,
-{
-    let initializer = PyClassInitializer::from(base).add_subclass(leaf);
-    Ok(Bound::new(py, initializer)?.into_any())
-}
-
-/// 改请求再试一组的异常。
-fn request_error<'py, L>(py: Python<'py>, base: HsM3u8Error, leaf: L) -> PyResult<Bound<'py, PyAny>>
-where
-    L: PyClass<BaseType = RequestError>,
-{
-    let initializer = PyClassInitializer::from(base)
-        .add_subclass(RequestError)
-        .add_subclass(leaf);
-    Ok(Bound::new(py, initializer)?.into_any())
-}
-
-/// 来源本身不行一组的异常。
-fn source_error<'py, L>(py: Python<'py>, base: HsM3u8Error, leaf: L) -> PyResult<Bound<'py, PyAny>>
-where
-    L: PyClass<BaseType = SourceError>,
-{
-    let initializer = PyClassInitializer::from(base)
-        .add_subclass(SourceError)
-        .add_subclass(leaf);
+fn instance<'py, L: PyClass>(
+    py: Python<'py>,
+    initializer: PyClassInitializer<L>,
+) -> PyResult<Bound<'py, PyAny>> {
     Ok(Bound::new(py, initializer)?.into_any())
 }
 

@@ -1,0 +1,2 @@
+# 构造函数的参数即 Python 侧的关键字参数，个数由类的字段决定（异常另有基类的五个）
+too-many-arguments-threshold = 16

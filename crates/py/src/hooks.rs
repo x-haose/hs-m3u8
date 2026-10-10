@@ -11,7 +11,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyMapping, PyTuple};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use crate::record::variants;
+use crate::record::{reduce, variants};
 
 variants! {
     /// 请求的用途。
@@ -42,6 +42,7 @@ pub struct RequestParts {
 #[gen_stub_pymethods]
 #[pymethods]
 impl RequestParts {
+    /// 各参数即同名属性。
     #[new]
     #[pyo3(signature = (url, *, headers))]
     fn new(
@@ -64,6 +65,13 @@ impl RequestParts {
             "RequestParts(url={:?}, headers={names:?})",
             bare_url(&self.url)
         )
+    }
+
+    #[gen_stub(skip)]
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        reduce(slf.as_any(), &["url", "headers"])
     }
 }
 

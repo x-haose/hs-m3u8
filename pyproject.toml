@@ -77,8 +77,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# 测试用 assert 断言，断言里直接写期望的值；测试函数的名字即说明
-"tests/python/**" = ["S101", "PLR2004", "D103"]
+# 测试用 assert 断言，断言里直接写期望的值；测试函数的名字即说明；反序列化的是测试自己刚序列化的数据
+"tests/python/**" = ["S101", "PLR2004", "D103", "S301"]
 
 [tool.mypy]
 strict = true

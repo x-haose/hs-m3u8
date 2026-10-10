@@ -1,5 +1,7 @@
 """端到端测试的公共部分：测试内起本地 HTTP 服务提供 HLS 样本（分片取自 tests/fixtures/media）。"""
 
+import copy
+import pickle
 import selectors
 import socket
 import threading
@@ -15,6 +17,13 @@ MEDIA = Path(__file__).parent.parent / "fixtures" / "media"
 def fixture(name: str) -> bytes:
     """样本目录 tests/fixtures/media 里的文件内容。"""
     return (MEDIA / name).read_bytes()
+
+
+def assert_survives_pickle(value: object) -> None:
+    """`value` 经 pickle、`copy.copy`、`copy.deepcopy` 重建后类型与值都不变。"""
+    for rebuilt in (pickle.loads(pickle.dumps(value)), copy.copy(value), copy.deepcopy(value)):
+        assert type(rebuilt) is type(value)
+        assert rebuilt == value
 
 
 # 停住的请求最多等多久，秒；只在测试出错、没有放行时才会等满

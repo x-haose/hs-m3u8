@@ -1,6 +1,7 @@
 //! 请求：来源、选轨偏好、发请求的方式、输出与任务的配置。构造时只做 Python 侧就能判定的检查，其余由 core 在探测、
 //! 开始任务时检查。
 
+use std::hash::{Hash, Hasher};
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,13 +9,13 @@ use std::time::Duration;
 use hs_m3u8_core as core;
 use hs_m3u8_core::Url;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyString};
+use pyo3::types::{PyBytes, PyString, PyTuple};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use crate::error::{invalid_input, to_pyerr};
 use crate::hooks::{self, Hooks, bare_url, extract_headers};
 use crate::path::PyPath;
-use crate::record::{record, variants};
+use crate::record::{record, reduce, variants};
 
 variants! {
     /// 选哪个变体。
@@ -49,6 +50,7 @@ variants! {
 }
 
 record! {
+    @custom_new
     /// 选轨偏好，属于来源：任务目录里有已完成的分片时按记录的变体与音频找回同一条轨，不按偏好重新选。
     pub struct Preference {
         /// 选哪个变体
@@ -70,6 +72,7 @@ impl Preference {
 }
 
 record! {
+    @custom_new
     /// 超时，都不能为 0。
     pub struct Timeouts {
         /// 连接超时，默认 15 秒
@@ -121,6 +124,7 @@ impl Timeouts {
 }
 
 record! {
+    @custom_new
     /// 单个请求的重试策略：可重试的失败（超时、连接与传输错误，408、429 与 5xx）按指数退避重试。默认 8 次、0.5 秒起、
     /// 上限 15 秒：重试前的等待合计约 45 秒，足以越过常见的短时故障。
     pub struct RetryPolicy {
@@ -246,11 +250,21 @@ impl HttpOptions {
             Bound::new(py, self.retry.clone())?.repr()?,
         ))
     }
+
+    #[gen_stub(skip)]
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        reduce(
+            slf.as_any(),
+            &["headers", "proxy", "insecure", "timeouts", "retry"],
+        )
+    }
 }
 
-/// 来源与访问它的方式；探测（`Engine.probe`）与下载共用。
+/// 来源与访问它的方式；探测（`Engine.probe`）与下载共用。按值比较，回调按对象身份比较。
 #[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", frozen, get_all)]
+#[pyclass(module = "hs_m3u8._native", frozen, eq, hash, get_all)]
 pub struct Source {
     /// 主播放列表或媒体播放列表的地址，只支持 http/https。它去掉用户名、密码、查询串与片段后，连同
     /// `preference`，称为来源：任务目录记录的来源不同即是另一个任务；来源相同而完整地址不同（如换了令牌）时，
@@ -262,6 +276,33 @@ pub struct Source {
     pub http: HttpOptions,
     /// 站点适配回调；None 时不做改动
     pub hooks: Option<Py<Hooks>>,
+}
+
+impl Source {
+    /// 回调对象的身份：回调一般不定义按值比较。
+    fn hooks_identity(&self) -> Option<*mut pyo3::ffi::PyObject> {
+        self.hooks.as_ref().map(Py::as_ptr)
+    }
+}
+
+impl PartialEq for Source {
+    fn eq(&self, other: &Self) -> bool {
+        self.url == other.url
+            && self.preference == other.preference
+            && self.http == other.http
+            && self.hooks_identity() == other.hooks_identity()
+    }
+}
+
+impl Eq for Source {}
+
+impl Hash for Source {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.url.hash(state);
+        self.preference.hash(state);
+        self.http.hash(state);
+        self.hooks_identity().hash(state);
+    }
 }
 
 #[gen_stub_pymethods]
@@ -302,6 +343,13 @@ impl Source {
             Bound::new(py, self.http.clone())?.repr()?,
         ))
     }
+
+    #[gen_stub(skip)]
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        reduce(slf.as_any(), &["url", "preference", "http", "hooks"])
+    }
 }
 
 variants! {
@@ -332,6 +380,7 @@ variants! {
 }
 
 record! {
+    @custom_new
     /// 输出到哪里、任务目录在哪里；下载（`JobRequest.output`）与只合并（`Engine.merge_recorded`）共用。
     pub struct OutputOptions {
         /// 输出什么
@@ -352,6 +401,7 @@ record! {
 #[gen_stub_pymethods]
 #[pymethods]
 impl OutputOptions {
+    /// 各参数即同名属性。
     #[new]
     #[pyo3(signature = (target, *, work_dir = None, overwrite = false, keep_work_dir = false))]
     fn new(target: Target, work_dir: Option<PyPath>, overwrite: bool, keep_work_dir: bool) -> Self {
@@ -426,9 +476,17 @@ impl KeyOverride {
         let iv = if self.iv.is_some() { "..." } else { "None" };
         format!("KeyOverride(key=..., iv={iv})")
     }
+
+    #[gen_stub(skip)]
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        reduce(slf.as_any(), &["key", "iv"])
+    }
 }
 
 record! {
+    @custom_new
     /// 直播的录制方式。
     ///
     /// 录制从当前播放列表里的全部分片开始，按 RFC 8216 6.3.4 的节奏刷新，直到所有轨出现 EXT-X-ENDLIST、调用
@@ -487,9 +545,9 @@ impl LiveOptions {
     }
 }
 
-/// 一个下载任务的配置。
+/// 一个下载任务的配置。按值比较（见 `Source`）。
 #[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", frozen, get_all)]
+#[pyclass(module = "hs_m3u8._native", frozen, eq, hash, get_all)]
 pub struct JobRequest {
     /// 来源与访问它的方式
     pub source: Py<Source>,
@@ -501,6 +559,28 @@ pub struct JobRequest {
     pub concurrency: usize,
     /// 直播的录制方式；None 时遇到直播抛 `LiveNotEnabledError`
     pub live: Option<LiveOptions>,
+}
+
+impl PartialEq for JobRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.source.get() == other.source.get()
+            && self.output == other.output
+            && self.key == other.key
+            && self.concurrency == other.concurrency
+            && self.live == other.live
+    }
+}
+
+impl Eq for JobRequest {}
+
+impl Hash for JobRequest {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.source.get().hash(state);
+        self.output.hash(state);
+        self.key.hash(state);
+        self.concurrency.hash(state);
+        self.live.hash(state);
+    }
 }
 
 // 构造函数的默认值不是字面量，存根生成写不出，签名在这里写明
@@ -564,6 +644,16 @@ impl JobRequest {
             "JobRequest(source={source}, output={output}, key={key}, concurrency={}, live={live})",
             self.concurrency
         ))
+    }
+
+    #[gen_stub(skip)]
+    fn __reduce__<'py>(
+        slf: &Bound<'py, Self>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
+        reduce(
+            slf.as_any(),
+            &["source", "output", "key", "concurrency", "live"],
+        )
     }
 }
 
