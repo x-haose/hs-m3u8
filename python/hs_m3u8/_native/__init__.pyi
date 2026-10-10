@@ -317,7 +317,7 @@ class HlsUnsupportedError(RequestError):
     本地 HLS 表示不了这些内容；可只输出 MP4（`Target.Mp4`）。
     """
     @property
-    def reason(self) -> HlsUnsupported:
+    def reason(self) -> HlsUnsupported.MixedInit | HlsUnsupported.BandwidthUnknown:
         r"""
         表示不了的原因
         """
@@ -337,7 +337,7 @@ class HookError(HsM3u8Error):
     回调抛出了异常，任务失败、不重试；`__cause__` 为回调抛出的异常。
     """
     @property
-    def hook(self) -> HookKind:
+    def hook(self) -> HookKind.Playlist | HookKind.Request | HookKind.Key | HookKind.Segment:
         r"""
         哪个回调
         """
@@ -469,7 +469,7 @@ class HttpError(HsM3u8Error):
         请求的地址（可能带令牌；异常的说明里只显示到路径）
         """
     @property
-    def kind(self) -> HttpErrorKind:
+    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
         r"""
         失败的原因
         """
@@ -594,7 +594,7 @@ class HttpFailure:
     取不到的请求：失败的原因，与服务器要求的最短等待。
     """
     @property
-    def kind(self) -> HttpErrorKind:
+    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
         r"""
         失败的原因
         """
@@ -665,7 +665,7 @@ class IntegrityError(SourceError):
         出错的分片或 init 段的地址
         """
     @property
-    def reason(self) -> IntegrityFailure:
+    def reason(self) -> IntegrityFailure.Padding | IntegrityFailure.CipherLength | IntegrityFailure.RangeLength | IntegrityFailure.UnrecognizedSegment | IntegrityFailure.NotFmp4:
         r"""
         失败的原因
         """
@@ -927,7 +927,7 @@ class Leftover:
         它现在的路径
         """
     @property
-    def kind(self) -> LeftoverKind:
+    def kind(self) -> LeftoverKind.Removable | LeftoverKind.Displaced | LeftoverKind.Installed | LeftoverKind.WorkDir:
         r"""
         是什么，决定怎么处理
         """
@@ -1031,7 +1031,7 @@ class LiveEnd:
             第几条轨
             """
         @property
-        def cause(self) -> StallCause:
+        def cause(self) -> StallCause.NoNewSegments | StallCause.PlaylistGone:
             r"""
             看起来已结束的原因
             """
@@ -1131,7 +1131,7 @@ class LiveReport:
     直播的录制结果。
     """
     @property
-    def end(self) -> typing.Optional[LiveEnd]:
+    def end(self) -> typing.Optional[LiveEnd.EndList | LiveEnd.Stopped | LiveEnd.DurationReached | LiveEnd.Stalled | LiveEnd.Restarted | LiveEnd.Inconsistent]:
         r"""
         本次运行的录制如何结束；只合并（`Engine.merge_recorded`）时为 None
         """
@@ -1166,7 +1166,7 @@ class LiveStalledError(HsM3u8Error):
         第几条轨
         """
     @property
-    def reason(self) -> StallReason:
+    def reason(self) -> StallReason.RefreshFailed | StallReason.RefreshPending | StallReason.Unrecordable | StallReason.TrackStopped:
         r"""
         停滞的原因
         """
@@ -1302,7 +1302,7 @@ class MissReason:
         """
         __match_args__ = ("kind",)
         @property
-        def kind(self) -> HttpErrorKind:
+        def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
             r"""
             失败的原因
             """
@@ -1315,7 +1315,7 @@ class MissReason:
         """
         __match_args__ = ("kind",)
         @property
-        def kind(self) -> HttpErrorKind:
+        def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
             r"""
             失败的原因
             """
@@ -1369,7 +1369,7 @@ class Missed:
         区间里的分片数；大到无法表示时为平台的最大整数
         """
     @property
-    def reason(self) -> MissReason:
+    def reason(self) -> MissReason.Expired | MissReason.Failed | MissReason.InitFailed | MissReason.Unmergeable | MissReason.Unknown:
         r"""
         缺失的原因
         """
@@ -1426,7 +1426,7 @@ class Mp4Unsupported:
             第几条轨
             """
         @property
-        def kind(self) -> StreamKind:
+        def kind(self) -> StreamKind.Video | StreamKind.Audio:
             r"""
             流的种类
             """
@@ -1472,17 +1472,17 @@ class Mp4Unsupported:
             第几条轨
             """
         @property
-        def kind(self) -> StreamKind:
+        def kind(self) -> StreamKind.Video | StreamKind.Audio:
             r"""
             流的种类
             """
         @property
-        def first(self) -> Shape:
+        def first(self) -> Shape.Video | Shape.Audio:
             r"""
             第 0 组的参数
             """
         @property
-        def found(self) -> Shape:
+        def found(self) -> Shape.Video | Shape.Audio:
             r"""
             这一组的参数
             """
@@ -1506,7 +1506,7 @@ class Mp4Unsupported:
             第几条轨
             """
         @property
-        def kind(self) -> StreamKind:
+        def kind(self) -> StreamKind.Video | StreamKind.Audio:
             r"""
             流的种类
             """
@@ -1527,7 +1527,7 @@ class Mp4UnsupportedError(RequestError):
     内容放不进 MP4；可只输出本地 HLS（`Target.Hls`）。
     """
     @property
-    def reason(self) -> Mp4Unsupported:
+    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.NoStreams:
         r"""
         放不进的原因
         """
@@ -1673,7 +1673,7 @@ class OutputOptions:
     输出到哪里、任务目录在哪里；下载（`JobRequest.output`）与只合并（`Engine.merge_recorded`）共用。
     """
     @property
-    def target(self) -> Target:
+    def target(self) -> Target.Mp4 | Target.Hls | Target.Both:
         r"""
         输出什么
         """
@@ -1720,7 +1720,7 @@ class PlaylistError(SourceError):
         播放列表的地址（重定向之后的）
         """
     @property
-    def reason(self) -> Malformed:
+    def reason(self) -> Malformed.Empty | Malformed.NotAPlaylist | Malformed.NotUtf8 | Malformed.Mixed | Malformed.Syntax:
         r"""
         不合法的原因
         """
@@ -1740,12 +1740,12 @@ class Preference:
     选轨偏好，属于来源：任务目录里有已完成的分片时按记录的变体与音频找回同一条轨，不按偏好重新选。
     """
     @property
-    def variant(self) -> VariantChoice:
+    def variant(self) -> VariantChoice.Best | VariantChoice.Index:
         r"""
         选哪个变体
         """
     @property
-    def audio(self) -> AudioChoice:
+    def audio(self) -> AudioChoice.Default | AudioChoice.Language | AudioChoice.Index:
         r"""
         取哪个音频
         """
@@ -1793,7 +1793,7 @@ class Progress:
     任务进度快照（`Job.progress`）。
     """
     @property
-    def stage(self) -> Stage:
+    def stage(self) -> Stage.Preparing | Stage.Downloading | Stage.Recording | Stage.Writing | Stage.Done:
         r"""
         所处的阶段
         """
@@ -1898,7 +1898,7 @@ class RefreshCause:
     直播一次刷新失败；这类失败等下次刷新，不使任务立即失败。
     """
     @property
-    def reason(self) -> RefreshReason:
+    def reason(self) -> RefreshReason.Http | RefreshReason.Empty | RefreshReason.Syntax:
         r"""
         失败的原因
         """
@@ -2105,7 +2105,7 @@ class SelectError(RequestError):
     选轨偏好与来源不符。
     """
     @property
-    def reason(self) -> SelectFailure:
+    def reason(self) -> SelectFailure.NoVariants | SelectFailure.VariantIndexOutOfRange | SelectFailure.AudioLanguageNotFound | SelectFailure.AudioIndexOutOfRange | SelectFailure.NotVariantAudio:
         r"""
         选不出的原因
         """
@@ -2382,7 +2382,7 @@ class SourceUnsupported:
             EXT-X-KEY 所在的行，从 1 起
             """
         @property
-        def encryption(self) -> Encryption:
+        def encryption(self) -> Encryption.SampleAes | Encryption.Drm | Encryption.Method:
             r"""
             加密方式
             """
@@ -2436,7 +2436,7 @@ class SourceUnsupportedError(SourceError):
     来源用到了不支持的特性。
     """
     @property
-    def reason(self) -> SourceUnsupported:
+    def reason(self) -> SourceUnsupported.EmptyPlaylist | SourceUnsupported.NoTargetDuration | SourceUnsupported.Encrypted | SourceUnsupported.InitChangesWithinGroup | SourceUnsupported.DiscontinuityMismatch:
         r"""
         哪个特性
         """
@@ -2569,7 +2569,7 @@ class StallReason:
         """
         __match_args__ = ("cause",)
         @property
-        def cause(self) -> StallCause:
+        def cause(self) -> StallCause.NoNewSegments | StallCause.PlaylistGone:
             r"""
             看起来已结束的原因
             """
@@ -2604,7 +2604,7 @@ class StreamReport:
     合并出的一路流。
     """
     @property
-    def shape(self) -> Shape:
+    def shape(self) -> Shape.Video | Shape.Audio:
         r"""
         编码参数
         """
@@ -2867,7 +2867,7 @@ class WorkDirError(HsM3u8Error):
         任务目录
         """
     @property
-    def problem(self) -> WorkDirProblem:
+    def problem(self) -> WorkDirProblem.NotEmpty | WorkDirProblem.Locked | WorkDirProblem.Corrupt | WorkDirProblem.UnsupportedVersion | WorkDirProblem.KindMismatch | WorkDirProblem.NotLiveRecording | WorkDirProblem.SourceMismatch | WorkDirProblem.TracksMismatch | WorkDirProblem.PlanChanged | WorkDirProblem.SelectionGone | WorkDirProblem.SourceUnverified:
         r"""
         不能使用的原因
         """
@@ -2947,12 +2947,12 @@ class WorkDirProblem:
         """
         __match_args__ = ("recorded", "current",)
         @property
-        def recorded(self) -> JobType:
+        def recorded(self) -> JobType.Vod | JobType.Live:
             r"""
             记录的
             """
         @property
-        def current(self) -> JobType:
+        def current(self) -> JobType.Vod | JobType.Live:
             r"""
             本次的
             """

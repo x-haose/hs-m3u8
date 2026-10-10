@@ -2,9 +2,12 @@
 //!
 //! pickle 与 copy 经 `__reduce__` 按关键字调用构造函数重建（见 [`partial`]），所以每个类都有构造函数。
 
+use std::ops::BitOr;
+
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyTuple};
+use pyo3_stub_gen::TypeInfo;
 
 /// 数据类：字段只读（同名属性）。构造函数各参数只能按关键字传、都必须给；要默认值或校验的写 `@custom_new`，自己定义
 /// 构造函数。
@@ -68,17 +71,44 @@ macro_rules! record {
     };
 }
 
-/// 枚举：每种取值是一个子类（不带数据的也是，如 `Stage.Writing()`），用 `match` 或 `isinstance` 分辨。
+/// 枚举：每种取值是一个子类（不带数据的也是，如 `Stage.Writing()`），用 `match` 或 `isinstance` 分辨。存根里，属性与
+/// 返回值的类型写成各取值类的并集（如 `Stage.Preparing | ... | Stage.Done`），类型检查器才能判断 `match` 是否穷尽；
+/// 参数的类型写基类，接受任一取值。
 macro_rules! variants {
     (
         $(#[$meta:meta])*
-        pub enum $name:ident { $($body:tt)* }
+        pub enum $name:ident {
+            $(
+                $(#[$variant_meta:meta])*
+                $variant:ident {
+                    $(
+                        $(#[$field_meta:meta])*
+                        $field:ident : $ty:ty
+                    ),* $(,)?
+                }
+            ),* $(,)?
+        }
     ) => {
         $(#[$meta])*
-        #[::pyo3_stub_gen::derive::gen_stub_pyclass_complex_enum]
+        #[::pyo3_stub_gen::derive::gen_stub_pyclass_complex_enum(skip_stub_type)]
         #[::pyo3::pyclass(module = "hs_m3u8._native", frozen, eq, hash, from_py_object)]
         #[derive(Clone, PartialEq, Eq, Hash)]
-        pub enum $name { $($body)* }
+        pub enum $name {
+            $(
+                $(#[$variant_meta])*
+                $variant { $( $(#[$field_meta])* $field: $ty ),* }
+            ),*
+        }
+
+        impl ::pyo3_stub_gen::PyStubType for $name {
+            fn type_output() -> ::pyo3_stub_gen::TypeInfo {
+                $crate::record::union(&[$(concat!(stringify!($name), ".", stringify!($variant))),*])
+            }
+
+            fn type_input() -> ::pyo3_stub_gen::TypeInfo {
+                ::pyo3_stub_gen::TypeInfo::unqualified(stringify!($name))
+            }
+        }
 
         #[::pyo3_stub_gen::derive::gen_stub_pymethods]
         #[::pyo3::pymethods]
@@ -100,6 +130,15 @@ macro_rules! variants {
 }
 
 pub(crate) use {record, variants};
+
+/// 各取值类的并集，如 `Stage.Preparing | Stage.Done`；都定义在本模块里，存根里直接写类名。
+pub(crate) fn union(variants: &[&str]) -> TypeInfo {
+    variants
+        .iter()
+        .map(|variant| TypeInfo::unqualified(variant))
+        .reduce(BitOr::bitor)
+        .expect("枚举至少有一种取值")
+}
 
 /// `名字(字段=repr, ...)`，按 `fields` 的顺序。
 pub(crate) fn fields_repr(
