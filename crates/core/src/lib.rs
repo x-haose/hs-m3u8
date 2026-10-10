@@ -33,6 +33,7 @@ mod vod;
 mod workdir;
 
 use std::num::NonZeroUsize;
+use std::path::Path;
 use std::sync::Arc;
 
 use tokio::sync::{Semaphore, watch};
@@ -135,6 +136,19 @@ impl Engine {
         let cancel = CancellationToken::new();
         let task = tokio::spawn(job::merge_recorded(output, cancel.clone(), progress_tx));
         Ok(Job::new(task, cancel, CancellationToken::new(), progress))
+    }
+
+    /// 放弃任务：删除任务目录 `work_dir`（相对路径按当前目录补全），只删本库写的文件。先按其中的记录收拾写到一半
+    /// 的输出：删掉临时输出，把没能放回原处的旧输出放回（原处已有输出时删掉它，见 [`LeftoverKind::Displaced`]）。
+    /// 返回留下的东西：里面有不是本库写的文件（例如经符号链接写进去的输出）而没删干净时为一项
+    /// [`LeftoverKind::WorkDir`]。目录不存在时什么也不做。
+    ///
+    /// 任务目录正被任务使用时报 [`WorkDirProblem::Locked`]，不是本库的任务目录（没有 `job.json` 且不为空）时报
+    /// [`WorkDirProblem::NotEmpty`]；收拾输出失败时报错，任务目录与记录都留着，可以重试。不在 tokio 运行时内调用会
+    /// panic。
+    pub async fn discard(&self, work_dir: &Path) -> Result<Vec<Leftover>, Error> {
+        let root = std::path::absolute(work_dir).map_err(error::io_error("解析", work_dir))?;
+        job::discard(root).await
     }
 }
 
