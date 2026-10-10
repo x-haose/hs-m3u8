@@ -3,6 +3,7 @@
 //! ```text
 //! job.json                                                          任务记录，见 JobFile
 //! lock                                                              运行期间持有排他锁
+//! outputs.json                                                      正在写的输出，见 PendingOutput
 //! tracks/<轨道>/<会话>-<起点>-<序号>-<不连续段>-<init>-<时长>-<身份>.seg  已解密、通过校验的分片
 //! tracks/<轨道>/init-<指纹>.mp4                                      init 段，按内容命名
 //! ```
@@ -16,6 +17,7 @@
 //! 请求配置（请求头、Cookie 等）不写入目录：续传时由调用方再次提供。
 
 mod names;
+mod outputs;
 mod record;
 
 use std::ffi::{OsStr, OsString};
@@ -25,6 +27,10 @@ use std::path::{Path, PathBuf};
 
 pub(crate) use self::names::{SegmentName, SessionStart};
 use self::names::{init_file_name, parse_init_name, parse_segment_name, segment_file_name};
+use self::outputs::OUTPUTS_FILE;
+pub(crate) use self::outputs::{
+    PendingOutput, clear_outputs, outputs_file, read_outputs, record_outputs,
+};
 pub(crate) use self::record::{JobRecord, RecordKind};
 use self::record::{decode, encode};
 use crate::ident::Fingerprint;
@@ -159,7 +165,8 @@ impl WorkDir {
         .await?
     }
 
-    /// 删除整个任务目录。只删本库写的文件（`job.json`、各轨的分片与 init 段，以及它们写到一半的 `.part`）、系统
+    /// 删除整个任务目录。只删本库写的文件（`job.json`、`outputs.json`、各轨的分片与 init 段，以及它们写到一半的
+    /// `.part`）、系统
     /// 自动生成的元数据文件（见 [`is_system_file`]）与因此变空的目录；其他文件（例如经符号链接或只差大小写的路径
     /// 写进来的输出）原样留下，返回删除失败并指出留下的文件。有东西留下时 `job.json` 也留下：目录仍是可识别的
     /// 任务目录，下次运行照常使用（没有已完成的分片，按当前任务重新开始）。
@@ -174,10 +181,12 @@ impl WorkDir {
             let mut kept = Vec::new();
             let mut job = None;
             for (path, name, kind) in entries(root)? {
-                let ours = name
-                    .to_str()
-                    .is_some_and(|n| n.strip_suffix(".part") == Some(JOB_FILE))
-                    && kind.is_file();
+                // job.json 写到一半的、正在写的输出的记录（含写到一半的）
+                let ours = kind.is_file()
+                    && name.to_str().is_some_and(|n| {
+                        n.strip_suffix(".part") == Some(JOB_FILE)
+                            || n.strip_suffix(".part").unwrap_or(n) == OUTPUTS_FILE
+                    });
                 match name.to_str() {
                     Some(LOCK_FILE) => {}
                     Some(JOB_FILE) if kind.is_file() => job = Some(path),

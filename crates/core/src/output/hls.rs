@@ -95,22 +95,6 @@ pub(super) fn stage(
     })
 }
 
-/// 备齐的 `stage` 改名为 `target`：`target` 已存在时按 [`check`] 替换。备齐期间 `target` 可能被别人占用，
-/// 替换前再查一次；查过之后别人又抢先写好了 `target`（几个任务输出到同一处）时改名失败，报
-/// [`Error::OutputExists`]，不会混在一起。
-pub(super) fn replace(stage: &Path, target: &Path, overwrite: bool) -> Result<(), Error> {
-    check(target, overwrite)?;
-    if let Err(e) = fs::remove_dir_all(target)
-        && e.kind() != io::ErrorKind::NotFound
-    {
-        return Err(io_error("删除", target)(e));
-    }
-    fs::rename(stage, target).map_err(|e| match fs::symlink_metadata(target) {
-        Ok(_) => Error::OutputExists(target.to_path_buf()),
-        Err(_) => io_error("重命名", stage)(e),
-    })
-}
-
 /// 上次中断留下的准备目录：全是本库写出的文件才删，否则报已存在。
 fn remove_stale_stage(stage: &Path) -> Result<(), Error> {
     match fs::symlink_metadata(stage) {

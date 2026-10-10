@@ -85,9 +85,27 @@ impl OutputOptions {
         }
     }
 
-    /// 路径都有文件名、互不相同也不互相包含。只按字面判断，不访问文件系统：输出能否写由
+    /// 输出路径是 UTF-8、MP4 路径不以分隔符结尾，各路径都有文件名、互不相同也不互相包含。只按字面判断，不访问
+    /// 文件系统：输出能否写由
     /// [`super::check_targets`] 在任务开头查。
     pub(crate) fn validate(&self) -> Result<(), Error> {
+        let invalid = |reason: &str, path: &Path| {
+            Err(Error::InvalidInput(format!("{reason}：{}", path.display())))
+        };
+        for path in self.target.mp4().into_iter().chain(self.target.hls()) {
+            // 写到一半的输出记进任务目录，记录的写法要求 UTF-8；Windows 与 macOS 上的路径总是 UTF-8
+            if path.to_str().is_none() {
+                return invalid("输出路径须为 UTF-8", path);
+            }
+        }
+        if let Some(mp4) = self.target.mp4()
+            && mp4
+                .as_os_str()
+                .to_string_lossy()
+                .ends_with(std::path::is_separator)
+        {
+            return invalid("MP4 路径是文件，不能以路径分隔符结尾", mp4);
+        }
         let work_dir = self.resolved_work_dir();
         let mut paths: Vec<&Path> = vec![&work_dir];
         paths.extend(self.target.mp4());
@@ -126,7 +144,7 @@ pub(crate) fn sibling(path: &Path, name: &OsStr, suffix: &str) -> PathBuf {
 }
 
 /// 按字面规整成绝对路径：补上当前目录，去掉 `.`，`..` 退一级；不访问文件系统，不跟随符号链接。
-fn lexical_absolute(path: &Path) -> Result<PathBuf, Error> {
+pub(super) fn lexical_absolute(path: &Path) -> Result<PathBuf, Error> {
     let absolute = std::path::absolute(path).map_err(|cause| Error::Io {
         action: "解析",
         path: path.to_path_buf(),

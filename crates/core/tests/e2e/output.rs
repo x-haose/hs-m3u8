@@ -538,9 +538,9 @@ async fn system_files_in_the_work_dir_do_not_block_its_removal() {
     assert!(!work.exists());
 }
 
-/// 输出与任务目录的路径相同或互相包含时，下载前即拒绝：任务目录成功后会被整个删除。
+/// 输出与任务目录的路径相同或互相包含、MP4 路径以分隔符结尾时，下载前即拒绝。
 #[tokio::test(flavor = "multi_thread")]
-async fn overlapping_paths_are_rejected() {
+async fn invalid_output_paths_are_rejected() {
     let dir = test_dir("output_paths");
     let url = Url::parse("http://127.0.0.1:9/index.m3u8").unwrap();
     let cases = [
@@ -558,6 +558,7 @@ async fn overlapping_paths_are_rejected() {
             },
             None,
         ),
+        (Target::Mp4(dir.join("out.mp4/")), None),
     ];
     for (target, work_dir) in cases {
         let mut req = request_to(url.clone(), &dir, target.clone());
@@ -566,5 +567,63 @@ async fn overlapping_paths_are_rejected() {
             Err(Error::InvalidInput(_)) => {}
             other => panic!("{target:?} 应被拒绝：{other:?}"),
         }
+    }
+}
+
+/// 输出名很长（238 字节，在文件名上限 255 字节之内）：临时名定长，不因输出名变长而超出上限。
+#[tokio::test(flavor = "multi_thread")]
+async fn long_output_names_are_written() {
+    let dir = test_dir("output_long_name");
+    let server = Server::start().await;
+    server.put("seg0.ts", fixture("ts_a/seg0.ts"));
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n",
+    );
+    let name = format!("{}.mp4", "长".repeat(78));
+    assert_eq!(name.len(), 238);
+    let target = Target::Mp4(dir.join(&name));
+
+    let output = run(request_to(server.url("index.m3u8"), &dir, target))
+        .await
+        .unwrap();
+
+    assert!(output.mp4.unwrap().path.is_file());
+}
+
+/// 要求覆盖、两者都要，旧的 HLS 目录里有删不掉的内容：新的 MP4 与 HLS 照常换上，旧的挪开后删不掉，
+/// 记在 cleanup_error 里；任务目录里不留正在写的输出的记录。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn old_outputs_that_cannot_be_removed_are_reported() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = test_dir("output_old_kept");
+    let server = Server::start().await;
+    server.put("seg0.ts", fixture("ts_a/seg0.ts"));
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n",
+    );
+    let mut req = request_to(server.url("index.m3u8"), &dir, both(&dir));
+    run(req.clone()).await.unwrap();
+    let old_track = dir.join("out/0");
+    std::fs::set_permissions(&old_track, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    req.output.overwrite = true;
+    req.output.keep_work_dir = true;
+    let output = run(req).await.unwrap();
+
+    let cleanup = output.cleanup_error.expect("旧的 HLS 删不掉");
+    assert!(cleanup.contains(".hls.old"), "{cleanup}");
+    assert_hls_matches(&dir.join("out"), &output.mp4.unwrap().path);
+    assert!(!dir.join("out.hsdl/outputs.json").exists());
+    let kept: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().ends_with(".hls.old"))
+        .collect();
+    for old in &kept {
+        std::fs::set_permissions(old.join("0"), std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
