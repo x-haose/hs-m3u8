@@ -77,9 +77,9 @@ pub struct Output {
     /// 生成的 MP4；没要 MP4（[`crate::Target::Hls`]）时为 None
     pub mp4: Option<Mp4Output>,
     /// 生成的本地 HLS 目录（绝对路径，相对路径按开始任务时的当前目录补全）；没要 HLS 时为 None。入口为其中的
-    /// `index.m3u8`：单轨时是媒体播放列表，视频与独立音频
-    /// 分离时是主播放列表；各轨的分片、init 段（与分离时这条轨的 `index.m3u8`）在 `<轨道编号>/` 下。
-    /// 内容与 MP4 相同：只放各轨都有的不连续段组，组内缺失的分片不标出、保留原时间戳
+    /// `index.m3u8`：单轨时是媒体播放列表，视频与独立音频分离时是主播放列表；各轨的分片、init 段（与分离时这条轨的
+    /// `index.m3u8`）在 `<轨道编号>/` 下。内容与 MP4 相同：只放各轨都有的不连续段组，组内缺失的分片不标出、保留原
+    /// 时间戳
     pub hls: Option<PathBuf>,
     /// 输出的分片数，各轨合计
     pub segments: usize,
@@ -110,8 +110,8 @@ pub enum LeftoverKind {
     Displaced { target: PathBuf },
     /// 写输出失败后没能撤下的新输出：完整可用，留在原处
     Installed,
-    /// 没删干净的任务目录：里面可能有不是本库写的文件（例如经符号链接写进去的输出本身），不要整个删除，用
-    /// [`crate::Engine::discard`] 删
+    /// 没删干净的任务目录，`cause` 说明原因：里面有不是本库写的文件（例如经符号链接写进去的输出本身），要用户处理；
+    /// 或删除时出错，可用 [`crate::Engine::discard`] 重试。不要整个删除
     WorkDir,
 }
 
