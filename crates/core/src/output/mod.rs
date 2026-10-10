@@ -45,8 +45,8 @@ pub(crate) struct GroupSegment {
     pub duration_us: u64,
 }
 
-/// 任务开头：收拾上次写输出留下的（见 [`commit::recover`]），检查各输出能否写，再建出各输出所在的目录：盘不在、
-/// 连不上、没有权限都在这里报出，不等下载完。上次没能放回的旧输出原处是别的东西时报 [`Error::Cleanup`]（原因为
+/// 任务开头：收拾上次写输出留下的（见 [`commit::recover`]），检查各输出能否写，再建出各输出所在的目录（见
+/// [`create_dirs`]），都不等下载完。上次没能放回的旧输出原处是别的东西时报 [`Error::Cleanup`]（原因为
 /// [`Error::OutputOccupied`]），要用户处理。要读写文件系统，在阻塞线程池中调用；任务目录已存在时调用方已加锁。
 pub(crate) fn prepare(options: &ResolvedOutput) -> Result<(), Error> {
     let unsettled = commit::recover(&options.work_dir, &options.outputs)?;
@@ -60,6 +60,12 @@ pub(crate) fn prepare(options: &ResolvedOutput) -> Result<(), Error> {
         });
     }
     check_all(options)?;
+    create_dirs(options)
+}
+
+/// 建出各输出所在的目录，已有的不动：根存在而中间建不出（没有写权限，如 macOS 上外置盘卸载后的 /Volumes）时报出。
+/// 任务开头与写出前各调一次：下载期间目录被删了就重建。
+fn create_dirs(options: &ResolvedOutput) -> Result<(), Error> {
     for o in &options.outputs {
         let dir = o
             .target()
@@ -127,6 +133,7 @@ fn write_files(
     options: &ResolvedOutput,
 ) -> Result<(Option<Mp4Output>, Vec<Leftover>), Error> {
     check_all(options)?;
+    create_dirs(options)?;
     if options.get(OutputKind::Hls).is_some() {
         hls::check_content(groups, selection)?;
     }

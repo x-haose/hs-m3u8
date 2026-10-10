@@ -25,7 +25,7 @@ pub struct OutputOptions {
     pub keep_work_dir: bool,
 }
 
-/// 输出什么。各路径与任务目录不能相同或互相包含（按字面比较，不跟随符号链接），所在目录不存在时在任务开头创建；
+/// 输出什么。各路径与任务目录不能相同或互相包含（按字面比较，不跟随符号链接），所在目录不存在时在任务开头与写出前创建；
 /// 相对路径按开始任务时的当前目录补全，之后改变当前目录不影响任务。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {

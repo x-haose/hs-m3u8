@@ -737,8 +737,37 @@ async fn an_output_under_a_file_is_reported_as_occupied() {
     }
 }
 
-/// 输出所在的目录建不出来（这里是没有写权限，盘不在、连不上同样）：任务开头、联网之前就报出，不等下载完。以 root
-/// 运行时权限位不起作用，不测。
+/// 下载期间输出所在的目录被删了（如移走、外置盘重新插入）：写出前重建，MP4 与 HLS 照常写出。
+#[tokio::test(flavor = "multi_thread")]
+async fn output_directories_removed_during_the_download_are_recreated() {
+    let dir = test_dir("output_dir_removed");
+    let server = Server::start().await;
+    server.put("seg0.ts", fixture("ts_a/seg0.ts"));
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n",
+    );
+    let outdir = dir.join("outdir");
+    let target = Target::Both {
+        mp4: outdir.join("a.mp4"),
+        hls: outdir.join("a"),
+    };
+    let mut req = request_to(server.url("index.m3u8"), &dir, target);
+    req.output.work_dir = Some(dir.join("work"));
+    let gate = server.gate("seg0.ts");
+    let job = engine().start(req).unwrap();
+    gate.arrived.notified().await;
+    std::fs::remove_dir_all(&outdir).unwrap();
+    server.ungate("seg0.ts");
+
+    let output = job.wait().await.unwrap();
+
+    assert!(output.mp4.unwrap().path.is_file());
+    assert!(output.hls.unwrap().join("index.m3u8").is_file());
+}
+
+/// 输出所在的目录建不出来（这里是没有写权限）：任务开头、联网之前就报出，不等下载完。以 root 运行时权限位不起
+/// 作用，不测。
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn output_directories_that_cannot_be_created_fail_before_downloading() {
