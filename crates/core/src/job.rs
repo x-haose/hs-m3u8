@@ -10,13 +10,11 @@ use crate::fetch::Fetcher;
 use crate::http::Http;
 use crate::ident::{source_digest, url_digest};
 use crate::live::{self, Context, Outcome};
-use crate::request::{JobRequest, Resume, check_output};
+use crate::request::{JobRequest, OutputOptions, check_output};
 use crate::resolve::{self, Resolved};
 use crate::vod::{self, Plan};
 use crate::workdir::{JobRecord, RecordKind, Stored, WorkDir, read_resumable};
-use crate::{
-    Error, LiveEnd, LiveReport, Output, Progress, Stage, Unsupported, WorkDirProblem, blocking,
-};
+use crate::{Error, LiveReport, Output, Progress, Stage, Unsupported, WorkDirProblem, blocking};
 
 /// 一次运行用到的共享对象。
 struct Task {
@@ -42,13 +40,7 @@ pub(crate) async fn run(
         progress,
     };
     let request = &task.request;
-    if request
-        .live
-        .is_some_and(|live| live.resume == Resume::MergeOnly)
-    {
-        return merge_only(task).await;
-    }
-    let root = request.resolved_work_dir();
+    let root = request.output.resolved_work_dir();
     let source = source_digest(&request.source.url, &request.source.preference);
     // 任务目录里有同一来源、可续的记录时，按记录的选轨找回同一条轨；记录的是直播且请求开启了直播时按直播继续，
     // 即使播放列表已出现 ENDLIST（中断期间直播结束了）。没开启直播时按点播运行，由 WorkDir::open 报类型不符
@@ -85,7 +77,7 @@ async fn run_live(task: Task, source: String, resolved: Resolved) -> Result<Outp
             url_digest: url_digest(&task.request.source.url),
         },
     };
-    let dir = WorkDir::open(task.request.resolved_work_dir(), record).await?;
+    let dir = WorkDir::open(task.request.output.resolved_work_dir(), record).await?;
     let mut fetcher = task.fetcher();
     let ctx = Context {
         http: task.http.clone(),
@@ -115,7 +107,7 @@ async fn run_vod(task: Task, source: String, resolved: Resolved) -> Result<Outpu
             plan_digest: plan.digest(),
         },
     };
-    let dir = WorkDir::open(task.request.resolved_work_dir(), record).await?;
+    let dir = WorkDir::open(task.request.output.resolved_work_dir(), record).await?;
     let mut fetcher = task.fetcher();
     let groups = vod::download(
         &task.http,
@@ -136,9 +128,9 @@ async fn run_vod(task: Task, source: String, resolved: Resolved) -> Result<Outpu
 }
 
 /// 不联网，只合并任务目录中已录到的直播分片。
-async fn merge_only(task: Task) -> Result<Output, Error> {
-    let request = &task.request;
-    let root = request.resolved_work_dir();
+pub(crate) async fn merge_recorded(output: OutputOptions) -> Result<Output, Error> {
+    output.validate()?;
+    let root = output.resolved_work_dir();
     let Some(record) = read_resumable(root.clone()).await? else {
         return Err(Error::NothingRecorded);
     };
@@ -148,18 +140,11 @@ async fn merge_only(task: Task) -> Result<Output, Error> {
             problem: WorkDirProblem::NotLiveRecording,
         });
     }
-    if record.source_digest != source_digest(&request.source.url, &request.source.preference) {
-        return Err(Error::WorkDir {
-            path: root,
-            problem: WorkDirProblem::SourceMismatch,
-        });
-    }
     let dir = WorkDir::open(root, record).await?;
     let streams = dir.record().streams();
     let stored = dir.scan(streams.len()).await?;
-    live::count_stored(&stored, &task.progress);
     let input = merge_live(&dir, &stored, streams, None)?;
-    task.finish(dir, input).await
+    merge(dir, input, &output, stored.bytes()).await
 }
 
 /// 合并直播录到的分片；`recording` 为本次运行的录制，只合并时为 None。
@@ -174,8 +159,8 @@ fn merge_live(
         return Err(Error::NothingRecorded);
     }
     let (end, known) = match recording {
-        Some(r) => (r.end, r.missed),
-        None => (LiveEnd::MergeOnly, Vec::new()),
+        Some(r) => (Some(r.end), r.missed),
+        None => (None, Vec::new()),
     };
     let report = LiveReport {
         end,
@@ -212,40 +197,49 @@ impl Task {
 
     /// 合并为输出文件，按选项删除任务目录。
     async fn finish(self, dir: WorkDir, input: MergeInput) -> Result<Output, Error> {
-        let MergeInput {
-            streams,
-            groups,
-            segments,
-            live,
-        } = input;
-        let request = self.request;
         // 简化：合并阶段不响应取消（remux 不可中断），合并耗时成为问题时给 remux 加 FFmpeg 中断回调。
         if self.cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        // 下载或录制期间输出路径可能已被别人占用；开始时检查过，这里再查一次
-        check_output(&request.output, request.overwrite)?;
-        create_parent(&request.output).await?;
         self.progress.send_modify(|p| p.stage = Stage::Merging);
-        let output = request.output.clone();
-        let report = blocking(move || hs_m3u8_remux::remux(&streams, &groups, &output)).await??;
-
-        let cleanup_error = if request.keep_work_dir {
-            None
-        } else {
-            dir.remove().await.err().map(|e| e.to_string())
-        };
-        self.progress.send_modify(|p| p.stage = Stage::Done);
         let bytes = self.progress.borrow().bytes;
-        Ok(Output {
-            path: request.output,
-            report,
-            segments,
-            bytes,
-            cleanup_error,
-            live,
-        })
+        let output = merge(dir, input, &self.request.output, bytes).await?;
+        self.progress.send_modify(|p| p.stage = Stage::Done);
+        Ok(output)
     }
+}
+
+/// 合并为输出文件，按选项删除任务目录。`bytes` 为任务目录中已完成的分片与 init 段的字节数。
+async fn merge(
+    dir: WorkDir,
+    input: MergeInput,
+    options: &OutputOptions,
+    bytes: u64,
+) -> Result<Output, Error> {
+    let MergeInput {
+        streams,
+        groups,
+        segments,
+        live,
+    } = input;
+    // 下载或录制期间输出路径可能已被别人占用；开始时检查过，这里再查一次
+    check_output(&options.path, options.overwrite)?;
+    create_parent(&options.path).await?;
+    let path = options.path.clone();
+    let report = blocking(move || hs_m3u8_remux::remux(&streams, &groups, &path)).await??;
+    let cleanup_error = if options.keep_work_dir {
+        None
+    } else {
+        dir.remove().await.err().map(|e| e.to_string())
+    };
+    Ok(Output {
+        path: options.path.clone(),
+        report,
+        segments,
+        bytes,
+        cleanup_error,
+        live,
+    })
 }
 
 async fn create_parent(output: &std::path::Path) -> Result<(), Error> {

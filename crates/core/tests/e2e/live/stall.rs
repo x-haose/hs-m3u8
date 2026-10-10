@@ -83,7 +83,7 @@ async fn one_track_whose_playlist_is_removed_ends_the_recording() {
         track: 1,
         cause: StallCause::PlaylistGone(404),
     };
-    assert_eq!(output.live.unwrap().end, end);
+    assert_eq!(output.live.unwrap().end, Some(end));
 }
 
 /// 音频轨的刷新一直 500、视频轨一直有新分片：音频轨的故障使任务失败（目录保留，可续录），

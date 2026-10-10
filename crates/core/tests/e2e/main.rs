@@ -9,7 +9,7 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use hs_m3u8_core::{Engine, Error, JobRequest, Output, RetryPolicy, Source, Url};
+use hs_m3u8_core::{Engine, Error, JobRequest, Output, OutputOptions, RetryPolicy, Source, Url};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams, TrackSegments, remux};
 
 // ---------- 样本 ----------
@@ -72,7 +72,7 @@ fn test_dir(test: &str) -> PathBuf {
 // ---------- 任务 ----------
 
 fn request(url: Url, dir: &Path) -> JobRequest {
-    let mut request = JobRequest::new(Source::new(url), dir.join("out.mp4"));
+    let mut request = JobRequest::new(Source::new(url), OutputOptions::new(dir.join("out.mp4")));
     request.source.http.retry = RetryPolicy {
         attempts: NonZeroU32::new(3).unwrap(),
         base_delay: Duration::from_millis(1),

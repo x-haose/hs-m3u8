@@ -56,6 +56,13 @@ pub(crate) struct Stored {
     pub init_bytes: u64,
 }
 
+impl Stored {
+    /// 分片与 init 段的字节数之和。
+    pub(crate) fn bytes(&self) -> u64 {
+        self.segments.iter().flatten().map(|f| f.len).sum::<u64>() + self.init_bytes
+    }
+}
+
 impl Layout {
     pub(crate) fn root(&self) -> &Path {
         &self.root

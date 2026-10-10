@@ -271,10 +271,10 @@ async fn tracks_without_candidates_all_end_together() {
     assert!(
         matches!(
             live.end,
-            LiveEnd::Stalled {
+            Some(LiveEnd::Stalled {
                 cause: StallCause::NoNewSegments,
                 ..
-            }
+            })
         ),
         "{:?}",
         live.end

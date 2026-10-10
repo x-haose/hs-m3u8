@@ -3,9 +3,7 @@
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use hs_m3u8_core::{
-    Engine, Error, HttpError, LiveEnd, LiveOptions, MissReason, Missed, Resume, Stage,
-};
+use hs_m3u8_core::{Engine, Error, HttpError, LiveEnd, LiveOptions, MissReason, Missed, Stage};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
 use super::{
@@ -114,7 +112,6 @@ async fn max_duration_limits_recording() {
     req.live = Some(LiveOptions {
         max_duration: Some(Duration::from_secs(2)),
         stall_timeout: STALL,
-        resume: Resume::Continue,
     });
 
     let output = run(req).await.unwrap();
@@ -157,13 +154,12 @@ async fn max_duration_applies_to_every_track() {
     req.live = Some(LiveOptions {
         max_duration: Some(Duration::from_secs(1)),
         stall_timeout: STALL,
-        resume: Resume::Continue,
     });
 
     let output = run(req).await.unwrap();
 
     assert_output(&output, &expected_split(&dir, &video[..1], &audio[..1]));
-    assert_eq!(output.live.unwrap().end, LiveEnd::DurationReached);
+    assert_eq!(output.live.unwrap().end, Some(LiveEnd::DurationReached));
     assert_eq!(
         (server.hits("video/seg1.m4s"), server.hits("audio/seg1.m4s")),
         (0, 0)
