@@ -20,9 +20,9 @@ use std::time::Duration;
 
 use url::Url;
 
-use crate::StallCause;
 use crate::hooks::{HookError, HookKind};
 use crate::ident::bare_url;
+use crate::{Leftover, StallCause};
 
 #[derive(thiserror::Error)]
 pub enum Error {
@@ -90,15 +90,22 @@ pub enum Error {
     },
     #[error("合并失败：{0}")]
     Remux(Box<hs_m3u8_remux::Error>),
-    /// 写输出失败后，删除本次已写出的部分也失败：`failure` 为原来的失败，`path` 为没删掉的文件或目录
-    #[error("{failure}；清理 {} 也失败：{cause}", .path.display())]
+    /// 写输出失败后，收拾本次写出的也没做完：`failure` 为原来的失败，`leftovers` 为留下的东西（至少一项）
+    #[error("{failure}；{}", joined(.leftovers))]
     Cleanup {
         failure: Box<Error>,
-        path: PathBuf,
-        cause: io::Error,
+        leftovers: Vec<Leftover>,
     },
     #[error("任务已取消")]
     Cancelled,
+}
+
+fn joined(leftovers: &[Leftover]) -> String {
+    leftovers
+        .iter()
+        .map(Leftover::to_string)
+        .collect::<Vec<_>>()
+        .join("；")
 }
 
 /// 包装的错误里的原因；原因的地址显示出来（只到路径）与外层的相同时不再重复，回调改写路径或重定向后照常显示。

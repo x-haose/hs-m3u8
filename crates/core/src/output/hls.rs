@@ -23,7 +23,7 @@ use crate::ident::Fingerprint;
 use crate::selection::SelectionKey;
 use crate::verify::id3_len;
 use crate::verify::{Standalone, standalone_format};
-use crate::{Error, Unsupported, WorkDirProblem};
+use crate::{Error, Leftover, LeftoverKind, Unsupported, WorkDirProblem};
 
 const INDEX: &str = "index.m3u8";
 
@@ -121,8 +121,11 @@ pub(super) fn stage(
         Ok(()) => failure,
         Err(cause) => Error::Cleanup {
             failure: Box::new(failure),
-            path: stage.to_path_buf(),
-            cause,
+            leftovers: vec![Leftover {
+                path: stage.to_path_buf(),
+                kind: LeftoverKind::Removable,
+                cause: cause.to_string(),
+            }],
         },
     })
 }

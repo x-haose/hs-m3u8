@@ -18,7 +18,7 @@ use crate::error::io_error;
 use crate::ident::Fingerprint;
 use crate::selection::SelectionKey;
 use crate::workdir::{self, PendingOutput, WorkDir};
-use crate::{Error, LiveReport, Mp4Output, Output, blocking};
+use crate::{Error, Leftover, LeftoverKind, LiveReport, Mp4Output, Output, blocking};
 
 /// 交给输出的内容。
 pub(crate) struct Content {
@@ -82,17 +82,15 @@ pub(crate) async fn write(
     let (mp4, mut leftovers) =
         blocking(move || write_files(&work_dir, &streams, &groups, selection.as_ref(), &files))
             .await??;
-    if !options.keep_work_dir
-        && let Err(e) = dir.remove().await
-    {
-        leftovers.push(e.to_string());
+    if !options.keep_work_dir {
+        leftovers.extend(dir.remove().await);
     }
     Ok(Output {
         mp4,
         hls: options.target.hls().map(Path::to_path_buf),
         segments,
         bytes,
-        cleanup_error: (!leftovers.is_empty()).then(|| leftovers.join("；")),
+        leftovers,
         live,
     })
 }
@@ -111,14 +109,14 @@ fn pending(target: &Path, fingerprint: Fingerprint, kind: &str, dir: bool) -> Pe
 
 /// 先把 MP4 合并到临时名、HLS 备齐到准备目录，都成功后再换上（见 [`commit`]）。最常见的失败（编码不受支持）发生在
 /// 合并 MP4 时，此时还没有动到输出；任一步失败都删掉本次写出的，等于没有写过。写之前把临时名记进任务目录，
-/// 上次中断留下的先按记录清掉。成功时另返回删不掉的旧输出的说明。
+/// 上次中断留下的先按记录清掉。成功时另返回收尾没删掉的东西。
 fn write_files(
     work_dir: &Path,
     streams: &[Streams],
     groups: &[Vec<GroupTrack>],
     selection: Option<&SelectionKey>,
     options: &OutputOptions,
-) -> Result<(Option<Mp4Output>, Vec<String>), Error> {
+) -> Result<(Option<Mp4Output>, Vec<Leftover>), Error> {
     check_targets(options)?;
     if options.target.hls().is_some() {
         hls::check_content(groups, selection)?;
@@ -154,8 +152,11 @@ fn write_files(
         Err(failure) => return Err(discard(failure, work_dir, &outputs)),
     };
     if let Err(e) = workdir::clear_outputs(work_dir) {
-        let path = workdir::outputs_file(work_dir);
-        leftovers.push(format!("删除 {} 失败：{e}", path.display()));
+        leftovers.push(Leftover {
+            path: workdir::outputs_file(work_dir),
+            kind: LeftoverKind::Removable,
+            cause: e.to_string(),
+        });
     }
     let mp4 = mp4.zip(report).map(|(mp4, report)| Mp4Output {
         path: mp4.target,
@@ -219,8 +220,11 @@ fn discard(failure: Error, work_dir: &Path, outputs: &[PendingOutput]) -> Error 
         Ok(()) => failure,
         Err((path, cause)) => Error::Cleanup {
             failure: Box::new(failure),
-            path,
-            cause,
+            leftovers: vec![Leftover {
+                path,
+                kind: LeftoverKind::Removable,
+                cause: cause.to_string(),
+            }],
         },
     }
 }
