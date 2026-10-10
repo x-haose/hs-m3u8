@@ -159,6 +159,37 @@ async fn a_stall_while_deciding_still_records_listed_segments() {
     assert_eq!(output.live, report(end, 1, vec![]));
 }
 
+/// 判定期间音频一直没有分片而停滞、看起来直播已结束，这时视频的核对还没完（重试退避使它长于停滞时长）：
+/// 只有还没拿到候选的音频这次不录，视频等核对完、接着原会话录完，按停滞收尾。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stall_while_another_track_is_checking() {
+    let dir = test_dir("deciding_stall_while_checking");
+    let server = Server::start().await;
+    put_split_master(&server);
+    put_long(&server, "v/", &[0, 1, 2]);
+    put_long(&server, "a/", &[0, 1]);
+    server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
+    server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
+    let mut req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(300));
+    interrupt(&req, |p| p.segments_done == 4).await;
+
+    req.retry = slow_retry(Duration::from_millis(400));
+    server.fail("v/seg1.ts", 2);
+    server.put("video.m3u8", playlist_in("v/", &[0, 1, 2], true));
+    server.put("audio.m3u8", playlist_in("a/", &[], false));
+    let output = run(req).await.unwrap();
+
+    assert_output(
+        &output,
+        &expected_split_long(&dir, &[(&[0, 1, 2], &[0, 1])]),
+    );
+    let end = LiveEnd::Stalled {
+        track: 1,
+        cause: StallCause::NoNewSegments,
+    };
+    assert_eq!(output.live, report(end, 1, vec![]));
+}
+
 /// 会话定下后视频新签名的 init 段一时拉不到（重试退避长于音频的停滞时长），音频不受影响：照常刷新，录到之后
 /// 出现的分片。视频的目标时长较长，它自己的停滞时限长于拉 init 段的时间。
 #[tokio::test(flavor = "multi_thread")]
