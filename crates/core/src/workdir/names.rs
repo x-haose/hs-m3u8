@@ -65,13 +65,6 @@ pub(super) fn parse_segment_name(file_name: &str) -> Option<SegmentName> {
     (parts.next().is_none() && segment_file_name(&name) == file_name).then_some(name)
 }
 
-/// 规范写法的十进制非负整数：没有多余的前导零。文件名与目录名里的编号只认这种写法。
-pub(crate) fn is_canonical_number(text: &str) -> bool {
-    !text.is_empty()
-        && text.bytes().all(|b| b.is_ascii_digit())
-        && (text == "0" || !text.starts_with('0'))
-}
-
 /// `init-<指纹>.mp4`。
 pub(super) fn init_file_name(fingerprint: Fingerprint) -> String {
     format!("init-{fingerprint}.mp4")
@@ -133,9 +126,5 @@ mod tests {
         for other in ["init-3.mp4", "init-0123456789abcdef.mp4.part"] {
             assert_eq!(parse_init_name(other), None, "{other}");
         }
-        assert!(is_canonical_number("0") && is_canonical_number("10"));
-        assert!(
-            !is_canonical_number("") && !is_canonical_number("00") && !is_canonical_number("-1")
-        );
     }
 }

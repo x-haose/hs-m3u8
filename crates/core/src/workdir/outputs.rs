@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::{io_error, write_atomic};
+use super::write_atomic;
+use crate::error::io_error;
 use crate::{Error, WorkDirProblem};
 
 pub(super) const OUTPUTS_FILE: &str = "outputs.json";

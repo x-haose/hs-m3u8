@@ -127,7 +127,7 @@ enum JobFile {
 #[serde(deny_unknown_fields)]
 struct SelectionFile {
     variant: VariantFile,
-    audio: Option<RenditionFile>,
+    audio: Option<AudioFile>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -143,7 +143,7 @@ struct VariantFile {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RenditionFile {
+struct AudioFile {
     group_id: String,
     language: Option<String>,
     name: Option<String>,
@@ -220,7 +220,7 @@ impl From<&SelectionKey> for SelectionFile {
                 audio_group: v.audio_group.clone(),
                 occurrence: key.variant.occurrence,
             },
-            audio: key.audio.as_ref().map(|a| RenditionFile {
+            audio: key.audio.as_ref().map(|a| AudioFile {
                 group_id: a.attributes.group_id.clone(),
                 language: a.attributes.language.clone(),
                 name: a.attributes.name.clone(),

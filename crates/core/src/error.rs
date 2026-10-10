@@ -15,7 +15,7 @@
 
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use url::Url;
@@ -133,6 +133,16 @@ impl fmt::Debug for Error {
 impl fmt::Debug for Unsupported {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
+    }
+}
+
+/// 把文件操作的失败包成 [`Error::Io`]：`action` 为做的是什么（读取、删除……），`path` 为操作的路径。
+pub(crate) fn io_error(action: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Error {
+    let path = path.to_path_buf();
+    move |cause| Error::Io {
+        action,
+        path,
+        cause,
     }
 }
 
