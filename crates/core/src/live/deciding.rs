@@ -85,24 +85,24 @@ impl Recorder<'_> {
         self.tracks[track].hold(fetched);
     }
 
-    /// 核对第 `track` 条轨的候选 `playlist` 能否接着它最近的会话录；没有录过分片或没有重叠时直接得出接不上。
+    /// 核对第 `track` 条轨的候选 `playlist` 能否接着它最近的会话录；没有录过分片时没有可核对的，没有重叠时直接
+    /// 得出接不上。
     fn check(&mut self, track: usize, playlist: &MediaPlaylist) {
         let dir: &WorkDir = self.dir;
         let verdicts = self.verdicts();
-        let found: Vec<StoredOverlap> = verdicts
-            .recorded(track)
-            .map(|recorded| {
-                overlaps(recorded, playlist)
-                    .into_iter()
-                    .map(|segment| StoredOverlap {
-                        stored: dir
-                            .layout()
-                            .segment(track, &recorded.segments()[&segment.sequence]),
-                        segment: segment.clone(),
-                    })
-                    .collect()
+        let Some(recorded) = verdicts.recorded(track) else {
+            verdicts.conclude(track, Verdict::Unrecorded);
+            return;
+        };
+        let found: Vec<StoredOverlap> = overlaps(recorded, playlist)
+            .into_iter()
+            .map(|segment| StoredOverlap {
+                stored: dir
+                    .layout()
+                    .segment(track, &recorded.segments()[&segment.sequence]),
+                segment: segment.clone(),
             })
-            .unwrap_or_default();
+            .collect();
         if found.is_empty() {
             verdicts.conclude(track, Verdict::Differs);
         } else {
