@@ -57,7 +57,8 @@ pub(crate) struct SegmentFile {
 pub(crate) struct Stored {
     /// 各轨的分片，按（会话, 序号）排列
     pub segments: Vec<Vec<SegmentFile>>,
-    /// 各轨各会话的起点；有分片的会话一定有
+    /// 各轨各会话的起点。续录要用：本库先写起点再录这个会话的分片，有分片却没有起点的目录不能续录
+    /// （只合并不需要它）
     pub starts: Vec<BTreeMap<u32, SessionStart>>,
     /// 各轨 init 段的字节数之和
     pub init_bytes: u64,
@@ -125,7 +126,7 @@ impl WorkDir {
         blocking(move || write_atomic(&path, &bytes)).await?
     }
 
-    /// 前 `tracks` 条轨已完成的分片、会话起点与 init 段。有分片的会话没有起点时目录内容矛盾。
+    /// 直播录制目录中前 `tracks` 条轨已完成的分片、会话起点与 init 段。同一会话有两个起点时目录内容矛盾。
     pub(crate) async fn scan(&self, tracks: usize) -> Result<Stored, Error> {
         let layout = self.layout.clone();
         blocking(move || {
@@ -141,7 +142,7 @@ impl WorkDir {
                     .map(|(name, path, len)| SegmentFile { name, path, len })
                     .collect();
                 files.sort_by_key(|f| (f.name.session, f.name.sequence));
-                let starts = scan_starts(&layout, track, &files)?;
+                let starts = scan_starts(&layout, track)?;
                 stored.segments.push(files);
                 stored.starts.push(starts);
                 for (_, _, len) in list(&dir, parse_init_name)? {
@@ -261,29 +262,18 @@ fn open(root: PathBuf, record: JobRecord) -> Result<WorkDir, Error> {
     })
 }
 
-/// 一条轨各会话的起点；`files` 中的分片所在的会话都须有，同一会话不能有两个。
-fn scan_starts(
-    layout: &Layout,
-    track: usize,
-    files: &[SegmentFile],
-) -> Result<BTreeMap<u32, SessionStart>, Error> {
-    let corrupt = |reason: String| Error::WorkDir {
-        path: layout.root.clone(),
-        problem: WorkDirProblem::Corrupt(reason),
-    };
+/// 一条轨各会话的起点；同一会话不能有两个。
+fn scan_starts(layout: &Layout, track: usize) -> Result<BTreeMap<u32, SessionStart>, Error> {
     let mut starts = BTreeMap::new();
     for ((session, start), _, _) in list(&layout.track(track), parse_start_name)? {
         if starts.insert(session, start).is_some() {
-            return Err(corrupt(format!(
-                "第 {track} 条轨会话 {session} 有两个起点记录"
-            )));
+            return Err(Error::WorkDir {
+                path: layout.root.clone(),
+                problem: WorkDirProblem::Corrupt(format!(
+                    "第 {track} 条轨会话 {session} 有两个起点记录"
+                )),
+            });
         }
-    }
-    if let Some(f) = files.iter().find(|f| !starts.contains_key(&f.name.session)) {
-        return Err(corrupt(format!(
-            "第 {track} 条轨会话 {} 有分片，但没有起点记录",
-            f.name.session
-        )));
     }
     Ok(starts)
 }

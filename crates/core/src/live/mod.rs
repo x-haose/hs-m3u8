@@ -37,7 +37,7 @@ use crate::http::Http;
 use crate::request::LiveOptions;
 use crate::resolve::ResolvedTrack;
 use crate::workdir::{self, Stored, StoredInit, WorkDir};
-use crate::{Error, LiveEnd, MissReason, Missed, Progress, Stage};
+use crate::{Error, LiveEnd, MissReason, Missed, Progress, Stage, WorkDirProblem};
 
 /// 本次运行的录制结果。
 pub(crate) struct Outcome {
@@ -115,7 +115,11 @@ pub(crate) async fn record(
     count_stored(&stored, progress);
     let now = Instant::now();
     // 目录里没有录过的分片时直接录第 0 个会话
-    let phase = match Verdicts::new(&stored) {
+    let verdicts = Verdicts::new(&stored).map_err(|reason| Error::WorkDir {
+        path: dir.layout().root().to_path_buf(),
+        problem: WorkDirProblem::Corrupt(reason),
+    })?;
+    let phase = match verdicts {
         Some(verdicts) => Phase::Deciding(verdicts),
         None => Phase::Decided { session: 0 },
     };
