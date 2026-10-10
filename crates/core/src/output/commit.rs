@@ -7,6 +7,9 @@
 //!   原处是输出说明更新的输出已经装上，本任务的或同时写同一输出的别的任务的）；原处是别的东西就留着，报出来；
 //! - 已换好，或没有记录（换好后删不掉而留下，记录已删）：只删不放回。
 //!
+//! 保留名上「不存在」只在路径的根还在时才算没有：连根都不在（Windows 上不存在的盘符、连不上的共享）是看不到，报错，
+//! 记录留着，下次接着收拾。卷卸下后挂载点消失（macOS 的 /Volumes 下）时根还在，与目录被删分不出来，按没有处理。
+//!
 //! 写临时输出之前把各输出记进任务目录（[`Commit::begin`]），全部装上后改记为已换好，再删旧输出。之后每次运行在任务
 //! 开头、检查输出之前按记录与本次各输出的名字收拾一遍（[`recover`]）。换上时只挪开检查认可替换的东西，装上与放回都
 //! 不替换已有的（例外见 [`install`]）：几个任务同时写同一输出，先装上的成功，后到的报已存在。任一步失败都撤回，每一项
@@ -57,7 +60,7 @@ fn occupant(o: &PendingOutput) -> Result<Occupant, Error> {
 
 /// 不存在的输出路径看最近的已存在的上级：是目录（跟随符号链接）就建得出来，否则建不出来。上级有一段是文件时，
 /// Unix 上报「不是目录」，Windows 上报「不存在」；上级是悬空的符号链接时报「不存在」，它本身却在。都在这里查清。
-/// 连根都不存在（Windows 上不存在的盘符、连不上的共享）时以根的错误报出。
+/// 连根都不存在（Windows 上不存在的盘符、连不上的共享）时报错（见 [`root_present`]）。
 fn occupant_by_ancestor(target: &Path) -> Result<Occupant, Error> {
     let mut missing = None;
     for ancestor in target.ancestors().skip(1) {
@@ -327,25 +330,31 @@ fn install(from: &Path, to: &Path, kind: OutputKind) -> io::Result<bool> {
     }
 }
 
-/// 删掉文件或目录；已不存在的不算失败。
+/// 删掉文件或目录；已不存在的不算失败，连根都不在时报错（见 [`root_present`]）。
 fn remove(path: &Path, kind: OutputKind) -> io::Result<()> {
     let removed = match kind {
         OutputKind::Mp4 => fs::remove_file(path),
         OutputKind::Hls => fs::remove_dir_all(path),
     };
     match removed {
-        Err(e) if is_absent(&e) => Ok(()),
+        Err(e) if is_absent(&e) => root_present(path),
         other => other,
     }
 }
 
-/// 不跟随符号链接。
+/// 不跟随符号链接；连根都不在时报错（见 [`root_present`]）。
 fn exists(path: &Path) -> io::Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
-        Err(e) if is_absent(&e) => Ok(false),
+        Err(e) if is_absent(&e) => root_present(path).map(|()| false),
         Err(e) => Err(e),
     }
+}
+
+/// 绝对路径 `path` 的根还在；不在（Windows 上不存在的盘符、连不上的共享）时返回读根的错误：那是看不到，不是没有。
+fn root_present(path: &Path) -> io::Result<()> {
+    let root = path.ancestors().last().expect("路径至少有一段");
+    fs::metadata(root).map(drop)
 }
 
 /// 路径不存在：没有这一项，或上级有一段是文件。
@@ -617,6 +626,24 @@ mod tests {
             Err(Error::Io { path, .. }) => assert_eq!(path, drive),
             other => panic!("应报根不存在：{other:?}"),
         }
+    }
+
+    /// 上次换上没做完、输出所在的盘这次不在：保留名看不到不算没有，报错，记录留着，盘回来后接着收拾。
+    #[cfg(windows)]
+    #[test]
+    fn leftovers_on_a_missing_drive_keep_their_record() {
+        let dir = scratch("missing_drive");
+        let work = dir.join("work");
+        let drive = ('D'..='Z')
+            .rev()
+            .map(|letter| PathBuf::from(format!("{letter}:\\")))
+            .find(|drive| !drive.exists())
+            .expect("D 到 Z 里至少有一个没用的盘符");
+        let outputs = [pending(OutputKind::Mp4, drive.join("a.mp4"))];
+        workdir::record_outputs(&work, &outputs, false).unwrap();
+
+        assert!(matches!(recover(&work, &[]), Err(Error::Io { .. })));
+        assert_eq!(workdir::read_outputs(&work).unwrap().outputs, outputs);
     }
 
     /// 换上没做完时中断：临时输出删掉；挪开的旧输出原处空着就放回，原处是新输出就删掉。
