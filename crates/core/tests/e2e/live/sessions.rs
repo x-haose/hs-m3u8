@@ -117,6 +117,74 @@ async fn a_fresh_sessions_head_is_refilled_below_an_earlier_maximum() {
     assert_eq!(output.live, report(LiveEnd::EndList, 2, vec![]));
 }
 
+/// 第一次运行音频一个分片都没录到（都 404），之后换了令牌续录：音频没有可核对的，不阻挡接续；视频核对一致，
+/// 改记新地址，音频并入原会话从窗口起点录，两轨都进成片。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_track_never_recorded_joins_the_session() {
+    let dir = test_dir("sessions_never_recorded");
+    let server = Server::start().await;
+    put_split_master(&server);
+    put_long(&server, "v/", &[0, 1, 2, 3]);
+    server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
+    server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
+    let with_token = |token: u32| {
+        let url = Url::parse(&format!("{}?token={token}", server.url("master.m3u8"))).unwrap();
+        live_request(url, &dir, STALL)
+    };
+    interrupt(&with_token(1), |p| {
+        p.segments_done == 2 && p.segments_failed == 2
+    })
+    .await;
+
+    put_long(&server, "a/", &[0, 1, 2, 3]);
+    server.put("video.m3u8", playlist_in("v/", &[0, 1, 2, 3], true));
+    server.put("audio.m3u8", playlist_in("a/", &[0, 1, 2, 3], true));
+    let output = run(with_token(2)).await.unwrap();
+
+    let want = expected_split_long(&dir, &[(&[0, 1, 2, 3], &[0, 1, 2, 3])]);
+    assert_output(&output, &want);
+    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+}
+
+/// 视频已录满 max_duration、音频一个分片都没录到，换了令牌续录：这次只有音频要录，它没有可核对的，没有一条轨
+/// 核对过内容，无法确认是同一个直播。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_token_needs_a_verified_track() {
+    let dir = test_dir("sessions_needs_verified");
+    let server = Server::start().await;
+    put_split_master(&server);
+    put_long(&server, "v/", &[0, 1]);
+    server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
+    server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
+    let with_token = |token: u32, max: Option<u64>| {
+        let url = Url::parse(&format!("{}?token={token}", server.url("master.m3u8"))).unwrap();
+        let mut req = live_request(url, &dir, STALL);
+        req.live = Some(LiveOptions {
+            max_duration: max.map(Duration::from_secs),
+            ..req.live.unwrap()
+        });
+        req
+    };
+    interrupt(&with_token(1, None), |p| {
+        p.segments_done == 2 && p.segments_failed == 2
+    })
+    .await;
+
+    // 视频已录到 2 秒，满了；音频这次取得到
+    put_long(&server, "a/", &[0, 1]);
+    let err = run(with_token(2, Some(2))).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::WorkDir {
+                problem: WorkDirProblem::SourceUnverified,
+                ..
+            }
+        ),
+        "{err}"
+    );
+}
+
 /// 令牌 1 录满 max_duration；中断期间换成了另一个直播。令牌 2、同样的上限：各轨都已录满、这次不录，不改记地址，
 /// 照常合并；之后令牌 2、不限时长：仍要核对，接不上报无法确认是同一个直播。
 #[tokio::test(flavor = "multi_thread")]

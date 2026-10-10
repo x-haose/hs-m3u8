@@ -86,8 +86,10 @@ impl LatestSession {
 pub(super) enum Verdict {
     /// 窗口与已录的分片重叠一致，内容核对相同
     Matches,
-    /// 这条轨没有录过分片，或没有重叠、有矛盾、内容不同，或重叠的分片都已取不到
+    /// 没有重叠、有矛盾、内容不同，或重叠的分片都已取不到
     Differs,
+    /// 这条轨之前一个分片都没录到：没有可核对的，不阻挡接续，在定下的会话里从窗口起点录
+    Unrecorded,
     /// 已录满 max_duration，这次不录，不影响判定
     Full,
     /// 没拿到有分片的播放列表就结束了：播放列表已结束而没有分片，或停滞且其他轨也不再出新分片。这次不录，
@@ -98,16 +100,19 @@ pub(super) enum Verdict {
 impl Verdict {
     /// 这条轨这次要录。
     fn records(self) -> bool {
-        matches!(self, Verdict::Matches | Verdict::Differs)
+        matches!(
+            self,
+            Verdict::Matches | Verdict::Differs | Verdict::Unrecorded
+        )
     }
 }
 
 /// 完整来源地址与目录里记录的不同时怎么办。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum NewUrl {
-    /// 改记当前地址：目录里还没有录过的分片，或要录的各轨都接得上
+    /// 改记当前地址：目录里还没有录过的分片，或要录的各轨都接得上、且至少一条核对一致
     Adopt,
-    /// 有轨接不上，无法确认是同一个直播
+    /// 有轨接不上，或没有一条轨核对一致（要录的都是之前没录到过的），无法确认是同一个直播
     Unverified,
     /// 这次没有要录的轨：不改记，照常合并
     Keep,
@@ -194,15 +199,18 @@ impl Verdicts {
         let previous = self.previous_session;
         let continued = verdicts.iter().all(|v| *v != Verdict::Differs);
         let recording = verdicts.iter().any(|v| v.records());
+        let verified = verdicts.contains(&Verdict::Matches);
         let session = if continued {
             previous
         } else {
             previous.checked_add(1)?
         };
-        let new_url = match (recording, continued) {
-            (false, _) => NewUrl::Keep,
-            (true, true) => NewUrl::Adopt,
-            (true, false) => NewUrl::Unverified,
+        let new_url = if !recording {
+            NewUrl::Keep
+        } else if continued && verified {
+            NewUrl::Adopt
+        } else {
+            NewUrl::Unverified
         };
         let tracks = std::mem::take(&mut self.recorded)
             .into_iter()
