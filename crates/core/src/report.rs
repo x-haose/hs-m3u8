@@ -69,7 +69,7 @@ pub enum Stage {
     Done,
 }
 
-/// 下载结果。
+/// 任务结果：下载、录制或只合并。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output {
     /// 生成的 MP4；没要 MP4（[`crate::Target::Hls`]）时为 None

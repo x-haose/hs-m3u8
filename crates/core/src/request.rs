@@ -96,7 +96,8 @@ pub struct JobRequest {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct KeyOverride {
     pub key: [u8; 16],
-    /// 所有加密分片都用这个 IV；None 时用各分片自己的（播放列表写明的，或由媒体序号推出）
+    /// 所有加密分片都用这个 IV；None 时用各分片自己的（播放列表写明的，或由媒体序号推出）。IV 只影响每个分片
+    /// 解密后的头 16 字节，给错了校验发现不了、错的内容照样写进输出，只在确知时给
     pub iv: Option<[u8; 16]>,
 }
 

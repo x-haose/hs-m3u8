@@ -6,7 +6,8 @@ use aes::cipher::{BlockModeDecrypt, KeyIvInit};
 
 use crate::Integrity;
 
-/// 原地解密并去掉 PKCS#7 填充。填充不合法几乎只会因为 key 或 IV 不对。
+/// 原地解密并去掉 PKCS#7 填充。key 不对时填充几乎必然不合法；IV 只影响第一个 16 字节块，而填充在最后一块，
+/// IV 不对发现不了。
 pub(crate) fn decrypt(
     mut data: Vec<u8>,
     key: &[u8; 16],
