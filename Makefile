@@ -1,5 +1,5 @@
 .PHONY: sb publish_testpypi publish_pypi release_testpypi release check py_check check_i ffmpeg \
-	rs_check rs_fmt rs_lint rs_clippy rs_test rs_cov ffmpeg_present
+	rs_check rs_fmt rs_lint rs_clippy rs_doc rs_test rs_cov ffmpeg_present
 
 FFMPEG_DIST := third_party/ffmpeg/dist
 
@@ -28,7 +28,7 @@ py_check:
 	uv run pre-commit run --all-files
 
 # Rust 的全部检查；CI 按平台调用其中的子目标
-rs_check: rs_fmt rs_lint rs_clippy rs_test rs_cov
+rs_check: rs_fmt rs_lint rs_clippy rs_doc rs_test rs_cov
 
 rs_fmt:
 	cargo fmt --all --check
@@ -42,6 +42,10 @@ rs_lint:
 
 rs_clippy: ffmpeg_present
 	cargo clippy --workspace --all-targets -- -D warnings
+
+# 文档注释里的链接须都能解析（含私有项）：改名、删除后留下的断链在这里失败
+rs_doc: ffmpeg_present
+	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 
 rs_test: ffmpeg_present
 	cargo test --workspace
