@@ -79,6 +79,8 @@ pub struct JobRequest {
     pub output: PathBuf,
     /// 任务目录；None 时为 `<output>.hsdl`。只能是空目录、不存在的目录或本库建立的任务目录
     pub work_dir: Option<PathBuf>,
+    /// 自定义 key；None 时按播放列表取 key
+    pub key: Option<KeyOverride>,
     /// 本任务同时下载的分片数
     pub concurrency: NonZeroUsize,
     /// 输出文件已存在时替换它
@@ -87,6 +89,16 @@ pub struct JobRequest {
     pub keep_work_dir: bool,
     /// 直播的录制方式；None 时拒绝直播（[`crate::Unsupported::Live`]）
     pub live: Option<LiveOptions>,
+}
+
+/// 自定义 key：加密的分片一律用它解密，不请求播放列表里的 key 地址，也不经过 [`crate::Hooks::on_key`]。用于
+/// key 地址取不到、或返回的不是真正的 key，而调用方已知 key 的站点；不加密的分片不受影响。
+/// 不实现 `Debug`：key 不进日志。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct KeyOverride {
+    pub key: [u8; 16],
+    /// 所有加密分片都用这个 IV；None 时用各分片自己的（播放列表写明的，或由媒体序号推出）
+    pub iv: Option<[u8; 16]>,
 }
 
 /// 默认并发：与常见下载器同一量级；站点限流时由调用方调低。
@@ -98,6 +110,7 @@ impl JobRequest {
             source,
             output,
             work_dir: None,
+            key: None,
             concurrency: DEFAULT_CONCURRENCY,
             overwrite: false,
             keep_work_dir: false,

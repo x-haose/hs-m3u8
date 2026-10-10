@@ -40,7 +40,9 @@ pub use hs_m3u8_hls as hls;
 pub use hs_m3u8_remux::{Report, Shape, StreamKind, StreamReport};
 pub use probe::Probe;
 pub use report::{LiveEnd, LiveReport, MissReason, Missed, Output, Progress, Stage, StallCause};
-pub use request::{HttpOptions, JobRequest, LiveOptions, Resume, RetryPolicy, Source, Timeouts};
+pub use request::{
+    HttpOptions, JobRequest, KeyOverride, LiveOptions, Resume, RetryPolicy, Source, Timeouts,
+};
 pub use url::Url;
 
 pub(crate) use blocking::blocking;

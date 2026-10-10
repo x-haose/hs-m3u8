@@ -204,6 +204,7 @@ impl Task {
         Fetcher::new(
             self.http.clone(),
             self.request.source.hooks.clone(),
+            self.request.key,
             self.request.concurrency,
             &self.cancel,
         )

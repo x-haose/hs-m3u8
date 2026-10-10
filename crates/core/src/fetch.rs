@@ -17,6 +17,7 @@ use url::Url;
 use crate::crypto::decrypt;
 use crate::hooks::{HookKind, Hooks, Purpose, run_hook};
 use crate::http::{Http, Permit};
+use crate::request::KeyOverride;
 use crate::verify::{check_fmp4, check_standalone_segment};
 use crate::{Error, Integrity, Progress, workdir};
 
@@ -40,6 +41,8 @@ pub(crate) type Finished = (ItemId, Result<u64, Error>);
 struct Ctx {
     http: Arc<Http>,
     hooks: Arc<dyn Hooks>,
+    /// 有值时加密的分片都用它，不取 key
+    key_override: Option<KeyOverride>,
     /// key 地址 → 处理后的 16 字节 key；每个地址只拉取一次
     keys: Mutex<HashMap<Url, Arc<OnceCell<[u8; 16]>>>>,
 }
@@ -57,6 +60,7 @@ impl Fetcher {
     pub(crate) fn new(
         http: Arc<Http>,
         hooks: Arc<dyn Hooks>,
+        key_override: Option<KeyOverride>,
         limit: NonZeroUsize,
         cancel: &CancellationToken,
     ) -> Self {
@@ -64,6 +68,7 @@ impl Fetcher {
             ctx: Arc::new(Ctx {
                 http,
                 hooks,
+                key_override,
                 keys: Mutex::new(HashMap::new()),
             }),
             limit: limit.get(),
@@ -212,15 +217,16 @@ pub(crate) async fn fetch_init(
     Ok(data)
 }
 
-/// 拉取分片，经 `on_segment` 回调后解密并校验内容。
+/// 拉取分片，经 `on_segment` 回调后解密并校验内容；有自定义 key 时用它解密。
 async fn fetch_segment(
     ctx: &Ctx,
     segment: &Segment,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>, Error> {
-    let key = match &segment.key {
-        Some(key) => Some((key_for(ctx, &key.uri, cancel).await?, key.iv)),
-        None => None,
+    let key = match (&segment.key, ctx.key_override) {
+        (None, _) => None,
+        (Some(key), Some(given)) => Some((given.key, given.iv.unwrap_or(key.iv))),
+        (Some(key), None) => Some((key_for(ctx, &key.uri, cancel).await?, key.iv)),
     };
     let body = ctx
         .http

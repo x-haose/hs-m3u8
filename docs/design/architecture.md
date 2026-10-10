@@ -137,6 +137,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 ### 5.5 解密与校验
 
 - AES-128-CBC 加 PKCS#7，使用分片自己的 key 与 IV（`aes` 0.9.3 + `cbc` 0.2.1）。
+- 调用方已知 key 时可给自定义 key（`KeyOverride`，可另给 IV）：加密的分片一律用它解密，不请求 key 地址、不经 `on_key`。
 - 校验（不通过即失败，不写盘）：
   - 响应体长度与 `Content-Length`、字节范围一致；
   - 解密后去填充必须合法；key 或 IV 错误时这一步几乎必然失败；
