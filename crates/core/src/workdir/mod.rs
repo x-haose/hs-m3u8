@@ -150,30 +150,39 @@ impl WorkDir {
         .await?
     }
 
-    /// 删除整个任务目录。持锁删掉全部内容，最后删锁文件，再释放锁、删目录：释放锁之后别的任务就能打开这个目录，
-    /// 先删内容保证它看到的不会是删到一半的任务；锁文件也在持锁时删，别的任务打开的是新建的锁文件，
-    /// 不会锁上本任务还持有的那个。std 打开文件时允许删除，Windows 上持有句柄也能删。
+    /// 删除整个任务目录。只删本库写的文件（`job.json`、各轨的分片与 init 段，以及它们写到一半的 `.part`）与
+    /// 因此变空的目录；其他文件（例如经符号链接或只差大小写的路径写进来的输出）原样留下，目录随之留下，返回
+    /// 删除失败并指出留下的文件。
+    ///
+    /// 持锁删掉其余内容，最后删锁文件，再释放锁、删目录：释放锁之后别的任务就能打开这个目录，先删内容保证它看到的
+    /// 不会是删到一半的任务；锁文件也在持锁时删，别的任务打开的是新建的锁文件，不会锁上本任务还持有的那个。
+    /// std 打开文件时允许删除，Windows 上持有句柄也能删。
     pub(crate) async fn remove(self) -> Result<(), Error> {
         let WorkDir { layout, lock, .. } = self;
         blocking(move || {
             let root = &layout.root;
-            for entry in fs::read_dir(root).map_err(io_error("读取", root))? {
-                let entry = entry.map_err(io_error("读取", root))?;
-                if entry.file_name() == LOCK_FILE {
-                    continue;
+            let mut kept = Vec::new();
+            for (path, name, kind) in entries(root)? {
+                match name.to_str() {
+                    Some(LOCK_FILE) => {}
+                    Some(name)
+                        if kind.is_file()
+                            && name.strip_suffix(".part").unwrap_or(name) == JOB_FILE =>
+                    {
+                        fs::remove_file(&path).map_err(io_error("删除", &path))?;
+                    }
+                    Some(TRACKS_DIR) if kind.is_dir() => remove_tracks(&path, &mut kept)?,
+                    _ => kept.push(path),
                 }
-                let path = entry.path();
-                let is_dir = entry.file_type().map_err(io_error("读取", &path))?.is_dir();
-                let removed = if is_dir {
-                    fs::remove_dir_all(&path)
-                } else {
-                    fs::remove_file(&path)
-                };
-                removed.map_err(io_error("删除", &path))?;
             }
             let lock_path = root.join(LOCK_FILE);
             fs::remove_file(&lock_path).map_err(io_error("删除", &lock_path))?;
             drop(lock);
+            if let Some(first) = kept.first() {
+                let reason = format!("留有不是本库写的文件：{}", first.display());
+                let cause = io::Error::new(io::ErrorKind::DirectoryNotEmpty, reason);
+                return Err(io_error("删除", root)(cause));
+            }
             match fs::remove_dir(root) {
                 Ok(()) => Ok(()),
                 // 释放锁后另一个任务已开始使用这个目录：本任务的内容已删完，目录留给它
@@ -183,6 +192,52 @@ impl WorkDir {
         })
         .await?
     }
+}
+
+/// 删掉 `tracks/` 下各轨的分片与 init 段（含写到一半的 `.part`）与变空的目录；认不得的记进 `kept`。
+fn remove_tracks(tracks: &Path, kept: &mut Vec<PathBuf>) -> Result<(), Error> {
+    let before = kept.len();
+    for (dir, name, kind) in entries(tracks)? {
+        let is_track = name
+            .to_str()
+            .is_some_and(|n| n.parse::<usize>().is_ok_and(|t| t.to_string() == n));
+        if !(is_track && kind.is_dir()) {
+            kept.push(dir);
+            continue;
+        }
+        let track_before = kept.len();
+        for (path, name, kind) in entries(&dir)? {
+            let ours = kind.is_file()
+                && name.to_str().is_some_and(|n| {
+                    let n = n.strip_suffix(".part").unwrap_or(n);
+                    parse_segment_name(n).is_some() || parse_init_name(n).is_some()
+                });
+            if ours {
+                fs::remove_file(&path).map_err(io_error("删除", &path))?;
+            } else {
+                kept.push(path);
+            }
+        }
+        if kept.len() == track_before {
+            fs::remove_dir(&dir).map_err(io_error("删除", &dir))?;
+        }
+    }
+    if kept.len() == before {
+        fs::remove_dir(tracks).map_err(io_error("删除", tracks))?;
+    }
+    Ok(())
+}
+
+/// 目录中的各项：路径、名字与类型（不跟随符号链接）。
+fn entries(dir: &Path) -> Result<Vec<(PathBuf, std::ffi::OsString, fs::FileType)>, Error> {
+    let mut all = Vec::new();
+    for entry in fs::read_dir(dir).map_err(io_error("读取", dir))? {
+        let entry = entry.map_err(io_error("读取", dir))?;
+        let path = entry.path();
+        let kind = entry.file_type().map_err(io_error("读取", &path))?;
+        all.push((path, entry.file_name(), kind));
+    }
+    Ok(all)
 }
 
 /// 有可续的内容时读取任务目录的记录；目录或 `job.json` 不存在，或还没有已完成的分片时为 None（按当前请求

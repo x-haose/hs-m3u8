@@ -298,6 +298,35 @@ async fn live_holes_and_sessions_in_hls() {
     assert_output(&output, &expected_long(&dir, &[0, 2, 3], &[2, 1]));
 }
 
+/// 输出经符号链接落在任务目录里（按字面比较看不出）：删除任务目录时只删本库写的文件，输出留下，
+/// 没删完的原因记在 cleanup_error 里。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn outputs_inside_the_work_dir_survive_its_removal() {
+    let dir = test_dir("output_alias");
+    let server = Server::start().await;
+    server.put("seg0.ts", fixture("ts_a/seg0.ts"));
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n",
+    );
+    let work = dir.join("work");
+    std::fs::create_dir(&work).unwrap();
+    std::os::unix::fs::symlink(&work, dir.join("link")).unwrap();
+    let target = Target::Mp4(dir.join("link/out.mp4"));
+    let mut req = request_to(server.url("index.m3u8"), &dir, target);
+    req.output.work_dir = Some(work.clone());
+
+    let output = run(req).await.unwrap();
+
+    assert!(work.join("out.mp4").is_file());
+    let cleanup = output.cleanup_error.expect("留有输出，任务目录没删完");
+    assert!(cleanup.contains("out.mp4"), "{cleanup}");
+    for name in ["job.json", "lock", "tracks"] {
+        assert!(!work.join(name).exists(), "{name} 应已删除");
+    }
+}
+
 /// 输出与任务目录的路径相同或互相包含时，下载前即拒绝：任务目录成功后会被整个删除。
 #[tokio::test(flavor = "multi_thread")]
 async fn overlapping_paths_are_rejected() {
