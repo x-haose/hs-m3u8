@@ -379,7 +379,7 @@ impl Recorder<'_> {
         match inits {
             Some(inits) => self.process(track, fetched, inits, fetcher).await,
             None => {
-                self.tracks[track].hold(fetched, Instant::now());
+                self.tracks[track].hold(fetched);
                 Ok(())
             }
         }
