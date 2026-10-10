@@ -35,7 +35,7 @@ use self::record::{decode, encode};
 use crate::entries::{self, is_canonical_number};
 use crate::error::io_error;
 use crate::ident::Fingerprint;
-use crate::{Error, Leftover, LeftoverKind, WorkDirProblem, blocking};
+use crate::{Error, Leftover, LeftoverKind, WorkDirProblem, blocking, volume};
 
 const JOB_FILE: &str = "job.json";
 const LOCK_FILE: &str = "lock";
@@ -535,6 +535,11 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<(), Error> {
     fs::rename(&part, path).map_err(io_error("重命名", &part))
 }
 
+/// 跟随符号链接；不存在时根读不到即报错（见 [`volume::reachable`]）。
 fn exists(path: &Path) -> Result<bool, Error> {
-    path.try_exists().map_err(io_error("检查", path))
+    match path.try_exists() {
+        Ok(true) => Ok(true),
+        Ok(false) => volume::reachable(path).map(|()| false),
+        Err(cause) => Err(io_error("检查", path)(cause)),
+    }
 }

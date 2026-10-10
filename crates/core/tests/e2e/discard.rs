@@ -57,6 +57,22 @@ async fn discarding_restores_outputs_and_removes_only_library_files() {
     assert_eq!(left, ["job.json", "notes.txt"]);
 }
 
+/// 任务目录所在的盘不在：看不到不算不存在，报读不到盘，不当作已经放弃。
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn discarding_on_a_missing_drive_is_reported() {
+    let drive = ('D'..='Z')
+        .rev()
+        .map(|letter| std::path::PathBuf::from(format!("{letter}:\\")))
+        .find(|drive| !drive.exists())
+        .expect("D 到 Z 里至少有一个没用的盘符");
+
+    match engine().discard(&drive.join("jobs").join("a")).await {
+        Err(Error::VolumeUnavailable { root, .. }) => assert_eq!(root, drive),
+        other => panic!("应报读不到 {}：{other:?}", drive.display()),
+    }
+}
+
 /// 目录不存在时什么也不做；不是本库建立的任务目录不动；正被任务使用时报被占用。
 #[tokio::test(flavor = "multi_thread")]
 async fn discarding_leaves_directories_in_use_or_not_from_the_library() {

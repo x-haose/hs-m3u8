@@ -7,8 +7,7 @@
 //!   原处是输出说明更新的输出已经装上，本任务的或同时写同一输出的别的任务的）；原处是别的东西就留着，报出来；
 //! - 已换好，或没有记录（换好后删不掉而留下，记录已删）：只删不放回。
 //!
-//! 保留名上「不存在」只在路径的根还在时才算没有：连根都不在（Windows 上不存在的盘符、连不上的共享）是看不到，报错，
-//! 记录留着，下次接着收拾。卷卸下后挂载点消失（macOS 的 /Volumes 下）时根还在，与目录被删分不出来，按没有处理。
+//! 「不存在」只在根读得到时才算没有（见 [`volume::reachable`]）：读不到时报错，记录留着，下次接着收拾。
 //!
 //! 写临时输出之前把各输出记进任务目录（[`Commit::begin`]），全部装上后改记为已换好，再删旧输出。之后每次运行在任务
 //! 开头、检查输出之前按记录与本次各输出的名字收拾一遍（[`recover`]）。换上时只挪开检查认可替换的东西，装上与放回都
@@ -23,10 +22,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::hls;
-use crate::entries;
 use crate::error::io_error;
 use crate::workdir::{self, OutputKind, PendingOutput};
-use crate::{Error, Leftover, LeftoverKind};
+use crate::{Error, Leftover, LeftoverKind, entries, volume};
 
 /// 输出路径上现在的东西。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,17 +58,16 @@ fn occupant(o: &PendingOutput) -> Result<Occupant, Error> {
 
 /// 不存在的输出路径看最近的已存在的上级：是目录（跟随符号链接）就建得出来，否则建不出来。上级有一段是文件时，
 /// Unix 上报「不是目录」，Windows 上报「不存在」；上级是悬空的符号链接时报「不存在」，它本身却在。都在这里查清。
-/// 连根都不存在（Windows 上不存在的盘符、连不上的共享）时报错（见 [`root_present`]）。
+/// 根读不到时报错（见 [`volume::reachable`]）。
 fn occupant_by_ancestor(target: &Path) -> Result<Occupant, Error> {
-    let mut missing = None;
-    for ancestor in target.ancestors().skip(1) {
+    let below_root = target.ancestors().skip(1).filter(|a| a.parent().is_some());
+    for ancestor in below_root {
         match fs::metadata(ancestor) {
             Ok(meta) if meta.is_dir() => return Ok(Occupant::Nothing),
             Ok(_) => {}
             // 跟随后不存在：没有这一项就再往上看，有（悬空的符号链接）就建不出来
             Err(e) if is_absent(&e) => {
-                if !exists(ancestor).map_err(io_error("检查", ancestor))? {
-                    missing = Some((ancestor, e));
+                if !exists(ancestor)? {
                     continue;
                 }
             }
@@ -79,8 +76,8 @@ fn occupant_by_ancestor(target: &Path) -> Result<Occupant, Error> {
         let ancestor = ancestor.to_path_buf();
         return Ok(Occupant::Blocked { ancestor });
     }
-    let (root, cause) = missing.expect("以文件名结尾的绝对路径至少有一级上级");
-    Err(io_error("检查", root)(cause))
+    // 根以下各级都不存在：根读得到就建得出来
+    volume::reachable(target).map(|()| Occupant::Nothing)
 }
 
 /// 输出能否写，能写时返回路径上现在的东西：空着、是空目录，或要求覆盖而路径上是输出。是输出而没有要求覆盖时报
@@ -137,8 +134,8 @@ pub(super) fn unsettled(o: &PendingOutput) -> Leftover {
 /// 收拾一个输出的保留名：临时输出删掉；挪开的旧输出 `restorable`（换上还没做完）时看原处放回或删掉，否则删掉。
 /// 旧输出因原处是别的东西而留着时为 false。
 fn settle(o: &PendingOutput, restorable: bool) -> Result<bool, Error> {
-    remove(o.temp(), o.kind()).map_err(io_error("删除", o.temp()))?;
-    if !exists(o.aside()).map_err(io_error("检查", o.aside()))? {
+    remove(o.temp(), o.kind())?;
+    if !exists(o.aside())? {
         return Ok(true);
     }
     if restorable {
@@ -153,10 +150,10 @@ fn settle(o: &PendingOutput, restorable: bool) -> Result<bool, Error> {
         };
         // 放回时原处刚被别人装上了，同原处是输出：删掉旧的
         if empty {
-            install(o.aside(), o.target(), o.kind()).map_err(io_error("放回", o.aside()))?;
+            install(o.aside(), o.target(), o.kind(), "放回")?;
         }
     }
-    remove(o.aside(), o.kind()).map_err(io_error("删除", o.aside()))?;
+    remove(o.aside(), o.kind())?;
     Ok(true)
 }
 
@@ -164,7 +161,7 @@ fn settle(o: &PendingOutput, restorable: bool) -> Result<bool, Error> {
 fn remove_empty_dir(dir: &Path) -> Result<(), Error> {
     for entry in entries::list(dir)? {
         if entry.is_system_file() {
-            remove(&entry.path, OutputKind::Mp4).map_err(io_error("删除", &entry.path))?;
+            remove(&entry.path, OutputKind::Mp4)?;
         }
     }
     fs::remove_dir(dir).map_err(io_error("删除", dir))
@@ -192,7 +189,7 @@ impl<'a> Commit<'a> {
         let mut leftovers = Vec::new();
         for o in moved {
             if let Err(e) = remove(o.aside(), o.kind()) {
-                leftovers.push(leftover(o.aside(), LeftoverKind::Removable, &e));
+                leftovers.push(leftover(o.aside(), LeftoverKind::Removable, e));
             }
         }
         self.remove_temps(&mut leftovers);
@@ -223,7 +220,7 @@ impl<'a> Commit<'a> {
             }
         }
         for o in self.outputs {
-            if !install(o.temp(), o.target(), o.kind()).map_err(io_error("装上", o.temp()))? {
+            if !install(o.temp(), o.target(), o.kind(), "装上")? {
                 return Err(Error::OutputExists(o.target().to_path_buf()));
             }
             installed.push(o);
@@ -242,7 +239,7 @@ impl<'a> Commit<'a> {
         let mut leftovers = Vec::new();
         for o in installed.iter().rev() {
             if let Err(e) = remove(o.target(), o.kind()) {
-                leftovers.push(leftover(o.target(), LeftoverKind::Installed, &e));
+                leftovers.push(leftover(o.target(), LeftoverKind::Installed, e));
             }
         }
         for o in moved.iter().rev() {
@@ -253,15 +250,15 @@ impl<'a> Commit<'a> {
                 },
                 cause,
             };
-            match install(o.aside(), o.target(), o.kind()) {
+            match install(o.aside(), o.target(), o.kind(), "放回") {
                 Ok(true) => {
                     // 用硬链接放回时挪开的名字还在
                     if let Err(e) = remove(o.aside(), o.kind()) {
-                        leftovers.push(leftover(o.aside(), LeftoverKind::Removable, &e));
+                        leftovers.push(leftover(o.aside(), LeftoverKind::Removable, e));
                     }
                 }
                 Ok(false) => leftovers.push(displaced("原处已被占用".to_owned())),
-                Err(e) => leftovers.push(displaced(e.to_string())),
+                Err(e) => leftovers.push(displaced(cause_text(e))),
             }
         }
         self.remove_temps(&mut leftovers);
@@ -281,24 +278,36 @@ impl<'a> Commit<'a> {
     fn remove_temps(&self, leftovers: &mut Vec<Leftover>) {
         for o in self.outputs {
             if let Err(e) = remove(o.temp(), o.kind()) {
-                leftovers.push(leftover(o.temp(), LeftoverKind::Removable, &e));
+                leftovers.push(leftover(o.temp(), LeftoverKind::Removable, e));
             }
         }
     }
 
     fn clear_record(&self, leftovers: &mut Vec<Leftover>) {
         if let Err(e) = workdir::clear_outputs(self.work_dir) {
-            let path = workdir::outputs_file(self.work_dir);
-            leftovers.push(leftover(&path, LeftoverKind::Removable, &e));
+            leftovers.push(Leftover {
+                path: workdir::outputs_file(self.work_dir),
+                kind: LeftoverKind::Removable,
+                cause: e.to_string(),
+            });
         }
     }
 }
 
-fn leftover(path: &Path, kind: LeftoverKind, cause: &io::Error) -> Leftover {
+/// `path` 上没做完的一项，`failure` 为 [`remove`] 等报的错误。
+fn leftover(path: &Path, kind: LeftoverKind, failure: Error) -> Leftover {
     Leftover {
         path: path.to_path_buf(),
         kind,
-        cause: cause.to_string(),
+        cause: cause_text(failure),
+    }
+}
+
+/// 残留的原因：读写错误只取原因（残留本身已带路径），根读不到等整句。
+fn cause_text(failure: Error) -> String {
+    match failure {
+        Error::Io { cause, .. } => cause.to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -311,10 +320,10 @@ fn move_aside(o: &PendingOutput) -> Result<bool, Error> {
     }
 }
 
-/// 把 `from` 装到 `to`，不替换已有的：`to` 已被占用时为 false。文件用硬链接装，`from` 留着由调用方删除；文件系统
-/// 不支持硬链接时改名，这时只在几个任务同时写同一输出的那一瞬会替换掉对方刚装上的。目录改名到非空目录失败；改名
-/// 到空目录时替换它，没有可丢的。
-fn install(from: &Path, to: &Path, kind: OutputKind) -> io::Result<bool> {
+/// 把 `from` 装到 `to`，不替换已有的：`to` 已被占用时为 false；失败时以 `action`（装上、放回）报 `from`。文件用硬链接
+/// 装，`from` 留着由调用方删除；文件系统不支持硬链接时改名，这时只在几个任务同时写同一输出的那一瞬会替换掉对方刚装上
+/// 的。目录改名到非空目录失败；改名到空目录时替换它，没有可丢的。
+fn install(from: &Path, to: &Path, kind: OutputKind, action: &'static str) -> Result<bool, Error> {
     let renamed = match kind {
         OutputKind::Mp4 => match fs::hard_link(from, to) {
             Ok(()) => return Ok(true),
@@ -326,35 +335,30 @@ fn install(from: &Path, to: &Path, kind: OutputKind) -> io::Result<bool> {
     match renamed {
         Ok(()) => Ok(true),
         Err(_) if exists(to)? => Ok(false),
-        Err(cause) => Err(cause),
+        Err(cause) => Err(io_error(action, from)(cause)),
     }
 }
 
-/// 删掉文件或目录；已不存在的不算失败，连根都不在时报错（见 [`root_present`]）。
-fn remove(path: &Path, kind: OutputKind) -> io::Result<()> {
+/// 删掉文件或目录；已不存在的不算失败，根读不到时报错（见 [`volume::reachable`]）。
+fn remove(path: &Path, kind: OutputKind) -> Result<(), Error> {
     let removed = match kind {
         OutputKind::Mp4 => fs::remove_file(path),
         OutputKind::Hls => fs::remove_dir_all(path),
     };
     match removed {
-        Err(e) if is_absent(&e) => root_present(path),
-        other => other,
+        Ok(()) => Ok(()),
+        Err(e) if is_absent(&e) => volume::reachable(path),
+        Err(cause) => Err(io_error("删除", path)(cause)),
     }
 }
 
-/// 不跟随符号链接；连根都不在时报错（见 [`root_present`]）。
-fn exists(path: &Path) -> io::Result<bool> {
+/// 不跟随符号链接；不存在时根读不到即报错（见 [`volume::reachable`]）。
+fn exists(path: &Path) -> Result<bool, Error> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
-        Err(e) if is_absent(&e) => root_present(path).map(|()| false),
-        Err(e) => Err(e),
+        Err(e) if is_absent(&e) => volume::reachable(path).map(|()| false),
+        Err(cause) => Err(io_error("检查", path)(cause)),
     }
-}
-
-/// 绝对路径 `path` 的根还在；不在（Windows 上不存在的盘符、连不上的共享）时返回读根的错误：那是看不到，不是没有。
-fn root_present(path: &Path) -> io::Result<()> {
-    let root = path.ancestors().last().expect("路径至少有一段");
-    fs::metadata(root).map(drop)
 }
 
 /// 路径不存在：没有这一项，或上级有一段是文件。
@@ -612,37 +616,46 @@ mod tests {
         assert_blocked(&dir.join("link/sub/out"), &link);
     }
 
-    /// 输出在不存在的盘符上：连根都不存在，建不出来，以根的错误报出。
+    /// D 到 Z 里没用的一个盘符的根。
     #[cfg(windows)]
-    #[test]
-    fn an_output_on_a_missing_drive_is_reported() {
-        let drive = ('D'..='Z')
+    fn missing_drive() -> PathBuf {
+        ('D'..='Z')
             .rev()
             .map(|letter| PathBuf::from(format!("{letter}:\\")))
             .find(|drive| !drive.exists())
-            .expect("D 到 Z 里至少有一个没用的盘符");
+            .expect("D 到 Z 里至少有一个没用的盘符")
+    }
 
-        match check(&pending(OutputKind::Mp4, drive.join("out.mp4")), false) {
-            Err(Error::Io { path, .. }) => assert_eq!(path, drive),
-            other => panic!("应报根不存在：{other:?}"),
+    /// 应报读不到盘符的根 `drive`。
+    #[cfg(windows)]
+    fn assert_unavailable<T: std::fmt::Debug>(result: Result<T, Error>, drive: &Path) {
+        match result {
+            Err(Error::VolumeUnavailable { root, .. }) => assert_eq!(root, drive),
+            other => panic!("应报读不到 {}：{other:?}", drive.display()),
         }
     }
 
-    /// 上次换上没做完、输出所在的盘这次不在：保留名看不到不算没有，报错，记录留着，盘回来后接着收拾。
+    /// 输出在不存在的盘符上（直接在根下，或在根下的目录里）：报读不到盘，不判为建得出来。
+    #[cfg(windows)]
+    #[test]
+    fn an_output_on_a_missing_drive_is_reported() {
+        let drive = missing_drive();
+        for target in [drive.join("out.mp4"), drive.join("movies").join("out.mp4")] {
+            assert_unavailable(check(&pending(OutputKind::Mp4, target), false), &drive);
+        }
+    }
+
+    /// 上次换上没做完、输出所在的盘这次不在：保留名看不到不算没有，报读不到盘，记录留着，盘回来后接着收拾。
     #[cfg(windows)]
     #[test]
     fn leftovers_on_a_missing_drive_keep_their_record() {
         let dir = scratch("missing_drive");
         let work = dir.join("work");
-        let drive = ('D'..='Z')
-            .rev()
-            .map(|letter| PathBuf::from(format!("{letter}:\\")))
-            .find(|drive| !drive.exists())
-            .expect("D 到 Z 里至少有一个没用的盘符");
-        let outputs = [pending(OutputKind::Mp4, drive.join("a.mp4"))];
+        let drive = missing_drive();
+        let outputs = [pending(OutputKind::Mp4, drive.join("movies").join("a.mp4"))];
         workdir::record_outputs(&work, &outputs, false).unwrap();
 
-        assert!(matches!(recover(&work, &[]), Err(Error::Io { .. })));
+        assert_unavailable(recover(&work, &[]), &drive);
         assert_eq!(workdir::read_outputs(&work).unwrap().outputs, outputs);
     }
 

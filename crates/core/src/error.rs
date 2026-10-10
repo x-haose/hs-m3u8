@@ -9,7 +9,8 @@
 //! - 网络：[`Error::Http`]，看 [`HttpError::retryable`]；
 //! - 说明出在哪里、看包着的原因：[`Error::Segment`]、[`Error::Key`]（哪个分片或 key）、[`Error::LiveStalled`]（直播
 //!   哪条轨停滞）、[`Error::Cleanup`]（失败后收拾也没做完，带残留列表）；
-//! - 读写文件：[`Error::Io`]；合并 MP4：[`Error::Remux`]。都不可重试；
+//! - 读写文件：[`Error::Io`]、[`Error::VolumeUnavailable`]（盘不在、共享连不上，接上后再试）；合并 MP4：
+//!   [`Error::Remux`]。都不可重试；
 //! - 任务目录：[`Error::WorkDir`]（按 [`WorkDirProblem`] 处理）、[`Error::NothingRecorded`]；
 //! - 调用方的回调出错：[`Error::Hook`]；[`Error::Cancelled`]。
 //!
@@ -97,6 +98,10 @@ pub enum Error {
         path: PathBuf,
         cause: io::Error,
     },
+    /// 路径的根 `root`（Windows 的盘符、网络共享）读不到：盘不在、共享连不上或没有权限。根下的东西看不到不当作没有，
+    /// 不据此删东西、丢记录
+    #[error("读不到 {}：{cause}", .root.display())]
+    VolumeUnavailable { root: PathBuf, cause: io::Error },
     /// 合并 MP4 失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是 [`Unsupported::Mp4`]
     #[error("合并失败：{0}")]
     Remux(Box<hs_m3u8_remux::Error>),

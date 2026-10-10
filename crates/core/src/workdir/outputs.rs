@@ -11,7 +11,7 @@ use super::record::{FORMAT_VERSION, check_version};
 use super::write_atomic;
 use crate::error::io_error;
 use crate::ident::Fingerprint;
-use crate::{Error, WorkDirProblem};
+use crate::{Error, WorkDirProblem, volume};
 
 pub(super) const OUTPUTS_FILE: &str = "outputs.json";
 
@@ -84,12 +84,15 @@ pub(crate) struct OutputsRecord {
     pub outputs: Vec<PendingOutput>,
 }
 
-/// 读取记录；没有时（含任务目录不存在）为空。
+/// 读取记录；没有时（含任务目录不存在）为空，根读不到时报错（见 [`volume::reachable`]）。
 pub(crate) fn read_outputs(root: &Path) -> Result<OutputsRecord, Error> {
     let path = outputs_file(root);
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(OutputsRecord::default()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            volume::reachable(&path)?;
+            return Ok(OutputsRecord::default());
+        }
         Err(cause) => return Err(io_error("读取", &path)(cause)),
     };
     decode(&bytes).map_err(|problem| Error::WorkDir {

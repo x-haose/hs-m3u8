@@ -30,6 +30,7 @@ mod resolve;
 mod selection;
 mod verify;
 mod vod;
+mod volume;
 mod workdir;
 
 use std::num::NonZeroUsize;
@@ -150,11 +151,12 @@ impl Engine {
     /// [`LeftoverKind::WorkDir`]。目录不存在时什么也不做。
     ///
     /// 路径为空时报参数错误。任务目录正被任务使用时报 [`WorkDirProblem::Locked`]，不是本库的任务目录（没有 `job.json`
-    /// 且不为空）时报 [`WorkDirProblem::NotEmpty`]；收拾输出失败时报错，任务目录与记录都留着，可以重试。记录
+    /// 且不为空）时报 [`WorkDirProblem::NotEmpty`]；任务目录或输出所在的盘不在、共享连不上时报
+    /// [`Error::VolumeUnavailable`]，接上后重试；收拾输出失败时报错，任务目录与记录都留着，可以重试。记录
     /// （`outputs.json`）是另一个格式版本写的时报 [`WorkDirProblem::UnsupportedVersion`]、无法解析时报
-    /// [`WorkDirProblem::Corrupt`]，什么也不动：不知道它记着什么就不收拾，可用写下它的版本放弃，或由用户删掉它（写了
-    /// 一半的临时输出与没能放回的旧输出以 `hsdl-` 开头，留在输出旁）后再放弃。`job.json` 不读：它是另一个版本写的
-    /// 也照常删除。不在 tokio 运行时内调用会 panic。
+    /// [`WorkDirProblem::Corrupt`]，什么也不动：不知道它记着什么就不收拾，可用写下它的版本放弃。输出所在的盘不再
+    /// 接上或记录读不懂时，可由用户删掉记录（写了一半的临时输出与没能放回的旧输出以 `hsdl-` 开头，留在输出旁）后再
+    /// 放弃。`job.json` 不读：它是另一个版本写的也照常删除。不在 tokio 运行时内调用会 panic。
     pub async fn discard(&self, work_dir: &Path) -> Result<Vec<Leftover>, Error> {
         if work_dir.as_os_str().is_empty() {
             return Err(Error::InvalidInput("任务目录路径为空".to_owned()));
