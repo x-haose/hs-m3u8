@@ -86,9 +86,8 @@ impl OutputOptions {
         }
     }
 
-    /// 输出路径是 UTF-8、MP4 路径不以分隔符结尾，各路径都有文件名、互不相同也不互相包含。只按字面判断，不访问
-    /// 文件系统：输出能否写由
-    /// [`super::check_targets`] 在任务开头查。
+    /// 输出路径是 UTF-8、MP4 路径不以分隔符结尾，各路径都以文件名结尾、互不相同也不互相包含。只按字面判断，
+    /// 不访问文件系统：输出能否写由 [`super::check_targets`] 在任务开头查。
     pub(crate) fn validate(&self) -> Result<(), Error> {
         let invalid = |reason: &str, path: &Path| {
             Err(Error::InvalidInput(format!("{reason}：{}", path.display())))
@@ -113,11 +112,8 @@ impl OutputOptions {
         paths.extend(self.target.hls());
         let mut absolute = Vec::with_capacity(paths.len());
         for path in &paths {
-            if path.file_name().is_none() {
-                return Err(Error::InvalidInput(format!(
-                    "路径没有文件名：{}",
-                    path.display()
-                )));
+            if !ends_with_file_name(path) {
+                return invalid("路径须以文件名结尾", path);
             }
             absolute.push(lexical_absolute(path)?);
         }
@@ -134,6 +130,18 @@ impl OutputOptions {
         }
         Ok(())
     }
+}
+
+/// 路径的最后一段（结尾的分隔符不算）就是它的文件名。`Path` 解析时略去结尾的 `.`：`out.mp4/.` 的文件名仍是
+/// `out.mp4`，指的却是它本身当作目录。
+fn ends_with_file_name(path: &Path) -> bool {
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let end = bytes
+        .iter()
+        .rposition(|&b| !std::path::is_separator(char::from(b)))
+        .map_or(0, |last| last + 1);
+    path.file_name()
+        .is_some_and(|name| bytes[..end].ends_with(name.as_encoded_bytes()))
 }
 
 /// 与 `path` 同级、名为 `name` 加 `suffix` 的路径；`path` 结尾的分隔符不影响结果。

@@ -637,7 +637,7 @@ async fn system_files_in_the_work_dir_do_not_block_its_removal() {
     assert!(!work.exists());
 }
 
-/// 输出与任务目录的路径相同或互相包含、MP4 路径以分隔符结尾时，下载前即拒绝。
+/// 输出与任务目录的路径相同或互相包含、MP4 路径以分隔符结尾、路径以 `.` 结尾时，下载前即拒绝。
 #[tokio::test(flavor = "multi_thread")]
 async fn invalid_output_paths_are_rejected() {
     let dir = test_dir("output_paths");
@@ -658,6 +658,9 @@ async fn invalid_output_paths_are_rejected() {
             None,
         ),
         (Target::Mp4(dir.join("out.mp4/")), None),
+        (Target::Mp4(dir.join("out.mp4/.")), None),
+        (Target::Hls(dir.join("out/.")), None),
+        (Target::Hls(dir.join("out")), Some(dir.join("work/."))),
     ];
     for (target, work_dir) in cases {
         let mut req = request_to(url.clone(), &dir, target.clone());
