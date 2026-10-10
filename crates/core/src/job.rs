@@ -202,7 +202,11 @@ pub(crate) async fn discard(root: PathBuf, unsettled: Unsettled) -> Result<Vec<L
         Err(failure) => return Err(failure),
     };
     let work_dir = root.clone();
-    let mut leftovers = blocking(move || output::recover_recorded(&work_dir, unsettled)).await??;
+    // 锁随收拾进阻塞线程：调用方中途丢弃这个 future 时，收拾照常做完才放锁，别的任务不会与它同时收拾
+    let (mut leftovers, lock) = blocking(move || {
+        output::recover_recorded(&work_dir, unsettled).map(|leftovers| (leftovers, lock))
+    })
+    .await??;
     leftovers.extend(workdir::remove(root, lock).await);
     Ok(leftovers)
 }
