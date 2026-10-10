@@ -79,6 +79,40 @@ fn test_dir(test: &str) -> PathBuf {
     dir
 }
 
+/// 以 root 运行：权限位不起作用，造不出没有权限的情形。
+#[cfg(unix)]
+fn is_root(dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    std::fs::metadata(dir).unwrap().uid() == 0
+}
+
+/// 结束时（含断言失败）恢复目录权限，免得下次删不掉测试目录。
+#[cfg(unix)]
+struct Writable(PathBuf);
+
+#[cfg(unix)]
+impl Drop for Writable {
+    fn drop(&mut self) {
+        make_writable(&self.0);
+    }
+}
+
+#[cfg(unix)]
+fn make_writable(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let writable = std::fs::Permissions::from_mode(0o755);
+    if std::fs::set_permissions(dir, writable).is_err() {
+        return;
+    }
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            make_writable(&entry.path());
+        }
+    }
+}
+
 // ---------- 任务 ----------
 
 fn request(url: Url, dir: &Path) -> JobRequest {

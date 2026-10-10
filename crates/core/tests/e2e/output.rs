@@ -13,6 +13,8 @@ use hs_m3u8_hls::{MediaPlaylist, Playlist, parse};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams, TrackSegments, remux};
 
 use crate::server::Server;
+#[cfg(unix)]
+use crate::{Writable, is_root, make_writable};
 use crate::{
     apple_double, assert_output, engine, expected_long, fixture, fixtures, request, run, test_dir,
 };
@@ -793,40 +795,6 @@ async fn output_directories_that_cannot_be_created_fail_before_downloading() {
         other => panic!("应报建不出输出所在的目录：{other:?}"),
     }
     assert_eq!(server.hits("index.m3u8"), 0);
-}
-
-/// 以 root 运行：权限位不起作用，造不出没有权限的情形。
-#[cfg(unix)]
-fn is_root(dir: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    std::fs::metadata(dir).unwrap().uid() == 0
-}
-
-/// 结束时（含断言失败）恢复目录权限，免得下次删不掉测试目录。
-#[cfg(unix)]
-struct Writable(PathBuf);
-
-#[cfg(unix)]
-impl Drop for Writable {
-    fn drop(&mut self) {
-        make_writable(&self.0);
-    }
-}
-
-#[cfg(unix)]
-fn make_writable(dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    let writable = std::fs::Permissions::from_mode(0o755);
-    if std::fs::set_permissions(dir, writable).is_err() {
-        return;
-    }
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        if entry.file_type().is_ok_and(|t| t.is_dir()) {
-            make_writable(&entry.path());
-        }
-    }
 }
 
 /// 输出名很长（238 字节，在文件名上限 255 字节之内）：临时名定长，不因输出名变长而超出上限。
