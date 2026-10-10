@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use hs_m3u8_remux::{DiscontinuityGroup, Streams};
+use hs_m3u8_remux::Streams;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -10,11 +10,12 @@ use crate::fetch::Fetcher;
 use crate::http::Http;
 use crate::ident::{source_digest, url_digest};
 use crate::live::{self, Context, Outcome};
-use crate::request::{JobRequest, OutputOptions, check_output};
+use crate::output::{self, MergeInput};
+use crate::request::{JobRequest, OutputOptions};
 use crate::resolve::{self, Resolved};
 use crate::vod::{self, Plan};
 use crate::workdir::{JobRecord, RecordKind, Stored, WorkDir, read_resumable};
-use crate::{Error, LiveReport, Output, Progress, Stage, Unsupported, WorkDirProblem, blocking};
+use crate::{Error, LiveReport, Output, Progress, Stage, Unsupported, WorkDirProblem};
 
 /// 一次运行用到的共享对象。
 struct Task {
@@ -122,6 +123,7 @@ async fn run_vod(task: Task, source: String, resolved: Resolved) -> Result<Outpu
         streams,
         groups,
         segments: plan.segment_count(),
+        selection: dir.record().selection.clone(),
         live: None,
     };
     task.finish(dir, input).await
@@ -144,7 +146,7 @@ pub(crate) async fn merge_recorded(output: OutputOptions) -> Result<Output, Erro
     let streams = dir.record().streams();
     let stored = dir.scan(streams.len()).await?;
     let input = merge_live(&dir, &stored, streams, None)?;
-    merge(dir, input, &output, stored.bytes()).await
+    output::write(dir, input, &output, stored.bytes()).await
 }
 
 /// 合并直播录到的分片；`recording` 为本次运行的录制，只合并时为 None。
@@ -171,17 +173,9 @@ fn merge_live(
         streams,
         segments: plan.segments,
         groups: plan.groups,
+        selection: dir.record().selection.clone(),
         live: Some(report),
     })
-}
-
-/// 交给合并的内容。
-struct MergeInput {
-    streams: Vec<Streams>,
-    groups: Vec<DiscontinuityGroup>,
-    /// 合并进输出的分片数，各轨合计
-    segments: usize,
-    live: Option<LiveReport>,
 }
 
 impl Task {
@@ -203,56 +197,8 @@ impl Task {
         }
         self.progress.send_modify(|p| p.stage = Stage::Merging);
         let bytes = self.progress.borrow().bytes;
-        let output = merge(dir, input, &self.request.output, bytes).await?;
+        let output = output::write(dir, input, &self.request.output, bytes).await?;
         self.progress.send_modify(|p| p.stage = Stage::Done);
         Ok(output)
     }
-}
-
-/// 合并为输出文件，按选项删除任务目录。`bytes` 为任务目录中已完成的分片与 init 段的字节数。
-async fn merge(
-    dir: WorkDir,
-    input: MergeInput,
-    options: &OutputOptions,
-    bytes: u64,
-) -> Result<Output, Error> {
-    let MergeInput {
-        streams,
-        groups,
-        segments,
-        live,
-    } = input;
-    // 下载或录制期间输出路径可能已被别人占用；开始时检查过，这里再查一次
-    check_output(&options.path, options.overwrite)?;
-    create_parent(&options.path).await?;
-    let path = options.path.clone();
-    let report = blocking(move || hs_m3u8_remux::remux(&streams, &groups, &path)).await??;
-    let cleanup_error = if options.keep_work_dir {
-        None
-    } else {
-        dir.remove().await.err().map(|e| e.to_string())
-    };
-    Ok(Output {
-        path: options.path.clone(),
-        report,
-        segments,
-        bytes,
-        cleanup_error,
-        live,
-    })
-}
-
-async fn create_parent(output: &std::path::Path) -> Result<(), Error> {
-    let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) else {
-        return Ok(());
-    };
-    let parent = parent.to_path_buf();
-    blocking(move || {
-        std::fs::create_dir_all(&parent).map_err(|cause| Error::Io {
-            action: "创建",
-            path: parent,
-            cause,
-        })
-    })
-    .await?
 }

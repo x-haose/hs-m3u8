@@ -3,7 +3,6 @@
 mod plan;
 
 use hs_m3u8_hls::Segment;
-use hs_m3u8_remux::{DiscontinuityGroup, TrackSegments};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -11,6 +10,7 @@ pub(crate) use self::plan::Plan;
 use crate::fetch::{Fetcher, Item, count_done, fetch_init};
 use crate::http::{Http, Permit};
 use crate::ident::Fingerprint;
+use crate::output::{GroupSegment, GroupTrack};
 use crate::workdir::{self, Layout, SegmentName, SessionStart};
 use crate::{Error, Progress, Stage, blocking};
 
@@ -25,7 +25,7 @@ pub(crate) async fn download(
     layout: &Layout,
     progress: &watch::Sender<Progress>,
     cancel: &CancellationToken,
-) -> Result<Vec<DiscontinuityGroup>, Error> {
+) -> Result<Vec<Vec<GroupTrack>>, Error> {
     progress.send_modify(|p| {
         p.stage = Stage::Downloading;
         p.segments_total = plan.segment_count();
@@ -131,26 +131,28 @@ fn pending(items: Vec<Item>) -> Result<(Vec<Item>, usize, u64), Error> {
     Ok((pending, done, bytes))
 }
 
-/// 计划中的不连续段组换成任务目录中的文件路径。
-fn merge_input(
-    plan: &Plan,
-    names: &[Vec<SegmentName>],
-    layout: &Layout,
-) -> Vec<DiscontinuityGroup> {
+/// 计划中的不连续段组换成任务目录中的文件。
+fn merge_input(plan: &Plan, names: &[Vec<SegmentName>], layout: &Layout) -> Vec<Vec<GroupTrack>> {
     plan.groups
         .iter()
-        .map(|ranges| DiscontinuityGroup {
-            tracks: ranges
+        .map(|ranges| {
+            ranges
                 .iter()
                 .enumerate()
                 .map(|(t, range)| {
                     let names = &names[t][range.clone()];
-                    TrackSegments {
+                    GroupTrack {
                         init: names[0].init.map(|f| layout.init(t, f)),
-                        segments: names.iter().map(|n| layout.segment(t, n)).collect(),
+                        segments: names
+                            .iter()
+                            .map(|n| GroupSegment {
+                                path: layout.segment(t, n),
+                                duration_us: n.duration_us,
+                            })
+                            .collect(),
                     }
                 })
-                .collect(),
+                .collect()
         })
         .collect()
 }

@@ -9,7 +9,7 @@
 //!   [`Error::Segment`]、[`Error::Key`] 说明出在哪个分片或 key，[`Error::LiveStalled`] 说明直播哪条轨停滞，
 //!   可否重试看其原因（[`Error::retryable`]）；
 //! - 任务目录：[`Error::WorkDir`]、[`Error::NothingRecorded`]；
-//! - 回调：[`Error::Hook`]；合并：[`Error::Remux`]；[`Error::Cancelled`]。
+//! - 回调：[`Error::Hook`]；合并：[`Error::Remux`]；[`Error::Cancelled`]；失败后清理也失败：[`Error::Cleanup`]。
 //!
 //! 错误信息已包含原因，不经 `source()` 重复给出；地址只显示到路径，不含用户名、密码与查询串（常带凭据或令牌）。
 
@@ -85,6 +85,13 @@ pub enum Error {
     },
     #[error("合并失败：{0}")]
     Remux(Box<hs_m3u8_remux::Error>),
+    /// 写输出失败后，删除本次已写出的部分也失败：`failure` 为原来的失败，`path` 为没删掉的文件或目录
+    #[error("{failure}；清理 {} 也失败：{cause}", .path.display())]
+    Cleanup {
+        failure: Box<Error>,
+        path: PathBuf,
+        cause: io::Error,
+    },
     #[error("任务已取消")]
     Cancelled,
 }
@@ -164,6 +171,7 @@ impl Error {
         match self {
             Error::Http { kind, .. } => kind.retryable(),
             Error::Segment { cause, .. } | Error::Key { cause, .. } => cause.retryable(),
+            Error::Cleanup { failure, .. } => failure.retryable(),
             Error::LiveStalled { cause, .. } => match cause {
                 StallError::RefreshFailed(error) => error.retryable(),
                 StallError::RefreshPending => true,
@@ -237,7 +245,7 @@ pub enum Integrity {
     CipherLength(usize),
     #[error("字节范围应为 {expected} 字节，实际 {found}")]
     RangeLength { expected: u64, found: usize },
-    #[error("不是 TS、ADTS 或带 ID3 头的音频（开头 {0}）")]
+    #[error("不是 TS 或可识别的打包音频（AAC、MP3、AC-3、E-AC-3）（开头 {0}）")]
     UnrecognizedSegment(String),
     #[error("不是 fMP4（开头 {0}）")]
     NotFmp4(String),

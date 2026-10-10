@@ -2,6 +2,7 @@
 //! 输出与直接用 remux 合并同一批样本文件的结果逐字节比较，解密、顺序或分组的任何错误都会暴露。
 
 mod live;
+mod output;
 mod server;
 mod vod;
 
@@ -9,7 +10,9 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use hs_m3u8_core::{Engine, Error, JobRequest, Output, OutputOptions, RetryPolicy, Source, Url};
+use hs_m3u8_core::{
+    Engine, Error, JobRequest, Output, OutputOptions, RetryPolicy, Source, Target, Url,
+};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams, TrackSegments, remux};
 
 // ---------- 样本 ----------
@@ -72,7 +75,8 @@ fn test_dir(test: &str) -> PathBuf {
 // ---------- 任务 ----------
 
 fn request(url: Url, dir: &Path) -> JobRequest {
-    let mut request = JobRequest::new(Source::new(url), OutputOptions::new(dir.join("out.mp4")));
+    let output = OutputOptions::new(Target::Mp4(dir.join("out.mp4")));
+    let mut request = JobRequest::new(Source::new(url), output);
     request.source.http.retry = RetryPolicy {
         attempts: NonZeroU32::new(3).unwrap(),
         base_delay: Duration::from_millis(1),
@@ -90,11 +94,12 @@ async fn run(request: JobRequest) -> Result<Output, Error> {
     engine().start(request)?.wait().await
 }
 
-/// 成功的任务：输出与期望逐字节相同，任务目录已删除。
+/// 成功的任务：MP4 与期望逐字节相同，任务目录已删除。
 fn assert_output(output: &Output, expected: &[u8]) {
-    assert_eq!(std::fs::read(&output.path).unwrap(), expected);
+    let mp4 = &output.mp4.as_ref().expect("应输出 MP4").path;
+    assert_eq!(std::fs::read(mp4).unwrap(), expected);
     assert_eq!(output.cleanup_error, None);
-    let mut work_dir = output.path.clone().into_os_string();
+    let mut work_dir = mp4.clone().into_os_string();
     work_dir.push(".hsdl");
     assert!(!Path::new(&work_dir).exists());
 }

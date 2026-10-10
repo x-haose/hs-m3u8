@@ -298,7 +298,7 @@ async fn failure_then_resume() {
         ),
         other => panic!("{other}"),
     }
-    assert!(!req.output.path.exists());
+    assert!(!req.output.target.mp4().unwrap().exists());
     assert!(dir.join("out.mp4.hsdl/job.json").exists());
 
     put_ts_a(&server, "index.m3u8", 0.5);
@@ -442,7 +442,7 @@ async fn cancel_lock_and_resume() {
     );
     job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
-    assert!(!req.output.path.exists());
+    assert!(!req.output.target.mp4().unwrap().exists());
 
     server.ungate("seg1.ts");
     let output = run(req).await.unwrap();
@@ -648,7 +648,10 @@ async fn signed_init_urls_resume_with_the_right_init() {
             video("fmp4_b", &["seg0.m4s"]),
         ],
     );
-    assert_eq!(std::fs::read(&output.path).unwrap(), want);
+    assert_eq!(
+        std::fs::read(&output.mp4.as_ref().unwrap().path).unwrap(),
+        want
+    );
 }
 
 /// 把 init 段地址 `init?p=<目录>` 改写为 `<目录>/init.mp4`：模拟按查询串区分内容的站点。
@@ -756,12 +759,12 @@ async fn rejected_before_download() {
     let server = Server::start().await;
 
     let req = request(server.url("index.m3u8"), &dir);
-    std::fs::write(&req.output.path, b"").unwrap();
+    std::fs::write(req.output.target.mp4().unwrap(), b"").unwrap();
     assert!(matches!(
         engine().start(req.clone()),
         Err(Error::OutputExists(_))
     ));
-    std::fs::remove_file(&req.output.path).unwrap();
+    std::fs::remove_file(req.output.target.mp4().unwrap()).unwrap();
 
     server.put(
         "live.m3u8",

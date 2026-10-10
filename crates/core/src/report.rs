@@ -38,9 +38,13 @@ pub enum Stage {
 /// 下载结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output {
-    pub path: PathBuf,
-    pub report: Report,
-    /// 合并进输出的分片数，各轨合计
+    /// 生成的 MP4；没要 MP4（[`crate::Target::Hls`]）时为 None
+    pub mp4: Option<Mp4Output>,
+    /// 生成的本地 HLS 目录；没要 HLS 时为 None。入口为其中的 `index.m3u8`：单轨时是媒体播放列表，视频与独立音频
+    /// 分离时是主播放列表；各轨的分片、init 段（与分离时这条轨的 `index.m3u8`）在 `<轨道编号>/` 下。
+    /// 内容与 MP4 相同：只放各轨都有的不连续段组，组内缺失的分片不标出、保留原时间戳
+    pub hls: Option<PathBuf>,
+    /// 输出的分片数，各轨合计
     pub segments: usize,
     /// 同 [`Progress::bytes`]
     pub bytes: u64,
@@ -49,6 +53,14 @@ pub struct Output {
     pub cleanup_error: Option<String>,
     /// 直播的录制结果；点播为 None
     pub live: Option<LiveReport>,
+}
+
+/// 生成的 MP4。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mp4Output {
+    pub path: PathBuf,
+    /// 各路输出流的编码参数、包数与时长
+    pub report: Report,
 }
 
 /// 直播的录制结果。

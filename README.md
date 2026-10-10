@@ -16,7 +16,7 @@ HLS（m3u8）下载器。本分支是 Rust 重写：Rust 库、Python 包（`hs-
 
 ## 核心库能力
 
-- 点播：TS 与 fMP4 分片、AES-128、字节范围、不连续段，视频与独立音频 rendition 合并为一个 MP4，不重编码。
+- 点播：TS 与 fMP4 分片、AES-128、字节范围、不连续段，视频与独立音频 rendition 合并为一个 MP4，不重编码；也可输出可直接播放的本地 HLS 目录，或两者都要。
 - 续传：分片落盘即完整，中断后再次运行只补缺的；播放列表变了时明确拒绝。
 - 直播录制：按 RFC 8216 的节奏刷新，窗口滑过或取不到的分片在结果里如实报告；中断后续录。
 - 站点适配回调：改写播放列表、修改请求、变换 key、变换分片。
@@ -27,17 +27,19 @@ HLS（m3u8）下载器。本分支是 Rust 重写：Rust 库、Python 包（`hs-
 ```rust
 use std::num::NonZeroUsize;
 
-use hs_m3u8_core::{Engine, JobRequest, OutputOptions, Source, Url};
+use hs_m3u8_core::{Engine, JobRequest, OutputOptions, Source, Target, Url};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let engine = Engine::new(NonZeroUsize::new(32).unwrap());
     let url = Url::parse("https://example.com/master.m3u8")?;
-    let output = OutputOptions::new("downloads/video.mp4".into());
+    let output = OutputOptions::new(Target::Mp4("downloads/video.mp4".into()));
     let request = JobRequest::new(Source::new(url), output);
     let job = engine.start(request)?;
     let output = job.wait().await?;
-    println!("已保存到 {}", output.path.display());
+    if let Some(mp4) = output.mp4 {
+        println!("已保存到 {}", mp4.path.display());
+    }
     Ok(())
 }
 ```
