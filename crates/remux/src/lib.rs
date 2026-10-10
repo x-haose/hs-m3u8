@@ -6,7 +6,7 @@
 //!   各组首尾相接，下一组从上一组所有流的最晚结束时刻之后开始。
 //! - 每条轨按调用方指定的 [`Streams`] 贡献第一路视频和（或）第一路音频，没有这类流的轨不贡献（各轨合起来至少
 //!   一路），未指定种类的流不进输出、不检查编码；同一类流只能来自一条轨；后续组的流布局与编码参数必须与第一组
-//!   一致，组内每路流的解码时间戳不能往回跳。
+//!   一致，每路流的解码时间戳必须严格递增（组内不能往回跳或重复）。
 //! - 只接受 H.264、HEVC 视频与 AAC 音频，与 FFmpeg 构建启用的组件一致。
 //!
 //! 输出写完回读核对每路流的包数并落盘；失败时输出上可能留有写了一半的文件。输出要么完整、要么不存在由调用方
@@ -221,8 +221,8 @@ pub enum Error {
     },
 }
 
-/// 内容放不进 MP4：编码不受支持；后续组与第 0 组的流种类、编码参数不同，或组内解码时间戳往回跳（同一条 MP4 轨的
-/// 内容须前后一致、时间戳递增）；或各轨都没有要取的流。
+/// 内容放不进 MP4：编码不受支持；后续组与第 0 组的流种类、编码参数不同，或组内解码时间戳不递增（同一条 MP4 轨的
+/// 内容须前后一致、时间戳严格递增）；或各轨都没有要取的流。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unsupported {
     #[error(
@@ -741,8 +741,8 @@ fn write_group(
         let out = mapping.output;
         let o = &mut outs[out];
         let t = retime(&mut packet, mapping.time_base, o.time_base, offset_us);
-        // MP4 封装器要求每路流的 DTS 在输出时间基下严格递增，不满足时只报「参数不合法」；组间的偏移保证跨组递增，
-        // 不递增只会出在组内
+        // 每路流的 DTS 在输出时间基下须严格递增（同一条 MP4 轨不能有两个样本同时解码）。FFmpeg 的封装器遇到不递增的
+        // 只报「参数不合法」，上一个为 0 时还不查，这里一律拦下；组间的偏移保证跨组递增，不递增只会出在组内
         let dts = packet.dts().expect("retime 设了 DTS");
         if o.last_dts.is_some_and(|last| dts <= last) {
             return Err(Error::Unsupported(Unsupported::DtsNotIncreasing {
