@@ -83,8 +83,8 @@ pub struct Output {
     pub segments: usize,
     /// 同 [`Progress::bytes`]
     pub bytes: u64,
-    /// 删除任务目录失败的原因（含路径）；输出文件不受影响，残留目录由调用方处理。
-    /// 未删除（`keep_work_dir`）或删除成功时为 None
+    /// 收尾清理失败的原因（含路径）：删除被替换的旧输出或任务目录失败；输出不受影响。残留的任务目录里可能有不是
+    /// 本库写的文件（例如经符号链接写进去的输出本身），不要整个删除。都删干净时为 None
     pub cleanup_error: Option<String>,
     /// 直播的录制结果；点播为 None
     pub live: Option<LiveReport>,

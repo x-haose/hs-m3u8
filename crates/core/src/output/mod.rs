@@ -148,7 +148,7 @@ fn write_files(
         hls.as_ref(),
     )
     .and_then(|report| {
-        // 合并期间输出路径可能已被别人占用；开始时检查过，换上前再查一次
+        // 写出期间输出路径可能已被别人占用；开始时检查过，换上前再查一次
         check_targets(options)?;
         Ok((report, commit::swap_in(&outputs)?))
     });

@@ -13,7 +13,7 @@ pub(crate) enum Standalone {
 }
 
 impl Standalone {
-    /// 全部格式；增加格式时同时加在这里。
+    /// 全部格式。
     pub(crate) const ALL: [Standalone; 5] = [
         Standalone::Ts,
         Standalone::Aac,
