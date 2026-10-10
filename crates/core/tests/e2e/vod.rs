@@ -7,6 +7,7 @@ use std::sync::Arc;
 use aes::cipher::block_padding::Pkcs7;
 use aes::cipher::{BlockModeEncrypt, KeyIvInit};
 use axum::http::StatusCode;
+use hs_m3u8_core::hls::AudioChoice;
 use hs_m3u8_core::{
     Error, HookError, Hooks, HttpError, Integrity, KeyOverride, Purpose, RequestParts, Stage,
     Unsupported, Url, WorkDirProblem,
@@ -404,6 +405,53 @@ async fn resume_finds_the_same_redundant_variant() {
     assert_eq!((server.hits("a/seg1.ts"), server.hits("b/seg1.ts")), (0, 2));
     let selected = progress.borrow().selection.clone().unwrap();
     assert_eq!(selected.variant.index, 1);
+}
+
+/// 同一音频组里两条属性完全相同的音轨（同组、同语言、同名），按下标选了后一条：续传按排位找回同一条，
+/// 不换成前一条（两条的分片文件名与 init 段内容相同，换了也不会报错，只会把两条音轨拼在一起）。
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_finds_the_same_identical_audio_rendition() {
+    let dir = test_dir("resume_identical_audio");
+    let server = Server::start().await;
+    let media = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"init.mp4\"\n\
+                 #EXTINF:1,\nseg0.m4s\n#EXTINF:1,\nseg1.m4s\n#EXT-X-ENDLIST\n";
+    for (dir, fixtures) in [
+        ("v", "fmp4_a/video"),
+        ("a", "fmp4_a/audio"),
+        ("b", "fmp4_b/audio"),
+    ] {
+        for name in ["init.mp4", "seg0.m4s", "seg1.m4s"] {
+            server.put(
+                &format!("{dir}/{name}"),
+                fixture(&format!("{fixtures}/{name}")),
+            );
+        }
+        server.put(&format!("{dir}/index.m3u8"), media);
+    }
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n\
+         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES,URI=\"a/index.m3u8\"\n\
+         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"English\",LANGUAGE=\"en\",URI=\"b/index.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=320x180,AUDIO=\"aud\"\nv/index.m3u8\n",
+    );
+    let mut req = request(server.url("master.m3u8"), &dir);
+    req.source.preference.audio = AudioChoice::Index(1);
+    server.remove("b/seg1.m4s");
+    assert!(run(req.clone()).await.is_err());
+    server.put("b/seg1.m4s", fixture("fmp4_b/audio/seg1.m4s"));
+
+    let output = run(req).await.unwrap();
+
+    let group = DiscontinuityGroup {
+        tracks: vec![
+            track("fmp4_a/video", Some("init.mp4"), &["seg0.m4s", "seg1.m4s"]),
+            track("fmp4_b/audio", Some("init.mp4"), &["seg0.m4s", "seg1.m4s"]),
+        ],
+    };
+    let want = expected(&dir, &[Streams::Video, Streams::Audio], &[group]);
+    assert_output(&output, &want);
+    assert_eq!(server.hits("a/seg1.m4s"), 0);
 }
 
 /// 上次一个分片都没下完就中断：目录里没有可续的内容，不按记录的选轨找回（那个变体已从主播放列表里删掉），

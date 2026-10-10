@@ -3,7 +3,7 @@
 //! 只有它可用），身份里去掉的属性不会出现在那里。
 
 use hs_m3u8_hls::{
-    MasterPlaylist, Rendition, RenditionKind, Resolution, SelectedAudio, Selection, Variant,
+    MasterPlaylist, Rendition, Resolution, SelectedAudio, Selection, Variant, audio_renditions,
 };
 use hs_m3u8_remux::Streams;
 
@@ -12,7 +12,7 @@ use hs_m3u8_remux::Streams;
 pub(crate) struct SelectionKey {
     pub variant: VariantKey,
     /// 独立的音频 rendition；None 表示音频混在变体流里（或没有音频）
-    pub audio: Option<RenditionKey>,
+    pub audio: Option<AudioKey>,
 }
 
 /// 变体的身份：属性，以及属性完全相同的变体里排第几。地址常带令牌，不作身份。
@@ -32,9 +32,18 @@ pub(crate) struct VariantAttributes {
     pub audio_group: Option<String>,
 }
 
+/// 音频 rendition 的身份：属性，以及属性完全相同的音频里排第几。地址常带令牌，不作身份。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AudioKey {
+    pub attributes: AudioAttributes,
+    /// 主播放列表中属性与它完全相同的音频 rendition 里排第几（从 0 起）；同组同语言同名的音频（违反 RFC 8216
+    /// 4.3.4.1.1 的 NAME 唯一，但确有其事）只能这样区分
+    pub occurrence: usize,
+}
+
 /// 音频 rendition 的属性。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RenditionKey {
+pub(crate) struct AudioAttributes {
     pub group_id: String,
     pub language: Option<String>,
     pub name: Option<String>,
@@ -53,10 +62,7 @@ impl SelectionKey {
                 attributes,
                 occurrence,
             },
-            audio: selection
-                .audio
-                .as_ref()
-                .map(|a| RenditionKey::of(&a.rendition)),
+            audio: selection.audio.as_ref().map(|a| AudioKey::of(a, master)),
         }
     }
 
@@ -71,9 +77,9 @@ impl SelectionKey {
         let audio = match &self.audio {
             None => None,
             Some(key) => {
-                let (index, rendition) = master.renditions.iter().enumerate().find(|(_, r)| {
-                    r.kind == RenditionKind::Audio && r.uri.is_some() && RenditionKey::of(r) == *key
-                })?;
+                let (index, rendition) = audio_renditions(master)
+                    .filter(|(_, r)| AudioAttributes::of(r) == key.attributes)
+                    .nth(key.occurrence)?;
                 Some(SelectedAudio {
                     index,
                     uri: rendition.uri.clone()?,
@@ -109,9 +115,24 @@ pub(crate) fn track_streams(selection: Option<&SelectionKey>) -> Vec<Streams> {
     }
 }
 
-impl RenditionKey {
+impl AudioKey {
+    /// `audio` 为从 `master` 中选出的音频。
+    fn of(audio: &SelectedAudio, master: &MasterPlaylist) -> Self {
+        let attributes = AudioAttributes::of(&audio.rendition);
+        let occurrence = audio_renditions(master)
+            .take(audio.index)
+            .filter(|(_, r)| AudioAttributes::of(r) == attributes)
+            .count();
+        AudioKey {
+            attributes,
+            occurrence,
+        }
+    }
+}
+
+impl AudioAttributes {
     fn of(rendition: &Rendition) -> Self {
-        RenditionKey {
+        AudioAttributes {
             group_id: rendition.group_id.clone(),
             language: rendition.language.clone(),
             name: rendition.name.clone(),

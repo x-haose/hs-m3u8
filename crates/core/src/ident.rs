@@ -47,19 +47,18 @@ impl fmt::Display for Fingerprint {
 
 /// 来源摘要（SHA-256 十六进制）：来源地址（见 [`source_address`]）与选轨偏好。语言代码与选轨一样不区分
 /// ASCII 大小写。每项一行；地址与语言里不会有换行（语言由 [`crate::Source`] 的校验保证），编码没有歧义。
-/// 按下标选音频时另起一行，默认与按语言的写法与之前相同。
 pub(crate) fn source_digest(url: &Url, preference: &Preference) -> String {
     let variant = match preference.variant {
         VariantChoice::Best => "best".to_owned(),
         VariantChoice::Index(index) => format!("index {index}"),
     };
     let audio = match &preference.audio {
-        AudioChoice::Default => "audio \n".to_owned(),
-        AudioChoice::Language(language) => format!("audio {}\n", language.to_ascii_lowercase()),
-        AudioChoice::Index(index) => format!("audio \naudio-rendition {index}\n"),
+        AudioChoice::Default => "default".to_owned(),
+        AudioChoice::Language(language) => format!("language {}", language.to_ascii_lowercase()),
+        AudioChoice::Index(index) => format!("index {index}"),
     };
     digest_hex(format!(
-        "url {}\nvariant {variant}\n{audio}",
+        "url {}\nvariant {variant}\naudio {audio}\n",
         source_address(url)
     ))
 }
@@ -177,7 +176,7 @@ mod tests {
         };
         assert_eq!(
             source_digest(&source, &best),
-            "1035beb86fc0aa0203d7faf9972cbc41ec60faf6761111c4d51afdc5d101f8c3"
+            "a9106f2006973de9187a043d77a969aa977790875deb871ecc8da7c70e9dee62"
         );
         let index = Preference {
             variant: VariantChoice::Index(2),
@@ -185,7 +184,7 @@ mod tests {
         };
         assert_eq!(
             source_digest(&source, &index),
-            "013a317cdea31c36099ad2a357b4ab403aa998de523ec1725a9574c498dcb5c2"
+            "0e42d3b0802e2f2d74ae0d8dc420518949c503b570451b6a988c73e8930028d5"
         );
 
         let live = Url::parse("https://a.example:8443/live.m3u8?token=1").unwrap();

@@ -30,7 +30,7 @@ pub enum AudioChoice {
     Default,
     /// 组内第一个 LANGUAGE 与它相同（不区分大小写）的
     Language(String),
-    /// `MasterPlaylist::renditions` 中的下标；须是所选变体音频组里的音频 rendition
+    /// 主播放列表里第几个音频 rendition（只数 TYPE=AUDIO 的，按出现顺序，从 0 起）；须在所选变体的音频组里
     Index(usize),
 }
 
@@ -47,7 +47,7 @@ pub struct Selection {
 /// 有独立媒体播放列表的音频 rendition。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedAudio {
-    /// 在 `MasterPlaylist::renditions` 中的下标
+    /// 主播放列表里第几个音频 rendition，口径同 [`AudioChoice::Index`]
     pub index: usize,
     /// 该 rendition 的媒体播放列表地址
     pub uri: Url,
@@ -66,10 +66,11 @@ pub enum SelectError {
         language: String,
         available: Vec<String>,
     },
-    #[error("rendition 下标 {index} 超出范围（共 {count} 个）")]
-    RenditionIndexOutOfRange { index: usize, count: usize },
-    /// 指定的 rendition 不是音频，或不在所选变体引用的音频组里（变体没有引用音频组时 `group` 为 None）
-    #[error("第 {index} 个 rendition 不是所选变体的音频组（{}）里的音频", group.as_deref().unwrap_or("无"))]
+    /// 口径同 [`AudioChoice::Index`]，`count` 为音频 rendition 的个数
+    #[error("音频下标 {index} 超出范围（共 {count} 个）")]
+    AudioIndexOutOfRange { index: usize, count: usize },
+    /// 指定的音频 rendition 不在所选变体引用的音频组里（变体没有引用音频组时 `group` 为 None）
+    #[error("第 {index} 个音频不在所选变体的音频组（{}）里", group.as_deref().unwrap_or("无"))]
     NotVariantAudio { index: usize, group: Option<String> },
 }
 
@@ -86,7 +87,7 @@ pub fn select(master: &MasterPlaylist, preference: &Preference) -> Result<Select
     };
     let variant = &master.variants[variant_index];
     let group = variant.audio.as_deref();
-    let rendition = match (&preference.audio, group) {
+    let audio = match (&preference.audio, group) {
         (AudioChoice::Index(index), group) => Some(audio_by_index(master, *index, group)?),
         (AudioChoice::Language(language), Some(group)) => {
             Some(audio_by_language(master, group, language)?)
@@ -97,7 +98,7 @@ pub fn select(master: &MasterPlaylist, preference: &Preference) -> Result<Select
     Ok(Selection {
         variant_index,
         variant: variant.clone(),
-        audio: rendition.and_then(|index| separate_audio(master, index)),
+        audio: audio.and_then(|(index, rendition)| separate(index, rendition)),
     })
 }
 
@@ -118,25 +119,30 @@ fn best_variant(master: &MasterPlaylist) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
-fn is_audio_of(rendition: &Rendition, group: &str) -> bool {
-    rendition.kind == RenditionKind::Audio && rendition.group_id == group
+/// 主播放列表里的音频 rendition 与它们的位置（口径同 [`AudioChoice::Index`]）。
+pub fn audio_renditions(master: &MasterPlaylist) -> impl Iterator<Item = (usize, &Rendition)> {
+    master
+        .renditions
+        .iter()
+        .filter(|r| r.kind == RenditionKind::Audio)
+        .enumerate()
 }
 
-/// 按下标指定的 rendition，须是 `group` 组里的音频。
-fn audio_by_index(
-    master: &MasterPlaylist,
+/// 按位置指定的音频，须在 `group` 组里。
+fn audio_by_index<'a>(
+    master: &'a MasterPlaylist,
     index: usize,
     group: Option<&str>,
-) -> Result<usize, SelectError> {
-    let rendition = master
-        .renditions
-        .get(index)
-        .ok_or(SelectError::RenditionIndexOutOfRange {
-            index,
-            count: master.renditions.len(),
-        })?;
-    if group.is_some_and(|g| is_audio_of(rendition, g)) {
-        Ok(index)
+) -> Result<(usize, &'a Rendition), SelectError> {
+    let (_, rendition) =
+        audio_renditions(master)
+            .nth(index)
+            .ok_or_else(|| SelectError::AudioIndexOutOfRange {
+                index,
+                count: audio_renditions(master).count(),
+            })?;
+    if group == Some(rendition.group_id.as_str()) {
+        Ok((index, rendition))
     } else {
         Err(SelectError::NotVariantAudio {
             index,
@@ -146,25 +152,18 @@ fn audio_by_index(
 }
 
 /// 组里第一个语言相同（不区分大小写）的音频。
-fn audio_by_language(
-    master: &MasterPlaylist,
+fn audio_by_language<'a>(
+    master: &'a MasterPlaylist,
     group: &str,
     language: &str,
-) -> Result<usize, SelectError> {
-    let in_group = || {
-        master
-            .renditions
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| is_audio_of(r, group))
-    };
+) -> Result<(usize, &'a Rendition), SelectError> {
+    let in_group = || audio_renditions(master).filter(|(_, r)| r.group_id == group);
     in_group()
         .find(|(_, r)| {
             r.language
                 .as_deref()
                 .is_some_and(|l| l.eq_ignore_ascii_case(language))
         })
-        .map(|(index, _)| index)
         .ok_or_else(|| SelectError::AudioLanguageNotFound {
             group: group.to_owned(),
             language: language.to_owned(),
@@ -173,22 +172,15 @@ fn audio_by_language(
 }
 
 /// 组里 DEFAULT=YES 的音频，没有则取第一个；组里没有音频时为 None。
-fn default_audio(master: &MasterPlaylist, group: &str) -> Option<usize> {
-    let mut in_group = master
-        .renditions
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| is_audio_of(r, group));
-    let first = in_group.clone().next().map(|(index, _)| index);
-    in_group
+fn default_audio<'a>(master: &'a MasterPlaylist, group: &str) -> Option<(usize, &'a Rendition)> {
+    let in_group = || audio_renditions(master).filter(|(_, r)| r.group_id == group);
+    in_group()
         .find(|(_, r)| r.default)
-        .map(|(index, _)| index)
-        .or(first)
+        .or_else(|| in_group().next())
 }
 
-/// 第 `index` 个 rendition 有独立的媒体播放列表时为它；没有 URI 的混在变体流里。
-fn separate_audio(master: &MasterPlaylist, index: usize) -> Option<SelectedAudio> {
-    let rendition = &master.renditions[index];
+/// 有独立媒体播放列表时为它；没有 URI 的 rendition 混在变体流里。
+fn separate(index: usize, rendition: &Rendition) -> Option<SelectedAudio> {
     rendition.uri.clone().map(|uri| SelectedAudio {
         index,
         uri,

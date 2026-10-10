@@ -1,12 +1,14 @@
 //! 对外描述来源的类型：探测结果与进度里的变体、音轨与各轨概况。不含地址：地址常带令牌，而这些类型常被打进
 //! 日志与界面。
 
-use hs_m3u8_hls::{MasterPlaylist, MediaPlaylist, Rendition, RenditionKind, Resolution, Selection};
+use hs_m3u8_hls::{
+    MasterPlaylist, MediaPlaylist, Rendition, Resolution, Selection, audio_renditions,
+};
 
 /// 一个变体的属性。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariantInfo {
-    /// 在主播放列表中的下标，即 [`crate::hls::VariantChoice::Index`] 用的
+    /// 主播放列表里第几个变体，即 [`crate::hls::VariantChoice::Index`] 用的，也是在 [`MasterInfo::variants`] 里的位置
     pub index: usize,
     /// BANDWIDTH，bit/s；来源没写时为 None
     pub bandwidth: Option<u64>,
@@ -20,7 +22,8 @@ pub struct VariantInfo {
 /// 一个音频 rendition 的属性。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioInfo {
-    /// 在主播放列表的 rendition 中的下标，即 [`crate::hls::AudioChoice::Index`] 用的
+    /// 主播放列表里第几个音频 rendition（只数音频），即 [`crate::hls::AudioChoice::Index`] 用的，也是在
+    /// [`MasterInfo::audio`] 里的位置
     pub index: usize,
     pub group: String,
     pub name: Option<String>,
@@ -67,11 +70,7 @@ impl MasterInfo {
             variants: (0..master.variants.len())
                 .map(|i| variant_info(master, i))
                 .collect(),
-            audio: master
-                .renditions
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| r.kind == RenditionKind::Audio)
+            audio: audio_renditions(master)
                 .map(|(i, r)| audio_info(i, r))
                 .collect(),
             selected: Selected::of(master, selection),

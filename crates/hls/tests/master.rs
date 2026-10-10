@@ -142,7 +142,7 @@ fn audio_rendition_is_chosen_by_default_flag_or_language() {
     );
 }
 
-/// 按下标选同组里的另一条音轨；下标越界、不是所选变体音频组里的音频时报错。
+/// 按下标选同组里的另一条音轨，下标只数音频 rendition；下标越界、不在所选变体音频组里时报错。
 #[test]
 fn audio_rendition_is_chosen_by_index() {
     let m = master(SPLIT);
@@ -154,7 +154,22 @@ fn audio_rendition_is_chosen_by_index() {
     assert_eq!(audio.rendition.name.as_deref(), Some("English"));
     assert_eq!(
         select(&m, &by_index(2)).unwrap_err(),
-        SelectError::RenditionIndexOutOfRange { index: 2, count: 2 }
+        SelectError::AudioIndexOutOfRange { index: 2, count: 2 }
+    );
+
+    // 下标只数音频：排在前面的字幕不算
+    let with_subtitles = master(&SPLIT.replacen(
+        "#EXT-X-MEDIA:TYPE=AUDIO",
+        "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"sub\",NAME=\"zh\",URI=\"sub.m3u8\"\n#EXT-X-MEDIA:TYPE=AUDIO",
+        1,
+    ));
+    let audio = select(&with_subtitles, &by_index(1))
+        .unwrap()
+        .audio
+        .unwrap();
+    assert_eq!(
+        (audio.index, audio.rendition.name.as_deref()),
+        (1, Some("中文"))
     );
 
     let other_group = master(
