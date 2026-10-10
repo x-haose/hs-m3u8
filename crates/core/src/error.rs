@@ -278,14 +278,15 @@ pub enum WorkDirProblem {
     /// job.json 或分片文件无法识别
     #[error("内容无法识别：{0}")]
     Corrupt(String),
-    /// 目录里记录的任务类型与本次不同。本次的类型：播放列表没有 EXT-X-ENDLIST，或目录里是这个来源的直播录制且
-    /// 请求开启了直播（[`crate::JobRequest::live`]）时为直播，否则为点播
+    /// 目录里记录的任务类型与本次不同：记录的是直播、本次是点播，多为中断期间直播结束了而请求没开启直播
+    /// （[`crate::JobRequest::live`]），开启即可续录，或用 [`crate::Resume::MergeOnly`] 只合并；记录的是点播、
+    /// 本次是直播（同一来源现在是直播），换一个任务目录
     #[error("记录的是{recorded}任务，本次是{current}任务")]
     KindMismatch { recorded: JobType, current: JobType },
     /// 只合并（[`crate::Resume::MergeOnly`]）只用于直播录制，目录里是点播的下载；点播用同样的请求正常运行即可续传
     #[error("目录里是点播的下载，只合并只用于直播录制")]
     NotLiveRecording,
-    /// 来源地址（不含用户名、密码、查询串与片段）或选轨偏好与记录的不同
+    /// 来源（见 [`crate::JobRequest::url`]）与记录的不同
     #[error("记录的是另一个来源或选轨偏好")]
     SourceMismatch,
     /// 来源的轨道（所选变体、有无独立音频）与记录的不同
@@ -298,9 +299,8 @@ pub enum WorkDirProblem {
     /// 或换一个任务目录重新开始
     #[error("记录的变体或音频已不在主播放列表中")]
     SelectionGone,
-    /// 直播：完整来源地址与记录的不同（来源摘要相同，如换了令牌），且有轨接不上它之前录到的内容，无法确认是同一个
-    /// 直播。可用原来的地址续录、
-    /// 用 [`crate::Resume::MergeOnly`] 合并已录的部分，或换一个任务目录重新录
+    /// 直播：来源相同而完整地址与记录的不同（如换了令牌），且有轨接不上它之前录到的内容，无法确认是同一个直播。
+    /// 可用原来的地址续录、用 [`crate::Resume::MergeOnly`] 合并已录的部分，或换一个任务目录重新录
     #[error("地址与记录的不同，且当前内容与已录的接不上，无法确认是同一个直播")]
     SourceUnverified,
 }

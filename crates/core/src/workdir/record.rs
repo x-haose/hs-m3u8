@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use crate::selection::{RenditionKey, SelectionKey, VariantAttributes, VariantKey, track_streams};
 use crate::{Error, JobType, WorkDirProblem};
 
+/// 任务目录格式的版本：job.json 的字段，分片、init 段与会话起点的文件名，以及其中指纹与摘要的编码。任何一项
+/// 改变都要升；读到别的版本一律拒绝。
 const FORMAT_VERSION: u32 = 3;
 
 /// 任务目录记录的任务；续传、续录时须与当前请求相符。
@@ -26,7 +28,7 @@ pub(crate) enum RecordKind {
     /// 点播：计划摘要（见 [`crate::vod::Plan::digest`]）相同才能续传
     Vod { plan_digest: String },
     /// 直播：完整来源地址（含查询串）的摘要。地址变了仍可沿用目录，由录制确认窗口与已录内容衔接后
-    /// 再用 [`super::WorkDir::save`] 更新
+    /// 再用 [`super::WorkDir::adopt_url`] 更新
     Live { url_digest: String },
 }
 
@@ -100,7 +102,7 @@ impl Conflict {
     }
 }
 
-/// `job.json` 的格式（序列化契约）。`format_version` 不等于 [`FORMAT_VERSION`] 时拒绝。
+/// `job.json` 的写法。`format_version` 不等于 [`FORMAT_VERSION`] 时拒绝。
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 enum JobFile {

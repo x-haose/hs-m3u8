@@ -67,7 +67,7 @@ pub enum SyntaxError {
     UriWithoutInfo { expected: &'static str },
     #[error("{tag} 之后缺少 URI 行")]
     InfoWithoutUri { tag: &'static str },
-    /// 原因；不含地址原文（常带凭据或令牌，脱敏的写法无法可靠地切分一个解析不了的地址）
+    /// 原因；不含地址原文（常带凭据或令牌）
     #[error("无法解析为 URL：{0}")]
     Url(String),
     #[error("EXT-X-MEDIA 的 TYPE 无法识别：{0:?}")]
