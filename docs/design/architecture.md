@@ -32,7 +32,7 @@ hs-m3u8/
 │   ├── core/               下载任务：HTTP、调度、解密校验、续传、直播录制、合并编排、进度
 │   ├── remux/              FFmpeg 转封装；全项目唯一的 FFI 边界
 │   └── py/                 PyO3 绑定（cdylib），模块名 hs_m3u8._native（Python 绑定阶段建立）
-├── python/hs_m3u8/         Python 包：类型化包装、异常类、.pyi（同上）
+├── python/hs_m3u8/         Python 包：再导出原生模块、py.typed，存根由 pyo3-stub-gen 生成（同上）
 ├── apps/desktop/           Tauri 应用：src-tauri/ 与前端（GUI 阶段建立）
 ├── third_party/
 │   ├── ffmpeg/             FFmpeg 构建脚本：固定版本与 configure 参数
@@ -227,33 +227,105 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 
 ## 7. Python 绑定
 
+### 7.1 结构
+
+- `crates/py`：PyO3 绑定（cdylib），模块 `hs_m3u8._native`，只依赖 `core`。对外的类型都是这里定义的 PyO3 类，由 `core` 的类型逐个翻译而来：
+  - 数据类不可变，可比较、可哈希，有按字段的构造函数（除第一个参数外只能按关键字传）、`__repr__` 与 `__match_args__`；
+  - 带数据的枚举（如变体选择、录制的结束原因）每种取值是一个子类，用 `match` 或 `isinstance` 分辨；不带数据的是简单枚举，成员名大写；
+  - 异常也是 PyO3 类（继承 `Exception`），属性带类型；
+  - 回调基类 `Hooks` 是可被 Python 继承的 PyO3 类。
+- 类型存根 `_native.pyi` 由 pyo3-stub-gen 从这些 Rust 定义生成，说明取自 `///`：存根写的类型就是运行时实际的类型，不另外手写。
+- `python/hs_m3u8`：`__init__.py` 再导出全部公开名字（`__all__`），带 `py.typed`。
+- 只提供异步接口，脚本用 `asyncio.run(...)`：同步版本只是它的包装；核心的写法保证进程在任何时刻退出都不留半个输出、可以续传，Ctrl+C 不需要特殊处理。
+- PyO3 0.29.3 + `pyo3-async-runtimes` 0.29.0（tokio，异步方法返回 asyncio 的 Future）+ maturin 1.15.0 + pyo3-stub-gen 0.23.1；`abi3-py311` wheel（最低 Python 3.11），FFmpeg 静态链接进扩展模块。
+- 回调在 `core` 的阻塞线程池中取得 GIL 后执行，不占用 tokio 工作线程；只调用子类覆盖了的方法，没覆盖的不取 GIL。
+
+### 7.2 约定
+
+- 类型：不出现 `Any`、没写元素类型的 `dict` 与 `list`。调用方能据以处理的信息都是有类型的字段；只供人看的细节（播放列表语法错误的具体内容、FFmpeg 的错误说明等）是 `str`，`str(异常)` 是完整说明。
+- 路径：入参接受 `str | os.PathLike[str]`，返回的一律是 `pathlib.Path`（绝对路径）。地址是 `str`，内容是 `bytes`。
+- 时长：`datetime.timedelta`；服务器要求的等待 `retry_after` 是整数秒（可能大到超出 `timedelta` 能表示的范围）。
+- 序列：返回 `list[T]`。请求头入参接受 `Mapping[str, str]` 或 `(名, 值)` 的序列（同名请求头可以有多个），保存为 `list[tuple[str, str]]`。
+- 默认值取 `core` 的（`Default` 实现与常量），绑定层不另写数字。
+- 说明：中文，每个类、字段、方法、参数都写。请求头的值、key、代理地址里的口令不进 `__repr__`。
+- 异步方法在 asyncio 事件循环中调用；等待被取消时，所等的操作随之取消（同 `asyncio.Task`）。
+
+### 7.3 接口
+
 ```python
-# 草案
-import hs_m3u8
+StrPath = str | os.PathLike[str]
 
-async def main():
-    dl = hs_m3u8.Downloader(max_concurrency=32)
-    job = dl.start(
-        "https://example.com/master.m3u8",
-        output="downloads/日日是好日.mp4",
-        headers={"Referer": "https://example.com/"},
-        on_key=decrypt_key,          # (key_url: str, data: bytes) -> bytes
-        on_request=None,             # (req: hs_m3u8.Request) -> None，可改 url 与 headers
-        on_playlist=None,            # (url: str, text: str) -> str
-        on_segment=None,             # (url: str, data: bytes) -> bytes
-        hls_dir=None,                # 另给目录时同时输出可直接播放的本地 HLS；只要 HLS 时 output=None
-    )
-    async for p in job.progress():   # 定时采样的进度快照
-        print(p.segments_done, p.segments_total, p.received)
-    result = await job               # 失败抛 hs_m3u8.DownloadError 的子类
+class Engine:
+    def __init__(self, *, max_requests: int = ...) -> None: ...   # 所有任务合计的在途请求数，默认见 core
+    def probe(self, source: Source) -> Awaitable[Probe]: ...
+    def start(self, request: JobRequest) -> Job: ...               # 参数错误立即抛出
+    def merge_recorded(self, output: OutputOptions) -> Job: ...
+    def discard(self, work_dir: StrPath, *, unsettled: Unsettled = Unsettled.FAIL) -> Awaitable[list[Leftover]]: ...
 
-hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
+class Job:                                       # 被回收即取消任务（已开始写出的在后台写完）
+    def progress(self) -> Progress: ...          # 当前的进度快照；要显示进度就定时取
+    def cancel(self) -> None: ...
+    def stop(self) -> None: ...                  # 直播：停止刷新，已列出的下完后写出
+    def wait(self) -> Awaitable[Output]: ...     # 可多次等待，得到同一结果或同一异常
 ```
 
-- PyO3 0.29.3 + `pyo3-async-runtimes` 0.29.0（tokio）+ maturin 1.15.0；`abi3-py311` wheel（最低 Python 3.11），FFmpeg 静态链接进扩展模块。
-- Python 回调在阻塞线程池中获取 GIL 后执行，不占用 tokio 工作线程。
-- `core::Error` 在边界上翻译为 Python 异常层级，`retryable` 等字段作为异常属性保留。
-- 0.1.x 参数对应关系：`key` → `key=hs_m3u8.Key(...)`；`get_m3u8_func` → `on_playlist`；`*_request_before` → `on_request`；`key_response_after` → `on_key`；`ts_response_after` → `on_segment`；`merge`、`del_hls` → 输出目标：MP4、可播放的本地 HLS 目录，或两者都要。
+请求：
+
+- `Source(url, *, preference=Preference(), http=HttpOptions(), hooks=None)`。
+- `Preference(*, variant=VariantChoice.Best(), audio=AudioChoice.Default())`；`VariantChoice`：`Best()`、`Index(index)`；`AudioChoice`：`Default()`、`Language(language)`、`Index(index)`。
+- `HttpOptions(*, headers=(), proxy=None, insecure=False, timeouts=Timeouts(), retry=RetryPolicy())`；`Timeouts(*, connect, read_idle, request)`、`RetryPolicy(*, attempts, base_delay, max_delay)`，各项可省略。
+- `Hooks`：继承它并覆盖需要的方法——`on_playlist(url: str, body: bytes) -> bytes`、`on_request(purpose: Purpose, request: RequestParts) -> RequestParts`、`on_key(url: str, data: bytes) -> bytes`、`on_segment(url: str, data: bytes) -> bytes`；回调抛出的异常使任务失败（`HookError`，`__cause__` 为原异常）。`Purpose`：`PLAYLIST`、`KEY`、`INIT`、`SEGMENT`；`RequestParts(url, *, headers)`。
+- `JobRequest(source, output, *, key=None, concurrency=..., live=LiveOptions())`，`live=None` 时拒绝直播；`KeyOverride(key: bytes, *, iv: bytes | None = None)`；`LiveOptions(*, max_duration=None, stall_timeout=...)`。
+- `OutputOptions(target, *, work_dir=None, overwrite=False, keep_work_dir=False)`，`resolved_work_dir() -> Path`；`Target`：`Mp4(path)`、`Hls(path)`、`Both(*, mp4, hls)`。
+- `Unsettled`：`FAIL`、`REPORT`（见 5.2 放弃任务）。
+
+结果（字段同 `core`，微秒数改为 `timedelta`，名字去掉 `_us`）：
+
+- `Probe`：`master: MasterInfo | None`、`tracks: list[TrackInfo]`、`live: bool`；`MasterInfo`：`variants: list[VariantInfo]`、`audio: list[AudioInfo]`、`selected: Selected`；`VariantInfo`、`AudioInfo`、`Selected`、`TrackInfo`、`Resolution`。
+- `Progress`：`stage: Stage`、`selected`、`segments_done`、`segments_total`、`segments_failed`、`segments_expired`、`duration: timedelta`、`bytes`、`received`、`refresh_errors: list[RefreshCause | None]`；`Stage`：`PREPARING`、`DOWNLOADING`、`RECORDING`、`WRITING`、`DONE`；`RefreshCause`：`Http(failure)`、`Empty()`、`Syntax(line, detail)`，带 `retryable`、`retry_after`。
+- `HttpFailure`：`kind: HttpErrorKind`、`retry_after: int | None`；`HttpErrorKind`：`Status(code)`、`RangeIgnored(code)`、`Timeout()`、`Certificate(detail)`、`Redirect(detail)`、`Connect(detail)`、`InvalidRequest(detail)`、`Transport(detail)`，带 `retryable`。
+- `Output`：`mp4: Mp4Output | None`、`hls: Path | None`、`segments`、`bytes`、`leftovers: list[Leftover]`、`live: LiveReport | None`；`Mp4Output`：`path`、`report: MediaReport`；`MediaReport`：`streams: list[StreamReport]`；`StreamReport`：`shape: Shape`、`packets`、`skipped_without_dts`、`duration`；`Shape`：`Video(codec, width, height)`、`Audio(codec, sample_rate, channels)`；`StreamKind`：`VIDEO`、`AUDIO`。
+- `Leftover`：`path`、`kind: LeftoverKind`、`cause: str`；`LeftoverKind`：`Removable()`、`Displaced(target)`、`Installed()`、`WorkDir()`。
+- `LiveReport`：`end: LiveEnd | None`、`session_count`、`missed: list[Missed]`；`LiveEnd`：`EndList()`、`Stopped()`、`DurationReached()`、`Stalled(track, cause: StallCause)`、`Restarted(track)`、`Inconsistent(track, sequence)`；`StallCause`：`NoNewSegments()`、`PlaylistGone(status)`；`Missed`：`session`、`track`、`first`、`last`、`reason: MissReason`、`count`；`MissReason`：`Expired()`、`Failed(kind)`、`InitFailed(kind)`、`Unmergeable()`、`Unknown()`。
+
+异常：类表示出了什么问题，按调用方的处理方式分组（同 5.8）。`core` 里说明出在哪里的包装（`Segment`、`Key`、`Cleanup`）不另成异常类，抛的是包着的原因，位置与残留作为属性：`except HttpError` 也接得住分片与 key 的网络错误。
+
+```
+HsM3u8Error                       retryable: bool、retry_after: int | None、segment: SegmentRef | None（track、sequence、url）、
+│                                 key_url: str | None、leftovers: list[Leftover]（失败后收拾也没做完时）
+├── RequestError                  改请求再试
+│   ├── InvalidInputError
+│   ├── OutputExistsError         path；要求覆盖即可替换
+│   ├── OutputOccupiedError       path、ancestor: Path | None；换路径
+│   ├── SelectError               reason: SelectFailure
+│   ├── LiveNotEnabledError       开启直播录制
+│   ├── Mp4UnsupportedError       reason: Mp4Unsupported；可只输出本地 HLS
+│   └── HlsUnsupportedError       reason: HlsUnsupported；可只输出 MP4
+├── SourceError                   来源本身不行
+│   ├── PlaylistError             url、reason: Malformed（Empty、NotAPlaylist、Mixed、Syntax(line, detail)）
+│   ├── NotMediaPlaylistError     url
+│   ├── SourceUnsupportedError    reason: SourceUnsupported（EmptyPlaylist、NoTargetDuration、Encryption、InitChangesWithinGroup、DiscontinuityMismatch）
+│   ├── IntegrityError            url、reason: IntegrityFailure
+│   └── KeyLengthError            url、length
+├── HttpError                     url、kind: HttpErrorKind
+├── LiveStalledError              track、reason: StallReason（RefreshFailed、RefreshPending、Unrecordable、TrackStopped）
+├── FileError                     action: str、path
+├── VolumeUnavailableError        root；接上后再试
+├── RemuxError                    合并 MP4 失败（内容放不进 MP4 的是 Mp4UnsupportedError）
+├── WorkDirError                  path、problem: WorkDirProblem
+├── NothingRecordedError
+├── HookError                     hook: HookKind；__cause__ 为回调抛出的异常
+└── JobCancelledError
+```
+
+`SelectFailure`、`Mp4Unsupported`、`HlsUnsupported`、`SourceUnsupported`（其中不支持的加密为 `Encryption`：`SampleAes()`、`Drm(keyformat)`、`Method(name)`）、`IntegrityFailure`、`StallReason`、`WorkDirProblem` 都是带数据的枚举，取值与字段同 `core` 的对应类型；`HookKind`：`PLAYLIST`、`REQUEST`、`KEY`、`SEGMENT`；`JobType`（`WorkDirProblem.KindMismatch` 用）：`VOD`、`LIVE`。
+
+0.1.x 的对应关系：`key` → `JobRequest(key=KeyOverride(...))`；`get_m3u8_func` → `Hooks.on_playlist`；`*_request_before` → `Hooks.on_request`；`key_response_after` → `Hooks.on_key`；`ts_response_after` → `Hooks.on_segment`；`merge`、`del_hls` → `Target`。
+
+### 7.4 质量门
+
+- ruff（检查与格式）；mypy `--strict` 与 basedpyright（严格）检查 `python/`、测试与示例；stubtest 核对存根与模块；重新生成存根后与仓库里的没有差异。
+- pytest 端到端：测试内起本地 HTTP 服务，跑探测、下载、回调、取消、续传、异常与放弃任务；Python 3.11 与最新版各跑一遍。
 
 ## 8. 桌面应用（GUI 阶段细化）
 
@@ -278,7 +350,7 @@ hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
 - 编解码与端到端：
   - `remux` 用仓库内的小样本（ffmpeg testsrc 生成，几百 KB）覆盖 TS、fMP4、音视频分离、HEVC、不连续，断言每条流的包数和帧数；
   - `core` 的端到端在测试内起本地 HTTP 服务提供 HLS 样本（含 AES-128、字节范围、重定向、按请求次数变化的直播播放列表，注入 404、500 与阻塞），跑完整任务后把输出与直接合并同一批样本的结果逐字节比较，并覆盖取消、续传与续录；
-  - Python 绑定做一个端到端冒烟（Python 绑定阶段）。
+  - Python 绑定的端到端见 7.4。
 
 不写用假件拼流程、复述实现的测试。
 
@@ -292,7 +364,7 @@ hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
 6. 文档：`cargo doc --workspace --no-deps --document-private-items`，告警即失败（文档注释里的链接须都能解析）
 7. `cargo test --workspace`
 8. 覆盖率：`hls`、`core`、`remux` 各自行覆盖 ≥ 80%（cargo-llvm-cov）
-9. Python：maturin 构建 + 端到端冒烟（Python 绑定阶段加入）
+9. Python：maturin 构建，再按 7.4 检查与测试（Python 绑定阶段加入）
 10. 前端：`tsc --noEmit`、lint、构建（GUI 阶段加入）
 
 ## 11. CI 与发布
@@ -314,4 +386,4 @@ hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
 
 ## 依据的版本（2026-10-08 查 crates.io）
 
-tokio 1.53.2、tokio-util 0.7.19、rustls 0.23.45 与 tokio-rustls 0.26.6（2026-10-10，取 Cargo.lock 中 reqwest 已用的版本；后者仅测试用）、reqwest 0.13.5、axum 0.8.9（2026-10-09 查，仅测试用）、aes 0.9.3、cbc 0.2.1、url 2.5.8、thiserror 2.0.21、serde 1.0.229、serde_json 1.0.151、sha2 0.11.0、rusqlite 0.40.2、pyo3 0.29.3、pyo3-async-runtimes 0.29.0、maturin 1.15.0、ffmpeg-next 9.0.0、tauri 2.12.1、cargo-deny 0.20.2、cargo-llvm-cov 0.9.1（2026-10-09 查）、libc 0.2.190（2026-10-10 查，仅测试用）。
+tokio 1.53.2、tokio-util 0.7.19、rustls 0.23.45 与 tokio-rustls 0.26.6（2026-10-10，取 Cargo.lock 中 reqwest 已用的版本；后者仅测试用）、reqwest 0.13.5、axum 0.8.9（2026-10-09 查，仅测试用）、aes 0.9.3、cbc 0.2.1、url 2.5.8、thiserror 2.0.21、serde 1.0.229、serde_json 1.0.151、sha2 0.11.0、rusqlite 0.40.2、pyo3 0.29.3、pyo3-async-runtimes 0.29.0、maturin 1.15.0、ffmpeg-next 9.0.0、tauri 2.12.1、cargo-deny 0.20.2、cargo-llvm-cov 0.9.1（2026-10-09 查）、libc 0.2.190（2026-10-10 查，仅测试用）、pyo3-stub-gen 0.23.1，以及 Python 侧的开发工具 mypy 2.4.0、basedpyright 1.40.2、ruff 0.17.0、pytest 9.1.1（2026-10-11 查）。
