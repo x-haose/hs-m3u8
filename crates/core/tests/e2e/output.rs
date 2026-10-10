@@ -479,7 +479,7 @@ async fn hls_cannot_mix_fmp4_and_ts_in_one_track() {
 }
 
 /// 输出经符号链接落在任务目录里（按字面比较看不出）：删除任务目录时只删本库写的文件，输出留下，
-/// 没删完的原因记在 cleanup_error 里。
+/// 没删完的原因记在 cleanup_error 里；job.json 也留下，目录仍是任务目录，再运行（覆盖）照常进行。
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn outputs_inside_the_work_dir_survive_its_removal() {
@@ -497,14 +497,45 @@ async fn outputs_inside_the_work_dir_survive_its_removal() {
     let mut req = request_to(server.url("index.m3u8"), &dir, target);
     req.output.work_dir = Some(work.clone());
 
-    let output = run(req).await.unwrap();
+    let output = run(req.clone()).await.unwrap();
 
     assert!(work.join("out.mp4").is_file());
     let cleanup = output.cleanup_error.expect("留有输出，任务目录没删完");
     assert!(cleanup.contains("out.mp4"), "{cleanup}");
-    for name in ["job.json", "lock", "tracks"] {
+    assert!(work.join("job.json").is_file());
+    for name in ["lock", "tracks"] {
         assert!(!work.join(name).exists(), "{name} 应已删除");
     }
+
+    req.output.overwrite = true;
+    run(req).await.unwrap();
+    assert!(work.join("out.mp4").is_file());
+}
+
+/// 下载期间系统在任务目录里生成了元数据文件（在访达里打开过）：成功后照样删掉整个任务目录。
+#[tokio::test(flavor = "multi_thread")]
+async fn system_files_in_the_work_dir_do_not_block_its_removal() {
+    let dir = test_dir("output_work_dir_ds_store");
+    let server = Server::start().await;
+    server.put("seg0.ts", fixture("ts_a/seg0.ts"));
+    server.put("seg1.ts", fixture("ts_a/seg1.ts"));
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n#EXT-X-ENDLIST\n",
+    );
+    let req = request(server.url("index.m3u8"), &dir);
+    let work = req.output.resolved_work_dir();
+    let gate = server.gate("seg1.ts");
+    let job = engine().start(req).unwrap();
+    gate.arrived.notified().await;
+    std::fs::write(work.join(".DS_Store"), "访达生成的").unwrap();
+    std::fs::write(work.join("tracks/0/.DS_Store"), "访达生成的").unwrap();
+    server.ungate("seg1.ts");
+
+    let output = job.wait().await.unwrap();
+
+    assert_eq!(output.cleanup_error, None);
+    assert!(!work.exists());
 }
 
 /// 输出与任务目录的路径相同或互相包含时，下载前即拒绝：任务目录成功后会被整个删除。

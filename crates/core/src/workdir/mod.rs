@@ -18,6 +18,7 @@
 mod names;
 mod record;
 
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, TryLockError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -158,9 +159,10 @@ impl WorkDir {
         .await?
     }
 
-    /// 删除整个任务目录。只删本库写的文件（`job.json`、各轨的分片与 init 段，以及它们写到一半的 `.part`）与
-    /// 因此变空的目录；其他文件（例如经符号链接或只差大小写的路径写进来的输出）原样留下，目录随之留下，返回
-    /// 删除失败并指出留下的文件。
+    /// 删除整个任务目录。只删本库写的文件（`job.json`、各轨的分片与 init 段，以及它们写到一半的 `.part`）、系统
+    /// 自动生成的元数据文件（见 [`is_system_file`]）与因此变空的目录；其他文件（例如经符号链接或只差大小写的路径
+    /// 写进来的输出）原样留下，返回删除失败并指出留下的文件。有东西留下时 `job.json` 也留下：目录仍是可识别的
+    /// 任务目录，下次运行照常使用（没有已完成的分片，按当前任务重新开始）。
     ///
     /// 持锁删掉其余内容，最后删锁文件，再释放锁、删目录：释放锁之后别的任务就能打开这个目录，先删内容保证它看到的
     /// 不会是删到一半的任务；锁文件也在持锁时删，别的任务打开的是新建的锁文件，不会锁上本任务还持有的那个。
@@ -170,18 +172,24 @@ impl WorkDir {
         blocking(move || {
             let root = &layout.root;
             let mut kept = Vec::new();
+            let mut job = None;
             for (path, name, kind) in entries(root)? {
+                let ours = name
+                    .to_str()
+                    .is_some_and(|n| n.strip_suffix(".part") == Some(JOB_FILE))
+                    && kind.is_file();
                 match name.to_str() {
                     Some(LOCK_FILE) => {}
-                    Some(name)
-                        if kind.is_file()
-                            && name.strip_suffix(".part").unwrap_or(name) == JOB_FILE =>
-                    {
+                    Some(JOB_FILE) if kind.is_file() => job = Some(path),
+                    Some(TRACKS_DIR) if kind.is_dir() => remove_tracks(&path, &mut kept)?,
+                    _ if ours || is_system_file(&name, kind) => {
                         fs::remove_file(&path).map_err(io_error("删除", &path))?;
                     }
-                    Some(TRACKS_DIR) if kind.is_dir() => remove_tracks(&path, &mut kept)?,
                     _ => kept.push(path),
                 }
+            }
+            if let Some(job) = job.filter(|_| kept.is_empty()) {
+                fs::remove_file(&job).map_err(io_error("删除", &job))?;
             }
             let lock_path = root.join(LOCK_FILE);
             fs::remove_file(&lock_path).map_err(io_error("删除", &lock_path))?;
@@ -202,6 +210,13 @@ impl WorkDir {
     }
 }
 
+/// 系统自动生成的元数据文件（访达的 `.DS_Store`、Windows 资源管理器的 `Thumbs.db` 与 `desktop.ini`）：不含用户的
+/// 内容，判断目录是否为空、是否全是本库写的文件时不算，删除目录时一起删。
+pub(crate) fn is_system_file(name: &OsStr, kind: fs::FileType) -> bool {
+    const SYSTEM_FILES: [&str; 3] = [".DS_Store", "Thumbs.db", "desktop.ini"];
+    kind.is_file() && name.to_str().is_some_and(|n| SYSTEM_FILES.contains(&n))
+}
+
 /// 删掉 `tracks/` 下各轨的分片与 init 段（含写到一半的 `.part`）与变空的目录；认不得的记进 `kept`。
 fn remove_tracks(tracks: &Path, kept: &mut Vec<PathBuf>) -> Result<(), Error> {
     let before = kept.len();
@@ -209,6 +224,10 @@ fn remove_tracks(tracks: &Path, kept: &mut Vec<PathBuf>) -> Result<(), Error> {
         let is_track = name
             .to_str()
             .is_some_and(|n| n.parse::<usize>().is_ok_and(|t| t.to_string() == n));
+        if is_system_file(&name, kind) {
+            fs::remove_file(&dir).map_err(io_error("删除", &dir))?;
+            continue;
+        }
         if !(is_track && kind.is_dir()) {
             kept.push(dir);
             continue;
@@ -220,7 +239,7 @@ fn remove_tracks(tracks: &Path, kept: &mut Vec<PathBuf>) -> Result<(), Error> {
                     let n = n.strip_suffix(".part").unwrap_or(n);
                     parse_segment_name(n).is_some() || parse_init_name(n).is_some()
                 });
-            if ours {
+            if ours || is_system_file(&name, kind) {
                 fs::remove_file(&path).map_err(io_error("删除", &path))?;
             } else {
                 kept.push(path);
@@ -237,7 +256,7 @@ fn remove_tracks(tracks: &Path, kept: &mut Vec<PathBuf>) -> Result<(), Error> {
 }
 
 /// 目录中的各项：路径、名字与类型（不跟随符号链接）。
-fn entries(dir: &Path) -> Result<Vec<(PathBuf, std::ffi::OsString, fs::FileType)>, Error> {
+fn entries(dir: &Path) -> Result<Vec<(PathBuf, OsString, fs::FileType)>, Error> {
     let mut all = Vec::new();
     for entry in fs::read_dir(dir).map_err(io_error("读取", dir))? {
         let entry = entry.map_err(io_error("读取", dir))?;
@@ -303,8 +322,10 @@ fn open(root: PathBuf, record: JobRecord) -> Result<WorkDir, Error> {
 
 /// 没有 `job.json` 的目录只能是空的（`.part` 残留与锁文件除外），否则不是本库建立的任务目录。
 fn ensure_empty(root: &Path) -> Result<(), Error> {
-    for entry in fs::read_dir(root).map_err(io_error("读取", root))? {
-        let name = entry.map_err(io_error("读取", root))?.file_name();
+    for (_, name, kind) in entries(root)? {
+        if is_system_file(&name, kind) {
+            continue;
+        }
         let name = name.to_string_lossy();
         if name != LOCK_FILE && !name.ends_with(".part") {
             return Err(Error::WorkDir {
