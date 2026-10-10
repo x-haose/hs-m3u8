@@ -44,7 +44,7 @@ pub(crate) async fn run(
     };
     let request = &task.request;
     check_targets(&request.output).await?;
-    let root = request.output.resolved_work_dir();
+    let root = request.output.resolved_work_dir()?;
     let source = source_digest(&request.source.url, &request.source.preference);
     // 任务目录里有同一来源、可续的记录时，按记录的选轨找回同一条轨；记录的是直播且请求开启了直播时按直播继续，
     // 即使播放列表已出现 ENDLIST（中断期间直播结束了）。没开启直播时按点播运行，由 WorkDir::open 报类型不符
@@ -65,7 +65,7 @@ pub(crate) async fn run(
         .master
         .as_ref()
         .map(|m| Selected::of(&m.playlist, &m.selection));
-    task.progress.send_modify(|p| p.selection = selection);
+    task.progress.send_modify(|p| p.selected = selection);
     if resolved.is_live() || continuing_live && request.live.is_some() {
         run_live(task, source, resolved).await
     } else {
@@ -86,7 +86,7 @@ async fn run_live(task: Task, source: String, resolved: Resolved) -> Result<Outp
             url_digest: url_digest(&task.request.source.url),
         },
     };
-    let dir = WorkDir::open(task.request.output.resolved_work_dir(), record).await?;
+    let dir = WorkDir::open(task.request.output.resolved_work_dir()?, record).await?;
     let mut fetcher = task.fetcher();
     let ctx = Context {
         http: task.http.clone(),
@@ -116,7 +116,7 @@ async fn run_vod(task: Task, source: String, resolved: Resolved) -> Result<Outpu
             plan_digest: plan.digest(),
         },
     };
-    let dir = WorkDir::open(task.request.output.resolved_work_dir(), record).await?;
+    let dir = WorkDir::open(task.request.output.resolved_work_dir()?, record).await?;
     let mut fetcher = task.fetcher();
     let groups = vod::download(
         &task.http,
@@ -143,9 +143,8 @@ pub(crate) async fn merge_recorded(
     cancel: CancellationToken,
     progress: watch::Sender<Progress>,
 ) -> Result<Output, Error> {
-    progress.send_modify(|p| p.stage = Stage::Merging);
     check_targets(&output).await?;
-    let root = output.resolved_work_dir();
+    let root = output.resolved_work_dir()?;
     let Some(record) = read_resumable(root.clone()).await? else {
         return Err(Error::NothingRecorded);
     };
@@ -229,7 +228,7 @@ async fn finish(
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
     }
-    progress.send_modify(|p| p.stage = Stage::Merging);
+    progress.send_modify(|p| p.stage = Stage::Writing);
     let bytes = progress.borrow().bytes;
     let output = output::write(dir, content, options, bytes).await?;
     progress.send_modify(|p| p.stage = Stage::Done);

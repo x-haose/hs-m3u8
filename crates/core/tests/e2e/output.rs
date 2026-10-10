@@ -574,7 +574,7 @@ async fn system_files_in_the_work_dir_do_not_block_its_removal() {
         "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n#EXT-X-ENDLIST\n",
     );
     let req = request(server.url("index.m3u8"), &dir);
-    let work = req.output.resolved_work_dir();
+    let work = req.output.resolved_work_dir().unwrap();
     let gate = server.gate("seg1.ts");
     let job = engine().start(req).unwrap();
     gate.arrived.notified().await;

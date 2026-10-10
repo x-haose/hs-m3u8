@@ -51,7 +51,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 ```
 
 - `hls` 不依赖 tokio、reqwest、ffmpeg；`remux` 不依赖 `core`、`hls`、tokio、reqwest；`core` 不依赖 tauri、pyo3。
-- 跨边界一律翻译：`hls` 不暴露第三方解析库的类型；`py` 与 `apps/desktop` 把 `core` 的类型转成各自的表示，`core` 不出现 Python 或前端的概念。`core` 的公开接口只重新导出用到的 `hls` 类型（选轨偏好与解析错误，在 `core::hls` 下）与 `remux` 的合并报告和错误，绑定层只依赖 `core`。
+- 跨边界一律翻译：`hls` 不暴露第三方解析库的类型；`py` 与 `apps/desktop` 把 `core` 的类型转成各自的表示，`core` 不出现 Python 或前端的概念。`core` 的公开接口只重新导出用到的 `hls` 类型（选轨偏好与解析错误，在 `core::hls` 下）与 `remux` 的合并报告和错误（在 `core::remux` 下），绑定层只依赖 `core`。
 - 以上由检查命令机器判定（第 10 节），不靠人看。
 
 ## 4. hls：数据模型与规范化
