@@ -28,18 +28,18 @@ pub(crate) struct Item {
     pub path: PathBuf,
 }
 
-/// 随结果返回的项标识。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ItemId {
+/// 随结果返回的项的信息：哪条轨的哪个分片，以及它的声明时长。
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ItemInfo {
     pub track: usize,
     pub sequence: u64,
     /// EXTINF 声明的时长，微秒
     pub duration_us: u64,
 }
 
-impl ItemId {
+impl ItemInfo {
     pub(crate) fn of(track: usize, segment: &Segment) -> Self {
-        ItemId {
+        ItemInfo {
             track,
             sequence: segment.sequence,
             duration_us: segment.duration_us,
@@ -48,7 +48,7 @@ impl ItemId {
 }
 
 /// 一项的结果：成功时为写入的字节数。失败包装为 [`Error::Segment`]（取消除外）。
-pub(crate) type Finished = (ItemId, Result<u64, Error>);
+pub(crate) type Finished = (ItemInfo, Result<u64, Error>);
 
 struct Ctx {
     http: Arc<Http>,
@@ -123,7 +123,7 @@ impl Fetcher {
     /// 返回第一个真正的失败，其余项因此以 Cancelled 结束不覆盖它。
     pub(crate) async fn drain(
         &mut self,
-        mut on_finished: impl FnMut(ItemId, Result<u64, Error>) -> Result<(), Error>,
+        mut on_finished: impl FnMut(ItemInfo, Result<u64, Error>) -> Result<(), Error>,
     ) -> Result<(), Error> {
         let mut outcome = Ok(());
         while let Some((id, result)) = self.next().await {
@@ -181,7 +181,7 @@ fn segment_error(track: usize, segment: &Segment, error: Error) -> Error {
 }
 
 /// 一个分片成功后计入进度；`len` 为写入的字节数。
-pub(crate) fn count_done(progress: &watch::Sender<Progress>, id: ItemId, len: u64) {
+pub(crate) fn count_done(progress: &watch::Sender<Progress>, id: ItemInfo, len: u64) {
     progress.send_modify(|p| p.count_segment(id.track, id.duration_us, len));
 }
 
@@ -191,7 +191,7 @@ async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
         segment,
         path,
     } = item;
-    let id = ItemId::of(track, &segment);
+    let id = ItemInfo::of(track, &segment);
     let data = fetch_segment(&ctx, &segment, &cancel)
         .await
         .map_err(|e| segment_error(track, &segment, e));

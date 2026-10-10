@@ -1,19 +1,21 @@
 //! 输出：合并为 MP4、写出可直接播放的本地 HLS，或两者都要；按选项替换已有的输出，成功后删除任务目录。
 
 mod hls;
+mod options;
 
 use std::io;
 use std::path::{Path, PathBuf};
 
 use hs_m3u8_remux::{DiscontinuityGroup, Streams, TrackSegments};
 
-use crate::request::OutputOptions;
+pub use self::options::{OutputOptions, Target};
+
 use crate::selection::SelectionKey;
 use crate::workdir::WorkDir;
 use crate::{Error, LiveReport, Mp4Output, Output, blocking};
 
 /// 交给输出的内容。
-pub(crate) struct MergeInput {
+pub(crate) struct Content {
     /// 各轨的取流方式（合并 MP4 用）
     pub streams: Vec<Streams>,
     /// 各不连续段组，每组各轨一项，轨道顺序与 `streams` 一致；至少一组，每项至少一个分片
@@ -59,13 +61,13 @@ pub(crate) fn check_targets(options: &OutputOptions) -> Result<(), Error> {
 /// 任务目录保留，等于没有合并过；要求覆盖时，已被替换掉的旧输出不能恢复。
 pub(crate) async fn write(
     dir: WorkDir,
-    input: MergeInput,
+    input: Content,
     options: &OutputOptions,
     bytes: u64,
 ) -> Result<Output, Error> {
     // 下载或录制期间输出路径可能已被别人占用；开始时检查过，这里再查一次
     check_targets(options)?;
-    let MergeInput {
+    let Content {
         streams,
         groups,
         segments,

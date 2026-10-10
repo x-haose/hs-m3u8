@@ -7,7 +7,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use self::plan::Plan;
-use crate::fetch::{Fetcher, Item, ItemId, count_done, fetch_init};
+use crate::fetch::{Fetcher, Item, ItemInfo, count_done, fetch_init};
 use crate::http::{Http, Permit};
 use crate::ident::Fingerprint;
 use crate::output::{GroupSegment, GroupTrack};
@@ -44,7 +44,7 @@ pub(crate) async fn download(
             });
         }
     }
-    let Sorted { pending, done } = blocking(move || sort(items)).await??;
+    let Split { pending, done } = blocking(move || split(items)).await??;
     progress.send_modify(|p| {
         for (id, len) in done {
             p.count_segment(id.track, id.duration_us, len);
@@ -116,27 +116,27 @@ fn segment_name(segment: &Segment, init: Option<Fingerprint>) -> SegmentName {
     }
 }
 
-/// 计划中的项按是否已在任务目录中分开。
-struct Sorted {
+/// 计划中的项按是否已在任务目录中分成两份。
+struct Split {
     pending: Vec<Item>,
     /// 已完成的项与其字节数
-    done: Vec<(ItemId, u64)>,
+    done: Vec<(ItemInfo, u64)>,
 }
 
-fn sort(items: Vec<Item>) -> Result<Sorted, Error> {
-    let mut sorted = Sorted {
+fn split(items: Vec<Item>) -> Result<Split, Error> {
+    let mut split = Split {
         pending: Vec::new(),
         done: Vec::new(),
     };
     for item in items {
         match workdir::completed_len(&item.path)? {
-            Some(len) => sorted
+            Some(len) => split
                 .done
-                .push((ItemId::of(item.track, &item.segment), len)),
-            None => sorted.pending.push(item),
+                .push((ItemInfo::of(item.track, &item.segment), len)),
+            None => split.pending.push(item),
         }
     }
-    Ok(sorted)
+    Ok(split)
 }
 
 /// 计划中的不连续段组换成任务目录中的文件。

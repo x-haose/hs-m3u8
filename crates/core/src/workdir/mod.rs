@@ -57,6 +57,14 @@ pub(crate) struct Stored {
 }
 
 impl Stored {
+    /// 第 `track` 条轨已完成分片的声明时长之和，微秒。
+    pub(crate) fn duration_us(&self, track: usize) -> u64 {
+        self.segments[track]
+            .iter()
+            .map(|f| f.name.duration_us)
+            .fold(0u64, u64::saturating_add)
+    }
+
     /// 分片与 init 段的字节数之和。
     pub(crate) fn bytes(&self) -> u64 {
         self.segments.iter().flatten().map(|f| f.len).sum::<u64>() + self.init_bytes

@@ -40,14 +40,14 @@ pub use error::{Error, HttpError, Integrity, JobType, StallError, Unsupported, W
 pub use hooks::{HookError, HookKind, Hooks, NoHooks, Purpose, RequestParts};
 pub use hs_m3u8_hls as hls;
 pub use hs_m3u8_remux::{Report, Shape, StreamKind, StreamReport};
+pub use output::{OutputOptions, Target};
 pub use probe::Probe;
 pub use report::{
     LiveEnd, LiveReport, MissReason, Missed, Mp4Output, Output, Progress, RefreshError,
     RefreshFailure, Stage, StallCause,
 };
 pub use request::{
-    HttpOptions, JobRequest, KeyOverride, LiveOptions, OutputOptions, RetryPolicy, Source, Target,
-    Timeouts,
+    HttpOptions, JobRequest, KeyOverride, LiveOptions, RetryPolicy, Source, Timeouts,
 };
 pub use url::Url;
 

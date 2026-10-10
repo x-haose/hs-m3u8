@@ -13,17 +13,14 @@ pub(crate) enum Standalone {
 }
 
 impl Standalone {
-    /// 文件扩展名，与 FFmpeg 识别出的格式对应：FFmpeg 读 HLS 时核对分片的扩展名与识别出的格式
-    /// （`extension_picky`，默认开启），不一致即拒绝。
-    pub(crate) fn extension(self) -> &'static str {
-        match self {
-            Standalone::Ts => "ts",
-            Standalone::Aac => "aac",
-            Standalone::Mp3 => "mp3",
-            Standalone::Ac3 => "ac3",
-            Standalone::Eac3 => "eac3",
-        }
-    }
+    /// 全部格式；增加格式时同时加在这里。
+    pub(crate) const ALL: [Standalone; 5] = [
+        Standalone::Ts,
+        Standalone::Aac,
+        Standalone::Mp3,
+        Standalone::Ac3,
+        Standalone::Eac3,
+    ];
 }
 
 /// 识别没有 init 段的分片：MPEG-TS（偏移 0 处、长度够时偏移 188 处为同步字节 0x47），或 RFC 8216 3.4 的打包
