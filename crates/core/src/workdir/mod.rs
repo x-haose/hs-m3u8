@@ -321,7 +321,7 @@ fn remove_tracks(tracks: &Path, kept: &mut Vec<PathBuf>) -> Result<(), Error> {
 /// 主文件或主目录里的东西在 `remaining` 中（留下）时它也留下；macOS 删除主文件时已一并删掉它，已不存在不算失败。
 fn remove_system_file(entry: &entries::Entry, remaining: &[PathBuf]) -> Result<(), Error> {
     if let Some(owner) = entry.apple_double_owner()
-        && remaining.iter().any(|path| path.starts_with(&owner))
+        && remaining.iter().any(|path| path.starts_with(owner))
     {
         return Ok(());
     }

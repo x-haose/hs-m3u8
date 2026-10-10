@@ -61,6 +61,11 @@ fn expected_long(dir: &Path, indices: &[u64], groups: &[usize]) -> Vec<u8> {
     expected(dir, &[Streams::All], &groups)
 }
 
+/// macOS 在 exFAT 等卷上生成的 AppleDouble 文件 `._<名字>` 的内容：开头为魔数与版本号。
+fn apple_double() -> Vec<u8> {
+    [[0, 5, 0x16, 7, 0, 2, 0, 0].as_slice(), b"Mac OS X        "].concat()
+}
+
 /// 每个测试独立的空目录。
 fn test_dir(test: &str) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
