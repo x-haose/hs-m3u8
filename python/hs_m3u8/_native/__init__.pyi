@@ -334,7 +334,8 @@ class HlsUnsupportedError(RequestError):
 @typing.final
 class HookError(HsM3u8Error):
     r"""
-    回调抛出了异常，任务失败、不重试；`__cause__` 为回调抛出的异常。
+    回调出错，任务失败、不重试。回调抛出了异常、或返回值的类型不对时，`__cause__` 为那个异常（类型不对时是
+    `TypeError`）；返回的地址或请求头不合法时为 None，原因在说明里。
     """
     @property
     def hook(self) -> HookKind.Playlist | HookKind.Request | HookKind.Key | HookKind.Segment:
@@ -391,27 +392,28 @@ class HookKind:
 
 class Hooks:
     r"""
-    站点适配回调的基类：继承它并覆盖需要的方法，没覆盖的不调用。回调在后台线程里执行（不在事件循环里），抛出的
-    异常使任务失败、不重试（`HookError`，`__cause__` 为原异常）。取消不会打断正在执行的回调，任务等它返回后才结束。
+    站点适配回调的基类：继承它并覆盖需要的方法，没覆盖的不调用；在实例上赋值的函数也算覆盖。回调在后台线程里执行
+    （不在事件循环里），同一个对象的回调会在多个线程上同时被调用（同时下载的分片各占一个线程），有状态的回调要自己
+    加锁。回调出错使任务失败、不重试（见 `HookError`）。取消不会打断正在执行的回调，任务等它返回后才结束。
     """
-    def __new__(cls, *_args: builtins.object, **_kwargs: builtins.object) -> Hooks:
+    def __new__(cls, *_args: typing.Any, **_kwargs: typing.Any) -> typing.Self:
         r"""
         子类可以定义带参数的 `__init__`，这里的参数一概不用。
         """
-    def on_playlist(self, url: builtins.str, body: bytes) -> bytes:
+    def on_playlist(self, url: builtins.str, body: bytes, /) -> bytes:
         r"""
         改写拉到的播放列表（如解密、转码），返回改写后的内容，须为 UTF-8 文本。`url` 为重定向之后的地址。
         """
-    def on_request(self, purpose: Purpose, request: RequestParts) -> RequestParts:
+    def on_request(self, purpose: Purpose, request: RequestParts, /) -> RequestParts:
         r"""
-        发出请求前修改地址与请求头（如签名），返回改过的 `request`。每次尝试（含重试）调用一次；改后的请求不合法
-        时任务失败。
+        发出请求前修改地址与请求头（如签名），返回改过的请求（`RequestParts` 不可变，改时新建一个）。每次尝试（含
+        重试）调用一次；改后的请求不合法时任务失败。
         """
-    def on_key(self, url: builtins.str, data: bytes) -> bytes:
+    def on_key(self, url: builtins.str, data: bytes, /) -> bytes:
         r"""
         变换拉到的 key（如站点自定义的 key 加密），返回 16 字节的 key。`url` 为播放列表中的 key 地址。
         """
-    def on_segment(self, url: builtins.str, data: bytes) -> bytes:
+    def on_segment(self, url: builtins.str, data: bytes, /) -> bytes:
         r"""
         在解密之前变换分片（如去掉伪装成图片的前缀字节），返回变换后的内容。`url` 为播放列表中的分片地址；init 段
         不经过此回调。

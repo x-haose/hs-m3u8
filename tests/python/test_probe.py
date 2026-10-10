@@ -141,6 +141,30 @@ def test_hooks_rewrite_playlists_and_requests(server: Server) -> None:
     assert ("x-sign", "signed") in server.headers("media.m3u8")
 
 
+def test_hooks_may_take_arguments_rename_parameters_and_be_set_on_the_instance(server: Server) -> None:
+    server.put("media.m3u8", "不是播放列表")
+
+    class Signer(Hooks):
+        def __init__(self, token: str) -> None:
+            self.token = token
+
+        # 参数名与基类的不同：回调按位置调用
+        def on_request(self, kind: Purpose, parts: RequestParts) -> RequestParts:
+            del kind
+            return RequestParts(parts.url, headers=(*parts.headers, ("X-Token", self.token)))
+
+    def rewrite(url: str, body: bytes) -> bytes:
+        del url, body
+        return MEDIA.encode()
+
+    signer = Signer("t")
+    vars(signer)["on_playlist"] = rewrite
+    result = probe(Source(server.url("media.m3u8"), hooks=signer))
+
+    assert result.tracks[0].segments == 2
+    assert ("x-token", "t") in server.headers("media.m3u8")
+
+
 def test_hook_failures_carry_the_original_exception(server: Server) -> None:
     server.put("media.m3u8", MEDIA)
 
@@ -157,6 +181,23 @@ def test_hook_failures_carry_the_original_exception(server: Server) -> None:
     assert isinstance(raised.value.__cause__, ValueError)
     assert "站点改版了" in str(raised.value)
     assert not raised.value.retryable
+
+
+def test_invalid_hook_results_are_reported_without_a_fabricated_cause(server: Server) -> None:
+    server.put("media.m3u8", MEDIA)
+
+    class Unparsable(Hooks):
+        def on_request(self, purpose: Purpose, request: RequestParts) -> RequestParts:
+            del purpose
+            return RequestParts("不是地址", headers=request.headers)
+
+    with pytest.raises(HookError) as unparsable:
+        probe(Source(server.url("media.m3u8"), hooks=Unparsable()))
+
+    assert unparsable.value.hook == HookKind.Request()
+    assert unparsable.value.__cause__ is None
+    assert "无法解析" in str(unparsable.value)
+    assert server.hits("media.m3u8") == 0
 
 
 def test_http_failures_report_the_status_and_whether_to_retry(server: Server) -> None:

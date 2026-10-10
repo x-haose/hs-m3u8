@@ -735,7 +735,8 @@ exception! {
 }
 
 exception! {
-    /// 回调抛出了异常，任务失败、不重试；`__cause__` 为回调抛出的异常。
+    /// 回调出错，任务失败、不重试。回调抛出了异常、或返回值的类型不对时，`__cause__` 为那个异常（类型不对时是
+    /// `TypeError`）；返回的地址或请求头不合法时为 None，原因在说明里。
     pub struct HookError extends HsM3u8Error {
         /// 哪个回调
         pub hook: HookKind,
