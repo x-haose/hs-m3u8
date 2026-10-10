@@ -277,10 +277,11 @@ hs_m3u8.download("https://...", output="a.mp4")   # 同步版本
 3. 禁止压制属性：`scripts/check_no_suppression.sh`（`#[allow]`、`#[expect]`，含 `cfg_attr` 包裹的）
 4. `cargo deny check`（`deny.toml`）：安全公告与撤回版本、许可证白名单（只允许宽松许可证；FFmpeg 的 LGPL 由其构建脚本检查）、禁用 OpenSSL、依赖只来自 crates.io
 5. `cargo clippy --workspace --all-targets -- -D warnings`
-6. `cargo test --workspace`
-7. 覆盖率：`hls`、`core`、`remux` 各自行覆盖 ≥ 80%（cargo-llvm-cov）
-8. Python：maturin 构建 + 端到端冒烟（Python 绑定阶段加入）
-9. 前端：`tsc --noEmit`、lint、构建（GUI 阶段加入）
+6. 文档：`cargo doc --workspace --no-deps --document-private-items`，告警即失败（文档注释里的链接须都能解析）
+7. `cargo test --workspace`
+8. 覆盖率：`hls`、`core`、`remux` 各自行覆盖 ≥ 80%（cargo-llvm-cov）
+9. Python：maturin 构建 + 端到端冒烟（Python 绑定阶段加入）
+10. 前端：`tsc --noEmit`、lint、构建（GUI 阶段加入）
 
 ## 11. CI 与发布
 
