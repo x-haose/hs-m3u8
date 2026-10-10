@@ -64,7 +64,7 @@ pub enum Stage {
     Downloading,
     /// 直播：刷新播放列表并下载新分片
     Recording,
-    /// 合并为输出文件；不响应取消
+    /// 写出输出（合并 MP4、写本地 HLS）；开始写出后不响应取消
     Merging,
     Done,
 }
@@ -100,7 +100,7 @@ pub struct Mp4Output {
 /// 直播的录制结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveReport {
-    /// 本次运行的录制如何结束；只合并（[`crate::merge_recorded`]）时为 None
+    /// 本次运行的录制如何结束；只合并（[`crate::Engine::merge_recorded`]）时为 None
     pub end: Option<LiveEnd>,
     /// 合并进输出的录制会话数。会话是一段时间线连续的录制：中断后续录时，若各轨都与之前录到的内容接得上，
     /// 仍是同一个会话；否则另起一个，与之前的首尾相接

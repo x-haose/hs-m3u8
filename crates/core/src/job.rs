@@ -138,8 +138,12 @@ async fn run_vod(task: Task, source: String, resolved: Resolved) -> Result<Outpu
 }
 
 /// 不联网，只合并任务目录中已录到的直播分片。
-pub(crate) async fn merge_recorded(output: OutputOptions) -> Result<Output, Error> {
-    output.validate()?;
+pub(crate) async fn merge_recorded(
+    output: OutputOptions,
+    cancel: CancellationToken,
+    progress: watch::Sender<Progress>,
+) -> Result<Output, Error> {
+    progress.send_modify(|p| p.stage = Stage::Merging);
     check_targets(&output).await?;
     let root = output.resolved_work_dir();
     let Some(record) = read_resumable(root.clone()).await? else {
@@ -154,8 +158,9 @@ pub(crate) async fn merge_recorded(output: OutputOptions) -> Result<Output, Erro
     let dir = WorkDir::open(root, record).await?;
     let streams = dir.record().streams();
     let stored = dir.scan(streams.len()).await?;
-    let input = merge_live(&dir, &stored, streams, None)?;
-    output::write(dir, input, &output, stored.bytes()).await
+    live::count_stored(&stored, &progress);
+    let content = merge_live(&dir, &stored, streams, None)?;
+    finish(dir, content, &output, &cancel, &progress).await
 }
 
 /// 合并直播录到的分片；`recording` 为本次运行的录制，只合并时为 None。
@@ -198,18 +203,37 @@ impl Task {
         )
     }
 
-    /// 合并为输出文件，按选项删除任务目录。
-    async fn finish(self, dir: WorkDir, input: Content) -> Result<Output, Error> {
-        // 简化：合并阶段不响应取消（remux 不可中断），合并耗时成为问题时给 remux 加 FFmpeg 中断回调。
-        if self.cancel.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        self.progress.send_modify(|p| p.stage = Stage::Merging);
-        let bytes = self.progress.borrow().bytes;
-        let output = output::write(dir, input, &self.request.output, bytes).await?;
-        self.progress.send_modify(|p| p.stage = Stage::Done);
-        Ok(output)
+    async fn finish(self, dir: WorkDir, content: Content) -> Result<Output, Error> {
+        finish(
+            dir,
+            content,
+            &self.request.output,
+            &self.cancel,
+            &self.progress,
+        )
+        .await
     }
+}
+
+/// 写出输出，按选项删除任务目录。
+///
+/// 简化：开始写出后不响应取消（合并 MP4 不可中断，复制 HLS 不检查取消）；耗时成为问题时给 remux 加 FFmpeg
+/// 中断回调、复制时检查取消。
+async fn finish(
+    dir: WorkDir,
+    content: Content,
+    options: &OutputOptions,
+    cancel: &CancellationToken,
+    progress: &watch::Sender<Progress>,
+) -> Result<Output, Error> {
+    if cancel.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    progress.send_modify(|p| p.stage = Stage::Merging);
+    let bytes = progress.borrow().bytes;
+    let output = output::write(dir, content, options, bytes).await?;
+    progress.send_modify(|p| p.stage = Stage::Done);
+    Ok(output)
 }
 
 /// 输出能否写（见 [`output::check_targets`]）；要读文件系统，在阻塞线程池中执行。

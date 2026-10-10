@@ -4,8 +4,7 @@ use std::time::Duration;
 
 use hs_m3u8_core::hls::AudioChoice;
 use hs_m3u8_core::{
-    Error, JobType, LiveEnd, LiveOptions, LiveReport, MissReason, Url, WorkDirProblem,
-    merge_recorded,
+    Error, JobType, LiveEnd, LiveOptions, LiveReport, MissReason, Stage, Url, WorkDirProblem,
 };
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
@@ -254,7 +253,7 @@ async fn a_live_directory_without_live_options_is_a_kind_mismatch() {
     assert!(dir.join("out.hsdl/job.json").exists());
 }
 
-/// 只合并：不联网，把中断前录到的合并成输出，没有录制结束原因。
+/// 只合并：不联网，把中断前录到的合并成输出，没有录制结束原因；进度给出已录的分片数与时长。
 #[tokio::test(flavor = "multi_thread")]
 async fn merge_recorded_merges_without_the_network() {
     let dir = test_dir("resume_merge");
@@ -265,9 +264,16 @@ async fn merge_recorded_merges_without_the_network() {
     interrupt(&req, |p| p.segments_done == 3).await;
     let hits = server.hits("live.m3u8");
 
-    let output = merge_recorded(req.output.clone()).await.unwrap();
+    let job = engine().merge_recorded(req.output.clone()).unwrap();
+    let progress = job.control().progress();
+    let output = job.wait().await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2], &[3]));
+    let last = progress.borrow().clone();
+    assert_eq!(
+        (last.stage, last.segments_done, last.duration_us),
+        (Stage::Done, 3, 3_000_000)
+    );
     let want = LiveReport {
         end: None,
         session_count: 1,
@@ -279,7 +285,7 @@ async fn merge_recorded_merges_without_the_network() {
 
 /// 只合并时目录里是点播任务：明确报不是直播录制，不当作「没有录到」。
 #[tokio::test(flavor = "multi_thread")]
-async fn merge_only_rejects_a_vod_directory() {
+async fn merge_recorded_rejects_a_vod_directory() {
     let dir = test_dir("resume_merge_vod");
     let server = Server::start().await;
     server.put("seg0.ts", fixture("ts_long/seg0.ts"));
@@ -290,7 +296,12 @@ async fn merge_only_rejects_a_vod_directory() {
     let req = live_request(server.url("vod.m3u8"), &dir, STALL);
     assert!(run(req.clone()).await.is_err());
 
-    let err = merge_recorded(req.output).await.unwrap_err();
+    let err = engine()
+        .merge_recorded(req.output)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap_err();
     assert!(
         matches!(
             err,

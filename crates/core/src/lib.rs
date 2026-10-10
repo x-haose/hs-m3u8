@@ -3,7 +3,7 @@
 //! 一个任务把一个播放列表地址变成一个输出文件。任务目录（默认与输出同级、名为输出的主名加 `.hsdl`）保存 `job.json`
 //! 与已完成的分片；分片先写 `.part`、落盘后原子改名，因此「最终文件存在」即「该分片完整」。
 //! 中断后用同样的请求再次运行：点播续传缺的分片（播放列表变了则拒绝），直播续录（见 [`LiveOptions`]）；
-//! 不联网、只合并已录到的直播用 [`merge_recorded`]。
+//! 不联网、只合并已录到的直播用 [`Engine::merge_recorded`]。
 //!
 //! 失败一律经 [`Job::wait`] 的 `Err` 返回；任务失败或取消时不生成输出文件，任务目录保留以便续传。
 //!
@@ -66,16 +66,6 @@ pub(crate) use blocking::blocking;
 
 use crate::http::{Http, OnReceived};
 
-/// 不联网，只把任务目录中已录到的直播分片合并成输出；用于中断后不再续录、或来源已取不到的录制。
-/// 不在 tokio 运行时内调用会 panic。
-///
-/// 任务目录见 [`OutputOptions::resolved_work_dir`]。目录里是点播的下载时报
-/// [`WorkDirProblem::NotLiveRecording`]（点播用同样的请求再次运行即可续传）；目录不存在或没有已完成的分片时报
-/// [`Error::NothingRecorded`]。结果的 [`LiveReport::end`] 为 None。
-pub async fn merge_recorded(output: OutputOptions) -> Result<Output, Error> {
-    job::merge_recorded(output).await
-}
-
 /// 下载引擎；持有跨任务共享的在途请求上限。
 #[derive(Clone)]
 pub struct Engine {
@@ -124,15 +114,22 @@ impl Engine {
             stop.clone(),
             progress_tx,
         ));
-        Ok(Job {
-            control: JobControl {
-                cancel: cancel.clone(),
-                stop,
-                progress,
-            },
-            task,
-            _guard: cancel.drop_guard(),
-        })
+        Ok(Job::new(task, cancel, stop, progress))
+    }
+
+    /// 不联网，只把任务目录中已录到的直播分片写成输出；用于中断后不再续录、或来源已取不到的录制。与
+    /// [`Engine::start`] 一样返回任务句柄：进度给出已录的分片数、字节数与时长，阶段为 [`Stage::Merging`]；
+    /// 开始写出前可取消，停止不起作用。参数错误时立即返回错误；不在 tokio 运行时内调用会 panic。
+    ///
+    /// 任务目录见 [`OutputOptions::resolved_work_dir`]。目录里是点播的下载时报
+    /// [`WorkDirProblem::NotLiveRecording`]（点播用同样的请求再次运行即可续传）；目录不存在或没有已完成的分片时报
+    /// [`Error::NothingRecorded`]。结果的 [`LiveReport::end`] 为 None。
+    pub fn merge_recorded(&self, output: OutputOptions) -> Result<Job, Error> {
+        output.validate()?;
+        let (progress_tx, progress) = watch::channel(Progress::default());
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(job::merge_recorded(output, cancel.clone(), progress_tx));
+        Ok(Job::new(task, cancel, CancellationToken::new(), progress))
     }
 }
 
@@ -150,6 +147,23 @@ pub struct Job {
 }
 
 impl Job {
+    fn new(
+        task: JoinHandle<Result<Output, Error>>,
+        cancel: CancellationToken,
+        stop: CancellationToken,
+        progress: watch::Receiver<Progress>,
+    ) -> Self {
+        Job {
+            control: JobControl {
+                cancel: cancel.clone(),
+                stop,
+                progress,
+            },
+            task,
+            _guard: cancel.drop_guard(),
+        }
+    }
+
     /// 控制句柄；与本句柄分开持有，等结果期间也能取消、停止。
     pub fn control(&self) -> JobControl {
         self.control.clone()

@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::Error;
 
-/// 输出到哪里、任务目录在哪里；下载（[`crate::JobRequest::output`]）与只合并（[`crate::merge_recorded`]）共用。
+/// 输出到哪里、任务目录在哪里；下载（[`crate::JobRequest::output`]）与只合并（[`crate::Engine::merge_recorded`]）共用。
 /// 用 [`OutputOptions::new`] 取默认值后按需修改字段。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputOptions {

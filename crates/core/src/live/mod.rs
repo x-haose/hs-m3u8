@@ -181,7 +181,7 @@ fn live_tracks(
 }
 
 /// 目录里已完成的分片与 init 段计入进度。
-fn count_stored(stored: &Stored, progress: &watch::Sender<Progress>) {
+pub(crate) fn count_stored(stored: &Stored, progress: &watch::Sender<Progress>) {
     let done = stored.segments.iter().map(Vec::len).sum();
     let bytes = stored.bytes();
     let duration_us = stored.duration_us(0);
