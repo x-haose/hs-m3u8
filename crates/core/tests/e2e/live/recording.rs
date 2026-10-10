@@ -4,6 +4,7 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use axum::http::StatusCode;
+use hs_m3u8_core::hls::SyntaxError;
 use hs_m3u8_core::{
     Engine, Error, HttpError, LiveEnd, LiveOptions, MissReason, Missed, RefreshCause, Stage,
 };
@@ -93,7 +94,10 @@ async fn refresh_errors_show_in_progress_until_recovered() {
     .expect("刷新失败应出现在进度里")
     .unwrap()
     .clone();
-    let unavailable = RefreshCause::Http(HttpError::Status(503));
+    let unavailable = RefreshCause::Http {
+        kind: HttpError::Status(503),
+        retry_after: None,
+    };
     assert_eq!(failed.refresh_errors, [Some(unavailable)]);
     // 已录 1 秒
     assert_eq!(failed.duration_us, 1_000_000);
@@ -102,6 +106,41 @@ async fn refresh_errors_show_in_progress_until_recovered() {
     let output = job.wait().await.unwrap();
     assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
     assert_eq!(progress.borrow().refresh_errors, [None]);
+}
+
+/// 刷新拿到写了一半的播放列表（为空，或末尾的 EXTINF 还没有 URI 行）：等下次刷新，进度里给出原因；写完后照常录。
+#[tokio::test(flavor = "multi_thread")]
+async fn half_written_playlists_are_waited_out() {
+    let dir = test_dir("live_half_written");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1]);
+    server.put("live.m3u8", playlist(&[0], false));
+    let job = engine()
+        .start(live_request(server.url("live.m3u8"), &dir, STALL))
+        .unwrap();
+    let mut progress = job.control().progress();
+    progress.wait_for(|p| p.segments_done == 1).await.unwrap();
+
+    let dangling = RefreshCause::Syntax {
+        line: 6,
+        kind: SyntaxError::InfoWithoutUri { tag: "EXTINF" },
+    };
+    let half_written = [
+        (String::new(), RefreshCause::Empty),
+        (playlist(&[0], false) + "#EXTINF:1,\n", dangling),
+    ];
+    for (text, cause) in half_written {
+        server.put("live.m3u8", text);
+        let shown = progress.wait_for(|p| p.refresh_errors == [Some(cause.clone())]);
+        tokio::time::timeout(Duration::from_secs(10), shown)
+            .await
+            .expect("写了一半的播放列表应作为刷新失败出现在进度里")
+            .unwrap();
+    }
+
+    server.put("live.m3u8", playlist(&[0, 1], true));
+    let output = job.wait().await.unwrap();
+    assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
 }
 
 /// 两次刷新之间窗口滑过了分片 1、2：记为缺失（进度按分片计），其余照常合并，时间线在该处留空。

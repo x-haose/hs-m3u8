@@ -22,7 +22,7 @@ use url::Url;
 
 use crate::hooks::{HookError, HookKind};
 use crate::ident::bare_url;
-use crate::{Leftover, StallCause};
+use crate::{Leftover, RefreshCause, StallCause};
 
 #[derive(thiserror::Error)]
 pub enum Error {
@@ -189,9 +189,9 @@ impl Error {
             Error::Segment { cause, .. } | Error::Key { cause, .. } => cause.retry_after(),
             Error::Cleanup { failure, .. } => failure.retry_after(),
             Error::LiveStalled {
-                cause: StallError::RefreshFailed(error),
+                cause: StallError::RefreshFailed(RefreshCause::Http { retry_after, .. }),
                 ..
-            } => error.retry_after(),
+            } => *retry_after,
             _ => None,
         }
     }
@@ -203,7 +203,10 @@ impl Error {
             Error::Segment { cause, .. } | Error::Key { cause, .. } => cause.retryable(),
             Error::Cleanup { failure, .. } => failure.retryable(),
             Error::LiveStalled { cause, .. } => match cause {
-                StallError::RefreshFailed(error) => error.retryable(),
+                StallError::RefreshFailed(RefreshCause::Http { kind, .. }) => kind.retryable(),
+                StallError::RefreshFailed(RefreshCause::Empty | RefreshCause::Syntax { .. }) => {
+                    false
+                }
                 StallError::RefreshPending => true,
                 StallError::Unrecordable(kind) => kind.retryable(),
                 StallError::TrackStopped(cause) => *cause == StallCause::NoNewSegments,
@@ -292,9 +295,9 @@ pub enum Integrity {
 /// 直播停滞的故障原因。
 #[derive(Debug, thiserror::Error)]
 pub enum StallError {
-    /// 刷新播放列表一直失败（404/410 之外的可重试错误，或内容不完整）
+    /// 刷新播放列表一直失败（404/410 之外的取不到，或内容不完整），带最近一次的原因
     #[error("刷新播放列表一直失败，最近一次：{0}")]
-    RefreshFailed(Box<Error>),
+    RefreshFailed(RefreshCause),
     /// 刷新请求超过一个目标时长仍未返回
     #[error("刷新播放列表的请求一直没有返回")]
     RefreshPending,

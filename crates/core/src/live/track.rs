@@ -11,7 +11,9 @@ use url::Url;
 use super::session::Start;
 use super::window::{InitsToFetch, NewInits, Scope, Update, Window};
 use crate::ident::Fingerprint;
-use crate::{Error, HttpError, LiveEnd, MissReason, StallCause, StallError, Unsupported};
+use crate::{
+    Error, HttpError, LiveEnd, MissReason, RefreshCause, StallCause, StallError, Unsupported,
+};
 
 /// 两次刷新之间的最短间隔，防止 TARGETDURATION 为 0 或极小时空转。
 const MIN_REFRESH: Duration = Duration::from_millis(100);
@@ -88,7 +90,7 @@ pub(super) struct LiveTrack {
     /// 最近一次取不到分片或 init 段的原因
     last_download_failure: Option<HttpError>,
     /// 最近一次刷新失败的原因；刷新成功即清空
-    last_refresh_error: Option<Error>,
+    last_refresh_error: Option<RefreshCause>,
 }
 
 impl LiveTrack {
@@ -180,7 +182,7 @@ impl LiveTrack {
     }
 
     /// 最近一次刷新失败的原因；之后刷新成功即清空。
-    pub(super) fn last_refresh_error(&self) -> Option<&Error> {
+    pub(super) fn last_refresh_error(&self) -> Option<&RefreshCause> {
         self.last_refresh_error.as_ref()
     }
 
@@ -226,14 +228,14 @@ impl LiveTrack {
     }
 
     /// 刷新失败、可以再试：半个目标时长后再刷新，服务器要求等更久时按它的。
-    pub(super) fn refresh_failed(&mut self, error: Error, now: Instant) {
+    pub(super) fn refresh_failed(&mut self, cause: RefreshCause, now: Instant) {
         let wait = self
             .half_target()
-            .max(error.retry_after().unwrap_or_default());
+            .max(asked_wait(&cause).unwrap_or_default());
         self.refresh = now
             .checked_add(wait)
             .map_or(Refresh::Suspended, Refresh::Due);
-        self.last_refresh_error = Some(error);
+        self.last_refresh_error = Some(cause);
     }
 
     /// 会话定下之前拿到一份播放列表：记下是否列出了新分片（判断它是否仍在出），安排下次刷新。
@@ -368,7 +370,7 @@ impl LiveTrack {
         let asked = self
             .last_refresh_error
             .as_ref()
-            .and_then(Error::retry_after)
+            .and_then(asked_wait)
             .and_then(|wait| now.checked_add(wait));
         self.refresh = if ended {
             Refresh::Ended
@@ -423,11 +425,11 @@ impl LiveTrack {
             return Err(StallError::RefreshPending);
         }
         let ended = match self.last_refresh_error.take() {
-            Some(Error::Http {
+            Some(RefreshCause::Http {
                 kind: HttpError::Status(status @ (404 | 410)),
                 ..
             }) => StallCause::PlaylistGone(status),
-            Some(error) => return Err(StallError::RefreshFailed(Box::new(error))),
+            Some(cause) => return Err(StallError::RefreshFailed(cause)),
             None if self.is_live(now) => {
                 let kind = self.last_download_failure.clone().expect(
                     "仍在列出新分片、没有在途的下载又没有录到：新分片都记了缺失，有失败原因",
@@ -469,6 +471,14 @@ fn joined(older: &MediaPlaylist, newer: &MediaPlaylist) -> Option<MediaPlaylist>
         segments: segments.into_values().cloned().collect(),
         ..newer.clone()
     })
+}
+
+/// 服务器在刷新失败时要求的等待。
+fn asked_wait(cause: &RefreshCause) -> Option<Duration> {
+    match cause {
+        RefreshCause::Http { retry_after, .. } => *retry_after,
+        RefreshCause::Empty | RefreshCause::Syntax { .. } => None,
+    }
 }
 
 fn identity(segment: &Segment) -> Fingerprint {

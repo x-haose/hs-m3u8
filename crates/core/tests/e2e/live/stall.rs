@@ -27,7 +27,10 @@ async fn removed_playlist_ends_recording() {
     let mut progress = job.control().progress();
     progress.wait_for(|p| p.segments_total == 2).await.unwrap();
     server.remove("live.m3u8");
-    let gone = Some(RefreshCause::Http(HttpError::Status(404)));
+    let gone = Some(RefreshCause::Http {
+        kind: HttpError::Status(404),
+        retry_after: None,
+    });
     progress
         .wait_for(|p| p.refresh_errors == [gone.clone()])
         .await
@@ -145,8 +148,8 @@ async fn one_failing_track_fails_the_recording() {
             cause: StallError::RefreshFailed(cause),
         } => assert!(
             matches!(
-                **cause,
-                Error::Http {
+                cause,
+                RefreshCause::Http {
                     kind: HttpError::Status(500),
                     ..
                 }
