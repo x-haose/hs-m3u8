@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use super::session::Verdict;
 use super::track::{Fetched, RefreshRequest};
 use super::window::{InitsToFetch, NewInits};
+use crate::error::io_error;
 use crate::fetch::{self, Direct};
 use crate::hooks::Hooks;
 use crate::http::{Http, Permit};
@@ -178,11 +179,7 @@ async fn same_file(stored: PathBuf, data: Vec<u8>) -> Result<bool, Error> {
     blocking(move || {
         std::fs::read(&stored)
             .map(|existing| existing == data)
-            .map_err(|cause| Error::Io {
-                action: "读取",
-                path: stored,
-                cause,
-            })
+            .map_err(io_error("读取", &stored))
     })
     .await?
 }

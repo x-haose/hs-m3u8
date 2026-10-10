@@ -16,13 +16,14 @@ use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use super::{GroupTrack, io_error};
+use super::GroupTrack;
+use crate::entries::{self, is_canonical_number};
+use crate::error::io_error;
 use crate::ident::Fingerprint;
 use crate::selection::SelectionKey;
 use crate::verify::id3_len;
 use crate::verify::{Standalone, standalone_format};
-use crate::workdir::is_canonical_number;
-use crate::{Error, Unsupported, WorkDirProblem, workdir};
+use crate::{Error, Unsupported, WorkDirProblem};
 
 const INDEX: &str = "index.m3u8";
 
@@ -41,8 +42,8 @@ fn extension(format: Standalone) -> &'static str {
     }
 }
 
-/// 目标目录能否写：不存在、没有内容（系统自动生成的元数据文件不算，见 [`workdir::is_system_file`]），或 `overwrite` 且其中
-/// 全是本库写出的文件。全是本库写出的文件而没有要求覆盖时报 [`Error::OutputExists`]；有别的文件或不是目录时报
+/// 目标目录能否写：不存在、没有内容（系统自动生成的元数据文件不算，见 [`entries::Entry::is_system_file`]），或
+/// `overwrite` 且其中全是本库写出的文件。全是本库写出的文件而没有要求覆盖时报 [`Error::OutputExists`]；有别的文件或不是目录时报
 /// [`Error::OutputOccupied`]，覆盖也不替换。
 pub(super) fn check(dir: &Path, overwrite: bool) -> Result<(), Error> {
     let meta = match fs::symlink_metadata(dir) {
@@ -53,7 +54,7 @@ pub(super) fn check(dir: &Path, overwrite: bool) -> Result<(), Error> {
     if !meta.is_dir() || !written_by_us(dir)? {
         return Err(Error::OutputOccupied(dir.to_path_buf()));
     }
-    if overwrite || is_empty(dir)? {
+    if overwrite || entries::is_empty(dir)? {
         Ok(())
     } else {
         Err(Error::OutputExists(dir.to_path_buf()))
@@ -350,35 +351,16 @@ fn master_playlist(selection: &SelectionKey, bandwidth: u64) -> String {
     )
 }
 
-/// 目录里除了系统自动生成的元数据文件之外没有别的。
-fn is_empty(dir: &Path) -> Result<bool, Error> {
-    for entry in fs::read_dir(dir).map_err(io_error("读取", dir))? {
-        let entry = entry.map_err(io_error("读取", dir))?;
-        if !is_system_file(&entry)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
-fn is_system_file(entry: &fs::DirEntry) -> Result<bool, Error> {
-    let kind = entry.file_type().map_err(io_error("读取", &entry.path()))?;
-    Ok(workdir::is_system_file(&entry.file_name(), kind))
-}
-
 /// 目录里是否全是本库写出的 HLS 文件（空目录也算，系统自动生成的元数据文件不算），即删掉它不会丢别人的文件。
 /// 不跟随符号链接：符号链接不是本库写出的。
 fn written_by_us(dir: &Path) -> Result<bool, Error> {
-    for entry in fs::read_dir(dir).map_err(io_error("读取", dir))? {
-        let entry = entry.map_err(io_error("读取", dir))?;
-        let kind = entry.file_type().map_err(io_error("读取", &entry.path()))?;
-        let name = entry.file_name();
-        let ours = match name.to_str() {
-            Some(INDEX) => kind.is_file(),
-            Some(name) if is_canonical_number(name) && kind.is_dir() => {
-                track_written_by_us(&entry.path())?
+    for entry in entries::list(dir)? {
+        let ours = match entry.name.to_str() {
+            Some(INDEX) => entry.kind.is_file(),
+            Some(name) if is_canonical_number(name) && entry.kind.is_dir() => {
+                track_written_by_us(&entry.path)?
             }
-            _ => is_system_file(&entry)?,
+            _ => entry.is_system_file(),
         };
         if !ours {
             return Ok(false);
@@ -388,16 +370,10 @@ fn written_by_us(dir: &Path) -> Result<bool, Error> {
 }
 
 fn track_written_by_us(dir: &Path) -> Result<bool, Error> {
-    for entry in fs::read_dir(dir).map_err(io_error("读取", dir))? {
-        let entry = entry.map_err(io_error("读取", dir))?;
-        let kind = entry.file_type().map_err(io_error("读取", &entry.path()))?;
-        let name = entry.file_name();
-        let ours = kind.is_file() && name.to_str().is_some_and(is_track_file_name);
-        if !ours && !is_system_file(&entry)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    Ok(entries::list(dir)?.iter().all(|entry| {
+        let ours = entry.kind.is_file() && entry.name.to_str().is_some_and(is_track_file_name);
+        ours || entry.is_system_file()
+    }))
 }
 
 /// 轨道目录里本库写出的文件名：`index.m3u8`、`init-<指纹>.mp4`、`<n>.<扩展名>`。

@@ -14,6 +14,7 @@ use hs_m3u8_remux::{DiscontinuityGroup, Report, Streams, TrackSegments};
 pub use self::options::{OutputOptions, Target};
 
 use self::options::{lexical_absolute, sibling};
+use crate::error::io_error;
 use crate::ident::Fingerprint;
 use crate::selection::SelectionKey;
 use crate::workdir::{self, PendingOutput, WorkDir};
@@ -225,14 +226,5 @@ fn discard(failure: Error, work_dir: &Path, outputs: &[PendingOutput]) -> Error 
             path,
             cause,
         },
-    }
-}
-
-fn io_error(action: &'static str, path: &Path) -> impl FnOnce(io::Error) -> Error {
-    let path = path.to_path_buf();
-    move |cause| Error::Io {
-        action,
-        path,
-        cause,
     }
 }

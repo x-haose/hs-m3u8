@@ -52,16 +52,8 @@ pub(crate) struct AudioAttributes {
 impl SelectionKey {
     /// `selection` 为从 `master` 中选出的轨。
     pub(crate) fn of(selection: &Selection, master: &MasterPlaylist) -> Self {
-        let attributes = VariantAttributes::of(&selection.variant);
-        let occurrence = master.variants[..selection.variant_index]
-            .iter()
-            .filter(|v| VariantAttributes::of(v) == attributes)
-            .count();
         SelectionKey {
-            variant: VariantKey {
-                attributes,
-                occurrence,
-            },
+            variant: VariantKey::of(&selection.variant, selection.variant_index, master),
             audio: selection.audio.as_ref().map(|a| AudioKey::of(a, master)),
         }
     }
@@ -92,6 +84,21 @@ impl SelectionKey {
             variant: variant.clone(),
             audio,
         })
+    }
+}
+
+impl VariantKey {
+    /// `variant` 为 `master` 中的第 `index` 个变体。
+    fn of(variant: &Variant, index: usize, master: &MasterPlaylist) -> Self {
+        let attributes = VariantAttributes::of(variant);
+        let occurrence = master.variants[..index]
+            .iter()
+            .filter(|v| VariantAttributes::of(v) == attributes)
+            .count();
+        VariantKey {
+            attributes,
+            occurrence,
+        }
     }
 }
 

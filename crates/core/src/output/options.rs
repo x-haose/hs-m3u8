@@ -4,6 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 
 use crate::Error;
+use crate::error::io_error;
 
 /// 输出到哪里、任务目录在哪里；下载（[`crate::JobRequest::output`]）与只合并（[`crate::Engine::merge_recorded`]）共用。
 /// 用 [`OutputOptions::new`] 取默认值后按需修改字段。
@@ -145,11 +146,7 @@ pub(crate) fn sibling(path: &Path, name: &OsStr, suffix: &str) -> PathBuf {
 
 /// 按字面规整成绝对路径：补上当前目录，去掉 `.`，`..` 退一级；不访问文件系统，不跟随符号链接。
 pub(super) fn lexical_absolute(path: &Path) -> Result<PathBuf, Error> {
-    let absolute = std::path::absolute(path).map_err(|cause| Error::Io {
-        action: "解析",
-        path: path.to_path_buf(),
-        cause,
-    })?;
+    let absolute = std::path::absolute(path).map_err(io_error("解析", path))?;
     let mut normalized = PathBuf::new();
     for component in absolute.components() {
         match component {

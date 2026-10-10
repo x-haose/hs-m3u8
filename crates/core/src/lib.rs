@@ -13,6 +13,7 @@
 
 mod blocking;
 mod crypto;
+mod entries;
 mod error;
 mod fetch;
 mod hooks;

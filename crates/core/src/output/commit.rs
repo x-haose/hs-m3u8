@@ -12,8 +12,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use super::io_error;
 use crate::Error;
+use crate::error::io_error;
 use crate::workdir::PendingOutput;
 
 /// 换上备齐的输出（调用方已检查过各输出能否写）。成功时返回删不掉的旧输出的说明：输出已换好，只是旧的还在。
