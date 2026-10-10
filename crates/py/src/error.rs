@@ -3,8 +3,11 @@
 //! 类表示出了什么问题；core 里说明出在哪里的包装（分片、key、失败后收拾）不另成异常类，抛的是包着的原因，位置与
 //! 残留作为基类的属性。`str(异常)` 是 core 给出的完整说明，可否重试与要求的等待也按 core 对最外层的判断。
 
+use std::io;
+use std::path::Path;
+
 use hs_m3u8_core as core;
-use pyo3::exceptions::PyException;
+use pyo3::exceptions::{PyException, PyOSError};
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
 use pyo3::{PyClass, PyClassInitializer};
@@ -696,7 +699,7 @@ exception! {
 }
 
 exception! {
-    /// 读写文件失败。
+    /// 读写文件失败；`__cause__` 为系统报的 `OSError`（如 `PermissionError`，磁盘满等按 `errno` 区分）。
     pub struct FileError extends HsM3u8Error {
         /// 做的是什么（读取、删除……）
         pub action: String,
@@ -707,7 +710,7 @@ exception! {
 
 exception! {
     /// 路径的根（Windows 的盘符、网络共享）读不到：盘不在、共享连不上或没有权限；接上后再试。根下的东西看不到不当作
-    /// 没有，不据此删东西、丢记录。
+    /// 没有，不据此删东西、丢记录。`__cause__` 为系统报的 `OSError`。
     pub struct VolumeUnavailableError extends HsM3u8Error {
         /// 读不到的根
         pub root: PyPath,
@@ -972,20 +975,27 @@ fn exception(
                 },
             ),
         )?,
-        E::Io { action, path, .. } => instance(
-            py,
-            HsM3u8Error::initializer(
-                base,
-                FileError {
-                    action: action.to_owned(),
-                    path: path.into(),
-                },
-            ),
-        )?,
-        E::VolumeUnavailable { root, .. } => instance(
-            py,
-            HsM3u8Error::initializer(base, VolumeUnavailableError { root: root.into() }),
-        )?,
+        E::Io {
+            action,
+            path,
+            cause,
+        } => {
+            let os_error = os_error(cause, &path);
+            let leaf = FileError {
+                action: action.to_owned(),
+                path: path.into(),
+            };
+            let error = raised(instance(py, HsM3u8Error::initializer(base, leaf))?, message)?;
+            error.set_cause(py, Some(os_error));
+            return Ok(error);
+        }
+        E::VolumeUnavailable { root, cause } => {
+            let os_error = os_error(cause, &root);
+            let leaf = VolumeUnavailableError { root: root.into() };
+            let error = raised(instance(py, HsM3u8Error::initializer(base, leaf))?, message)?;
+            error.set_cause(py, Some(os_error));
+            return Ok(error);
+        }
         E::Remux(_) => instance(py, HsM3u8Error::initializer(base, RemuxError {}))?,
         E::WorkDir { path, problem } => instance(
             py,
@@ -1003,6 +1013,27 @@ fn exception(
         E::Cancelled => instance(py, HsM3u8Error::initializer(base, JobCancelledError {}))?,
     };
     raised(object, message)
+}
+
+/// `cause` 对应的 `OSError`，`filename` 为 `path`：有错误码时 Python 按它选子类（如 `PermissionError`），调用方可按
+/// `errno` 区分磁盘满等；没有错误码时按种类选，同 PyO3 的转换。
+fn os_error(cause: io::Error, path: &Path) -> PyErr {
+    let Some(code) = cause.raw_os_error() else {
+        return PyErr::from(cause);
+    };
+    // 系统给的说明；Rust 在后面加的「(os error N)」与 Python 显示的错误码重复
+    let text = cause.to_string();
+    let strerror = text
+        .strip_suffix(&format!(" (os error {code})"))
+        .unwrap_or(&text)
+        .to_owned();
+    let filename = path.as_os_str().to_os_string();
+    // Windows 上的错误码是 GetLastError 的值，作 winerror 传入，由 Python 换算 errno
+    if cfg!(windows) {
+        PyOSError::new_err((None::<i32>, strerror, filename, code))
+    } else {
+        PyOSError::new_err((code, strerror, filename))
+    }
 }
 
 fn instance<'py, L: PyClass>(

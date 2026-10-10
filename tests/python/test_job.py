@@ -2,7 +2,9 @@
 
 import asyncio
 import copy
+import errno
 import pickle
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -12,6 +14,7 @@ from conftest import Gate, Server, assert_survives_pickle, fixture
 from hs_m3u8 import (
     AudioChoice,
     Engine,
+    FileError,
     HttpError,
     HttpErrorKind,
     HttpOptions,
@@ -258,6 +261,26 @@ def test_interrupted_recordings_can_be_merged_without_the_network(server: Server
     assert output.live is not None
     assert output.live.end is None
     assert output.segments == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows 上文件之下的路径报不存在，不是「不是目录」")
+def test_file_errors_carry_the_os_error(server: Server, tmp_path: Path) -> None:
+    put_media(server, VOD)
+    blocker = tmp_path / "file"
+    blocker.write_bytes(b"")
+    work_dir = blocker / "work"
+    request = JobRequest(
+        Source(server.url("index.m3u8")),
+        OutputOptions(Target.Mp4(tmp_path / "out.mp4"), work_dir=work_dir),
+    )
+
+    with pytest.raises(FileError) as raised:
+        run(request)
+
+    assert raised.value.path == work_dir
+    cause = raised.value.__cause__
+    assert isinstance(cause, NotADirectoryError)
+    assert (cause.errno, cause.filename) == (errno.ENOTDIR, str(work_dir))
 
 
 def test_existing_outputs_are_reported_with_their_path(server: Server, tmp_path: Path) -> None:

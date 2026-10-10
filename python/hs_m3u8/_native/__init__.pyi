@@ -261,7 +261,7 @@ class Engine:
 @typing.final
 class FileError(HsM3u8Error):
     r"""
-    读写文件失败。
+    读写文件失败；`__cause__` 为系统报的 `OSError`（如 `PermissionError`，磁盘满等按 `errno` 区分）。
     """
     @property
     def action(self) -> builtins.str:
@@ -2841,7 +2841,7 @@ class VariantInfo:
 class VolumeUnavailableError(HsM3u8Error):
     r"""
     路径的根（Windows 的盘符、网络共享）读不到：盘不在、共享连不上或没有权限；接上后再试。根下的东西看不到不当作
-    没有，不据此删东西、丢记录。
+    没有，不据此删东西、丢记录。`__cause__` 为系统报的 `OSError`。
     """
     @property
     def root(self) -> pathlib.Path:
