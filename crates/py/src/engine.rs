@@ -7,10 +7,10 @@ use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use tokio::task::JoinError;
 
+use crate::convert::PyPath;
 use crate::error::{invalid_input, to_pyerr};
 use crate::info::Probe;
 use crate::job::Job;
-use crate::path::PyPath;
 use crate::report::Leftover;
 use crate::request::{JobRequest, OutputOptions, Source, Unsettled};
 use crate::runtime::{self, Owner};

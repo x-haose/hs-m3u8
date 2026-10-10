@@ -5,8 +5,8 @@ use std::time::Duration;
 use hs_m3u8_core as core;
 use pyo3::prelude::*;
 
+use crate::convert::PyPath;
 use crate::info::Selected;
-use crate::path::PyPath;
 use crate::record::{record, variants};
 
 variants! {

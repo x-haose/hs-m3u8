@@ -10,8 +10,8 @@ use pyo3::types::PyTuple;
 use pyo3::{PyClass, PyClassInitializer};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
+use crate::convert::PyPath;
 use crate::hooks::PyHookError;
-use crate::path::PyPath;
 use crate::record::{partial, record, variants};
 use crate::report::{
     HttpErrorKind, HttpFailure, Leftover, RefreshCause, Shape, StallCause, StreamKind,

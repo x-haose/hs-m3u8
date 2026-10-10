@@ -12,9 +12,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString, PyTuple};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
+use crate::convert::{PyPath, bare_url, extract_headers};
 use crate::error::{invalid_input, to_pyerr};
-use crate::hooks::{self, Hooks, bare_url, extract_headers};
-use crate::path::PyPath;
+use crate::hooks::{self, Hooks};
 use crate::record::{record, reduce, variants};
 
 variants! {
