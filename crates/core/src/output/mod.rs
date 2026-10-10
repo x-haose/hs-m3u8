@@ -140,7 +140,10 @@ fn write_files(
         .hls()
         .map(|path| Pending::new(path, work_dir));
     let report = match &mp4 {
-        Some(mp4) => Some(write_mp4(&mp4.temp, streams, groups)?),
+        Some(mp4) => Some(
+            write_mp4(&mp4.temp, streams, groups)
+                .map_err(|failure| discard(failure, Some(&mp4.temp), None))?,
+        ),
         None => None,
     };
     let mp4_temp = mp4.as_ref().map(|m| m.temp.as_path());
@@ -155,7 +158,7 @@ fn write_files(
     }))
 }
 
-/// 合并为 MP4 写到 `temp`；失败时合并本身删掉它。
+/// 合并为 MP4 写到 `temp`；失败时 `temp` 上可能留有写了一半的文件。
 fn write_mp4(
     temp: &Path,
     streams: &[Streams],

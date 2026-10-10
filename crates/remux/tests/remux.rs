@@ -125,10 +125,6 @@ fn top_level_boxes(path: &Path) -> Vec<[u8; 4]> {
     boxes
 }
 
-fn assert_no_leftovers(output: &Path) {
-    assert!(!output.exists(), "失败时应删除输出");
-}
-
 #[test]
 fn ts_single_group_copies_every_packet_from_zero_with_moov_first() {
     let dir = work_dir("ts_single_group");
@@ -348,7 +344,6 @@ fn timestamps_going_back_within_a_group_fail_and_leave_no_files() {
     let err = remux(&[Streams::All], &[group([mixed])], &output).unwrap_err();
 
     assert!(matches!(err, Error::Mux(_)), "应为封装错误，实际 {err:?}");
-    assert_no_leftovers(&output);
 }
 
 #[test]
@@ -373,7 +368,6 @@ fn same_stream_kind_from_two_tracks_is_rejected() {
         ),
         "实际 {err:?}"
     );
-    assert_no_leftovers(&output);
 }
 
 /// 另一条轨提供音频时只取本轨的视频：本轨混着的音频不进输出，其编码（MP3）也不检查。
@@ -430,7 +424,6 @@ fn resolution_change_between_groups_is_rejected() {
         ),
         "实际 {err:?}"
     );
-    assert_no_leftovers(&output);
 }
 
 #[test]
@@ -451,5 +444,4 @@ fn mp3_audio_is_rejected() {
         ),
         "实际 {err:?}"
     );
-    assert_no_leftovers(&output);
 }
