@@ -26,7 +26,15 @@ allow = [
     "Unicode-3.0",
     "WTFPL", # ffmpeg-next、ffmpeg-sys-next
 ]
-exceptions = []
+# 只对下列包放行白名单之外的宽松许可证
+exceptions = [
+    # PyO3 的构建脚本用，不进产物；LLVM 例外只是多给权利
+    { allow = ["Apache-2.0 WITH LLVM-exception"], crate = "target-lexicon" },
+    # pyo3-stub-gen 解析 Python 存根语法所用 rustpython-parser 的构建脚本用，不进产物；CC0 即放弃版权
+    { allow = ["CC0-1.0"], crate = "tiny-keccak" },
+    # 同上的解析器用；Unicode-3.0 的前一版，同样宽松
+    { allow = ["Unicode-DFS-2016"], crate = "unicode_names2" },
+]
 
 [bans]
 # 同一包的多个版本来自上游各自的版本约束，本项目无法消除，只影响体积与编译时间

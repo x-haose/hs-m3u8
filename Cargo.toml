@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/hls", "crates/remux"]
+members = ["crates/core", "crates/hls", "crates/py", "crates/remux"]
 
 [workspace.package]
 edition = "2024"
@@ -17,6 +17,10 @@ axum = "0.8.9"
 cbc = "0.2.1"
 ffmpeg-next = { version = "9.0.0", default-features = false, features = ["format", "static"] }
 libc = "0.2.190"
+pyo3 = { version = "0.29.3", features = ["abi3-py312", "multiple-pymethods"] }
+pyo3-async-runtimes = { version = "0.29.0", features = ["tokio-runtime"] }
+# 默认特性带 numpy 等类型的存根支持，用不上；infer_signature 生成参数默认值的写法
+pyo3-stub-gen = { version = "0.23.1", default-features = false, features = ["infer_signature"] }
 reqwest = { version = "0.13.5", features = ["cookies", "socks"] }
 rustls = { version = "0.23.45", default-features = false, features = ["std"] }
 serde = { version = "1.0.229", features = ["derive"] }

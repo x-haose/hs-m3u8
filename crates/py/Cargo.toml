@@ -1,0 +1,31 @@
+[package]
+name = "hs-m3u8-py"
+version = "0.0.0"
+description = "Python bindings (PyO3) for the hs-m3u8 download engine"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# 绑定的测试是 tests/python 下的 Python 端到端测试；Rust 的测试程序要在运行时加载 libpython，这里没有要测的
+[lib]
+name = "hs_m3u8_py"
+# cdylib 是 Python 扩展模块；rlib 供 stub_gen 读取类型信息生成存根
+crate-type = ["cdylib", "rlib"]
+test = false
+doctest = false
+
+[[bin]]
+name = "stub_gen"
+test = false
+
+[dependencies]
+hs-m3u8-core = { path = "../core" }
+pyo3.workspace = true
+pyo3-async-runtimes.workspace = true
+pyo3-stub-gen.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+
+[lints]
+workspace = true

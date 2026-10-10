@@ -6,8 +6,9 @@ dist/
 wheels/
 *.egg-info
 
-# venv
+# venv（.venv-<版本> 为在别的 Python 版本上测试用）
 .venv
+.venv-*
 
 # rye
 .python-version
@@ -30,3 +31,6 @@ target/
 # FFmpeg 的源码与静态库，由 third_party/ffmpeg/build.sh 生成
 third_party/ffmpeg/build/
 third_party/ffmpeg/dist/
+# maturin develop 装进 Python 包目录的扩展模块
+python/hs_m3u8/*.so
+python/hs_m3u8/*.pyd
