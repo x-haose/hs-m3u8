@@ -157,7 +157,7 @@ pub(crate) fn check_header(name: &str, value: &str) -> Result<(), String> {
 /// 没录完的分片，时间线连续；否则另起一段，与之前的首尾相接（中断期间的内容不在输出中），之前录过的分片不重录。
 /// 最后一并合并。来源相同而完整地址与记录的不同（如换了令牌）时，要录的各轨都接得上才续录并改记新地址，否则报
 /// [`crate::WorkDirProblem::SourceUnverified`]；这次没有要录的轨（都已录满或已结束）时不改记，直接合并。
-/// 不联网、只合并已录到的部分用 [`crate::merge_recorded`]。
+/// 不联网、只合并已录到的部分用 [`crate::Engine::merge_recorded`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveOptions {
     /// 每条轨的分片声明时长之和达到此值后不再录，各轨都达到即结束；计入之前各会话已录到的、本次排入下载的、
