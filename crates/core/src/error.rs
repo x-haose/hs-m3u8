@@ -1,15 +1,18 @@
 //! 下载任务的错误。
 //!
 //! 按调用方的处理方式分类：
-//! - 调用方输入：[`Error::InvalidInput`]、[`Error::OutputExists`]、[`Error::OutputOccupied`]，改参数后再试；
-//! - 来源内容：[`Error::Playlist`]、[`Error::NotMediaPlaylist`]、[`Error::Select`]、[`Error::Unsupported`]、
-//!   [`Error::Integrity`]、[`Error::KeyLength`]，同样的请求再试也不会成功（其中 [`Unsupported::Live`] 开启直播
-//!   录制即可）；
-//! - 外部依赖：[`Error::Http`]（看 [`HttpError::retryable`]）、[`Error::Io`]；
-//!   [`Error::Segment`]、[`Error::Key`] 说明出在哪个分片或 key，[`Error::LiveStalled`] 说明直播哪条轨停滞，
-//!   可否重试看其原因（[`Error::retryable`]）；
-//! - 任务目录：[`Error::WorkDir`]、[`Error::NothingRecorded`]；
-//! - 回调：[`Error::Hook`]；合并：[`Error::Remux`]；[`Error::Cancelled`]；失败后清理也失败：[`Error::Cleanup`]。
+//! - 改请求再试：[`Error::InvalidInput`]；[`Error::OutputExists`]（要求覆盖）；[`Error::OutputOccupied`]（换路径）；
+//!   [`Error::Select`]（选轨偏好与来源不符）；[`Unsupported::Live`]（开启直播录制）；[`Unsupported::Mp4`]、
+//!   [`Unsupported::Hls`]（改用另一种输出）；
+//! - 来源本身不行，同样的请求再试也不会成功：[`Error::Playlist`]、[`Error::NotMediaPlaylist`]、
+//!   [`Error::Unsupported`] 的其余各项、[`Error::Integrity`]、[`Error::KeyLength`]；
+//! - 网络：[`Error::Http`]；[`Error::Segment`]、[`Error::Key`] 说明出在哪个分片或 key，[`Error::LiveStalled`] 说明
+//!   直播哪条轨停滞。可否重试看 [`Error::retryable`]，服务器要求的等待看 [`Error::retry_after`]，两者都看包着的
+//!   原因；
+//! - 读写文件：[`Error::Io`]；合并 MP4：[`Error::Remux`]。都不可重试；
+//! - 任务目录：[`Error::WorkDir`]（按 [`WorkDirProblem`] 处理）、[`Error::NothingRecorded`]；
+//! - 调用方的回调出错：[`Error::Hook`]；[`Error::Cancelled`]；失败后收拾也没做完：[`Error::Cleanup`]，带残留列表，
+//!   可否重试看原来的失败。
 //!
 //! 错误信息已包含原因，不经 `source()` 重复给出；地址只显示到路径，不含用户名、密码与查询串（常带凭据或令牌）。
 
@@ -48,6 +51,7 @@ pub enum Error {
     Select(hs_m3u8_hls::SelectError),
     #[error("不支持：{0}")]
     Unsupported(Unsupported),
+    /// 请求失败；在最外层时是播放列表或 init 段的请求（分片与 key 的包在 [`Error::Segment`]、[`Error::Key`] 里）。
     /// `retry_after` 为服务器在 429/503 中要求（Retry-After）的最短等待
     #[error("请求 {} 失败：{kind}", bare_url(.url))]
     Http {
@@ -274,7 +278,8 @@ pub enum HttpError {
     Timeout,
     #[error("连接失败：{0}")]
     Connect(String),
-    /// 请求无法构造，如回调给出了不合法的地址或请求头
+    /// 请求无法构造：地址能解析，HTTP 库却不接受（如超过 65534 字节）。回调改出的地址与请求头不合法时报
+    /// [`Error::Hook`]
     #[error("请求不合法：{0}")]
     InvalidRequest(String),
     /// 读取响应体等其他传输错误
