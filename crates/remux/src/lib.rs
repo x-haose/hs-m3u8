@@ -4,8 +4,9 @@
 //! - 组内：分片按字节顺序当作一个连续的输入读取，同一时刻只打开一个文件，不先拼成大文件。
 //! - 组间：整组使用同一个时间偏移，保留组内各轨（如视频与独立音频 rendition）原有的相对时序；
 //!   各组首尾相接，下一组从上一组所有流的最晚结束时刻之后开始。
-//! - 每条轨按调用方指定的 [`Streams`] 贡献第一路视频和（或）第一路音频，未指定种类的流不进输出、
-//!   不检查编码；同一类流只能来自一条轨；后续组的流布局与编码参数必须与第一组一致。
+//! - 每条轨按调用方指定的 [`Streams`] 贡献第一路视频和（或）第一路音频，没有这类流的轨不贡献（各轨合起来至少
+//!   一路），未指定种类的流不进输出、不检查编码；同一类流只能来自一条轨；后续组的流布局与编码参数必须与第一组
+//!   一致，组内每路流的解码时间戳不能往回跳。
 //! - 只接受 H.264、HEVC 视频与 AAC 音频，与 FFmpeg 构建启用的组件一致。
 //!
 //! 输出写完回读核对每路流的包数并落盘；失败时输出上可能留有写了一半的文件。输出要么完整、要么不存在由调用方
@@ -186,8 +187,6 @@ pub enum Error {
         track: usize,
         cause: FfmpegError,
     },
-    #[error("第 {track} 条轨没有指定要取的视频或音频流")]
-    NoStreams { track: usize },
     #[error("第 {track} 条轨的{kind}流与前面的轨重复")]
     DuplicateKind { track: usize, kind: StreamKind },
     #[error("{0}")]
@@ -222,7 +221,8 @@ pub enum Error {
     },
 }
 
-/// 内容放不进 MP4：编码不受支持，或后续组与第 0 组的流种类、编码参数不同（同一条 MP4 轨的内容须前后一致）。
+/// 内容放不进 MP4：编码不受支持；后续组与第 0 组的流种类、编码参数不同，或组内解码时间戳往回跳（同一条 MP4 轨的
+/// 内容须前后一致、时间戳递增）；或各轨都没有要取的流。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unsupported {
     #[error("第 {group} 组第 {track} 条轨的{kind}编码 {codec} 不受支持（只支持 H.264、HEVC、AAC）")]
@@ -244,6 +244,15 @@ pub enum Unsupported {
         first: Shape,
         found: Shape,
     },
+    /// 多为来源在时间戳重新开始处漏标了 `EXT-X-DISCONTINUITY`
+    #[error("第 {group} 组第 {track} 条轨的{kind}解码时间戳往回跳，无法放进同一条 MP4 轨")]
+    DtsBackward {
+        group: usize,
+        track: usize,
+        kind: StreamKind,
+    },
+    #[error("各轨都没有要取的视频或音频流")]
+    NoStreams,
 }
 
 /// 把各不连续段组的分片复制进 `output`（MP4，moov 前置），写完回读核对每路流的包数并落盘。失败时 `output` 上
@@ -582,9 +591,6 @@ fn create_outputs(
     let mut sources = Vec::new();
     for (track, segments) in first.tracks.iter().enumerate() {
         let (ictx, failure, selected) = open_selected(segments, streams[track], 0, track)?;
-        if selected.is_empty() {
-            return Err(Error::NoStreams { track });
-        }
         let mut outputs = Vec::new();
         for s in &selected {
             let kind = s.shape.kind();
@@ -602,9 +608,15 @@ fn create_outputs(
                 out: ost.index(),
             });
         }
-        let indices: Vec<usize> = outputs.iter().map(|o| o.out).collect();
-        sources.push(Source::new(0, track, ictx, failure, &selected, &indices));
+        // 没有要取的流的轨什么也不贡献，不读它的包
+        if !outputs.is_empty() {
+            let indices: Vec<usize> = outputs.iter().map(|o| o.out).collect();
+            sources.push(Source::new(0, track, ictx, failure, &selected, &indices));
+        }
         layout.push(outputs);
+    }
+    if layout.iter().all(Vec::is_empty) {
+        return Err(Error::Unsupported(Unsupported::NoStreams));
     }
     Ok((layout, sources))
 }
@@ -659,10 +671,12 @@ fn open_group(
                 }));
             }
         }
-        let indices: Vec<usize> = expected.iter().map(|e| e.out).collect();
-        sources.push(Source::new(
-            group, track, ictx, failure, &selected, &indices,
-        ));
+        if !expected.is_empty() {
+            let indices: Vec<usize> = expected.iter().map(|e| e.out).collect();
+            sources.push(Source::new(
+                group, track, ictx, failure, &selected, &indices,
+            ));
+        }
     }
     Ok(sources)
 }
@@ -720,6 +734,14 @@ fn write_group(
         let out = mapping.output;
         let o = &mut outs[out];
         let t = retime(&mut packet, mapping.time_base, o.time_base, offset_us);
+        // 组间的偏移保证递增，往回跳只会出在组内；封装器对此只报「参数不合法」
+        if o.last_dts_us.is_some_and(|last| t.dts_us < last) {
+            return Err(Error::Unsupported(Unsupported::DtsBackward {
+                group,
+                track: source.track,
+                kind: o.shape.kind(),
+            }));
+        }
         o.start_us = Some(o.start_us.map_or(t.pts_us, |s| s.min(t.pts_us)));
         o.end_us = Some(o.end_us.map_or(t.end_us, |e| e.max(t.end_us)));
         o.last_dts_us = Some(t.dts_us);

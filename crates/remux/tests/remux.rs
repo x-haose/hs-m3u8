@@ -345,7 +345,17 @@ fn timestamps_going_back_within_a_group_fail() {
 
     let err = remux(&[Streams::All], &[group([mixed])], &output).unwrap_err();
 
-    assert!(matches!(err, Error::Mux(_)), "应为封装错误，实际 {err:?}");
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::DtsBackward {
+                group: 0,
+                track: 0,
+                ..
+            })
+        ),
+        "实际 {err:?}"
+    );
 }
 
 #[test]
@@ -399,6 +409,36 @@ fn unwanted_streams_are_dropped_without_codec_checks() {
             (StreamKind::Video, "h264", v_in.len() as u64),
             (StreamKind::Audio, "aac", a_in.len() as u64)
         ]
+    );
+}
+
+/// 只有音频的变体又选了独立音频：变体那条轨只取视频而没有，什么也不贡献，输出只有独立音频；各轨都没有要取的流
+/// 时放不进 MP4。
+#[test]
+fn tracks_without_the_wanted_streams_contribute_nothing() {
+    let dir = work_dir("nothing_wanted");
+    let output = dir.join("out.mp4");
+    let (audio_only, audio) = (track("fmp4_a/audio"), track("fmp4_b/audio"));
+
+    let report = remux(
+        &[Streams::Video, Streams::Audio],
+        &[group([audio_only.clone(), audio.clone()])],
+        &output,
+    )
+    .unwrap();
+
+    let a_in = timelines(&concat_track(&audio, &dir, "a.mp4")).1;
+    let streams: Vec<_> = report
+        .streams
+        .iter()
+        .map(|s| (s.shape.kind(), s.packets))
+        .collect();
+    assert_eq!(streams, vec![(StreamKind::Audio, a_in.len() as u64)]);
+
+    let err = remux(&[Streams::Video], &[group([audio_only])], &output).unwrap_err();
+    assert!(
+        matches!(err, Error::Unsupported(Unsupported::NoStreams)),
+        "实际 {err:?}"
     );
 }
 
