@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use hs_m3u8_remux::{DiscontinuityGroup, Report, Streams, TrackSegments};
 
-pub(crate) use self::options::ResolvedOutput;
 pub use self::options::{OutputOptions, Target};
+pub(crate) use self::options::{ResolvedOutput, absolute_path};
 
 use self::commit::{Commit, Occupant};
 use crate::error::io_error;

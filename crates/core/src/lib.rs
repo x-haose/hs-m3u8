@@ -159,8 +159,7 @@ impl Engine {
         if work_dir.as_os_str().is_empty() {
             return Err(Error::InvalidInput("任务目录路径为空".to_owned()));
         }
-        let root = std::path::absolute(work_dir).map_err(error::io_error("解析", work_dir))?;
-        job::discard(root).await
+        job::discard(output::absolute_path(work_dir)?).await
     }
 }
 
