@@ -88,6 +88,7 @@ pub enum Error {
         path: PathBuf,
         cause: io::Error,
     },
+    /// 合并 MP4 时读分片或写输出出错；内容放不进 MP4 是 [`Unsupported::Mp4`]
     #[error("合并失败：{0}")]
     Remux(Box<hs_m3u8_remux::Error>),
     /// 写输出失败后收拾本次写出的、或任务开头收拾上次写输出留下的，没能做完：`failure` 为失败的原因（后者为
@@ -154,9 +155,15 @@ pub(crate) fn io_error(action: &'static str, path: &Path) -> impl FnOnce(io::Err
     }
 }
 
+/// 内容放不进 MP4 的归入 [`Unsupported::Mp4`]，其余为 [`Error::Remux`]。
 impl From<hs_m3u8_remux::Error> for Error {
     fn from(error: hs_m3u8_remux::Error) -> Self {
-        Error::Remux(Box::new(error))
+        match error {
+            hs_m3u8_remux::Error::Unsupported(unsupported) => {
+                Error::Unsupported(Unsupported::Mp4(unsupported))
+            }
+            other => Error::Remux(Box::new(other)),
+        }
     }
 }
 
@@ -216,7 +223,7 @@ impl Error {
     }
 }
 
-/// 来源用到了不支持的特性。
+/// 来源用到了不支持的特性，或内容放不进所选的输出。
 #[derive(Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unsupported {
     /// [`crate::JobRequest::live`] 为 None 时遇到直播
@@ -229,16 +236,12 @@ pub enum Unsupported {
     /// DRM、SAMPLE-AES 等本库解不了的加密
     #[error("{0}")]
     Encryption(hs_m3u8_hls::Unsupported),
-    /// 第 `track` 条轨里没有 init 段的不连续段组排在有 init 段（fMP4）的组后面：EXT-X-MAP 一直作用到下一个
-    /// EXT-X-MAP，前面的 init 段会被用在后面的组上，本地 HLS 无法表示，可只输出 MP4。直播续录时服务器从 fMP4
-    /// 换成 TS 会这样
-    #[error("第 {track} 条轨在 fMP4 的段之后又有不用 init 段的段，本地 HLS 无法表示")]
-    HlsMixedInit { track: usize },
-    /// 本地 HLS 的主播放列表必须写码率（BANDWIDTH），而某条轨的分片声明的时长都为 0 算不出，来源也没写
-    #[error(
-        "某条轨的分片声明的时长都为 0、来源也没写 BANDWIDTH，算不出本地 HLS 主播放列表必填的码率"
-    )]
-    HlsBandwidthUnknown,
+    /// 内容放不进 MP4，可只输出本地 HLS（[`crate::Target::Hls`]）：它原样保留分片，不受这些限制
+    #[error("输出 MP4：{0}")]
+    Mp4(hs_m3u8_remux::Unsupported),
+    /// 本地 HLS 表示不了这些内容，可只输出 MP4（[`crate::Target::Mp4`]）
+    #[error("输出本地 HLS：{0}")]
+    Hls(HlsUnsupported),
     #[error("同一不连续段内 EXT-X-MAP 发生变化（第 {track} 条轨，不连续段 {discontinuity}）")]
     InitChangesWithinGroup { track: usize, discontinuity: u64 },
     #[error("各轨的不连续段不一致：第 0 条轨 {first:?}，第 {track} 条轨 {found:?}")]
@@ -247,6 +250,18 @@ pub enum Unsupported {
         first: Vec<u64>,
         found: Vec<u64>,
     },
+}
+
+/// 本地 HLS 表示不了的内容。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum HlsUnsupported {
+    /// 第 `track` 条轨里没有 init 段的不连续段组排在有 init 段（fMP4）的组后面：EXT-X-MAP 一直作用到下一个
+    /// EXT-X-MAP，前面的 init 段会被用在后面的组上。直播续录时服务器从 fMP4 换成 TS 会这样
+    #[error("第 {track} 条轨在 fMP4 的段之后又有不用 init 段的段，EXT-X-MAP 无法表示")]
+    MixedInit { track: usize },
+    /// 音视频分离时主播放列表必须写码率（BANDWIDTH），而某条轨的分片声明的时长都为 0 算不出，来源也没写
+    #[error("某条轨的分片声明的时长都为 0、来源也没写 BANDWIDTH，算不出主播放列表必填的码率")]
+    BandwidthUnknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

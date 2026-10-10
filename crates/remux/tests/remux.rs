@@ -3,7 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use ffmpeg_next as ffmpeg;
-use hs_m3u8_remux::{DiscontinuityGroup, Error, Shape, StreamKind, Streams, TrackSegments, remux};
+use hs_m3u8_remux::{
+    DiscontinuityGroup, Error, Shape, StreamKind, Streams, TrackSegments, Unsupported, remux,
+};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/media")
@@ -415,12 +417,12 @@ fn resolution_change_between_groups_is_rejected() {
     assert!(
         matches!(
             err,
-            Error::ParamsChanged {
+            Error::Unsupported(Unsupported::ParamsChanged {
                 group: 1,
                 track: 0,
                 kind: StreamKind::Video,
                 ..
-            }
+            })
         ),
         "实际 {err:?}"
     );
@@ -436,11 +438,11 @@ fn mp3_audio_is_rejected() {
     assert!(
         matches!(
             err,
-            Error::UnsupportedCodec {
+            Error::Unsupported(Unsupported::Codec {
                 kind: StreamKind::Audio,
                 codec: "mp3",
                 ..
-            }
+            })
         ),
         "实际 {err:?}"
     );

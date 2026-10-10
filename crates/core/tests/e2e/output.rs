@@ -6,7 +6,9 @@
 use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
-use hs_m3u8_core::{Error, JobRequest, LiveOptions, Target, Unsupported, Url};
+use hs_m3u8_core::{
+    Error, HlsUnsupported, JobRequest, LiveOptions, Target, Unsupported, Url, remux,
+};
 use hs_m3u8_hls::{MediaPlaylist, Playlist, parse};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams, TrackSegments, remux};
 
@@ -414,7 +416,10 @@ async fn switching_to_hls_after_an_unsupported_codec_reuses_the_download() {
     let url = server.url("index.m3u8");
     let mp4 = request_to(url.clone(), &dir, Target::Mp4(dir.join("out.mp4")));
     match run(mp4).await {
-        Err(Error::Remux(_)) => {}
+        Err(Error::Unsupported(Unsupported::Mp4(remux::Unsupported::Codec {
+            codec: "mp3",
+            ..
+        }))) => {}
         other => panic!("MP3 音频应合并失败：{other:?}"),
     }
     assert_eq!(names_in(&dir), ["out.hsdl"]);
@@ -510,7 +515,7 @@ async fn bandwidth_falls_back_to_the_source_and_fails_without_it() {
         hls: dir.join("other"),
     };
     match run(request_to(url, &dir, other)).await {
-        Err(Error::Unsupported(Unsupported::HlsBandwidthUnknown)) => {}
+        Err(Error::Unsupported(Unsupported::Hls(HlsUnsupported::BandwidthUnknown))) => {}
         other => panic!("应报算不出码率：{other:?}"),
     }
     assert!(!dir.join("other.mp4").exists() && !dir.join("other").exists());
@@ -542,7 +547,7 @@ async fn hls_cannot_mix_fmp4_and_ts_in_one_track() {
     );
 
     match run(req).await {
-        Err(Error::Unsupported(Unsupported::HlsMixedInit { track: 0 })) => {}
+        Err(Error::Unsupported(Unsupported::Hls(HlsUnsupported::MixedInit { track: 0 }))) => {}
         other => panic!("应报不支持：{other:?}"),
     }
     assert!(!dir.join("out.mp4").exists() && !dir.join("out").exists());

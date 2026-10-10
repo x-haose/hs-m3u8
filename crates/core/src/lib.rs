@@ -40,7 +40,9 @@ use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
-pub use error::{Error, HttpError, Integrity, JobType, StallError, Unsupported, WorkDirProblem};
+pub use error::{
+    Error, HlsUnsupported, HttpError, Integrity, JobType, StallError, Unsupported, WorkDirProblem,
+};
 pub use hooks::{HookError, HookKind, Hooks, NoHooks, Purpose, RequestParts};
 pub use info::{AudioInfo, MasterInfo, Selected, TrackInfo, VariantInfo};
 pub use output::{OutputOptions, Target};
@@ -56,7 +58,9 @@ pub use url::Url;
 
 /// 公开接口用到的合并报告与合并错误的类型。
 pub mod remux {
-    pub use hs_m3u8_remux::{Error, FfmpegError, Report, Shape, StreamKind, StreamReport};
+    pub use hs_m3u8_remux::{
+        Error, FfmpegError, Report, Shape, StreamKind, StreamReport, Unsupported,
+    };
 }
 
 /// 公开接口用到的播放列表解析与选轨类型。
