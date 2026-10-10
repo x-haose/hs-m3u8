@@ -1,17 +1,17 @@
-//! 续录时判定会话期间的失败与边界：在途分片的补录、等候选的轨的停滞、已录满的轨、核对失败、停止。
+//! 续录时判定会话期间与会话定下时的失败与边界：在途分片的补录、等候选的轨的停滞、已录满或已结束而没有分片的轨、
+//! 核对失败与换更旧的重叠分片、慢的核对与 init 段不挡住其他轨。
 
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use hs_m3u8_core::{
-    Error, HttpError, LiveEnd, LiveOptions, RetryPolicy, StallCause, StallError, Url,
-};
+use hs_m3u8_core::{Error, HttpError, LiveEnd, LiveOptions, StallCause, StallError, Url};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
 use super::{
     STALL, expected_split, expected_split_long, interrupt, live_request, playlist, playlist_in,
-    put_long, put_split_master, report, signed_fmp4_playlist, split_source,
+    put_long, put_split_master, report, run_until_full, signed_fmp4_playlist, slow_retry,
+    split_source,
 };
 use crate::server::Server;
 use crate::{assert_output, engine, expected, expected_long, fixture, run, test_dir, track};
@@ -115,11 +115,7 @@ async fn a_slow_check_does_not_stall_a_waiting_track() {
     let mut req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(300));
     interrupt(&req, |p| p.segments_done == 4).await;
 
-    req.retry = RetryPolicy {
-        attempts: NonZeroU32::new(3).unwrap(),
-        base_delay: Duration::from_millis(300),
-        max_delay: Duration::from_millis(300),
-    };
+    req.retry = slow_retry(Duration::from_millis(300));
     server.fail("v/seg1.ts", 2);
     server.put("video.m3u8", playlist_in("v/", &[0, 1, 2, 3], true));
     server.put_sequence(
@@ -177,11 +173,7 @@ async fn a_slow_init_fetch_does_not_stall_another_track() {
     let mut req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(300));
     interrupt(&req, |p| p.segments_done == 2).await;
 
-    req.retry = RetryPolicy {
-        attempts: NonZeroU32::new(3).unwrap(),
-        base_delay: Duration::from_millis(300),
-        max_delay: Duration::from_millis(300),
-    };
+    req.retry = slow_retry(Duration::from_millis(300));
     server.put("video.m3u8", signed_fmp4_playlist("video", "2", 2, 2, true));
     server.fail("video/init.mp4", 2);
     server.put_sequence(
@@ -273,13 +265,8 @@ async fn a_full_track_does_not_block_the_decision() {
         max_duration: Some(Duration::from_secs(2)),
         ..req.live.unwrap()
     });
-    // 第一次运行两轨处理完第一份播放列表就都满了 2 秒（音频 seg1 取不到也计入），自行结束；
-    // 保留任务目录、删掉输出，再续录
-    let mut first = req.clone();
-    first.keep_work_dir = true;
-    let output = run(first).await.unwrap();
-    assert_eq!(output.live.unwrap().end, LiveEnd::DurationReached);
-    std::fs::remove_file(&req.output).unwrap();
+    // 第一次运行两轨处理完第一份播放列表就都满了 2 秒（音频 seg1 取不到也计入）
+    run_until_full(&req).await;
 
     put_long(&server, "a/", &[1, 2, 3]);
     server.put("video.m3u8", playlist_in("v/", &[], false));
@@ -431,11 +418,7 @@ async fn slow_check_does_not_count_as_a_stall() {
 
     // 核对 seg1 先失败两次，退避合计至少 600 毫秒；其间播放列表一直没有新分片、也没结束（约 100 毫秒刷新一次，
     // 前六次都是 [0,1]），之后才出现 2、3
-    req.retry = RetryPolicy {
-        attempts: NonZeroU32::new(3).unwrap(),
-        base_delay: Duration::from_millis(400),
-        max_delay: Duration::from_millis(400),
-    };
+    req.retry = slow_retry(Duration::from_millis(400));
     server.fail("seg1.ts", 2);
     let mut windows = vec![playlist(&[0, 1], false); 6];
     windows.push(playlist(&[0, 1, 2], false));

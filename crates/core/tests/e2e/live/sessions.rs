@@ -8,7 +8,7 @@ use hs_m3u8_core::{Error, LiveEnd, LiveOptions, Url, WorkDirProblem};
 
 use super::{
     STALL, expected_split, expected_split_long, interrupt, live_request, playlist, playlist_in,
-    put_long, put_split_master, report, split_source,
+    put_long, put_split_master, report, run_until_full, split_source,
 };
 use crate::server::Server;
 use crate::{assert_output, engine, expected_long, fixture, run, test_dir};
@@ -173,12 +173,8 @@ async fn a_full_track_fetches_no_init() {
         max_duration: Some(Duration::from_secs(2)),
         ..req.live.unwrap()
     });
-    // 第一次运行两轨都满 2 秒（音频 seg1 取不到也计入）即结束；保留任务目录、删掉输出，再续录
-    let mut first = req.clone();
-    first.keep_work_dir = true;
-    let output = run(first).await.unwrap();
-    assert_eq!(output.live.unwrap().end, LiveEnd::DurationReached);
-    std::fs::remove_file(&req.output).unwrap();
+    // 第一次运行两轨都满 2 秒（音频 seg1 取不到也计入）即结束
+    run_until_full(&req).await;
 
     server.put("audio/seg1.m4s", fixture("fmp4_a/audio/seg1.m4s"));
     server.status("video/init.mp4", StatusCode::FORBIDDEN);
