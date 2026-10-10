@@ -21,7 +21,7 @@ use crate::ident::Fingerprint;
 use crate::selection::SelectionKey;
 use crate::verify::id3_len;
 use crate::verify::{Standalone, standalone_format};
-use crate::{Error, Unsupported, WorkDirProblem};
+use crate::{Error, Unsupported, WorkDirProblem, workdir};
 
 const INDEX: &str = "index.m3u8";
 
@@ -40,7 +40,7 @@ fn extension(format: Standalone) -> &'static str {
     }
 }
 
-/// 目标目录能否写：不存在、没有内容（系统自动生成的元数据文件不算，见 [`SYSTEM_FILES`]），或 `overwrite` 且其中
+/// 目标目录能否写：不存在、没有内容（系统自动生成的元数据文件不算，见 [`workdir::is_system_file`]），或 `overwrite` 且其中
 /// 全是本库写出的文件。全是本库写出的文件而没有要求覆盖时报 [`Error::OutputExists`]；有别的文件或不是目录时报
 /// [`Error::OutputOccupied`]，覆盖也不替换。
 pub(super) fn check(dir: &Path, overwrite: bool) -> Result<(), Error> {
@@ -360,10 +360,6 @@ fn master_playlist(selection: &SelectionKey, bandwidth: Option<u64>) -> String {
     )
 }
 
-/// 系统自动生成的元数据文件（访达的 `.DS_Store`、Windows 资源管理器的 `Thumbs.db` 与 `desktop.ini`）：不含用户
-/// 的内容，判断目录是否为空、是否全是本库写出的文件时不算，替换时随目录一起删。
-const SYSTEM_FILES: [&str; 3] = [".DS_Store", "Thumbs.db", "desktop.ini"];
-
 /// 目录里除了系统自动生成的元数据文件之外没有别的。
 fn is_empty(dir: &Path) -> Result<bool, Error> {
     for entry in fs::read_dir(dir).map_err(io_error("读取", dir))? {
@@ -377,11 +373,7 @@ fn is_empty(dir: &Path) -> Result<bool, Error> {
 
 fn is_system_file(entry: &fs::DirEntry) -> Result<bool, Error> {
     let kind = entry.file_type().map_err(io_error("读取", &entry.path()))?;
-    Ok(kind.is_file()
-        && entry
-            .file_name()
-            .to_str()
-            .is_some_and(|n| SYSTEM_FILES.contains(&n)))
+    Ok(workdir::is_system_file(&entry.file_name(), kind))
 }
 
 /// 目录里是否全是本库写出的 HLS 文件（空目录也算，系统自动生成的元数据文件不算），即删掉它不会丢别人的文件。
