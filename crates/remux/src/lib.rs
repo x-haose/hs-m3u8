@@ -8,7 +8,7 @@
 //!   不检查编码；同一类流只能来自一条轨；后续组的流布局与编码参数必须与第一组一致。
 //! - 只接受 H.264、HEVC 视频与 AAC 音频，与 FFmpeg 构建启用的组件一致。
 //!
-//! 输出先写 `<输出>.part`，写完回读核对每路流的包数后改名；任一步失败都删除临时文件并返回错误。
+//! 输出先写 `<输出>.part`，写完回读核对每路流的包数、落盘后改名；任一步失败都删除临时文件并返回错误。
 //! 已存在的输出文件会被替换。错误信息已包含原因，不经 `source()` 重复给出。
 
 mod chain;
@@ -259,15 +259,24 @@ pub fn remux(
         return Err(Error::NonUtf8Path(output.to_path_buf()));
     }
     write_verified(streams, groups, &part)
-        .and_then(|report| {
-            std::fs::rename(&part, output).map_err(|cause| Error::Io {
-                action: "重命名",
-                path: part.clone(),
-                cause,
-            })?;
-            Ok(report)
-        })
+        .and_then(|report| commit(&part, output).map(|()| report))
         .map_err(|failure| discard(&part, failure))
+}
+
+/// 临时文件落盘后改名为输出：调用方随后可能删掉原始分片，断电时输出不能只剩改了名而内容没写下的文件。
+/// Windows 上落盘要求写权限，所以以可写方式打开。
+fn commit(part: &Path, output: &Path) -> Result<(), Error> {
+    let io = |action, cause| Error::Io {
+        action,
+        path: part.to_path_buf(),
+        cause,
+    };
+    std::fs::File::options()
+        .write(true)
+        .open(part)
+        .and_then(|file| file.sync_all())
+        .map_err(|cause| io("落盘", cause))?;
+    std::fs::rename(part, output).map_err(|cause| io("重命名", cause))
 }
 
 fn init() -> Result<(), Error> {
