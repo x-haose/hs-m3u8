@@ -10,6 +10,7 @@ mod path;
 mod record;
 mod report;
 mod request;
+mod runtime;
 
 use pyo3::prelude::*;
 

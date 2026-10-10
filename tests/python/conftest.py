@@ -1,5 +1,7 @@
 """端到端测试的公共部分：测试内起本地 HTTP 服务提供 HLS 样本（分片取自 tests/fixtures/media）。"""
 
+import selectors
+import socket
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,22 +17,50 @@ def fixture(name: str) -> bytes:
     return (MEDIA / name).read_bytes()
 
 
+# 停住的请求最多等多久，秒；只在测试出错、没有放行时才会等满
+HOLD_LIMIT = 30.0
+
+
 class Gate:
-    """让一个路径的请求停住：请求到达时 `arrived` 置位，`release` 之后才响应。"""
+    """让一个路径的请求停住，放行之后才响应。
+
+    请求到达时 `arrived` 置位；停住期间客户端断开连接（如任务被取消）时 `abandoned` 置位、不再响应。
+    """
 
     def __init__(self) -> None:
         """未到达、未放行。"""
         self.arrived = threading.Event()
-        self._released = threading.Event()
+        self.abandoned = threading.Event()
+        # 放行即往里写一个字节，之后一直可读：停住的与之后到达的请求都能用 select 同时等它与客户端的连接
+        self._released, self._release = socket.socketpair()
 
     def release(self) -> None:
-        """放行，让停住的请求继续。"""
-        self._released.set()
+        """放行，让停住的与之后到达的请求继续。"""
+        self._release.send(b"\0")
 
-    def hold(self) -> None:
-        """服务线程里调用：标记已到达，等到放行。"""
+    def hold(self, client: socket.socket) -> bool:
+        """服务线程里调用：标记已到达，等到放行时返回 True；`client` 先断开时置位 `abandoned`，返回 False。"""
         self.arrived.set()
-        self._released.wait()
+        with selectors.DefaultSelector() as selector:
+            selector.register(self._released, selectors.EVENT_READ)
+            selector.register(client, selectors.EVENT_READ)
+            while True:
+                ready = selector.select(HOLD_LIMIT)
+                if not ready:
+                    message = "停住的请求一直没有放行"
+                    raise TimeoutError(message)
+                if any(key.fileobj is self._released for key, _ in ready):
+                    return True
+                if client.recv(1, socket.MSG_PEEK) == b"":
+                    self.abandoned.set()
+                    return False
+                # 客户端又发来了数据（不会是这次请求的）：只等放行
+                selector.unregister(client)
+
+    def close(self) -> None:
+        """关闭放行用的一对套接字；服务停止后调用。"""
+        self._released.close()
+        self._release.close()
 
 
 class Server:
@@ -90,9 +120,11 @@ class Server:
         self._httpd.shutdown()
         self._httpd.server_close()
         self._thread.join()
+        for gate in gates:
+            gate.close()
 
-    def respond(self, path: str, headers: list[tuple[str, str]]) -> tuple[int, bytes]:
-        """记下这次请求，有闸门时先停住，再返回状态码与内容。
+    def respond(self, path: str, headers: list[tuple[str, str]], client: socket.socket) -> tuple[int, bytes] | None:
+        """记下这次请求，有闸门时先停住，再返回状态码与内容；停住期间客户端 `client` 断开时返回 None。
 
         设了状态码的返回它，放了内容的返回 200，都没有的返回 404。
         """
@@ -100,8 +132,8 @@ class Server:
             self._hits[path] = self._hits.get(path, 0) + 1
             self._headers[path] = headers
             gate = self._gates.get(path)
-        if gate is not None:
-            gate.hold()
+        if gate is not None and not gate.hold(client):
+            return None
         with self._lock:
             if path in self._statuses:
                 return self._statuses[path], b""
@@ -115,7 +147,11 @@ class Server:
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:
                 path = self.path.lstrip("/").split("?", 1)[0]
-                status, body = server.respond(path, list(self.headers.items()))
+                response = server.respond(path, list(self.headers.items()), self.connection)
+                if response is None:
+                    self.close_connection = True
+                    return
+                status, body = response
                 self.send_response(status)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()

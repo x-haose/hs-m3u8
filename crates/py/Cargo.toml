@@ -23,9 +23,9 @@ test = false
 [dependencies]
 hs-m3u8-core = { path = "../core" }
 pyo3.workspace = true
-pyo3-async-runtimes.workspace = true
 pyo3-stub-gen.workspace = true
-tokio = { workspace = true, features = ["rt", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+tokio-util = { workspace = true, features = ["rt"] }
 
 [lints]
 workspace = true

@@ -213,7 +213,8 @@ class Encryption:
 @typing.final
 class Engine:
     r"""
-    下载引擎：所有任务共用一个在途请求上限。异步方法在 asyncio 事件循环中调用；等待被取消时，所等的操作随之取消。
+    下载引擎：所有任务共用一个在途请求上限。异步方法返回协程，在 asyncio 事件循环里 await；协程被取消时，所等的操作
+    随之取消。只能在建立它的进程里使用，fork 出的子进程要另建。
     
     `max_requests`：所有任务合计同时在途的 key、分片与点播 init 段请求数，至少 1，默认为每个任务默认并发的四倍。
     播放列表与直播刷新时新出现的 init 段不占名额，以免直播刷新排在其他任务的大批下载之后。
@@ -222,7 +223,7 @@ class Engine:
         r"""
         `max_requests` 见类的说明；为 0 时抛 `InvalidInputError`。
         """
-    def probe(self, source: Source) -> collections.abc.Awaitable[Probe]:
+    async def probe(self, source: Source) -> Probe:
         r"""
         拉取来源并按偏好选轨，不下载分片、不碰任务目录；请求与回调同下载。用于开始下载前列出可选的清晰度与音轨、
         查看时长与是否直播。失败时抛 `HsM3u8Error` 的子类。
@@ -239,12 +240,13 @@ class Engine:
         参数错误立即抛出。目录里是点播的下载时抛 `WorkDirError`（`WorkDirProblem.NotLiveRecording`；点播用同样的请求
         再次运行即可续传）；目录不存在或没有已完成的分片时抛 `NothingRecordedError`。结果的 `LiveReport.end` 为 None。
         """
-    def discard(self, work_dir: builtins.str | os.PathLike[str], *, unsettled: Unsettled = ...) -> collections.abc.Awaitable[list[Leftover]]:
+    async def discard(self, work_dir: builtins.str | os.PathLike[str], *, unsettled: Unsettled = ...) -> builtins.list[Leftover]:
         r"""
         放弃任务：删除任务目录 `work_dir`（相对路径按当前目录补全），只删本库写的文件。先按其中的记录收拾写到一半的
         输出：删掉临时输出，挪开的旧输出按开始任务时的规则放回或删掉。返回留下的东西，记录已随任务目录删掉，要用户
         处理：原处是别的东西而没放回的旧输出各一项；收拾不了而按 `unsettled` 记下的；任务目录没删干净（里面有不是本库
-        写的文件，或删除出错）时一项 `LeftoverKind.WorkDir`。目录不存在时什么也不做。
+        写的文件，或删除出错）时一项 `LeftoverKind.WorkDir`。目录不存在时什么也不做。协程被取消时，已开始的收拾与删除
+        做完当前一步才停，再次放弃即可接着做。
         
         路径为空或不合要求时抛 `InvalidInputError`。任务目录正被任务使用时抛 `WorkDirError`
         （`WorkDirProblem.Locked`），不是本库的任务目录时为 `WorkDirProblem.NotEmpty`。记录是另一个格式版本写的
@@ -695,7 +697,7 @@ class InvalidInputError(RequestError):
 class Job:
     r"""
     运行中的任务（`Engine.start`、`Engine.merge_recorded` 返回）。不再被引用、也没有在等它时（被回收）取消任务；已开始
-    写出（`Stage.Writing`）的仍在后台写完。异步方法在 asyncio 事件循环中调用。
+    写出（`Stage.Writing`）的仍在后台写完。异步方法返回协程，在 asyncio 事件循环里 await。只能在建立它的进程里使用。
     """
     def progress(self) -> Progress:
         r"""
@@ -711,10 +713,10 @@ class Job:
         直播：停止刷新，把已拉到的播放列表处理完、已列出的分片下完后写出，`wait` 返回录到的部分；续录时会话还没定下就
         立即结束，不录新的分片。点播与只合并不受影响。
         """
-    def wait(self) -> collections.abc.Awaitable[Output]:
+    async def wait(self) -> Output:
         r"""
-        等任务结束，返回输出；失败时抛 `HsM3u8Error` 的子类。可多次等待，得到同一结果或同一异常；等待被取消时任务也
-        取消。
+        等任务结束，返回输出；失败时抛 `HsM3u8Error` 的子类，本库内部出错时抛 `pyo3_runtime.PanicException`。可多次
+        等待，得到同一结果或同一异常；等待的协程被取消时任务也取消。
         """
 
 @typing.final

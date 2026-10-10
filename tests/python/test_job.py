@@ -68,10 +68,7 @@ def run(request: JobRequest) -> Output:
 
 
 def discard(work_dir: Path) -> list[Leftover]:
-    async def main() -> list[Leftover]:
-        return await Engine().discard(work_dir)
-
-    return asyncio.run(main())
+    return asyncio.run(Engine().discard(work_dir))
 
 
 async def arrived(gate: Gate) -> None:
@@ -138,6 +135,43 @@ def test_cancelled_jobs_keep_their_segments_and_resume(server: Server, tmp_path:
     assert request.output.resolved_work_dir().is_dir()
     assert run(request).segments == 2
     assert server.hits("seg0.ts") == 1
+
+
+def test_cancelling_the_wait_cancels_the_job(server: Server, tmp_path: Path) -> None:
+    put_media(server, VOD)
+    gate = server.gate("seg1.ts")
+    request = one_at_a_time(server, Target.Mp4(tmp_path / "out.mp4"))
+
+    async def main() -> None:
+        job = Engine().start(request)
+        waiting = asyncio.create_task(job.wait())
+        await arrived(gate)
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        with pytest.raises(JobCancelledError):
+            await asyncio.wait_for(job.wait(), ARRIVAL)
+
+    asyncio.run(main())
+
+    assert gate.abandoned.wait(ARRIVAL)
+    assert request.output.resolved_work_dir().is_dir()
+
+
+def test_jobs_no_longer_referenced_are_cancelled(server: Server, tmp_path: Path) -> None:
+    put_media(server, VOD)
+    gate = server.gate("seg1.ts")
+    request = one_at_a_time(server, Target.Mp4(tmp_path / "out.mp4"))
+
+    async def main() -> None:
+        job = Engine().start(request)
+        await arrived(gate)
+        del job
+
+    asyncio.run(main())
+
+    assert gate.abandoned.wait(ARRIVAL)
+    assert not (tmp_path / "out.mp4").exists()
 
 
 def test_failed_segments_say_which_and_the_task_can_be_discarded(server: Server, tmp_path: Path) -> None:

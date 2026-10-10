@@ -129,7 +129,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 - 不可重试：其余 4xx、请求无法构造（含回调给出的不合法地址或请求头）、解密或校验失败、回调报错。
 - 点播任一分片最终失败：取消该任务其余请求，任务以 `Segment` 结束；已完成的分片保留，可以续传。直播的失败处理见 5.9。
 - 取消：每个任务一个 `CancellationToken`，按调用逐层传入每个请求与回调调用；下载队列持有其子令牌，只用来取消自己派出的下载。任务内的下载与刷新由 `JoinSet` 持有，结束前全部等回；回调与文件写入在阻塞线程池中执行，取消时等它们返回。`Engine::start` 返回的 `Job` 只用来等结果，取消、停止与读进度经可克隆的 `JobControl`，等结果期间也能调用；丢弃 `Job` 即取消；写出阶段（合并 MP4、复制 HLS）不响应取消，已开始写出的任务会在后台完成。
-- 运行时：`core` 不自建 tokio 运行时，使用调用方的（Tauri、`pyo3-async-runtimes` 都基于 tokio）。
+- 运行时：`core` 不自建 tokio 运行时，使用调用方的（Tauri 的；Python 绑定自建，见 7.1）。
 
 ### 5.4 HTTP
 
@@ -237,7 +237,8 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 - 类型存根（`python/hs_m3u8/_native/__init__.pyi`）由 pyo3-stub-gen 从这些 Rust 定义生成，说明取自 `///`：存根写的类型就是运行时实际的类型。默认值不是字面量、存根生成写不出的几个构造函数（`Engine`、`Timeouts`、`RetryPolicy`、`LiveOptions`、`JobRequest`），签名以存根语法写在 `crates/py` 里对应类型的旁边，由 stubtest 核对参数与默认值的有无。
 - `python/hs_m3u8`：`__init__.py`（再导出全部公开名字）同样由 pyo3-stub-gen 生成，带 `py.typed`。
 - 只提供异步接口，脚本用 `asyncio.run(...)`：同步版本只是它的包装；核心的写法保证进程在任何时刻退出都不留半个输出、可以续传，Ctrl+C 不需要特殊处理。
-- PyO3 0.29.3 + `pyo3-async-runtimes` 0.29.0（tokio，异步方法返回 asyncio 的 Future）+ maturin 1.15.0 + pyo3-stub-gen 0.23.1；`abi3-py312` wheel（最低 Python 3.12，见 ADR-0001），FFmpeg 静态链接进扩展模块。
+- PyO3 0.29.3（`experimental-async`：异步方法返回 Python 协程，`asyncio.run`、`create_task` 都能直接用）+ maturin 1.15.0 + pyo3-stub-gen 0.23.1；`abi3-py312` wheel（最低 Python 3.12，见 ADR-0001），FFmpeg 静态链接进扩展模块。
+- 运行时：每个进程一个 tokio 运行时，第一次用到时建立；fork 出的子进程没有父进程运行时的工作线程，第一次用到时另建。父进程建立的 `Engine`、`Job` 在子进程里抛 `RuntimeError`：请求名额可能被父进程的请求永远占着，等结果的后台任务不在子进程里。后台任务不碰解释器，任务的错误在第一次等待时才翻译为异常，解释器退出时任务还在跑也无妨。
 - 回调在 `core` 的阻塞线程池中取得 GIL 后执行，不占用 tokio 工作线程；只调用子类覆盖了的方法，没覆盖的不取 GIL。
 
 ### 7.2 约定
@@ -248,7 +249,7 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 - 序列：返回 `list[T]`。请求头入参接受 `Mapping[str, str]` 或 `(名, 值)` 的序列（同名请求头可以有多个），保存为 `list[tuple[str, str]]`。
 - 默认值取 `core` 的（`Default` 实现与常量），绑定层不另写数字；可否重试、区间的分片数等也由 `core` 算好、作为字段给出，绑定层不另写规则。
 - 说明：中文，每个类、字段、方法、参数都写。请求头的值、key、代理地址里的口令不进 `__repr__`。
-- 异步方法在 asyncio 事件循环中调用；等待被取消时，所等的操作随之取消（同 `asyncio.Task`）。
+- 异步方法返回协程，在 asyncio 事件循环里 await；协程被取消或丢弃时，所等的操作随之取消。本库内部出错（缺陷）时抛 `pyo3_runtime.PanicException`。
 
 ### 7.3 接口
 
@@ -258,17 +259,17 @@ StrPath = str | os.PathLike[str]
 
 class Engine:
     def __init__(self, *, max_requests: int = ...) -> None: ...  # 所有任务合计的在途请求数，默认见 core
-    def probe(self, source: Source) -> Awaitable[Probe]: ...
+    async def probe(self, source: Source) -> Probe: ...
     def start(self, request: JobRequest) -> Job: ...  # 参数错误立即抛出
     def merge_recorded(self, output: OutputOptions) -> Job: ...
-    def discard(self, work_dir: StrPath, *, unsettled: Unsettled = Unsettled.Fail()) -> Awaitable[list[Leftover]]: ...
+    async def discard(self, work_dir: StrPath, *, unsettled: Unsettled = Unsettled.Fail()) -> list[Leftover]: ...
 
 
 class Job:  # 不再被引用、也没有在等它时取消任务（已开始写出的在后台写完）
     def progress(self) -> Progress: ...  # 当前的进度快照；要显示进度就定时取
     def cancel(self) -> None: ...
     def stop(self) -> None: ...  # 直播：停止刷新，已列出的下完后写出
-    def wait(self) -> Awaitable[Output]: ...  # 可多次等待，得到同一结果或同一异常
+    async def wait(self) -> Output: ...  # 可多次等待，得到同一结果或同一异常
 ```
 
 请求：
@@ -389,4 +390,4 @@ HsM3u8Error                       retryable: bool、retry_after: int | None、se
 
 ## 依据的版本（2026-10-08 查 crates.io）
 
-tokio 1.53.2、tokio-util 0.7.19、rustls 0.23.45 与 tokio-rustls 0.26.6（2026-10-10，取 Cargo.lock 中 reqwest 已用的版本；后者仅测试用）、reqwest 0.13.5、axum 0.8.9（2026-10-09 查，仅测试用）、aes 0.9.3、cbc 0.2.1、url 2.5.8、thiserror 2.0.21、serde 1.0.229、serde_json 1.0.151、sha2 0.11.0、rusqlite 0.40.2、pyo3 0.29.3、pyo3-async-runtimes 0.29.0、maturin 1.15.0、ffmpeg-next 9.0.0、tauri 2.12.1、cargo-deny 0.20.2、cargo-llvm-cov 0.9.1（2026-10-09 查）、libc 0.2.190（2026-10-10 查，仅测试用）、pyo3-stub-gen 0.23.1，以及 Python 侧的开发工具 mypy 2.4.0、basedpyright 1.40.2、ruff 0.17.0、pytest 9.1.1（2026-10-11 查）。
+tokio 1.53.2、tokio-util 0.7.19、rustls 0.23.45 与 tokio-rustls 0.26.6（2026-10-10，取 Cargo.lock 中 reqwest 已用的版本；后者仅测试用）、reqwest 0.13.5、axum 0.8.9（2026-10-09 查，仅测试用）、aes 0.9.3、cbc 0.2.1、url 2.5.8、thiserror 2.0.21、serde 1.0.229、serde_json 1.0.151、sha2 0.11.0、rusqlite 0.40.2、pyo3 0.29.3、maturin 1.15.0、ffmpeg-next 9.0.0、tauri 2.12.1、cargo-deny 0.20.2、cargo-llvm-cov 0.9.1（2026-10-09 查）、libc 0.2.190（2026-10-10 查，仅测试用）、pyo3-stub-gen 0.23.1，以及 Python 侧的开发工具 mypy 2.4.0、basedpyright 1.40.2、ruff 0.17.0、pytest 9.1.1（2026-10-11 查）。

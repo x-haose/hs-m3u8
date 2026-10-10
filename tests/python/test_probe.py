@@ -59,11 +59,7 @@ NO_RETRY = HttpOptions(retry=RetryPolicy(attempts=1))
 
 def probe(source: Source) -> Probe:
     """在新的事件循环里探测 `source`。"""
-
-    async def run() -> Probe:
-        return await Engine().probe(source)
-
-    return asyncio.run(run())
+    return asyncio.run(Engine().probe(source))
 
 
 def put_master(server: Server) -> None:
