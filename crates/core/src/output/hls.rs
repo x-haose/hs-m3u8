@@ -13,14 +13,15 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use super::{GroupTrack, io_error};
 use crate::ident::Fingerprint;
 use crate::selection::SelectionKey;
+use crate::verify::id3_len;
 use crate::verify::{Standalone, standalone_format};
-use crate::{Error, WorkDirProblem};
+use crate::{Error, Unsupported, WorkDirProblem};
 
 const INDEX: &str = "index.m3u8";
 
@@ -39,19 +40,36 @@ fn extension(format: Standalone) -> &'static str {
     }
 }
 
-/// 目标目录能否写：不存在、为空，或 `overwrite` 且其中全是本库写出的文件。
+/// 目标目录能否写：不存在、没有内容（系统自动生成的元数据文件不算，见 [`SYSTEM_FILES`]），或 `overwrite` 且其中
+/// 全是本库写出的文件。全是本库写出的文件而没有要求覆盖时报 [`Error::OutputExists`]；有别的文件或不是目录时报
+/// [`Error::OutputOccupied`]，覆盖也不替换。
 pub(super) fn check(dir: &Path, overwrite: bool) -> Result<(), Error> {
     let meta = match fs::symlink_metadata(dir) {
         Ok(meta) => meta,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(cause) => return Err(io_error("检查", dir)(cause)),
     };
-    let replaceable = meta.is_dir() && (is_empty(dir)? || overwrite && written_by_us(dir)?);
-    if replaceable {
+    if !meta.is_dir() || !written_by_us(dir)? {
+        return Err(Error::OutputOccupied(dir.to_path_buf()));
+    }
+    if overwrite || is_empty(dir)? {
         Ok(())
     } else {
         Err(Error::OutputExists(dir.to_path_buf()))
     }
+}
+
+/// 本地 HLS 能否表示这些组：每条轨要么各组都有 init 段，要么都没有。EXT-X-MAP 一直作用到下一个 EXT-X-MAP，
+/// 没有 init 段的组接在有的组后面时，播放器会把前面的 init 段用在它上面。
+pub(super) fn check_layout(groups: &[Vec<GroupTrack>]) -> Result<(), Error> {
+    let tracks = groups.first().map_or(0, Vec::len);
+    for track in 0..tracks {
+        let fmp4 = groups[0][track].init.is_some();
+        if groups.iter().any(|g| g[track].init.is_some() != fmp4) {
+            return Err(Error::Unsupported(Unsupported::HlsMixedInit { track }));
+        }
+    }
+    Ok(())
 }
 
 /// 在准备目录 `stage` 里备齐 HLS 输出；`work_dir` 为分片所在的任务目录，用于报告目录内容无法识别。上次中断
@@ -78,13 +96,19 @@ pub(super) fn stage(
 }
 
 /// 备齐的 `stage` 改名为 `target`：`target` 已存在时按 [`check`] 替换。备齐期间 `target` 可能被别人占用，
-/// 替换前再查一次；改名时 `target` 又被别人写进了内容则改名失败，不会混在一起。
+/// 替换前再查一次；查过之后别人又抢先写好了 `target`（几个任务输出到同一处）时改名失败，报
+/// [`Error::OutputExists`]，不会混在一起。
 pub(super) fn replace(stage: &Path, target: &Path, overwrite: bool) -> Result<(), Error> {
     check(target, overwrite)?;
-    match fs::remove_dir_all(target) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(io_error("删除", target)(e)),
-        _ => fs::rename(stage, target).map_err(io_error("重命名", stage)),
+    if let Err(e) = fs::remove_dir_all(target)
+        && e.kind() != io::ErrorKind::NotFound
+    {
+        return Err(io_error("删除", target)(e));
     }
+    fs::rename(stage, target).map_err(|e| match fs::symlink_metadata(target) {
+        Ok(_) => Error::OutputExists(target.to_path_buf()),
+        Err(_) => io_error("重命名", stage)(e),
+    })
 }
 
 /// 上次中断留下的准备目录：全是本库写出的文件才删，否则报已存在。
@@ -95,7 +119,7 @@ fn remove_stale_stage(stage: &Path) -> Result<(), Error> {
         Ok(meta) if meta.is_dir() && written_by_us(stage)? => {
             fs::remove_dir_all(stage).map_err(io_error("删除", stage))
         }
-        Ok(_) => Err(Error::OutputExists(stage.to_path_buf())),
+        Ok(_) => Err(Error::OutputOccupied(stage.to_path_buf())),
     }
 }
 
@@ -107,37 +131,56 @@ fn fill(
     selection: Option<&SelectionKey>,
 ) -> Result<(), Error> {
     let track_count = groups.first().map_or(0, Vec::len);
-    let mut playlists = Vec::with_capacity(track_count);
+    let mut tracks = Vec::with_capacity(track_count);
     for track in 0..track_count {
         let dir = stage.join(track.to_string());
         fs::create_dir(&dir).map_err(io_error("创建", &dir))?;
-        let tracks = groups.iter().map(|g| &g[track]);
-        playlists.push(fill_track(&dir, work_dir, tracks)?);
+        tracks.push(fill_track(
+            &dir,
+            work_dir,
+            groups.iter().map(|g| &g[track]),
+        )?);
     }
-    match (track_count, selection) {
-        (1, _) => write_file(&stage.join(INDEX), &media_playlist(&playlists[0], "0/")),
-        (2, Some(selection)) => {
-            for (track, groups) in playlists.iter().enumerate() {
+    match (&tracks[..], selection) {
+        ([only], _) => write_file(&stage.join(INDEX), &media_playlist(&only.groups, "0/")),
+        ([video, audio], Some(selection)) => {
+            for (track, written) in tracks.iter().enumerate() {
                 let path = stage.join(track.to_string()).join(INDEX);
-                write_file(&path, &media_playlist(groups, ""))?;
+                write_file(&path, &media_playlist(&written.groups, ""))?;
             }
-            write_file(&stage.join(INDEX), &master_playlist(selection))
+            let bandwidth = video
+                .peak_bps
+                .zip(audio.peak_bps)
+                .map(|(v, a)| v.saturating_add(a));
+            write_file(&stage.join(INDEX), &master_playlist(selection, bandwidth))
         }
-        (count, selection) => panic!(
-            "轨道只有所选变体与独立音频两种，后者只来自主播放列表：{count} 条，有选轨 {}",
+        (tracks, selection) => panic!(
+            "轨道只有所选变体与独立音频两种，后者只来自主播放列表：{} 条，有选轨 {}",
+            tracks.len(),
             selection.is_some()
         ),
     }
 }
 
-/// 放好一条轨各组的分片与 init 段，返回这条轨各组在播放列表中的内容（地址相对于轨道目录）。
+/// 一条轨放进 HLS 目录的内容。
+struct TrackFiles {
+    /// 各组在播放列表中的内容（地址相对于轨道目录）
+    groups: Vec<PlaylistGroup>,
+    /// 分片的峰值码率（字节数 × 8 ÷ 声明时长，向上取整），bit/s；没有声明时长大于 0 的分片时为 None
+    peak_bps: Option<u64>,
+}
+
+/// 放好一条轨各组的分片与 init 段。
 fn fill_track<'a>(
     dir: &Path,
     work_dir: &Path,
     groups: impl Iterator<Item = &'a GroupTrack>,
-) -> Result<Vec<PlaylistGroup>, Error> {
+) -> Result<TrackFiles, Error> {
     let mut placed_inits = HashSet::new();
-    let mut playlist = Vec::new();
+    let mut written = TrackFiles {
+        groups: Vec::new(),
+        peak_bps: None,
+    };
     let mut index = 0usize;
     for group in groups {
         let init = match &group.init {
@@ -163,38 +206,57 @@ fn fill_track<'a>(
         let mut segments = Vec::with_capacity(group.segments.len());
         for segment in &group.segments {
             let name = format!("{index}.{ext}");
-            place(&segment.path, &dir.join(&name))?;
+            let len = place(&segment.path, &dir.join(&name))?;
+            if let Some(bps) = bits_per_second(len, segment.duration_us) {
+                written.peak_bps = Some(written.peak_bps.map_or(bps, |peak| peak.max(bps)));
+            }
             segments.push((name, segment.duration_us));
             index += 1;
         }
-        playlist.push(PlaylistGroup { init, segments });
+        written.groups.push(PlaylistGroup { init, segments });
     }
-    Ok(playlist)
+    Ok(written)
 }
 
-/// 识别时读取分片开头的字节数。
-const SNIFF_LEN: u64 = 64 * 1024;
+/// `len` 字节、声明时长 `duration_us` 微秒的分片的码率，bit/s，向上取整；时长为 0 时为 None。
+fn bits_per_second(len: u64, duration_us: u64) -> Option<u64> {
+    let bits = u128::from(len) * 8 * 1_000_000;
+    let duration = u128::from(duration_us);
+    (duration > 0).then(|| u64::try_from(bits.div_ceil(duration)).unwrap_or(u64::MAX))
+}
 
-/// 没有 init 段的分片的格式。
-///
-/// 简化：只看开头 64 KiB；打包音频前的 ID3 标签更长（如带封面图）时识别不出、报目录内容无法识别，
-/// 遇到时改为按标签长度跳读。
+/// 识别格式时每次读取的字节数：够判断 TS 的前两个包（376 字节）与 ID3 标签头。
+const SNIFF_LEN: u64 = 1024;
+
+/// 没有 init 段的分片的格式。打包音频前的 ID3 标签按长度跳过，不整个读进来（带封面图时可以很大）。
 fn sniff(path: &Path, work_dir: &Path) -> Result<Standalone, Error> {
-    let mut head = Vec::new();
-    File::open(path)
-        .and_then(|file| file.take(SNIFF_LEN).read_to_end(&mut head))
-        .map_err(io_error("读取", path))?;
-    standalone_format(&head).ok_or_else(|| Error::WorkDir {
-        path: work_dir.to_path_buf(),
-        problem: WorkDirProblem::Corrupt(format!("分片内容无法识别：{}", path.display())),
-    })
+    let mut file = File::open(path).map_err(io_error("读取", path))?;
+    let mut offset = 0u64;
+    loop {
+        let mut head = Vec::new();
+        file.seek(SeekFrom::Start(offset))
+            .and_then(|_| (&mut file).take(SNIFF_LEN).read_to_end(&mut head))
+            .map_err(io_error("读取", path))?;
+        match id3_len(&head) {
+            Some(len) => offset += len as u64,
+            None => {
+                return standalone_format(&head).ok_or_else(|| Error::WorkDir {
+                    path: work_dir.to_path_buf(),
+                    problem: WorkDirProblem::Corrupt(format!(
+                        "分片内容无法识别：{}",
+                        path.display()
+                    )),
+                });
+            }
+        }
+    }
 }
 
-/// 把 `src` 放到新文件 `dst`：能硬链接就硬链接，不占额外空间；做不了时（跨文件系统、文件系统不支持）复制并落盘。
-/// `dst` 已存在时报错，不写穿已有的文件：它可能是别处文件的硬链接。
-fn place(src: &Path, dst: &Path) -> Result<(), Error> {
+/// 把 `src` 放到新文件 `dst`，返回字节数：能硬链接就硬链接，不占额外空间；做不了时（跨文件系统、文件系统不支持）
+/// 复制并落盘。`dst` 已存在时报错，不写穿已有的文件：它可能是别处文件的硬链接。
+fn place(src: &Path, dst: &Path) -> Result<u64, Error> {
     match fs::hard_link(src, dst) {
-        Ok(()) => return Ok(()),
+        Ok(()) => return Ok(fs::metadata(dst).map_err(io_error("读取", dst))?.len()),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
             return Err(io_error("链接", dst)(e));
         }
@@ -205,10 +267,11 @@ fn place(src: &Path, dst: &Path) -> Result<(), Error> {
         .create_new(true)
         .open(dst)
         .map_err(io_error("创建", dst))?;
-    File::open(src)
+    let len = File::open(src)
         .and_then(|mut from| io::copy(&mut from, &mut to))
         .map_err(io_error("复制", src))?;
-    to.sync_all().map_err(io_error("落盘", dst))
+    to.sync_all().map_err(io_error("落盘", dst))?;
+    Ok(len)
 }
 
 fn write_file(path: &Path, text: &str) -> Result<(), Error> {
@@ -255,10 +318,11 @@ fn media_playlist(groups: &[PlaylistGroup], prefix: &str) -> String {
     text + "#EXT-X-ENDLIST\n"
 }
 
-/// 视频与独立音频分离时的主播放列表：第 0 条轨为变体，第 1 条为音频 rendition。变体的带宽、分辨率与编码照抄
-/// 来源（来源没写的也不写）；音频组固定为 `audio`。名称与语言照抄来源，带有引号或换行（带引号的字符串里不允许）
+/// 视频与独立音频分离时的主播放列表：第 0 条轨为变体，第 1 条为音频 rendition。BANDWIDTH 为 `bandwidth`（两条轨
+/// 分片峰值码率之和，是 RFC 8216 4.3.4.2 要求的上限；算不出时不写），分辨率与编码照抄来源（来源没写的也不写）；
+/// 音频组固定为 `audio`。名称与语言照抄来源，带有引号或换行（带引号的字符串里不允许）
 /// 时不用：没有可用的名称时名称为 `audio`，语言不写。
-fn master_playlist(selection: &SelectionKey) -> String {
+fn master_playlist(selection: &SelectionKey, bandwidth: Option<u64>) -> String {
     let audio = selection
         .audio
         .as_ref()
@@ -279,7 +343,7 @@ fn master_playlist(selection: &SelectionKey) -> String {
 
     let variant = &selection.variant.attributes;
     let mut attributes = Vec::new();
-    if let Some(bandwidth) = variant.bandwidth {
+    if let Some(bandwidth) = bandwidth {
         attributes.push(format!("BANDWIDTH={bandwidth}"));
     }
     if let Some(r) = variant.resolution {
@@ -296,15 +360,32 @@ fn master_playlist(selection: &SelectionKey) -> String {
     )
 }
 
+/// 系统自动生成的元数据文件（访达的 `.DS_Store`、Windows 资源管理器的 `Thumbs.db` 与 `desktop.ini`）：不含用户
+/// 的内容，判断目录是否为空、是否全是本库写出的文件时不算，替换时随目录一起删。
+const SYSTEM_FILES: [&str; 3] = [".DS_Store", "Thumbs.db", "desktop.ini"];
+
+/// 目录里除了系统自动生成的元数据文件之外没有别的。
 fn is_empty(dir: &Path) -> Result<bool, Error> {
-    Ok(fs::read_dir(dir)
-        .map_err(io_error("读取", dir))?
-        .next()
-        .is_none())
+    for entry in fs::read_dir(dir).map_err(io_error("读取", dir))? {
+        let entry = entry.map_err(io_error("读取", dir))?;
+        if !is_system_file(&entry)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
-/// 目录里是否全是本库写出的 HLS 文件（空目录也算），即删掉它不会丢别人的文件。不跟随符号链接：
-/// 符号链接不是本库写出的。
+fn is_system_file(entry: &fs::DirEntry) -> Result<bool, Error> {
+    let kind = entry.file_type().map_err(io_error("读取", &entry.path()))?;
+    Ok(kind.is_file()
+        && entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| SYSTEM_FILES.contains(&n)))
+}
+
+/// 目录里是否全是本库写出的 HLS 文件（空目录也算，系统自动生成的元数据文件不算），即删掉它不会丢别人的文件。
+/// 不跟随符号链接：符号链接不是本库写出的。
 fn written_by_us(dir: &Path) -> Result<bool, Error> {
     for entry in fs::read_dir(dir).map_err(io_error("读取", dir))? {
         let entry = entry.map_err(io_error("读取", dir))?;
@@ -313,7 +394,7 @@ fn written_by_us(dir: &Path) -> Result<bool, Error> {
         let ours = match name.to_str() {
             Some(INDEX) => kind.is_file(),
             Some(name) if is_number(name) && kind.is_dir() => track_written_by_us(&entry.path())?,
-            _ => false,
+            _ => is_system_file(&entry)?,
         };
         if !ours {
             return Ok(false);
@@ -327,7 +408,8 @@ fn track_written_by_us(dir: &Path) -> Result<bool, Error> {
         let entry = entry.map_err(io_error("读取", dir))?;
         let kind = entry.file_type().map_err(io_error("读取", &entry.path()))?;
         let name = entry.file_name();
-        if !kind.is_file() || !name.to_str().is_some_and(is_track_file_name) {
+        let ours = kind.is_file() && name.to_str().is_some_and(is_track_file_name);
+        if !ours && !is_system_file(&entry)? {
             return Ok(false);
         }
     }
@@ -445,12 +527,13 @@ mod tests {
     #[test]
     fn master_playlist_round_trips_through_the_parser() {
         let key = selection(Some("中文"), Some("zh"), &["avc1.64001f", "mp4a.40.2"]);
-        let Ok(Playlist::Master(master)) = parse(&master_playlist(&key), &url()) else {
+        let Ok(Playlist::Master(master)) = parse(&master_playlist(&key, Some(2_500_000)), &url())
+        else {
             panic!("应为主播放列表");
         };
         let variant = &master.variants[0];
         assert_eq!(variant.uri.path(), "/out/0/index.m3u8");
-        assert_eq!(variant.bandwidth, Some(2_000_000));
+        assert_eq!(variant.bandwidth, Some(2_500_000));
         assert_eq!(variant.codecs, ["avc1.64001f", "mp4a.40.2"]);
         assert_eq!(variant.audio.as_deref(), Some("audio"));
         let audio = &master.renditions[0];
@@ -467,7 +550,7 @@ mod tests {
 
         // 带引号的名称与编码写不进带引号的字符串：名称改用语言，编码不写
         let odd = selection(Some("a\"b"), Some("en"), &["avc1\"x"]);
-        let Ok(Playlist::Master(master)) = parse(&master_playlist(&odd), &url()) else {
+        let Ok(Playlist::Master(master)) = parse(&master_playlist(&odd, None), &url()) else {
             panic!("应为主播放列表");
         };
         assert_eq!(master.renditions[0].name.as_deref(), Some("en"));

@@ -45,12 +45,15 @@ pub(crate) struct GroupSegment {
     pub duration_us: u64,
 }
 
-/// 输出能否写：MP4 不存在或允许覆盖；HLS 目录不存在、为空，或允许覆盖且其中全是本库写出的文件。
+/// 输出能否写：MP4 不存在，或是文件且允许覆盖；HLS 目录见 [`hls::check`]。
 pub(crate) fn check_targets(options: &OutputOptions) -> Result<(), Error> {
     if let Some(mp4) = options.target.mp4() {
-        let exists = mp4.try_exists().map_err(io_error("检查", mp4))?;
-        if exists && !options.overwrite {
-            return Err(Error::OutputExists(mp4.to_path_buf()));
+        match fs::symlink_metadata(mp4) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(cause) => return Err(io_error("检查", mp4)(cause)),
+            Ok(meta) if meta.is_dir() => return Err(Error::OutputOccupied(mp4.to_path_buf())),
+            Ok(_) if !options.overwrite => return Err(Error::OutputExists(mp4.to_path_buf())),
+            Ok(_) => {}
         }
     }
     if let Some(dir) = options.target.hls() {
@@ -125,6 +128,9 @@ fn write_files(
     options: &OutputOptions,
 ) -> Result<Option<Mp4Output>, Error> {
     check_targets(options)?;
+    if options.target.hls().is_some() {
+        hls::check_layout(groups)?;
+    }
     let mp4 = options
         .target
         .mp4()
