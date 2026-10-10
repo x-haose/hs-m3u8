@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use aes::cipher::block_padding::Pkcs7;
 use aes::cipher::{BlockModeEncrypt, KeyIvInit};
+use axum::http::StatusCode;
 use hs_m3u8_core::{
-    Error, HookError, Hooks, HttpError, Integrity, Purpose, RequestParts, Stage, Unsupported, Url,
-    WorkDirProblem,
+    Error, HookError, Hooks, HttpError, Integrity, KeyOverride, Purpose, RequestParts, Stage,
+    Unsupported, Url, WorkDirProblem,
 };
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
@@ -487,6 +488,32 @@ async fn wrong_key_fails_integrity() {
         .map(|entries| entries.count())
         .unwrap_or(0);
     assert_eq!(written, 0, "校验失败的分片不应写盘");
+}
+
+/// 自定义 key：分片用它与给定的 IV 解密；播放列表里的 key 地址（这里 404）不请求，分片自己的 IV
+/// （由媒体序号推出）不用。
+#[tokio::test(flavor = "multi_thread")]
+async fn key_override_replaces_the_playlist_key_and_iv() {
+    let dir = test_dir("key_override");
+    let server = Server::start().await;
+    let (key, iv) = ([0x3C; 16], [0x7E; 16]);
+    for name in TS_A {
+        server.put(name, encrypt(&fixture(&format!("ts_a/{name}")), &key, &iv));
+    }
+    server.status("key", StatusCode::NOT_FOUND);
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-KEY:METHOD=AES-128,URI=\"key\"\n\
+         #EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n#EXT-X-ENDLIST\n",
+    );
+
+    let mut req = request(server.url("index.m3u8"), &dir);
+    req.key = Some(KeyOverride { key, iv: Some(iv) });
+    let output = run(req).await.unwrap();
+
+    let want = expected_ts_a(&dir);
+    assert_output(&output, &want);
+    assert_eq!(server.hits("key"), 0);
 }
 
 /// 站点适配：改写播放列表、给每个请求签名、解开变换过的 key、去掉分片前的伪装字节。
