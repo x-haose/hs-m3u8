@@ -1,10 +1,10 @@
 //! 录制中的一条轨：刷新的节奏、拉到还没处理的播放列表、停滞的判定，以及会话定下后的窗口。
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::ops::ControlFlow;
 use std::time::Duration;
 
-use hs_m3u8_hls::MediaPlaylist;
+use hs_m3u8_hls::{MediaPlaylist, Segment};
 use tokio::time::Instant;
 use url::Url;
 
@@ -261,24 +261,19 @@ impl LiveTrack {
         self.schedule(changed, playlist.ended, started, now);
     }
 
-    /// 暂存一份拉到的播放列表，同时丢掉用不着的旧暂存，使暂存的量不随等待的时长增长：
-    /// - 列出的分片新的这份都列着（同一序号、同一身份）的，丢掉不损失任何分片；
-    /// - 最早的一份里只有它列着的分片，按 RFC 8216 6.2.2 服务器从移除起只需再保留一个分片加整份播放列表的时长，
-    ///   过了这个时长的丢掉，处理时这些分片如实记为滑出窗口。
-    pub(super) fn hold(&mut self, fetched: Fetched, now: Instant) {
-        while self
-            .pending
-            .back()
-            .is_some_and(|last| contains(&fetched.playlist, &last.playlist))
+    /// 暂存一份拉到的播放列表。与上一份暂存的接得上（见 [`joined`]）时合成一份：按顺序处理两份与处理合成的这份
+    /// 结果相同，暂存的量只随新列出的分片增长，什么也不丢；接不上的分开暂存，交给窗口比对。
+    pub(super) fn hold(&mut self, fetched: Fetched) {
+        if let Some(last) = self.pending.back_mut()
+            && let Some(playlist) = joined(&last.playlist, &fetched.playlist)
         {
-            self.pending.pop_back();
+            *last = Fetched {
+                playlist,
+                started: fetched.started,
+            };
+            return;
         }
         self.pending.push_back(fetched);
-        while let [first, next, ..] = self.pending.make_contiguous()
-            && unavailable_since(first, next).is_some_and(|at| at <= now)
-        {
-            self.pending.pop_front();
-        }
     }
 
     /// 取出最早暂存的播放列表，开始准备它；会话还没定下、已有一份在准备、或没有暂存的时为 None。
@@ -443,34 +438,36 @@ impl LiveTrack {
     }
 }
 
-/// `newer` 列着 `older` 的全部分片：同一序号、同一身份。
-fn contains(newer: &MediaPlaylist, older: &MediaPlaylist) -> bool {
-    older.segments.iter().all(|old| {
-        newer.segments.iter().any(|new| {
-            new.sequence == old.sequence
-                && Fingerprint::of_segment(&new.uri, new.byte_range)
-                    == Fingerprint::of_segment(&old.uri, old.byte_range)
-        })
+/// `older` 与之后拉到的 `newer` 合成的一份：两者的分片按序号取并集，同一序号取 `newer` 的（地址里的令牌最新），
+/// 是否结束等取 `newer` 的。两者都有分片、`newer` 的第一个序号不早于 `older` 的第一个且不晚于它最后一个的下一个
+/// （并集没有空档）、重叠的序号身份与不连续段序号都一致时才接得上；否则为 None：序号回退（编码器重启或 CDN 的
+/// 旧缓存）、同一序号换了分片、不连续段重新编号、中间有没列出过的序号，都要窗口逐份比对。
+fn joined(older: &MediaPlaylist, newer: &MediaPlaylist) -> Option<MediaPlaylist> {
+    let older_first = older.segments.first()?.sequence;
+    let older_last = older.segments.last()?.sequence;
+    let newer_first = newer.segments.first()?.sequence;
+    if newer_first < older_first || newer_first > older_last.checked_add(1)? {
+        return None;
+    }
+    let mut segments: BTreeMap<u64, &Segment> =
+        older.segments.iter().map(|s| (s.sequence, s)).collect();
+    for new in &newer.segments {
+        if let Some(old) = segments.get(&new.sequence)
+            && (identity(old) != identity(new) || old.discontinuity != new.discontinuity)
+        {
+            return None;
+        }
+        segments.insert(new.sequence, new);
+    }
+    Some(MediaPlaylist {
+        media_sequence: older_first,
+        segments: segments.into_values().cloned().collect(),
+        ..newer.clone()
     })
 }
 
-/// 只有 `first` 列着的分片按 RFC 8216 6.2.2 服务器可以不再提供的时刻：它们最晚在拉 `next` 时已移除，之后
-/// 至多再保留一个分片加整份 `first` 的时长。时刻大到无法表示时为 None。
-fn unavailable_since(first: &Fetched, next: &Fetched) -> Option<Instant> {
-    let total_us = first
-        .playlist
-        .segments
-        .iter()
-        .fold(0u64, |sum, s| sum.saturating_add(s.duration_us));
-    let longest_us = first
-        .playlist
-        .segments
-        .iter()
-        .map(|s| s.duration_us)
-        .max()
-        .unwrap_or(0);
-    next.started
-        .checked_add(Duration::from_micros(total_us.saturating_add(longest_us)))
+fn identity(segment: &Segment) -> Fingerprint {
+    Fingerprint::of_segment(&segment.uri, segment.byte_range)
 }
 
 /// 刷新间隔的基准；播放列表既没有正的 TARGETDURATION 也没有分片时为 None。
@@ -502,41 +499,82 @@ mod tests {
         }
     }
 
-    #[test]
-    fn held_playlists_keep_only_what_may_still_be_needed() {
-        let t0 = Instant::now();
-        let at = |secs: u64| t0 + Duration::from_secs(secs);
-        let fetched = |first, names: &[&str], secs| Fetched {
-            playlist: playlist(first, names),
-            started: at(secs),
-        };
+    /// 暂存几份播放列表后，各份暂存的分片名。
+    fn held(playlists: &[MediaPlaylist]) -> Vec<Vec<String>> {
         let url = Url::parse("https://cdn.example/live.m3u8").unwrap();
-        let new_track = || LiveTrack::new(url.clone(), &playlist(0, &["s0.ts"]), 0, t0).unwrap();
+        let now = Instant::now();
+        let mut track = LiveTrack::new(url, &playlists[0], 0, now).unwrap();
+        for playlist in playlists {
+            track.hold(Fetched {
+                playlist: playlist.clone(),
+                started: now,
+            });
+        }
+        track
+            .pending
+            .iter()
+            .map(|f| {
+                f.playlist
+                    .segments
+                    .iter()
+                    .map(|s| {
+                        let name = s.uri.as_str().trim_start_matches("https://cdn.example/");
+                        format!("{}:{name}", s.sequence)
+                    })
+                    .collect()
+            })
+            .collect()
+    }
 
-        // 窗口只增长（如 EVENT）：新的包含旧的，只留最新的一份
-        let mut growing = new_track();
-        growing.hold(fetched(0, &["s0.ts"], 0), at(0));
-        growing.hold(fetched(0, &["s0.ts", "s1.ts"], 1), at(1));
-        growing.hold(fetched(0, &["s0.ts", "s1.ts", "s2.ts"], 2), at(2));
-        assert_eq!(growing.pending.len(), 1);
+    #[test]
+    fn held_playlists_that_join_are_merged_without_losing_segments() {
+        let names = |list: &[&str]| -> Vec<String> { list.iter().map(|s| s.to_string()).collect() };
+        // 窗口增长、滑动、CDN 返回的较旧子集：都接得上，合成一份，滑走的分片仍在
+        assert_eq!(
+            held(&[
+                playlist(0, &["s0.ts", "s1.ts"]),
+                playlist(1, &["s1.ts", "s2.ts"]),
+                playlist(2, &["s2.ts", "s3.ts", "s4.ts"]),
+                playlist(2, &["s2.ts", "s3.ts"]),
+            ]),
+            vec![names(&[
+                "0:s0.ts", "1:s1.ts", "2:s2.ts", "3:s3.ts", "4:s4.ts"
+            ])]
+        );
+        // 同一序号取后拉到的：地址里的令牌最新
+        let merged = held(&[
+            playlist(0, &["s0.ts?t=1"]),
+            playlist(0, &["s0.ts?t=2", "s1.ts"]),
+        ]);
+        assert_eq!(merged, vec![names(&["0:s0.ts?t=2", "1:s1.ts"])]);
 
-        // 滑动窗口：只有旧的列着的 s0 在拉到下一份后还要保留 1 + 2 秒，过了才丢
-        let mut sliding = new_track();
-        sliding.hold(fetched(0, &["s0.ts", "s1.ts"], 0), at(0));
-        sliding.hold(fetched(1, &["s1.ts", "s2.ts"], 1), at(1));
-        assert_eq!(sliding.pending.len(), 2);
-        sliding.hold(fetched(2, &["s2.ts", "s3.ts"], 4), at(4));
-        assert_eq!(sliding.pending.len(), 2);
-        assert_eq!(sliding.pending[0].playlist.segments[0].sequence, 1);
+        // 中间有没列出过的序号、序号回退、同一序号换了分片：接不上，分开暂存
+        let apart = |a: MediaPlaylist, b: MediaPlaylist| held(&[a, b]).len();
+        assert_eq!(apart(playlist(0, &["s0.ts"]), playlist(2, &["s2.ts"])), 2);
+        assert_eq!(
+            apart(playlist(100, &["s100.ts"]), playlist(0, &["s0.ts"])),
+            2
+        );
+        assert_eq!(
+            apart(
+                playlist(0, &["s0.ts", "s1.ts"]),
+                playlist(0, &["s0.ts", "x1.ts"])
+            ),
+            2
+        );
+    }
 
-        // 序号回退（编码器重启）、同一序号换了分片：都不算包含，留着交给窗口比对
-        let mut restarted = new_track();
-        restarted.hold(fetched(100, &["s100.ts"], 0), at(0));
-        restarted.hold(fetched(0, &["s0.ts"], 1), at(1));
-        assert_eq!(restarted.pending.len(), 2);
-        let mut replaced = new_track();
-        replaced.hold(fetched(0, &["s0.ts", "s1.ts"], 0), at(0));
-        replaced.hold(fetched(0, &["s0.ts", "other1.ts"], 1), at(1));
-        assert_eq!(replaced.pending.len(), 2);
+    #[test]
+    fn held_playlists_with_renumbered_discontinuities_stay_apart() {
+        let base = Url::parse("https://cdn.example/live.m3u8").unwrap();
+        let parse_media = |text: &str| match parse(text, &base).unwrap() {
+            Playlist::Media(media) => media,
+            Playlist::Master(_) => unreachable!("文本里没有 EXT-X-STREAM-INF"),
+        };
+        let first = parse_media("#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\ns0.ts\n");
+        let renumbered = parse_media(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-DISCONTINUITY-SEQUENCE:1\n#EXTINF:1,\ns0.ts\n",
+        );
+        assert_eq!(held(&[first, renumbered]).len(), 2);
     }
 }
