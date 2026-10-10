@@ -27,12 +27,14 @@ pub struct Engine {
     owner: Owner,
 }
 
-// 默认值取自 core 的常量，存根生成写不出它的值，签名在这里写明
+// 签名手写，默认值写 `...`，见 crate 文档
 pyo3_stub_gen::inventory::submit! {
     pyo3_stub_gen::derive::gen_methods_from_python! {
         r#"
+        import builtins
+
         class Engine:
-            def __new__(cls, *, max_requests: int = ...) -> Engine:
+            def __new__(cls, *, max_requests: builtins.int = ...) -> Engine:
                 """`max_requests` 见类的说明；为 0 时抛 `InvalidInputError`。"""
         "#
     }

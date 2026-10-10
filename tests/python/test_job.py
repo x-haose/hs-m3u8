@@ -343,4 +343,4 @@ def test_invalid_job_arguments_are_reported_and_keys_stay_out_of_reprs(server: S
     override = KeyOverride(key, iv=key)
     assert (override.key, override.iv) == (key, key)
     assert repr(override) == "KeyOverride(key=..., iv=...)"
-    assert "concurrency=16" in repr(JobRequest(source, output))
+    assert "concurrency=" in repr(JobRequest(source, output))

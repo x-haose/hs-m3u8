@@ -65,7 +65,11 @@ record! {
 impl Preference {
     /// `variant` 默认 `VariantChoice.Best()`，`audio` 默认 `AudioChoice.Default()`。
     #[new]
-    #[pyo3(signature = (*, variant = VariantChoice::Best {}, audio = AudioChoice::Default {}))]
+    #[pyo3(signature = (
+        *,
+        variant = Preference::from(core::hls::Preference::default()).variant,
+        audio = Preference::from(core::hls::Preference::default()).audio,
+    ))]
     fn new(variant: VariantChoice, audio: AudioChoice) -> Self {
         Preference { variant, audio }
     }
@@ -84,7 +88,7 @@ record! {
     }
 }
 
-// 构造函数的默认值不是字面量，存根生成写不出，签名在这里写明
+// 签名手写，默认值写 `...`，见 crate 文档
 pyo3_stub_gen::inventory::submit! {
     pyo3_stub_gen::derive::gen_methods_from_python! {
         r#"
@@ -138,17 +142,18 @@ record! {
     }
 }
 
-// 构造函数的默认值不是字面量，存根生成写不出，签名在这里写明
+// 签名手写，默认值写 `...`，见 crate 文档
 pyo3_stub_gen::inventory::submit! {
     pyo3_stub_gen::derive::gen_methods_from_python! {
         r#"
+        import builtins
         import datetime
 
         class RetryPolicy:
             def __new__(
                 cls,
                 *,
-                attempts: int = ...,
+                attempts: builtins.int = ...,
                 base_delay: datetime.timedelta = ...,
                 max_delay: datetime.timedelta = ...,
             ) -> RetryPolicy:
@@ -305,7 +310,7 @@ impl Source {
     #[pyo3(signature = (
         url,
         *,
-        preference = Preference::new(VariantChoice::Best {}, AudioChoice::Default {}),
+        preference = Preference::from(core::hls::Preference::default()),
         http = HttpOptions::from(core::HttpOptions::default()),
         hooks = None,
     ))]
@@ -505,17 +510,18 @@ record! {
     }
 }
 
-// 构造函数的默认值不是字面量，存根生成写不出，签名在这里写明
+// 签名手写，默认值写 `...`，见 crate 文档
 pyo3_stub_gen::inventory::submit! {
     pyo3_stub_gen::derive::gen_methods_from_python! {
         r#"
         import datetime
+        import typing
 
         class LiveOptions:
             def __new__(
                 cls,
                 *,
-                max_duration: datetime.timedelta | None = None,
+                max_duration: typing.Optional[datetime.timedelta] = None,
                 stall_timeout: datetime.timedelta = ...,
             ) -> LiveOptions:
                 """各项的默认值见同名属性。"""
@@ -575,19 +581,22 @@ impl Hash for JobRequest {
     }
 }
 
-// 构造函数的默认值不是字面量，存根生成写不出，签名在这里写明
+// 签名手写，默认值写 `...`，见 crate 文档
 pyo3_stub_gen::inventory::submit! {
     pyo3_stub_gen::derive::gen_methods_from_python! {
         r#"
+        import builtins
+        import typing
+
         class JobRequest:
             def __new__(
                 cls,
                 source: Source,
                 output: OutputOptions,
                 *,
-                key: KeyOverride | None = None,
-                concurrency: int = ...,
-                live: LiveOptions | None = ...,
+                key: typing.Optional[KeyOverride] = None,
+                concurrency: builtins.int = ...,
+                live: typing.Optional[LiveOptions] = ...,
             ) -> JobRequest:
                 """`concurrency` 默认 16，为 0 时抛 `InvalidInputError`；`live` 默认 `LiveOptions()`。"""
         "#
@@ -799,6 +808,26 @@ impl From<core::HttpOptions> for HttpOptions {
             insecure: h.insecure,
             timeouts: h.timeouts.into(),
             retry: h.retry.into(),
+        }
+    }
+}
+
+impl From<core::hls::Preference> for Preference {
+    fn from(p: core::hls::Preference) -> Self {
+        Preference {
+            variant: match p.variant {
+                core::hls::VariantChoice::Best => VariantChoice::Best {},
+                core::hls::VariantChoice::Index(index) => VariantChoice::Index {
+                    index: Count(index),
+                },
+            },
+            audio: match p.audio {
+                core::hls::AudioChoice::Default => AudioChoice::Default {},
+                core::hls::AudioChoice::Language(language) => AudioChoice::Language { language },
+                core::hls::AudioChoice::Index(index) => AudioChoice::Index {
+                    index: Count(index),
+                },
+            },
         }
     }
 }

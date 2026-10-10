@@ -1,5 +1,9 @@
 //! hs-m3u8 的 Python 绑定：把 core 的类型逐个翻译成 Python 类，放在模块 `hs_m3u8._native`，由 Python 包 `hs_m3u8`
 //! 再导出。类型存根由 `stub_gen` 从这里的定义生成。
+//!
+//! 默认值不是字面量的构造函数（`Engine`、`Timeouts`、`RetryPolicy`、`LiveOptions`、`JobRequest`），存根里的签名手写在
+//! 类型旁边，默认值写 `...`：PyO3 的运行时签名把这类默认值显示为 `...`，生成的存根却写出具体的值（时长写成
+//! `datetime....`，语法都不对），stubtest 核对不过。
 
 mod convert;
 mod engine;

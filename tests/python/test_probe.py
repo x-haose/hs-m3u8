@@ -24,9 +24,11 @@ from hs_m3u8 import (
     Purpose,
     RequestParts,
     RetryPolicy,
+    SegmentRef,
     SelectError,
     SelectFailure,
     Source,
+    SourceUnsupported,
     Timeouts,
     VariantChoice,
 )
@@ -263,8 +265,11 @@ def test_invalid_arguments_are_reported_before_any_request(server: Server) -> No
 def test_reprs_hide_header_values_and_credentials() -> None:
     options = HttpOptions(headers={"Cookie": "session=secret"}, proxy="http://user:password@proxy.example:8080")
     request = RequestParts("https://example.com/a.ts?token=secret", headers=[("Cookie", "secret")])
+    segment = SegmentRef(track=0, sequence=1, url="https://user:password@example.com/a.ts?token=secret")
+    empty = SourceUnsupported.EmptyPlaylist(url="https://example.com/a.m3u8?token=secret")
 
-    for text in [repr(options), repr(Source("https://user:password@example.com/a.m3u8?token=secret")), repr(request)]:
+    for value in [options, Source("https://user:password@example.com/a.m3u8?token=secret"), request, segment, empty]:
+        text = repr(value)
         assert "secret" not in text
         assert "password" not in text
     assert "Cookie" in repr(options)

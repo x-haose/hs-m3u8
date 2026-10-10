@@ -223,7 +223,7 @@ class Engine:
     `max_requests`：所有任务合计同时在途的 key、分片与点播 init 段请求数，至少 1，默认为每个任务默认并发的四倍。
     播放列表与直播刷新时新出现的 init 段不占名额，以免直播刷新排在其他任务的大批下载之后。
     """
-    def __new__(cls, *, max_requests: int = ...) -> Engine:
+    def __new__(cls, *, max_requests: builtins.int = ...) -> Engine:
         r"""
         `max_requests` 见类的说明；为 0 时抛 `InvalidInputError`。
         """
@@ -840,7 +840,7 @@ class JobRequest:
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, source: Source, output: OutputOptions, *, key: KeyOverride | None = None, concurrency: int = ..., live: LiveOptions | None = ...) -> JobRequest:
+    def __new__(cls, source: Source, output: OutputOptions, *, key: typing.Optional[KeyOverride] = None, concurrency: builtins.int = ..., live: typing.Optional[LiveOptions] = ...) -> JobRequest:
         r"""
         `concurrency` 默认 16，为 0 时抛 `InvalidInputError`；`live` 默认 `LiveOptions()`。
         """
@@ -1122,7 +1122,7 @@ class LiveOptions:
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
     def __repr__(self) -> builtins.str: ...
-    def __new__(cls, *, max_duration: datetime.timedelta | None = None, stall_timeout: datetime.timedelta = ...) -> LiveOptions:
+    def __new__(cls, *, max_duration: typing.Optional[datetime.timedelta] = None, stall_timeout: datetime.timedelta = ...) -> LiveOptions:
         r"""
         各项的默认值见同名属性。
         """
@@ -2068,7 +2068,7 @@ class RetryPolicy:
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
     def __repr__(self) -> builtins.str: ...
-    def __new__(cls, *, attempts: int = ..., base_delay: datetime.timedelta = ..., max_delay: datetime.timedelta = ...) -> RetryPolicy:
+    def __new__(cls, *, attempts: builtins.int = ..., base_delay: datetime.timedelta = ..., max_delay: datetime.timedelta = ...) -> RetryPolicy:
         r"""
         各项的默认值见类的说明；`attempts` 为 0 时抛 `InvalidInputError`。
         """
