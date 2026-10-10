@@ -1,7 +1,7 @@
 //! 下载任务的错误。
 //!
 //! 按调用方的处理方式分类：
-//! - 调用方输入：[`Error::InvalidInput`]、[`Error::OutputExists`]，改参数后再试；
+//! - 调用方输入：[`Error::InvalidInput`]、[`Error::OutputExists`]、[`Error::OutputOccupied`]，改参数后再试；
 //! - 来源内容：[`Error::Playlist`]、[`Error::NotMediaPlaylist`]、[`Error::Select`]、[`Error::Unsupported`]、
 //!   [`Error::Integrity`]、[`Error::KeyLength`]，同样的请求再试也不会成功（其中 [`Unsupported::Live`] 开启直播
 //!   录制即可）；
@@ -28,8 +28,13 @@ use crate::ident::bare_url;
 pub enum Error {
     #[error("参数错误：{0}")]
     InvalidInput(String),
-    #[error("输出文件已存在：{}", .0.display())]
+    /// 输出已存在，要求覆盖（[`crate::OutputOptions::overwrite`]）即可替换
+    #[error("输出已存在：{}", .0.display())]
     OutputExists(PathBuf),
+    /// 输出已存在且覆盖也不会替换它：要输出 MP4 而那里是目录，或要输出 HLS 而那里不是目录、或目录里有不是
+    /// 本库写出的文件，以免路径给错时删掉别人的文件
+    #[error("输出已存在，其中有不是本库写出的文件，覆盖也不会替换它：{}", .0.display())]
+    OutputOccupied(PathBuf),
     /// 不是播放列表或语法错误
     #[error("解析播放列表 {} 失败：{cause}", bare_url(.url))]
     Playlist {
@@ -199,6 +204,10 @@ pub enum Unsupported {
     SampleAes,
     #[error("未知的加密方式 {0}")]
     KeyMethod(String),
+    /// 第 `track` 条轨有的不连续段组用 init 段（fMP4）、有的不用：EXT-X-MAP 一直作用到下一个 EXT-X-MAP，
+    /// 本地 HLS 无法表示，可只输出 MP4。直播续录时服务器换了格式会这样
+    #[error("第 {track} 条轨有的段用 init 段（fMP4）、有的不用，本地 HLS 无法表示")]
+    HlsMixedInit { track: usize },
     #[error("同一不连续段内 EXT-X-MAP 发生变化（第 {track} 条轨，不连续段 {discontinuity}）")]
     InitChangesWithinGroup { track: usize, discontinuity: u64 },
     #[error("各轨的不连续段不一致：第 0 条轨 {first:?}，第 {track} 条轨 {found:?}")]

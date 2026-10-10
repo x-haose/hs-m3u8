@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
 use hs_m3u8_core::hls::{MediaPlaylist, Playlist, parse};
-use hs_m3u8_core::{Error, JobRequest, LiveOptions, Output, Target, Url};
+use hs_m3u8_core::{Error, JobRequest, LiveOptions, Target, Unsupported, Url};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams, TrackSegments, remux};
 
 use crate::server::Server;
@@ -142,10 +142,26 @@ async fn split_source_writes_both_outputs() {
     let Playlist::Master(master) = read_playlist(&hls.join("index.m3u8")) else {
         panic!("音视频分离时入口应为主播放列表");
     };
+    // 码率为两条轨分片峰值码率之和（各分片声明 1 秒），编码照抄来源
+    let peak = |kind: &str| {
+        let sizes = ["fmp4_a", "fmp4_b"].map(|program| {
+            std::fs::read_dir(fixtures().join(program).join(kind))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| p.extension().is_some_and(|e| e == "m4s"))
+                .map(|p| std::fs::metadata(p).unwrap().len())
+                .max()
+                .unwrap()
+        });
+        sizes.into_iter().max().unwrap() * 8
+    };
     let variant = &master.variants[0];
     assert_eq!(
         (variant.bandwidth, variant.codecs.join(",")),
-        (Some(200_000), "avc1.64000d,mp4a.40.2".to_owned())
+        (
+            Some(peak("video") + peak("audio")),
+            "avc1.64000d,mp4a.40.2".to_owned()
+        )
     );
     assert_eq!(master.renditions[0].language.as_deref(), Some("en"));
     for name in ["0/0.m4s", "0/2.m4s", "1/4.m4s"] {
@@ -184,7 +200,8 @@ async fn hls_only_keeps_codecs_the_mp4_cannot_take() {
     assert!(!dir.join("out.hsdl").exists());
 }
 
-/// 已有的 HLS 目录：为空可以直接写；有内容时不覆盖就拒绝；覆盖时只替换本库写出的，里面有别的文件仍拒绝。
+/// 已有的 HLS 目录：为空（系统自动生成的元数据文件不算）可以直接写；全是本库写出的文件时不覆盖就报已存在、
+/// 覆盖即替换；里面有别的文件时覆盖也不替换，报另一种错误。
 #[tokio::test(flavor = "multi_thread")]
 async fn existing_hls_directories_are_replaced_only_when_written_by_the_library() {
     let dir = test_dir("output_overwrite");
@@ -196,26 +213,30 @@ async fn existing_hls_directories_are_replaced_only_when_written_by_the_library(
     );
     let hls = dir.join("out");
     std::fs::create_dir(&hls).unwrap();
+    std::fs::write(hls.join(".DS_Store"), "访达生成的").unwrap();
     let req = request_to(server.url("index.m3u8"), &dir, Target::Hls(hls.clone()));
     run(req.clone()).await.unwrap();
 
-    let exists = |result: Result<Output, Error>, path: &Path| match result {
-        Err(Error::OutputExists(p)) => assert_eq!(p, path),
+    match run(req.clone()).await {
+        Err(Error::OutputExists(p)) => assert_eq!(p, hls),
         other => panic!("应报输出已存在：{other:?}"),
-    };
-    exists(run(req.clone()).await, &hls);
+    }
 
     let mut replace = req;
     replace.output.overwrite = true;
+    std::fs::write(hls.join("0/Thumbs.db"), "资源管理器生成的").unwrap();
     run(replace.clone()).await.unwrap();
     assert!(hls.join("0/0.ts").is_file());
 
     std::fs::write(hls.join("0/notes.txt"), "别人的文件").unwrap();
-    exists(run(replace).await, &hls);
+    match run(replace).await {
+        Err(Error::OutputOccupied(p)) => assert_eq!(p, hls),
+        other => panic!("应报有别人的文件：{other:?}"),
+    }
     assert!(hls.join("0/notes.txt").is_file());
 }
 
-/// 两者都要时，HLS 目录在下载期间被别人放进了文件：改名前的检查发现后报已存在，MP4 与 HLS 都没有写出、
+/// 两者都要时，HLS 目录在下载期间被别人放进了文件：写出前的检查发现后报错，MP4 与 HLS 都没有写出、
 /// 也不留临时文件，任务目录保留；腾出来后再运行，已下载的分片不重下。
 #[tokio::test(flavor = "multi_thread")]
 async fn outputs_taken_during_the_download_leave_nothing_behind() {
@@ -235,8 +256,8 @@ async fn outputs_taken_during_the_download_leave_nothing_behind() {
     server.ungate("seg0.ts");
 
     match job.wait().await {
-        Err(Error::OutputExists(path)) => assert_eq!(path, dir.join("out")),
-        other => panic!("应报输出已存在：{other:?}"),
+        Err(Error::OutputOccupied(path)) => assert_eq!(path, dir.join("out")),
+        other => panic!("应报有别人的文件：{other:?}"),
     }
     let mut left: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
@@ -394,6 +415,67 @@ async fn switching_to_hls_after_an_unsupported_codec_reuses_the_download() {
     assert_eq!(output.cleanup_error, None);
     assert!(!dir.join("out.hsdl").exists());
     assert_eq!(server.hits("seg0.ts"), 1);
+}
+
+/// 打包音频前的 ID3 标签很长（带封面图）：下载时整片校验通过，本地 HLS 按标签长度跳过后识别出 AAC。
+#[tokio::test(flavor = "multi_thread")]
+async fn long_id3_tags_before_packed_audio_are_skipped() {
+    let dir = test_dir("output_long_id3");
+    let server = Server::start().await;
+    let body = vec![0u8; 70 * 1024];
+    let size = body.len();
+    let syncsafe = [size >> 21, size >> 14, size >> 7, size].map(|b| (b & 0x7F) as u8);
+    let tag = [b"ID3\x04\x00\x00".as_slice(), &syncsafe, &body].concat();
+    let adts = [0xFF, 0xF1, 0x50, 0x80, 0x02, 0x1F, 0xFC];
+    server.put("seg0.aac", [tag.as_slice(), &adts].concat());
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.aac\n#EXT-X-ENDLIST\n",
+    );
+    let hls = dir.join("out");
+
+    run(request_to(
+        server.url("index.m3u8"),
+        &dir,
+        Target::Hls(hls.clone()),
+    ))
+    .await
+    .unwrap();
+
+    assert!(hls.join("0/0.aac").is_file());
+}
+
+/// 直播续录时服务器从 fMP4 换成了 TS，另起会话：同一条轨有的组用 init 段、有的不用，本地 HLS 无法表示，
+/// 合并 MP4 之前就报不支持，什么也不写，任务目录保留。
+#[tokio::test(flavor = "multi_thread")]
+async fn hls_cannot_mix_fmp4_and_ts_in_one_track() {
+    let dir = test_dir("output_mixed_init");
+    let server = Server::start().await;
+    server.put("init.mp4", fixture("fmp4_a/video/init.mp4"));
+    server.put("seg0.m4s", fixture("fmp4_a/video/seg0.m4s"));
+    server.put("seg0.ts", fixture("ts_long/seg0.ts"));
+    server.put(
+        "live.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\nseg0.m4s\n",
+    );
+    let mut req = request_to(server.url("live.m3u8"), &dir, both(&dir));
+    req.live = Some(LiveOptions::default());
+    let job = engine().start(req.clone()).unwrap();
+    let mut progress = job.control().progress();
+    progress.wait_for(|p| p.segments_done == 1).await.unwrap();
+    job.control().cancel();
+    assert!(matches!(job.wait().await, Err(Error::Cancelled)));
+    server.put(
+        "live.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n",
+    );
+
+    match run(req).await {
+        Err(Error::Unsupported(Unsupported::HlsMixedInit { track: 0 })) => {}
+        other => panic!("应报不支持：{other:?}"),
+    }
+    assert!(!dir.join("out.mp4").exists() && !dir.join("out").exists());
+    assert!(dir.join("out.hsdl/job.json").exists());
 }
 
 /// 输出经符号链接落在任务目录里（按字面比较看不出）：删除任务目录时只删本库写的文件，输出留下，
