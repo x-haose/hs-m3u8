@@ -238,7 +238,7 @@ fn remove(path: &Path, kind: OutputKind) -> io::Result<()> {
         OutputKind::Hls => fs::remove_dir_all(path),
     };
     match removed {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) if is_absent(&e) => Ok(()),
         other => other,
     }
 }
@@ -247,9 +247,17 @@ fn remove(path: &Path, kind: OutputKind) -> io::Result<()> {
 fn exists(path: &Path) -> io::Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) if is_absent(&e) => Ok(false),
         Err(e) => Err(e),
     }
+}
+
+/// 路径不存在：没有这一项，或上级路径中有一段是文件（这时由随后对输出路径的检查报出）。
+fn is_absent(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
 }
 
 #[cfg(test)]
