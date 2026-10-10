@@ -269,8 +269,8 @@ async fn retries_server_errors() {
     assert_eq!(server.hits("seg0.ts"), 3);
 }
 
-/// 服务器要求的等待超过重试的等待上限：不再重试，任务失败；错误可重试，服务器要求的等待包在分片的失败里，
-/// 从最外层就能取到。
+/// 服务器要求的等待超过重试的等待上限：不再重试，任务失败；错误可重试，服务器要求的等待包在分片的失败里（key
+/// 的失败又包在分片的失败里），从最外层就能取到。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_long_retry_after_is_reported_with_the_failure() {
     let dir = test_dir("retry_after");
@@ -286,6 +286,23 @@ async fn a_long_retry_after_is_reported_with_the_failure() {
     assert!(err.retryable());
     assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
     assert_eq!(server.hits("seg1.ts"), 1);
+
+    server.status_retry_after("k", StatusCode::TOO_MANY_REQUESTS, "3600");
+    server.put(
+        "encrypted.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\"\n\
+         #EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n",
+    );
+    let err = run(request(server.url("encrypted.m3u8"), &dir.join("key")))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&err, Error::Segment { cause, .. } if matches!(**cause, Error::Key { .. })),
+        "{err}"
+    );
+    assert!(err.retryable());
+    assert_eq!(err.retry_after(), Some(Duration::from_secs(3600)));
 }
 
 /// ts_a 的两个分片，明文；`duration` 为每个分片声明的时长。
