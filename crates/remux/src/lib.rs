@@ -8,8 +8,8 @@
 //!   不检查编码；同一类流只能来自一条轨；后续组的流布局与编码参数必须与第一组一致。
 //! - 只接受 H.264、HEVC 视频与 AAC 音频，与 FFmpeg 构建启用的组件一致。
 //!
-//! 输出写完回读核对每路流的包数并落盘，任一步失败都删除输出并返回错误；输出要么完整、要么不存在由调用方
-//! 写到临时路径、成功后改名来保证。错误信息已包含原因，不经 `source()` 重复给出。
+//! 输出写完回读核对每路流的包数并落盘；失败时输出上可能留有写了一半的文件。输出要么完整、要么不存在由调用方
+//! 写到临时路径、成功后改名、失败时删除来保证。错误信息已包含原因，不经 `source()` 重复给出。
 
 mod chain;
 mod ffi;
@@ -237,16 +237,10 @@ pub enum Error {
         path: PathBuf,
         cause: io::Error,
     },
-    #[error("{failure}；清理临时文件 {path} 也失败：{cause}")]
-    Cleanup {
-        failure: Box<Error>,
-        path: PathBuf,
-        cause: io::Error,
-    },
 }
 
-/// 把各不连续段组的分片复制进 `output`（MP4，moov 前置），写完回读核对每路流的包数并落盘；任一步失败都删除
-/// `output` 并返回错误。已存在的 `output` 会被替换。`streams[i]` 为第 i 条轨贡献的流种类。
+/// 把各不连续段组的分片复制进 `output`（MP4，moov 前置），写完回读核对每路流的包数并落盘。失败时 `output` 上
+/// 可能留有写了一半的文件，由调用方删除；已存在的 `output` 会被替换。`streams[i]` 为第 i 条轨贡献的流种类。
 pub fn remux(
     streams: &[Streams],
     groups: &[DiscontinuityGroup],
@@ -257,9 +251,9 @@ pub fn remux(
     if ffmpeg_path(output).is_none() {
         return Err(Error::NonUtf8Path(output.to_path_buf()));
     }
-    write_verified(streams, groups, output)
-        .and_then(|report| sync(output).map(|()| report))
-        .map_err(|failure| discard(output, failure))
+    let report = write_verified(streams, groups, output)?;
+    sync(output)?;
+    Ok(report)
 }
 
 /// 落盘。Windows 上落盘要求写权限，所以以可写方式打开。
@@ -310,19 +304,6 @@ fn validate(streams: &[Streams], groups: &[DiscontinuityGroup]) -> Result<(), Er
         }
     }
     Ok(())
-}
-
-/// 删除失败任务留下的临时文件；删除本身失败时把两个错误一并返回。
-fn discard(path: &Path, failure: Error) -> Error {
-    match std::fs::remove_file(path) {
-        Ok(()) => failure,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => failure,
-        Err(cause) => Error::Cleanup {
-            failure: Box::new(failure),
-            path: path.to_path_buf(),
-            cause,
-        },
-    }
 }
 
 /// 打开一条轨在一组里的全部分片（init 段在前），当作一个连续的输入。返回输入与记录文件错误的位置。
