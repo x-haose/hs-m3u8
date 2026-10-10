@@ -1,7 +1,7 @@
 //! 主播放列表解析与选轨。
 
 use hs_m3u8_hls::{
-    AudioChoice, Error, MasterPlaylist, Playlist, Preference, RenditionKind, Resolution,
+    AudioChoice, Error, Malformed, MasterPlaylist, Playlist, Preference, RenditionKind, Resolution,
     SelectError, SyntaxError, Url, VariantChoice, parse, select,
 };
 
@@ -77,12 +77,12 @@ fn stream_inf_without_uri_is_an_error() {
     .unwrap_err();
     assert_eq!(
         err,
-        Error::Syntax {
+        Error::Malformed(Malformed::Syntax {
             line: 2,
             kind: SyntaxError::InfoWithoutUri {
                 tag: "EXT-X-STREAM-INF"
             }
-        }
+        })
     );
 }
 

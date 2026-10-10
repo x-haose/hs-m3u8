@@ -1,8 +1,8 @@
 //! 媒体播放列表的解析与规范化。
 
 use hs_m3u8_hls::{
-    ByteRange, Error, InitSection, MediaPlaylist, Playlist, PlaylistType, SegmentKey, SyntaxError,
-    Unsupported, Url, parse,
+    ByteRange, Error, InitSection, Malformed, MediaPlaylist, Playlist, PlaylistType, SegmentKey,
+    SyntaxError, Unsupported, Url, parse,
 };
 
 fn url(s: &str) -> Url {
@@ -20,6 +20,14 @@ fn media(text: &str) -> MediaPlaylist {
 
 fn error(text: &str) -> Error {
     parse(text, &url(BASE)).unwrap_err()
+}
+
+/// 解析失败，且是内容不是合法的播放列表。
+fn malformed(text: &str) -> Malformed {
+    match error(text) {
+        Error::Malformed(malformed) => malformed,
+        other => panic!("应为内容有误：{other}"),
+    }
 }
 
 fn sequence_iv(sequence: u64) -> [u8; 16] {
@@ -235,12 +243,12 @@ fn byte_ranges_without_offset_continue_the_previous_sub_range() {
 
 #[test]
 fn byte_range_without_offset_after_another_resource_is_an_error() {
-    let err = error(
+    let err = malformed(
         "#EXTM3U\n#EXT-X-BYTERANGE:1000@0\n#EXTINF:4,\na.ts\n#EXT-X-BYTERANGE:500\n#EXTINF:4,\nb.ts\n",
     );
     assert_eq!(
         err,
-        Error::Syntax {
+        Malformed::Syntax {
             line: 5,
             kind: SyntaxError::ByteRangeWithoutOffset
         }
@@ -284,40 +292,40 @@ fn live_and_vod_are_told_apart() {
 #[test]
 fn malformed_input_is_reported_with_its_line() {
     assert_eq!(
-        error("<html><body>403 Forbidden</body></html>"),
-        Error::NotAPlaylist
+        malformed("<html><body>403 Forbidden</body></html>"),
+        Malformed::NotAPlaylist
     );
     // 空内容与「不是播放列表」分开：前者多为服务器还没写完
     for empty in ["", " \r\n", "\u{FEFF}\n"] {
-        assert_eq!(error(empty), Error::Empty);
+        assert_eq!(malformed(empty), Malformed::Empty);
     }
     // 解析失败的地址只显示查询串之前的部分
-    let bad_uri = error("#EXTM3U\n#EXTINF:4,\nhttp://[bad/a.ts?token=secret\n");
+    let bad_uri = malformed("#EXTM3U\n#EXTINF:4,\nhttp://[bad/a.ts?token=secret\n");
     assert!(!bad_uri.to_string().contains("secret"), "{bad_uri}");
     assert_eq!(
-        error("#EXTM3U\n#EXTINF:4,\na.ts\n#EXTINF:4,\n"),
-        Error::Syntax {
+        malformed("#EXTM3U\n#EXTINF:4,\na.ts\n#EXTINF:4,\n"),
+        Malformed::Syntax {
             line: 4,
             kind: SyntaxError::InfoWithoutUri { tag: "EXTINF" }
         }
     );
     assert_eq!(
-        error("#EXTM3U\na.ts\n"),
-        Error::Syntax {
+        malformed("#EXTM3U\na.ts\n"),
+        Malformed::Syntax {
             line: 2,
             kind: SyntaxError::UriWithoutInfo { expected: "EXTINF" }
         }
     );
     assert!(matches!(
-        error("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\",IV=0x1234\n#EXTINF:4,\na.ts\n"),
-        Error::Syntax {
+        malformed("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\",IV=0x1234\n#EXTINF:4,\na.ts\n"),
+        Malformed::Syntax {
             line: 2,
             kind: SyntaxError::Iv(_)
         }
     ));
     assert_eq!(
-        error("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128\n#EXTINF:4,\na.ts\n"),
-        Error::Syntax {
+        malformed("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128\n#EXTINF:4,\na.ts\n"),
+        Malformed::Syntax {
             line: 2,
             kind: SyntaxError::MissingAttribute {
                 tag: "EXT-X-KEY",
@@ -326,10 +334,10 @@ fn malformed_input_is_reported_with_its_line() {
         }
     );
     let unclosed =
-        error("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k?token=secret\n#EXTINF:4,\na.ts\n");
+        malformed("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k?token=secret\n#EXTINF:4,\na.ts\n");
     assert!(matches!(
         unclosed,
-        Error::Syntax {
+        Malformed::Syntax {
             line: 2,
             kind: SyntaxError::Attributes(_)
         }
@@ -337,20 +345,20 @@ fn malformed_input_is_reported_with_its_line() {
     // 错误信息不带属性原文：其中常有带令牌的地址
     assert!(!unclosed.to_string().contains("secret"), "{unclosed}");
     assert_eq!(
-        error("#EXTM3U\n#EXTINF:4,\na.ts\n#EXT-X-MEDIA-SEQUENCE:3\n"),
-        Error::Syntax {
+        malformed("#EXTM3U\n#EXTINF:4,\na.ts\n#EXT-X-MEDIA-SEQUENCE:3\n"),
+        Malformed::Syntax {
             line: 4,
             kind: SyntaxError::SequenceAfterSegments
         }
     );
     assert_eq!(
-        error("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nv.m3u8\n#EXTINF:4,\na.ts\n"),
-        Error::Mixed
+        malformed("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nv.m3u8\n#EXTINF:4,\na.ts\n"),
+        Malformed::Mixed
     );
     // 长度为 0 的字节范围拼不出合法的 Range 请求
     assert_eq!(
-        error("#EXTM3U\n#EXT-X-BYTERANGE:0@10\n#EXTINF:4,\na.ts\n"),
-        Error::Syntax {
+        malformed("#EXTM3U\n#EXT-X-BYTERANGE:0@10\n#EXTINF:4,\na.ts\n"),
+        Malformed::Syntax {
             line: 2,
             kind: SyntaxError::ByteRange("0@10".into())
         }
@@ -361,38 +369,38 @@ fn malformed_input_is_reported_with_its_line() {
 fn numbers_that_would_overflow_are_rejected() {
     let max = u64::MAX;
     assert_eq!(
-        error(&format!(
+        malformed(&format!(
             "#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:{max}\n#EXTINF:4,\na.ts\n#EXTINF:4,\nb.ts\n"
         )),
-        Error::Syntax {
+        Malformed::Syntax {
             line: 6,
             kind: SyntaxError::SequenceOverflow
         }
     );
     assert_eq!(
-        error(&format!(
+        malformed(&format!(
             "#EXTM3U\n#EXT-X-DISCONTINUITY-SEQUENCE:{max}\n#EXT-X-DISCONTINUITY\n#EXTINF:4,\na.ts\n"
         )),
-        Error::Syntax {
+        Malformed::Syntax {
             line: 5,
             kind: SyntaxError::SequenceOverflow
         }
     );
     // 字节范围的结束位置要能用 u64 表示，Range 请求头才拼得出来
     assert_eq!(
-        error(&format!(
+        malformed(&format!(
             "#EXTM3U\n#EXT-X-BYTERANGE:2@{max}\n#EXTINF:4,\na.ts\n"
         )),
-        Error::Syntax {
+        Malformed::Syntax {
             line: 2,
             kind: SyntaxError::ByteRange(format!("2@{max}"))
         }
     );
     assert_eq!(
-        error(&format!(
+        malformed(&format!(
             "#EXTM3U\n#EXT-X-MAP:URI=\"i.mp4\",BYTERANGE=\"2@{max}\"\n#EXTINF:4,\na.m4s\n"
         )),
-        Error::Syntax {
+        Malformed::Syntax {
             line: 2,
             kind: SyntaxError::ByteRange(format!("2@{max}"))
         }

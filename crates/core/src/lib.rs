@@ -62,7 +62,7 @@ pub mod remux {
 /// 公开接口用到的播放列表解析与选轨类型。
 pub mod hls {
     pub use hs_m3u8_hls::{
-        AudioChoice, Error, Preference, Resolution, SelectError, SyntaxError, Unsupported,
+        AudioChoice, Malformed, Preference, Resolution, SelectError, SyntaxError, Unsupported,
         VariantChoice,
     };
 }

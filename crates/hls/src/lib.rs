@@ -29,8 +29,18 @@ pub enum Playlist {
     Media(MediaPlaylist),
 }
 
+/// 解析失败：内容不是合法的播放列表，或用了不支持的加密。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    Malformed(#[from] Malformed),
+    #[error("第 {line} 行的 EXT-X-KEY：{what}")]
+    Unsupported { line: usize, what: Unsupported },
+}
+
+/// 内容不是合法的播放列表。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Malformed {
     /// 内容为空或只有空白（如服务器还没写完）
     #[error("播放列表为空")]
     Empty,
@@ -40,8 +50,6 @@ pub enum Error {
     Mixed,
     #[error("第 {line} 行：{kind}")]
     Syntax { line: usize, kind: SyntaxError },
-    #[error("第 {line} 行的 EXT-X-KEY：{what}")]
-    Unsupported { line: usize, what: Unsupported },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -81,6 +89,7 @@ pub enum SyntaxError {
     SequenceOverflow,
 }
 
+/// 不支持的加密方式。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unsupported {
     #[error("SAMPLE-AES 加密")]
@@ -94,12 +103,12 @@ pub enum Unsupported {
 /// 解析播放列表。`url` 为该播放列表的最终 URL（跟随重定向之后），所有相对 URI 按它解析。
 pub fn parse(text: &str, url: &Url) -> Result<Playlist, Error> {
     if text.trim_start_matches('\u{FEFF}').trim().is_empty() {
-        return Err(Error::Empty);
+        return Err(Malformed::Empty.into());
     }
     let mut iter = lines(text);
     match iter.next() {
         Some(first) if matches!(&first.kind, LineKind::Tag { name, .. } if name == "EXTM3U") => {}
-        _ => return Err(Error::NotAPlaylist),
+        _ => return Err(Malformed::NotAPlaylist.into()),
     }
     let mut has_stream_inf = false;
     let mut has_extinf = false;
@@ -110,8 +119,8 @@ pub fn parse(text: &str, url: &Url) -> Result<Playlist, Error> {
         }
     }
     match (has_stream_inf, has_extinf) {
-        (true, true) => Err(Error::Mixed),
-        (true, false) => master::parse(text, url).map(Playlist::Master),
+        (true, true) => Err(Malformed::Mixed.into()),
+        (true, false) => Ok(Playlist::Master(master::parse(text, url)?)),
         (false, _) => media::parse(text, url).map(Playlist::Media),
     }
 }

@@ -134,25 +134,13 @@ async fn load_playlist(
         hooks.on_playlist(&hook_url, body)
     })
     .await?;
-    let not_a_playlist = || Error::Playlist {
+    let malformed = |cause| Error::Playlist {
         url: Box::new(final_url.clone()),
-        cause: Box::new(hls::Error::NotAPlaylist),
+        cause: Box::new(cause),
     };
-    let text = String::from_utf8(body).map_err(|_| not_a_playlist())?;
-    hls::parse(&text, &final_url).map_err(|e| playlist_error(final_url, e))
-}
-
-/// DRM、SAMPLE-AES 等提升为 [`Error::Unsupported`]，便于调用方直接提示；其余为 [`Error::Playlist`]。
-fn playlist_error(url: Url, error: hls::Error) -> Error {
-    match error {
-        hls::Error::Unsupported { what, .. } => Error::Unsupported(match what {
-            hls::Unsupported::Drm { keyformat } => Unsupported::Drm { keyformat },
-            hls::Unsupported::SampleAes => Unsupported::SampleAes,
-            hls::Unsupported::Method(method) => Unsupported::KeyMethod(method),
-        }),
-        other => Error::Playlist {
-            url: Box::new(url),
-            cause: Box::new(other),
-        },
-    }
+    let text = String::from_utf8(body).map_err(|_| malformed(hls::Malformed::NotAPlaylist))?;
+    hls::parse(&text, &final_url).map_err(|e| match e {
+        hls::Error::Malformed(cause) => malformed(cause),
+        hls::Error::Unsupported { what, .. } => Error::Unsupported(Unsupported::Encryption(what)),
+    })
 }
