@@ -69,7 +69,7 @@ pub struct LiveReport {
 pub enum LiveEnd {
     /// 所有轨出现 EXT-X-ENDLIST
     EndList,
-    /// 调用了 [`crate::Job::stop`]
+    /// 调用了 [`crate::JobControl::stop`]
     Stopped,
     /// 各轨都录满了 [`crate::LiveOptions::max_duration`]
     DurationReached,

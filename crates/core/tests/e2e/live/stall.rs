@@ -23,7 +23,7 @@ async fn removed_playlist_ends_recording() {
     let job = engine()
         .start(live_request(server.url("live.m3u8"), &dir, STALL))
         .unwrap();
-    let mut progress = job.progress();
+    let mut progress = job.control().progress();
     progress.wait_for(|p| p.segments_total == 2).await.unwrap();
     server.remove("live.m3u8");
     let output = job.wait().await.unwrap();
@@ -72,7 +72,7 @@ async fn one_track_whose_playlist_is_removed_ends_the_recording() {
     let job = engine()
         .start(live_request(server.url("master.m3u8"), &dir, STALL))
         .unwrap();
-    let mut progress = job.progress();
+    let mut progress = job.control().progress();
     progress.wait_for(|p| p.segments_total >= 2).await.unwrap();
     server.remove("audio.m3u8");
 
@@ -126,7 +126,7 @@ async fn one_failing_track_fails_the_recording() {
     let job = engine()
         .start(live_request(server.url("master.m3u8"), &dir, STALL))
         .unwrap();
-    let mut progress = job.progress();
+    let mut progress = job.control().progress();
     progress.wait_for(|p| p.segments_done >= 3).await.unwrap();
     server.status("audio.m3u8", StatusCode::INTERNAL_SERVER_ERROR);
 
@@ -276,7 +276,7 @@ async fn queued_segments_do_not_stall_a_track() {
             Duration::from_millis(1),
         ))
         .unwrap();
-    let mut progress = job.progress();
+    let mut progress = job.control().progress();
     progress.wait_for(|p| p.segments_total == 5).await.unwrap();
     server.ungate("video/seg0.m4s");
     drop(gate);
@@ -342,7 +342,7 @@ async fn endless_retry_after_ends_as_a_refresh_failure() {
             Duration::from_millis(500),
         ))
         .unwrap();
-    let mut progress = job.progress();
+    let mut progress = job.control().progress();
     progress.wait_for(|p| p.segments_done == 1).await.unwrap();
     server.status_retry_after(
         "live.m3u8",
@@ -398,7 +398,7 @@ async fn forbidden_refresh_fails_the_task() {
     let job = engine()
         .start(live_request(server.url("live.m3u8"), &dir, STALL))
         .unwrap();
-    let mut progress = job.progress();
+    let mut progress = job.control().progress();
     progress.wait_for(|p| p.segments_total == 2).await.unwrap();
     server.status("live.m3u8", StatusCode::FORBIDDEN);
 

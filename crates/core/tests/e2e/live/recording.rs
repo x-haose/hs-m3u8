@@ -33,7 +33,7 @@ async fn records_until_endlist() {
 
     let req = live_request(server.url("live.m3u8"), &dir, Duration::MAX);
     let job = engine().start(req).unwrap();
-    let progress = job.progress();
+    let progress = job.control().progress();
     let output = job.wait().await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
@@ -59,7 +59,7 @@ async fn window_slide_is_reported_as_missed() {
     let job = engine()
         .start(live_request(server.url("live.m3u8"), &dir, STALL))
         .unwrap();
-    let progress = job.progress();
+    let progress = job.control().progress();
     let output = job.wait().await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 3], &[2]));
@@ -193,7 +193,7 @@ async fn unavailable_new_init_is_missed() {
     let job = engine()
         .start(live_request(server.url("live.m3u8"), &dir, STALL))
         .unwrap();
-    let progress = job.progress();
+    let progress = job.control().progress();
     let output = job.wait().await.unwrap();
 
     // 取不到 init 段的分片也算在要下载的分片里
@@ -235,7 +235,7 @@ async fn refresh_does_not_wait_for_engine_permits() {
     let job = engine
         .start(live_request(server.url("v.m3u8"), &dir, STALL))
         .unwrap();
-    let mut progress = job.progress();
+    let mut progress = job.control().progress();
     // seg0 占着唯一的名额；此后的刷新须拉新签名的 init 段
     gate.arrived.notified().await;
     server.put("v.m3u8", signed_fmp4_playlist("video", "0.1", 2, 1, true));

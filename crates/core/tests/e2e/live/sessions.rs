@@ -103,10 +103,10 @@ async fn a_fresh_sessions_head_is_refilled_below_an_earlier_maximum() {
     server.put("live.m3u8", playlist(&[10, 11, 12], false));
     let gate = server.gate("seg10.ts");
     let job = engine().start(req.clone()).unwrap();
-    let mut progress = job.progress();
+    let mut progress = job.control().progress();
     gate.arrived.notified().await;
     progress.wait_for(|p| p.segments_done == 3).await.unwrap();
-    job.cancel();
+    job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
     server.ungate("seg10.ts");
 

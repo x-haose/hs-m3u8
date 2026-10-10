@@ -80,7 +80,7 @@ async fn a_late_refresh_with_a_new_init_is_prepared_and_recorded() {
     let check = server.gate("video/seg0.m4s");
     let later = server.gate("video/later.m3u8");
     let job = engine().start(req.clone()).unwrap();
-    let mut progress = job.progress();
+    let mut progress = job.control().progress();
     check.arrived.notified().await;
     later.arrived.notified().await;
     server.ungate("video/seg0.m4s");
@@ -115,7 +115,7 @@ async fn stop_after_the_decision_does_not_wait_for_a_late_refresh() {
     let check = server.gate("video/seg0.m4s");
     let later = server.gate("video/later.m3u8");
     let job = engine().start(req.clone()).unwrap();
-    let mut progress = job.progress();
+    let mut progress = job.control().progress();
     check.arrived.notified().await;
     later.arrived.notified().await;
     server.ungate("video/seg0.m4s");
@@ -127,7 +127,7 @@ async fn stop_after_the_decision_does_not_wait_for_a_late_refresh() {
     .await
     .expect("暂存的候选应在会话定下时处理")
     .unwrap();
-    job.stop();
+    job.control().stop();
     let output = tokio::time::timeout(Duration::from_secs(10), job.wait())
         .await
         .expect("stop 不应等挂着的刷新")
@@ -157,7 +157,7 @@ async fn a_failed_late_refresh_does_not_skip_held_playlists() {
     let check = server.gate("video/seg0.m4s");
     let later = server.gate("video/later.m3u8");
     let job = engine().start(req.clone()).unwrap();
-    let mut progress = job.progress();
+    let mut progress = job.control().progress();
     check.arrived.notified().await;
     later.arrived.notified().await;
     server.ungate("video/seg0.m4s");
