@@ -197,6 +197,32 @@ async fn a_slow_init_fetch_does_not_stall_another_track() {
     assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
 }
 
+/// 中断期间直播结束，音频的播放列表只剩 ENDLIST、没有分片，地址还换了令牌：音频这次没有可录的、不影响判定，
+/// 视频接着原会话录完，改记新地址；不另起会话，也不报无法确认是同一个直播。
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ended_track_without_segments_does_not_affect_the_decision() {
+    let dir = test_dir("deciding_ended_empty");
+    let server = Server::start().await;
+    put_split_master(&server);
+    put_long(&server, "v/", &[0, 1, 2, 3]);
+    put_long(&server, "a/", &[0, 1]);
+    server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
+    server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
+    let with_token = |token: u32| {
+        let url = Url::parse(&format!("{}?token={token}", server.url("master.m3u8"))).unwrap();
+        live_request(url, &dir, STALL)
+    };
+    interrupt(&with_token(1), |p| p.segments_done == 4).await;
+
+    server.put("video.m3u8", playlist_in("v/", &[0, 1, 2, 3], true));
+    server.put("audio.m3u8", playlist_in("a/", &[], true));
+    let output = run(with_token(2)).await.unwrap();
+
+    let want = expected_split_long(&dir, &[(&[0, 1, 2, 3], &[0, 1])]);
+    assert_output(&output, &want);
+    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+}
+
 /// 判定期间两条轨的播放列表一直没有分片：直播看起来已结束，两条轨这次都不录，按停滞收尾、合并已录的。
 #[tokio::test(flavor = "multi_thread")]
 async fn tracks_without_candidates_all_end_together() {

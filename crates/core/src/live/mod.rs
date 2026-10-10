@@ -195,7 +195,9 @@ impl Recorder<'_> {
             }
             match self.next_event(signals, fetcher).await? {
                 Event::Stop => match self.phase {
-                    Phase::Deciding(_) => return Ok(LiveEnd::Stopped),
+                    Phase::Deciding(_) => {
+                        return Ok(self.ending.clone().unwrap_or(LiveEnd::Stopped));
+                    }
                     Phase::Decided { .. } => self.end(LiveEnd::Stopped),
                 },
                 Event::Stall(track) => self.on_stall(track).await?,
