@@ -13,7 +13,7 @@ use tokio::sync::watch;
 
 use crate::error::to_pyerr;
 use crate::report::{Output, Progress};
-use crate::runtime::{self, Owner};
+use crate::runtime::{self, Owned};
 
 /// 运行中的任务（`Engine.start`、`Engine.merge_recorded` 返回）。不再被引用、也没有在等它时（被回收）取消任务；已开始
 /// 写出（`Stage.Writing`）的仍在后台写完。异步方法返回协程，在 asyncio 事件循环里 await（在别处驱动时抛
@@ -21,10 +21,13 @@ use crate::runtime::{self, Owner};
 #[gen_stub_pyclass]
 #[pyclass(module = "hs_m3u8._native", frozen)]
 pub struct Job {
+    running: Owned<Running>,
+}
+
+struct Running {
     control: core::JobControl,
     /// 任务结束前为 None；运行时关闭（解释器正在退出）时发送端关闭而没有值
     finished: watch::Receiver<Option<Arc<Finished>>>,
-    owner: Owner,
 }
 
 /// 任务的结果。
@@ -81,38 +84,30 @@ impl Job {
             sender.send_replace(Some(Arc::new(finished)));
         });
         Job {
-            control,
-            finished,
-            owner: Owner::current(),
+            running: Owned::new(Running { control, finished }),
         }
     }
 }
 
-/// fork 出的子进程里回收时什么也不做：任务在父进程的运行时上（见 [`Owner`]）。
+/// 在 fork 出的子进程里回收时不取消：任务在父进程的运行时上（见 [`Owned`]）。
 impl Drop for Job {
     fn drop(&mut self) {
-        if self.owner.is_current() {
-            self.control.cancel();
+        if let Some(running) = self.running.here() {
+            running.control.cancel();
         }
     }
 }
 
 /// 等待被取消（协程被丢弃）时取消任务，在 fork 出的子进程里除外（同 `Job`）；正常拿到结果后解除。
 struct CancelOnDrop {
-    control: Option<core::JobControl>,
-    owner: Owner,
-}
-
-impl CancelOnDrop {
-    fn disarm(&mut self) {
-        self.control = None;
-    }
+    control: Owned<core::JobControl>,
+    armed: bool,
 }
 
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
-        if let Some(control) = self.control.take()
-            && self.owner.is_current()
+        if self.armed
+            && let Some(control) = self.control.here()
         {
             control.cancel();
         }
@@ -124,41 +119,41 @@ impl Drop for CancelOnDrop {
 impl Job {
     /// 当前的进度快照。每读到一块数据更新一次，要显示进度就定时取；任务结束后仍取得到最后一份。
     fn progress(&self) -> PyResult<Progress> {
-        self.owner.check("Job")?;
-        Ok(self.control.progress().borrow().clone().into())
+        let running = self.running.get("Job")?;
+        Ok(running.control.progress().borrow().clone().into())
     }
 
     /// 请求取消；`wait` 随后抛 `JobCancelledError`，已完成的分片保留在任务目录中。开始写出后不响应取消：已开始写出的
     /// 任务照常完成。
     fn cancel(&self) -> PyResult<()> {
-        self.owner.check("Job")?;
-        self.control.cancel();
+        self.running.get("Job")?.control.cancel();
         Ok(())
     }
 
     /// 直播：停止刷新，把已拉到的播放列表处理完、已列出的分片下完后写出，`wait` 返回录到的部分。续录刚开始、还没确定
     /// 能否接上之前录到的内容时停止，不录新的分片，只写出之前录到的。点播与只合并不受影响。
     fn stop(&self) -> PyResult<()> {
-        self.owner.check("Job")?;
-        self.control.stop();
+        self.running.get("Job")?.control.stop();
         Ok(())
     }
 
     /// 等任务结束，返回输出；失败时抛 `HsM3u8Error` 的子类，本库内部出错时抛 `pyo3_runtime.PanicException`，解释器
     /// 正在退出（运行时已关闭）时抛 `RuntimeError`。可多次等待，得到同一结果或同一异常；等待的协程被取消时任务也取消。
     async fn wait(&self) -> PyResult<Output> {
-        self.owner.check("Job")?;
+        let running = self.running.get("Job")?;
         runtime::require_event_loop()?;
-        let mut finished = self.finished.clone();
+        let mut finished = running.finished.clone();
         let mut cancel_on_drop = CancelOnDrop {
-            control: Some(self.control.clone()),
-            owner: self.owner,
+            control: Owned::new(running.control.clone()),
+            armed: true,
         };
-        let finished = finished
-            .wait_for(Option::is_some)
-            .await
-            .map(|value| value.clone().expect("wait_for 返回时值已满足条件"));
-        cancel_on_drop.disarm();
+        // 在运行时上等，协程只持有句柄：它在 fork 出的子进程里被回收时，不碰父进程的同步原语
+        let finished = runtime::spawn(async move {
+            let finished = finished.wait_for(Option::is_some).await;
+            finished.map(|value| value.clone().expect("wait_for 返回时值已满足条件"))
+        })?
+        .await?;
+        cancel_on_drop.armed = false;
         let Ok(finished) = finished else {
             return Err(runtime::closed());
         };

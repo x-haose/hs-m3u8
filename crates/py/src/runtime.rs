@@ -2,8 +2,8 @@
 //!
 //! 每个进程一个运行时，第一次用到时建立，解释器退出前关闭（见 [`shutdown`]）。经 `os.fork`（含 multiprocessing 的
 //! fork 方式）fork 出的子进程里没有父进程运行时的工作线程，也没有父进程建立的任务与在途请求：子进程第一次用到时
-//! 另建运行时；父进程建立的引擎、任务与协程在子进程里拒绝使用，回收时什么也不做（见 [`Owner`]）；继承来的任务
-//! 目录锁在子进程里关掉（见 `core::prepare_fork`）。
+//! 另建运行时；父进程建立的引擎、任务与协程在子进程里拒绝使用，回收时不销毁（见 [`Owned`]）；继承来的任务目录锁
+//! 在子进程里关掉（见 `core::prepare_fork`）。
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -113,26 +113,24 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    Ok(Spawned {
-        handle: Some(AbortOnDropHandle::new(handle()?.spawn(future))),
-        owner: Owner::current(),
-    })
+    Ok(Spawned(Owned::new(AbortOnDropHandle::new(
+        handle()?.spawn(future),
+    ))))
 }
 
-/// [`spawn`] 的句柄：await 得到结果；在建立它的进程里被丢弃时中止任务，在 fork 出的子进程里什么也不做（任务在
-/// 父进程的运行时上，子进程里碰它会去唤醒不存在的工作线程）。
-pub(crate) struct Spawned<T> {
-    /// drop 时才取走
-    handle: Option<AbortOnDropHandle<T>>,
-    owner: Owner,
-}
+/// [`spawn`] 的句柄：await 得到结果，在建立它的进程里被丢弃时中止任务。
+pub(crate) struct Spawned<T>(Owned<AbortOnDropHandle<T>>);
 
-/// 结果：任务内部 panic 原样继续（由 PyO3 转为 `PanicException`）；运行时已关闭时为 [`closed`] 的异常。
+/// 结果：任务内部 panic 原样继续（由 PyO3 转为 `PanicException`）；运行时已关闭时为 [`closed`] 的异常；在 fork
+/// 出的子进程里（如 fork 时正在等的协程，在子进程里继续等）为 `RuntimeError`。
 impl<T> Future for Spawned<T> {
     type Output = PyResult<T>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let handle = self.handle.as_mut().expect("句柄只在 drop 时取走");
+        let handle = match self.0.get_mut("协程") {
+            Ok(handle) => handle,
+            Err(foreign) => return Poll::Ready(Err(foreign)),
+        };
         Pin::new(handle).poll(cx).map(|joined| match joined {
             Ok(value) => Ok(value),
             Err(failure) => match failure.try_into_panic() {
@@ -160,38 +158,62 @@ pub(crate) fn panic_message(payload: Box<dyn Any + Send>) -> String {
     }
 }
 
-impl<T> Drop for Spawned<T> {
+/// 只属于建立它的进程的值（引擎、任务及等它们的协程所持有的），按 fork 的代次判断。引擎持有跨任务共享的请求名额，
+/// 任务与协程等的是父进程运行时上的后台任务，都不随 fork 进入子进程：在子进程里用，名额可能永远被占着、结果永远等
+/// 不到，所以拒绝。在子进程里回收时不销毁里面的值：销毁 tokio 的同步原语要拿它们的锁，fork 时若父进程的线程正拿着，
+/// 子进程就会永远等下去。
+pub(crate) struct Owned<T> {
+    /// drop 时才取走
+    value: Option<T>,
+    /// 建立时的 fork 代次
+    generation: u64,
+}
+
+impl<T> Owned<T> {
+    pub(crate) fn new(value: T) -> Self {
+        Owned {
+            value: Some(value),
+            generation: GENERATION.load(Ordering::Relaxed),
+        }
+    }
+
+    fn is_here(&self) -> bool {
+        self.generation == GENERATION.load(Ordering::Relaxed)
+    }
+
+    /// 在建立它的进程里时为里面的值，在 fork 出的子进程里为 None。
+    pub(crate) fn here(&self) -> Option<&T> {
+        self.is_here()
+            .then(|| self.value.as_ref().expect("值只在 drop 时取走"))
+    }
+
+    /// 同 [`Owned::here`]，在 fork 出的子进程里抛 `RuntimeError`；`what` 为对象的名字。
+    pub(crate) fn get(&self, what: &str) -> PyResult<&T> {
+        self.here().ok_or_else(|| foreign(what))
+    }
+
+    /// 同 [`Owned::get`]。
+    pub(crate) fn get_mut(&mut self, what: &str) -> PyResult<&mut T> {
+        if !self.is_here() {
+            return Err(foreign(what));
+        }
+        Ok(self.value.as_mut().expect("值只在 drop 时取走"))
+    }
+}
+
+impl<T> Drop for Owned<T> {
     fn drop(&mut self) {
-        if !self.owner.is_current() {
-            std::mem::forget(self.handle.take());
+        let value = self.value.take();
+        if !self.is_here() {
+            std::mem::forget(value);
         }
     }
 }
 
-/// 建立对象的进程（按 fork 的代次）。引擎持有跨任务共享的请求名额，任务的结果由父进程运行时上的后台任务送出，都不随
-/// fork 进入子进程：在子进程里用，名额可能永远被占着、结果永远等不到，所以拒绝。
-#[derive(Clone, Copy)]
-pub(crate) struct Owner(u64);
-
-impl Owner {
-    pub(crate) fn current() -> Self {
-        Owner(GENERATION.load(Ordering::Relaxed))
-    }
-
-    /// 在建立它的进程里。
-    pub(crate) fn is_current(self) -> bool {
-        self.0 == GENERATION.load(Ordering::Relaxed)
-    }
-
-    /// 不是当前进程时抛 `RuntimeError`；`what` 为对象的类名。
-    pub(crate) fn check(self, what: &str) -> PyResult<()> {
-        if self.is_current() {
-            return Ok(());
-        }
-        Err(PyRuntimeError::new_err(format!(
-            "{what} 只能在建立它的进程里使用；fork 出的子进程要另建 Engine"
-        )))
-    }
+fn foreign(what: &str) -> PyErr {
+    PyRuntimeError::new_err(format!(
+        "{what}：只能在建立它的进程里使用；fork 出的子进程要另建 Engine"
+    ))
 }
 
 thread_local! {

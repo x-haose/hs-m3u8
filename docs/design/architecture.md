@@ -241,7 +241,7 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 - `python/hs_m3u8`：`__init__.py`（再导出全部公开名字）同样由 pyo3-stub-gen 生成，带 `py.typed`。
 - 只提供异步接口，脚本用 `asyncio.run(...)`：同步版本只是它的包装；核心的写法保证进程在任何时刻退出都不留半个输出、可以续传，Ctrl+C 不需要特殊处理。
 - PyO3 0.29.3（`experimental-async`：异步方法返回 Python 协程，`asyncio.run`、`create_task` 都能直接用）+ maturin 1.15.0 + pyo3-stub-gen 0.23.1；`abi3-py312` wheel（最低 Python 3.12，见 ADR-0001），FFmpeg 静态链接进扩展模块。
-- 运行时：每个进程一个 tokio 运行时，第一次用到时建立。经 `os.fork`（含 multiprocessing 的 fork 方式）fork 出的子进程没有父进程运行时的工作线程，第一次用到时另建；按 `os.register_at_fork` 登记的处理记下 fork 的代次。父进程建立的 `Engine`、`Job` 在子进程里抛 `RuntimeError`（请求名额可能被父进程的请求永远占着，等结果的后台任务不在子进程里），回收时什么也不做（碰父进程运行时的副本会去唤醒不存在的工作线程）。任务目录的锁跟着打开的文件走，子进程继承了就会占着它直到退出：core 登记本进程持有的锁文件（`prepare_fork`），子进程里关掉，父进程的锁不受影响；fork 前放开 GIL 等登记表的锁（拿着它的可能是另一个正在 fork、要等 GIL 执行其他 fork 处理的线程）。后台任务不碰解释器，任务的错误在第一次等待时才翻译为异常。解释器退出前（atexit）关闭运行时：丢掉其上的任务，释放 GIL 等正在执行的回调返回（Ctrl+C 放弃等待），之后再没有线程进入解释器。终结开始后再取 GIL 的线程会被 CPython 终止或永远挂起，而 PyO3 只在 3.13 起的构建里先查解释器是否在终结，`abi3-py312` 构建不查。
+- 运行时：每个进程一个 tokio 运行时，第一次用到时建立。经 `os.fork`（含 multiprocessing 的 fork 方式）fork 出的子进程没有父进程运行时的工作线程，第一次用到时另建；按 `os.register_at_fork` 登记的处理记下 fork 的代次。父进程建立的 `Engine`、`Job` 及等它们的协程在子进程里抛 `RuntimeError`（请求名额可能被父进程的请求永远占着，等结果的后台任务不在子进程里），回收时不销毁里面的值（销毁 tokio 的同步原语要拿它们的锁，fork 时父进程的线程可能正拿着）。任务目录的锁跟着打开的文件走，子进程继承了就会占着它直到退出：core 登记本进程持有的锁文件（`prepare_fork`），子进程里关掉，父进程的锁不受影响；fork 前放开 GIL 等登记表的锁（拿着它的可能是另一个正在 fork、要等 GIL 执行其他 fork 处理的线程）。后台任务不碰解释器，任务的错误在第一次等待时才翻译为异常。解释器退出前（atexit）关闭运行时：丢掉其上的任务，释放 GIL 等正在执行的回调返回（Ctrl+C 放弃等待），之后再没有线程进入解释器。终结开始后再取 GIL 的线程会被 CPython 终止或永远挂起，而 PyO3 只在 3.13 起的构建里先查解释器是否在终结，`abi3-py312` 构建不查。
 - 回调在 `core` 的阻塞线程池中取得 GIL 后执行，不占用 tokio 工作线程；只调用子类覆盖了的方法，没覆盖的不取 GIL。
 
 ### 7.2 约定

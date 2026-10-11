@@ -12,7 +12,7 @@ use crate::info::Probe;
 use crate::job::Job;
 use crate::report::Leftover;
 use crate::request::{JobRequest, OutputOptions, Source, Unsettled};
-use crate::runtime::{self, Owner};
+use crate::runtime::{self, Owned};
 
 /// 下载引擎：所有任务共用一个在途请求上限。异步方法返回协程，在 asyncio 事件循环里 await（在别处驱动时抛
 /// `RuntimeError`，不开始操作）；协程被取消时，所等的操作随之取消。只能在建立它的进程里使用，fork 出的子进程要
@@ -23,8 +23,7 @@ use crate::runtime::{self, Owner};
 #[gen_stub_pyclass]
 #[pyclass(module = "hs_m3u8._native", frozen)]
 pub struct Engine {
-    inner: core::Engine,
-    owner: Owner,
+    inner: Owned<core::Engine>,
 }
 
 // 签名手写，默认值写 `...`，见 crate 文档
@@ -48,18 +47,16 @@ impl Engine {
     #[pyo3(signature = (*, max_requests = Positive(core::Engine::DEFAULT_MAX_REQUESTS)))]
     fn new(max_requests: Positive<NonZeroUsize>) -> Self {
         Engine {
-            inner: core::Engine::new(max_requests.0),
-            owner: Owner::current(),
+            inner: Owned::new(core::Engine::new(max_requests.0)),
         }
     }
 
     /// 拉取来源并按偏好选轨，不下载分片、不碰任务目录；请求与回调同下载。用于开始下载前列出可选的清晰度与音轨、
     /// 查看时长与是否直播。失败时抛 `HsM3u8Error` 的子类。
     async fn probe(&self, source: Py<Source>) -> PyResult<Probe> {
-        self.owner.check("Engine")?;
+        let engine = self.inner.get("Engine")?.clone();
         runtime::require_event_loop()?;
         let source = Python::attach(|py| source.get().to_core(py))?;
-        let engine = self.inner.clone();
         let probed = runtime::spawn(async move { engine.probe(&source).await })?.await?;
         match probed {
             Ok(probe) => Ok(probe.into()),
@@ -70,12 +67,12 @@ impl Engine {
     /// 校验请求并开始任务；参数错误立即抛出。输出已存在等要读文件系统的检查、建出输出所在的目录在任务开头、任何
     /// 下载之前进行，结果经 `Job.wait` 抛出。
     fn start(&self, py: Python<'_>, request: &Bound<'_, JobRequest>) -> PyResult<Job> {
-        self.owner.check("Engine")?;
+        let engine = self.inner.get("Engine")?;
         let request = request.get().to_core(py)?;
         let runtime = runtime::handle()?;
         let job = {
             let _entered = runtime.enter();
-            self.inner.start(request)
+            engine.start(request)
         };
         let job = job.map_err(|error| to_pyerr(py, error))?;
         Ok(Job::spawn(&runtime, job))
@@ -86,11 +83,11 @@ impl Engine {
     /// 参数错误立即抛出。目录里是点播的下载时抛 `WorkDirError`（`WorkDirProblem.NotLiveRecording`；点播用同样的请求
     /// 再次运行即可续传）；目录不存在或没有已完成的分片时抛 `NothingRecordedError`。结果的 `LiveReport.end` 为 None。
     fn merge_recorded(&self, py: Python<'_>, output: OutputOptions) -> PyResult<Job> {
-        self.owner.check("Engine")?;
+        let engine = self.inner.get("Engine")?;
         let runtime = runtime::handle()?;
         let job = {
             let _entered = runtime.enter();
-            self.inner.merge_recorded(output.to_core())
+            engine.merge_recorded(output.to_core())
         };
         let job = job.map_err(|error| to_pyerr(py, error))?;
         Ok(Job::spawn(&runtime, job))
@@ -109,9 +106,8 @@ impl Engine {
     /// 或由用户删掉记录（`outputs.json`；写了一半的临时输出与没能放回的旧输出以 `hsdl-` 开头，留在输出旁）后再放弃。
     #[pyo3(signature = (work_dir, *, unsettled = Unsettled::Fail {}))]
     async fn discard(&self, work_dir: PyPath, unsettled: Unsettled) -> PyResult<Seq<Leftover>> {
-        self.owner.check("Engine")?;
+        let engine = self.inner.get("Engine")?.clone();
         runtime::require_event_loop()?;
-        let engine = self.inner.clone();
         let unsettled = core::Unsettled::from(&unsettled);
         let discarded =
             runtime::spawn(async move { engine.discard(&work_dir.0, unsettled).await })?.await?;
