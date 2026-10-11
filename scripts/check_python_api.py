@@ -1,10 +1,13 @@
-"""对外接口的约定：说明齐全，几个字段的枚举取值只收关键字参数。
+"""Python 包对外接口的约定，不满足时列出并以 1 退出。
 
-要有说明的：导出的每个类、它的属性与方法、带数据的枚举的每种取值，以及存根里的构造函数。
+- 说明齐全：导出的每个类、它的属性与方法、带数据的枚举的每种取值，以及存根里各类的构造函数（它们的说明只在存根
+  里，运行时看不到；枚举取值的构造函数由存根生成器按字段生成，参数即取值类的属性，不查）。
+- 两个以上字段的枚举取值只收关键字参数：同类型的字段（如几个下标）按位置写反时不报错。
 """
 
 import ast
 import inspect
+import sys
 from pathlib import Path
 
 import hs_m3u8
@@ -26,10 +29,7 @@ def undocumented(owner: type, path: str) -> list[str]:
 
 
 def undocumented_constructors(stub: ast.Module) -> list[str]:
-    """存根里各类没有说明的 `__new__` 与 `__init__`；它们的说明只在存根里，运行时看不到。
-
-    枚举取值的构造函数由存根生成器按字段生成，参数即取值类的属性，不查。
-    """
+    """存根里各类没有说明的 `__new__` 与 `__init__`。"""
     return [
         f"{cls.name}.{method.name}"
         for cls in stub.body
@@ -39,15 +39,6 @@ def undocumented_constructors(stub: ast.Module) -> list[str]:
         and method.name in {"__new__", "__init__"}
         and ast.get_docstring(method) is None
     ]
-
-
-def test_every_public_name_is_documented() -> None:
-    missing = [item for name in hs_m3u8.__all__ for item in undocumented(getattr(hs_m3u8, name), name)]
-    assert missing == []
-
-
-def test_every_constructor_in_the_stub_is_documented() -> None:
-    assert undocumented_constructors(ast.parse(STUB.read_text(encoding="utf-8"))) == []
 
 
 def positional_variants(owner: type, path: str) -> list[str]:
@@ -61,12 +52,24 @@ def positional_variants(owner: type, path: str) -> list[str]:
             for parameter in inspect.signature(member).parameters.values()
             if parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
         ]
-        if len(positional) >= 2:
+        if len(positional) > 1:
             found.append(f"{path}.{name}")
     return found
 
 
-def test_enum_values_with_several_fields_take_keywords_only() -> None:
-    # 同类型的字段（如几个下标）按位置写反时不报错
-    found = [item for name in hs_m3u8.__all__ for item in positional_variants(getattr(hs_m3u8, name), name)]
-    assert found == []
+def main() -> int:
+    """检查各项约定，把不满足的写到 stderr；都满足时返回 0。"""
+    exported = [(name, getattr(hs_m3u8, name)) for name in hs_m3u8.__all__]
+    problems = [f"没有说明：{item}" for name, owner in exported for item in undocumented(owner, name)]
+    stub = ast.parse(STUB.read_text(encoding="utf-8"))
+    problems += [f"存根里的构造函数没有说明：{item}" for item in undocumented_constructors(stub)]
+    problems += [
+        f"两个以上字段能按位置传：{item}" for name, owner in exported for item in positional_variants(owner, name)
+    ]
+    for problem in problems:
+        sys.stderr.write(problem + "\n")
+    return 1 if problems else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

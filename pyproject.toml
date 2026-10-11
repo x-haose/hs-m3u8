@@ -53,7 +53,7 @@ generate-init-py = true
 [tool.ruff]
 line-length = 120
 target-version = "py312"
-src = ["python", "tests/python"]
+src = ["python", "tests/python", "scripts"]
 # 生成的文件不格式化、不检查（类型检查照常检查它们）
 extend-exclude = ["python/hs_m3u8/__init__.py", "python/hs_m3u8/_native/__init__.pyi"]
 
@@ -83,13 +83,13 @@ ignore = [
 
 [tool.mypy]
 strict = true
-files = ["python", "tests/python"]
+files = ["python", "tests/python", "scripts"]
 # 测试目录不是包，conftest 等按顶层模块导入（与 pytest 的导入方式一致）
 mypy_path = ["tests/python"]
 python_version = "3.12"
 
 [tool.basedpyright]
-include = ["python", "tests/python"]
+include = ["python", "tests/python", "scripts"]
 extraPaths = ["tests/python"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
