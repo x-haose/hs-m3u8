@@ -699,12 +699,15 @@ exception! {
 }
 
 exception! {
-    /// 读写文件失败；`__cause__` 为系统报的 `OSError`（如 `PermissionError`，磁盘满等按 `errno` 区分）。
+    /// 读写文件失败；`__cause__` 为系统报的 `OSError`（如 `PermissionError`）。
     pub struct FileError extends HsM3u8Error {
         /// 做的是什么（读取、删除……）
         pub action: String,
         /// 操作的路径
         pub path: PyPath,
+        /// 系统的错误码，同 `__cause__.errno`（磁盘满等按它区分，见 `errno` 模块）；不是系统报的错误时为 None。
+        /// pickle 后仍在，`__cause__` 则不随 pickle 保存
+        pub errno: Option<i32>,
     }
 }
 
@@ -714,6 +717,8 @@ exception! {
     pub struct VolumeUnavailableError extends HsM3u8Error {
         /// 读不到的根
         pub root: PyPath,
+        /// 系统的错误码，同 `FileError.errno`
+        pub errno: Option<i32>,
     }
 }
 
@@ -975,6 +980,7 @@ fn exception(
             let leaf = FileError {
                 action: action.to_owned(),
                 path: path.into(),
+                errno: errno_of(py, &os_error)?,
             };
             let error = raised(instance(py, HsM3u8Error::initializer(base, leaf))?, message)?;
             error.set_cause(py, Some(os_error));
@@ -982,7 +988,10 @@ fn exception(
         }
         E::VolumeUnavailable { root, cause } => {
             let os_error = os_error(cause, &root);
-            let leaf = VolumeUnavailableError { root: root.into() };
+            let leaf = VolumeUnavailableError {
+                root: root.into(),
+                errno: errno_of(py, &os_error)?,
+            };
             let error = raised(instance(py, HsM3u8Error::initializer(base, leaf))?, message)?;
             error.set_cause(py, Some(os_error));
             return Ok(error);
@@ -1025,6 +1034,11 @@ fn os_error(cause: io::Error, path: &Path) -> PyErr {
     } else {
         PyOSError::new_err((code, strerror, filename))
     }
+}
+
+/// `OSError` 的 `errno`：Windows 上是 Python 由系统错误码换算的。
+fn errno_of(py: Python<'_>, os_error: &PyErr) -> PyResult<Option<i32>> {
+    os_error.value(py).getattr("errno")?.extract()
 }
 
 fn instance<'py, L: PyClass>(

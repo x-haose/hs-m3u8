@@ -332,6 +332,8 @@ def test_file_errors_carry_the_os_error(server: Server, tmp_path: Path) -> None:
     cause = raised.value.__cause__
     assert isinstance(cause, NotADirectoryError)
     assert (cause.errno, cause.filename) == (errno.ENOTDIR, str(work_dir))
+    # 错误码另作属性，pickle 后仍在（__cause__ 不随 pickle 保存）
+    assert pickle.loads(pickle.dumps(raised.value)).errno == errno.ENOTDIR
 
 
 def test_existing_outputs_are_reported_and_replaced_on_request(server: Server, tmp_path: Path) -> None:

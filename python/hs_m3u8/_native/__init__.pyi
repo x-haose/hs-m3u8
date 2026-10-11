@@ -264,7 +264,7 @@ class Engine:
 @typing.final
 class FileError(HsM3u8Error):
     r"""
-    读写文件失败；`__cause__` 为系统报的 `OSError`（如 `PermissionError`，磁盘满等按 `errno` 区分）。
+    读写文件失败；`__cause__` 为系统报的 `OSError`（如 `PermissionError`）。
     """
     @property
     def action(self) -> builtins.str:
@@ -276,12 +276,18 @@ class FileError(HsM3u8Error):
         r"""
         操作的路径
         """
-    def __new__(cls, message: builtins.str, *, action: builtins.str, path: builtins.str | os.PathLike[str], retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> FileError:
+    @property
+    def errno(self) -> typing.Optional[builtins.int]:
+        r"""
+        系统的错误码，同 `__cause__.errno`（磁盘满等按它区分，见 `errno` 模块）；不是系统报的错误时为 None。
+        pickle 后仍在，`__cause__` 则不随 pickle 保存
+        """
+    def __new__(cls, message: builtins.str, *, action: builtins.str, path: builtins.str | os.PathLike[str], errno: typing.Optional[builtins.int], retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> FileError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, action: builtins.str, path: builtins.str | os.PathLike[str], retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, action: builtins.str, path: builtins.str | os.PathLike[str], errno: typing.Optional[builtins.int], retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -2896,12 +2902,17 @@ class VolumeUnavailableError(HsM3u8Error):
         r"""
         读不到的根
         """
-    def __new__(cls, message: builtins.str, *, root: builtins.str | os.PathLike[str], retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> VolumeUnavailableError:
+    @property
+    def errno(self) -> typing.Optional[builtins.int]:
+        r"""
+        系统的错误码，同 `FileError.errno`
+        """
+    def __new__(cls, message: builtins.str, *, root: builtins.str | os.PathLike[str], errno: typing.Optional[builtins.int], retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> VolumeUnavailableError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, root: builtins.str | os.PathLike[str], retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, root: builtins.str | os.PathLike[str], errno: typing.Optional[builtins.int], retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """

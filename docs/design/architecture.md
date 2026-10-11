@@ -316,8 +316,8 @@ HsM3u8Error                       retryable: bool、retry_after: int | None、se
 │   └── KeyLengthError            url、length
 ├── HttpError                     url、kind: HttpErrorKind
 ├── LiveStalledError              track、reason: StallReason（RefreshFailed、RefreshPending、Unrecordable、TrackStopped）
-├── FileError                     action: str、path；__cause__ 为系统报的 OSError（按 errno 区分）
-├── VolumeUnavailableError        root；接上后再试；__cause__ 同上
+├── FileError                     action: str、path、errno: int | None；__cause__ 为系统报的 OSError
+├── VolumeUnavailableError        root、errno；接上后再试；__cause__ 同上
 ├── RemuxError                    合并 MP4 失败（内容放不进 MP4 的是 Mp4UnsupportedError）
 ├── WorkDirError                  path、problem: WorkDirProblem
 ├── NothingRecordedError
