@@ -574,7 +574,7 @@ def test_forked_children_hold_no_work_dir_locks_and_leave_parent_jobs_alone(serv
         pid = os.fork()
         if pid == 0:
             # 子进程：回收继承来的任务不碰父进程的运行时，没有无法抛出的异常；另建的 Engine 能用，macOS 上则明确拒绝
-            # （系统框架在 fork 之后不可用）。都对时退出码为 0
+            # （系统框架在 fork 之后不可用）。都对时退出码为 0，否则把原因写到 stderr
             code = 1
             try:
                 unraisable: list[object] = []
@@ -586,7 +586,15 @@ def test_forked_children_hold_no_work_dir_locks_and_leave_parent_jobs_alone(serv
                 probing.start()
                 probing.join()
                 os.read(parent_done, 1)
-                code = 3 if unraisable else 4 if refused != [sys.platform == "darwin"] else 0
+                if unraisable:
+                    sys.stderr.write(f"子进程里有无法抛出的异常：{unraisable!r}\n")
+                    code = 3
+                elif refused != [sys.platform == "darwin"]:
+                    sys.stderr.write(f"子进程另建的 Engine 被拒绝：{refused!r}\n")
+                    code = 4
+                else:
+                    code = 0
+                sys.stderr.flush()
             finally:
                 os._exit(code)
         children.append(pid)
