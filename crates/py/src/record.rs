@@ -2,6 +2,7 @@
 //!
 //! pickle 与 copy 经 `__reduce__` 按关键字调用构造函数重建（见 [`partial`]），所以每个类都有构造函数。
 
+use std::any::TypeId;
 use std::ops::BitOr;
 
 use pyo3::prelude::*;
@@ -34,7 +35,11 @@ macro_rules! record {
         #[::pyo3::pymethods]
         impl $name {
             fn __repr__(slf: &::pyo3::Bound<'_, Self>) -> ::pyo3::PyResult<String> {
-                $crate::record::fields_repr(slf.as_any(), stringify!($name), &[$(stringify!($field)),*])
+                $crate::record::fields_repr(
+                    slf.as_any(),
+                    stringify!($name),
+                    &[$((stringify!($field), $crate::record::is_address::<$ty>())),*],
+                )
             }
 
             #[gen_stub(skip)]
@@ -113,19 +118,33 @@ macro_rules! variants {
             }
         }
 
+        impl $name {
+            /// 这种取值的各字段：名字，与是否为地址（见 [`crate::record::is_address`]）。
+            fn field_list(&self) -> Vec<(&'static str, bool)> {
+                match self {
+                    $(
+                        $name::$variant { .. } => vec![
+                            $((stringify!($field), $crate::record::is_address::<$ty>())),*
+                        ],
+                    )*
+                }
+            }
+        }
+
         #[::pyo3_stub_gen::derive::gen_stub_pymethods]
         #[::pyo3::pymethods]
         impl $name {
+            /// `类型.取值(字段=repr, ...)`。
             fn __repr__(slf: &::pyo3::Bound<'_, Self>) -> ::pyo3::PyResult<String> {
-                $crate::record::variant_repr(slf.as_any())
+                let name = slf.as_any().get_type().qualname()?.to_string();
+                $crate::record::fields_repr(slf.as_any(), &name, &slf.get().field_list())
             }
 
             #[gen_stub(skip)]
             fn __reduce__<'py>(
                 slf: &::pyo3::Bound<'py, Self>,
             ) -> ::pyo3::PyResult<(::pyo3::Bound<'py, ::pyo3::PyAny>, ::pyo3::Bound<'py, ::pyo3::types::PyTuple>)> {
-                let fields = $crate::record::variant_fields(slf.as_any())?;
-                let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
+                let fields: Vec<&str> = slf.get().field_list().iter().map(|&(name, _)| name).collect();
                 $crate::record::reduce(slf.as_any(), &fields)
             }
         }
@@ -154,36 +173,33 @@ pub(crate) fn union(variants: &[&str]) -> TypeInfo {
         .expect("枚举至少有一种取值")
 }
 
-/// `名字(字段=repr, ...)`，按 `fields` 的顺序。名为 `url` 的字段是地址，常带令牌，只显示到路径（属性本身是完整的）。
+/// 字段的类型是地址（[`Address`]，或可为 None 的）：`repr` 只显示到路径，地址常带令牌（属性本身是完整的）。
+pub(crate) fn is_address<T: 'static>() -> bool {
+    let id = TypeId::of::<T>();
+    id == TypeId::of::<Address>() || id == TypeId::of::<Option<Address>>()
+}
+
+/// `名字(字段=repr, ...)`，按 `fields` 的顺序；`fields` 为各字段的名字与是否为地址（见 [`is_address`]）。
 pub(crate) fn fields_repr(
     object: &Bound<'_, PyAny>,
     name: &str,
-    fields: &[&str],
+    fields: &[(&str, bool)],
 ) -> PyResult<String> {
     let mut parts = Vec::with_capacity(fields.len());
-    for field in fields {
-        let value = object.getattr(*field)?;
-        let shown = if *field == "url" {
-            PyString::new(object.py(), &value.extract::<Address>()?.bare()).repr()?
+    for &(field, address) in fields {
+        let value = object.getattr(field)?;
+        let url = if address {
+            value.extract::<Option<Address>>()?
         } else {
-            value.repr()?
+            None
+        };
+        let shown = match url {
+            Some(url) => PyString::new(object.py(), &url.bare()).repr()?,
+            None => value.repr()?,
         };
         parts.push(format!("{field}={shown}"));
     }
     Ok(format!("{name}({})", parts.join(", ")))
-}
-
-/// 枚举取值的 `__repr__`：`类型.取值(字段=repr, ...)`。
-pub(crate) fn variant_repr(object: &Bound<'_, PyAny>) -> PyResult<String> {
-    let name = object.get_type().qualname()?.to_string();
-    let fields = variant_fields(object)?;
-    let fields: Vec<&str> = fields.iter().map(String::as_str).collect();
-    fields_repr(object, &name, &fields)
-}
-
-/// 枚举取值的字段，取自取值类的 `__match_args__`。
-pub(crate) fn variant_fields(object: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
-    object.get_type().getattr("__match_args__")?.extract()
 }
 
 /// 数据类与枚举的 `__reduce__`：`(partial(...), ())`，见 [`partial`]。

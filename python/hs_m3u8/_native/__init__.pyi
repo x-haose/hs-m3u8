@@ -95,7 +95,10 @@ class AudioChoice:
     r"""
     所选变体引用了音频组时，取组里哪个音频；`Default` 与 `Language` 在变体没有引用音频组时不起作用。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class Default(AudioChoice):
         r"""
@@ -179,7 +182,10 @@ class Encryption:
     r"""
     本库解不了的加密。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class SampleAes(Encryption):
         r"""
@@ -296,7 +302,10 @@ class HlsUnsupported:
     r"""
     本地 HLS 表示不了的内容；可只输出 MP4（`Target.Mp4`）。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class MixedInit(HlsUnsupported):
         r"""
@@ -365,7 +374,10 @@ class HookKind:
     r"""
     出错的是哪个回调。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class Playlist(HookKind):
         r"""
@@ -504,7 +516,10 @@ class HttpErrorKind:
     r"""
     请求失败的原因。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class Status(HttpErrorKind):
         r"""
@@ -701,7 +716,10 @@ class IntegrityFailure:
     r"""
     数据校验失败的原因。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class Padding(IntegrityFailure):
         r"""
@@ -867,7 +885,10 @@ class JobType:
     r"""
     任务类型。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class Vod(JobType):
         r"""
@@ -967,7 +988,10 @@ class LeftoverKind:
     r"""
     残留是什么，决定怎么处理。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class Removable(LeftoverKind):
         r"""
@@ -1013,7 +1037,10 @@ class LiveEnd:
     r"""
     本次运行的录制如何结束。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class EndList(LiveEnd):
         r"""
@@ -1203,7 +1230,10 @@ class Malformed:
     r"""
     内容不是合法的播放列表的原因。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class Empty(Malformed):
         r"""
@@ -1305,7 +1335,10 @@ class MissReason:
     r"""
     分片不在输出中的原因。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class Expired(MissReason):
         r"""
@@ -1427,7 +1460,10 @@ class Mp4Unsupported:
     r"""
     内容放不进 MP4 的原因；可只输出本地 HLS（`Target.Hls`），它原样保留分片，不受这些限制。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class Codec(Mp4Unsupported):
         r"""
@@ -1878,7 +1914,10 @@ class Proxy:
     r"""
     请求经不经代理、经哪个。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class System(Proxy):
         r"""
@@ -1913,7 +1952,10 @@ class Purpose:
     r"""
     请求的用途。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class Playlist(Purpose):
         r"""
@@ -1979,7 +2021,10 @@ class RefreshReason:
     r"""
     直播一次刷新失败的原因。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class Http(RefreshReason):
         r"""
@@ -2178,7 +2223,10 @@ class SelectFailure:
     r"""
     按选轨偏好选不出轨的原因。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class NoVariants(SelectFailure):
         r"""
@@ -2292,7 +2340,10 @@ class Shape:
     r"""
     一路流的编码参数。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class Video(Shape):
         r"""
@@ -2394,7 +2445,10 @@ class SourceUnsupported:
     r"""
     来源用到了不支持的特性。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class EmptyPlaylist(SourceUnsupported):
         r"""
@@ -2510,7 +2564,10 @@ class Stage:
     r"""
     任务所处的阶段。失败时停在原来的阶段，结果只能从 `Job.wait` 取得。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class Preparing(Stage):
         r"""
@@ -2556,7 +2613,10 @@ class StallCause:
     r"""
     一条轨停滞时看起来已结束的原因。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class NoNewSegments(StallCause):
         r"""
@@ -2583,7 +2643,10 @@ class StallReason:
     r"""
     直播停滞的故障原因。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class RefreshFailed(StallReason):
         r"""
@@ -2636,7 +2699,10 @@ class StreamKind:
     r"""
     流的种类。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class Video(StreamKind):
         r"""
@@ -2693,7 +2759,10 @@ class Target:
     在任务开头与写出前创建；相对路径按开始任务时的当前目录补全，之后改变当前目录不影响任务；补全后最后一段变了
     （Windows 去掉结尾的点与空格）时报参数错误。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class Mp4(Target):
         r"""
@@ -2805,7 +2874,10 @@ class Unsettled:
     r"""
     放弃任务（`Engine.discard`）时，任务目录或记录里的输出所在的盘读不到，或收拾输出出错，怎么办。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class Fail(Unsettled):
         r"""
@@ -2829,7 +2901,10 @@ class VariantChoice:
     r"""
     选哪个变体。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class Best(VariantChoice):
         r"""
@@ -2946,7 +3021,10 @@ class WorkDirProblem:
     r"""
     任务目录不能使用的原因。
     """
-    def __repr__(self) -> builtins.str: ...
+    def __repr__(self) -> builtins.str:
+        r"""
+        `类型.取值(字段=repr, ...)`。
+        """
     @typing.final
     class NotEmpty(WorkDirProblem):
         r"""
