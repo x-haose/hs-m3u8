@@ -18,8 +18,8 @@ use crate::resolve::{self, Resolved};
 use crate::vod::{self, Plan};
 use crate::workdir::{self, JobRecord, Lock, RecordKind, Stored, WorkDir, read_resumable};
 use crate::{
-    Error, Leftover, LeftoverKind, LiveReport, Output, Progress, Stage, Unsettled, Unsupported,
-    WorkDirProblem, blocking,
+    Error, Leftover, LeftoverKind, LiveReport, Output, Progress, Stage, Unsettled, WorkDirProblem,
+    blocking,
 };
 
 /// 一次运行用到的共享对象。
@@ -98,10 +98,7 @@ async fn run_live(
     resolved: Resolved,
     lock: Option<Lock>,
 ) -> Result<Output, Error> {
-    let options = task
-        .request
-        .live
-        .ok_or(Error::Unsupported(Unsupported::Live))?;
+    let options = task.request.live.ok_or(Error::LiveNotEnabled)?;
     let record = JobRecord {
         source_digest: source,
         selection: resolved.selection_key(),

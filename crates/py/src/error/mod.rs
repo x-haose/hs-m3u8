@@ -533,7 +533,7 @@ fn exception(
                 },
             ),
         )?,
-        E::Unsupported(U::Live) => instance(py, RequestError::chain(base, LiveNotEnabledError {}))?,
+        E::LiveNotEnabled => instance(py, RequestError::chain(base, LiveNotEnabledError {}))?,
         E::Unsupported(U::Mp4(reason)) => instance(
             py,
             RequestError::chain(

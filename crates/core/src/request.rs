@@ -125,7 +125,7 @@ pub struct JobRequest {
     pub key: Option<KeyOverride>,
     /// 本任务同时下载的分片数
     pub concurrency: NonZeroUsize,
-    /// 直播的录制方式；None 时拒绝直播（[`crate::Unsupported::Live`]）
+    /// 直播的录制方式；None 时拒绝直播（[`Error::LiveNotEnabled`]）
     pub live: Option<LiveOptions>,
 }
 

@@ -2,7 +2,7 @@
 //!
 //! 按调用方的处理方式分类：
 //! - 改请求再试：[`Error::InvalidInput`]；[`Error::OutputExists`]（要求覆盖）；[`Error::OutputOccupied`]（换路径）；
-//!   [`Error::Select`]（选轨偏好与来源不符）；[`Unsupported::Live`]（开启直播录制）；[`Unsupported::Mp4`]、
+//!   [`Error::Select`]（选轨偏好与来源不符）；[`Error::LiveNotEnabled`]（开启直播录制）；[`Unsupported::Mp4`]、
 //!   [`Unsupported::Hls`]（改用另一种输出）；
 //! - 来源本身不行，同样的请求再试也不会成功：[`Error::Playlist`]、[`Error::NotMediaPlaylist`]、
 //!   [`Error::Unsupported`] 的其余各项、[`Error::Integrity`]、[`Error::KeyLength`]；
@@ -55,6 +55,9 @@ pub enum Error {
     NotMediaPlaylist { url: Box<Url> },
     #[error("选轨失败：{0}")]
     Select(hs_m3u8_hls::SelectError),
+    /// 来源是直播，而 [`crate::JobRequest::live`] 为 None
+    #[error("来源是直播（播放列表没有 EXT-X-ENDLIST），请求没有开启直播录制")]
+    LiveNotEnabled,
     #[error("不支持：{0}")]
     Unsupported(Unsupported),
     /// 请求失败；在最外层时是播放列表或 init 段的请求（分片与 key 的包在 [`Error::Segment`]、[`Error::Key`] 里）。
@@ -249,9 +252,6 @@ impl Error {
 /// 来源用到了不支持的特性，或内容放不进所选的输出。
 #[derive(Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unsupported {
-    /// [`crate::JobRequest::live`] 为 None 时遇到直播
-    #[error("直播（播放列表没有 EXT-X-ENDLIST）")]
-    Live,
     #[error("播放列表 {} 没有分片", bare_url(.0))]
     EmptyPlaylist(Box<Url>),
     #[error("直播播放列表 {} 既没有 EXT-X-TARGETDURATION 也没有分片，无法确定刷新间隔", bare_url(.0))]

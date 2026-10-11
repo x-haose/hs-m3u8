@@ -917,10 +917,7 @@ async fn rejected_before_download() {
     let mut req = request(server.url("live.m3u8"), &dir);
     req.live = None;
     let err = run(req).await.unwrap_err();
-    assert!(
-        matches!(err, Error::Unsupported(Unsupported::Live)),
-        "{err}"
-    );
+    assert!(matches!(err, Error::LiveNotEnabled), "{err}");
 
     server.put(
         "video.m3u8",
