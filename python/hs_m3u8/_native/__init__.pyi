@@ -394,14 +394,19 @@ class HookKind:
 
 class Hooks:
     r"""
-    站点适配回调的基类：继承它并覆盖需要的方法，没覆盖的不调用；在实例上赋值的函数也算覆盖。回调在后台线程里执行
+    站点适配回调的基类：继承它并覆盖需要的方法，没覆盖的不调用。回调在后台线程里执行
     （不在事件循环里），同一个对象的回调会在多个线程上同时被调用（同时下载的分片各占一个线程），有状态的回调要自己
     加锁。回调出错使任务失败、不重试（见 `HookError`）。取消不会打断正在执行的回调，任务等它返回后才结束；解释器
     退出时也等它返回，所以回调里的网络请求要设超时。
     """
     def __new__(cls, *_args: typing.Any, **_kwargs: typing.Any) -> typing.Self:
         r"""
-        子类可以定义带参数的 `__init__`，这里的参数一概不用。
+        子类可以定义带参数的 `__init__`，这里的参数一概不用（由 `__init__` 检查）。
+        """
+    def __init__(self, *args: typing.Any, **kwargs: typing.Any) -> None:
+        r"""
+        不收参数（签名与构造函数相同，类型检查器与 stubtest 按此核对）：没定义 `__init__` 的子类传了参数时抛
+        `TypeError`。
         """
     def on_playlist(self, url: builtins.str, body: bytes, /) -> str:
         r"""

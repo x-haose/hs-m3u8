@@ -147,8 +147,8 @@ def test_hooks_rewrite_playlists_and_requests(server: Server) -> None:
     assert ("x-sign", "signed") in server.headers("media.m3u8")
 
 
-def test_hooks_may_take_arguments_rename_parameters_and_be_set_on_the_instance(server: Server) -> None:
-    server.put("media.m3u8", "不是播放列表")
+def test_hooks_may_take_arguments_and_rename_parameters(server: Server) -> None:
+    server.put("media.m3u8", MEDIA)
 
     class Signer(Hooks):
         def __init__(self, token: str) -> None:
@@ -159,13 +159,7 @@ def test_hooks_may_take_arguments_rename_parameters_and_be_set_on_the_instance(s
             del kind
             return RequestParts(parts.url, headers=(*parts.headers, ("X-Token", self.token)))
 
-    def rewrite(url: str, body: bytes) -> str:
-        del url, body
-        return MEDIA
-
-    signer = Signer("t")
-    vars(signer)["on_playlist"] = rewrite
-    result = probe(Source(server.url("media.m3u8"), hooks=signer))
+    result = probe(Source(server.url("media.m3u8"), hooks=Signer("t")))
 
     assert result.tracks[0].segments == 2
     assert ("x-token", "t") in server.headers("media.m3u8")

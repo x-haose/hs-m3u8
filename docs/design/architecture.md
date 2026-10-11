@@ -246,7 +246,7 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 
 ### 7.2 约定
 
-- 类型：不出现没写元素类型的 `dict` 与 `list`；`Any` 只用于 `Hooks.__new__` 的参数（一概不用，子类的 `__init__` 才有意义，写成 `Any` 类型检查器才按子类的 `__init__` 检查）。调用方能据以处理的信息都是有类型的字段；只供人看的细节（播放列表语法错误的具体内容、FFmpeg 的错误说明等）是 `str`，`str(异常)` 是完整说明。
+- 类型：不出现没写元素类型的 `dict` 与 `list`；`Any` 只用于 `Hooks` 的 `__new__` 与 `__init__` 的参数（不收参数，由 `__init__` 在运行时检查；子类的 `__init__` 才有意义，写成 `Any` 类型检查器才按子类的 `__init__` 检查）。调用方能据以处理的信息都是有类型的字段；只供人看的细节（播放列表语法错误的具体内容、FFmpeg 的错误说明等）是 `str`，`str(异常)` 是完整说明。
 - 路径：入参接受 `str | os.PathLike[str]`，返回的一律是 `pathlib.Path`（绝对路径）。地址是 `str`（传入时解析，返回的是解析后的规范写法），内容是 `bytes`。
 - 时长：`datetime.timedelta`；服务器要求的等待 `retry_after` 是整数秒（可能大到超出 `timedelta` 能表示的范围）。
 - 序列：返回 `tuple[T, ...]`，改不了，也就没有「改了却没生效」；传入接受任意序列。请求头传入 `Mapping[str, str]` 或 `(名, 值)` 的可迭代对象（同名可以有多个，不接受 `str`、`bytes`），保存为 `tuple[tuple[str, str], ...]`。
@@ -281,7 +281,7 @@ class Job:  # 不再被引用、也没有在等它时取消任务（已开始写
 - `Source(url, *, preference=Preference(), http=HttpOptions(), hooks=None)`。
 - `Preference(*, variant=VariantChoice.Best(), audio=AudioChoice.Default())`；`VariantChoice`：`Best()`、`Index(index)`；`AudioChoice`：`Default()`、`Language(language)`、`Index(index)`。
 - `HttpOptions(*, headers=None, proxy=Proxy.System(), insecure=False, timeouts=Timeouts(), retry=RetryPolicy())`，`Proxy` 为 `System()`（系统代理设置）、`Direct()`（直连）或 `Url(url)`；`Timeouts(*, connect, read_idle, request)`、`RetryPolicy(*, attempts, base_delay, max_delay)`，各项可省略。
-- `Hooks`：继承它并覆盖需要的方法——`on_playlist(url: str, body: bytes) -> str`、`on_request(purpose: Purpose, request: RequestParts) -> RequestParts`、`on_key(url: str, data: bytes) -> bytes`、`on_segment(url: str, data: bytes) -> bytes`，参数仅限位置（覆盖时可以改名）；没覆盖的不调用，在实例上赋值的函数也算覆盖；同一对象的回调会在多个线程上同时被调用。回调出错使任务失败（`HookError`）：抛出了异常或返回值的类型不对时 `__cause__` 为那个异常，返回的地址不是 http/https、请求头不合法、或 key 不是 16 字节时为 None。`Purpose`：`Playlist()`、`Key()`、`Init()`、`Segment()`；`RequestParts(url, *, headers)`。子类可以定义带参数的 `__init__`。
+- `Hooks`：继承它并覆盖需要的方法——`on_playlist(url: str, body: bytes) -> str`、`on_request(purpose: Purpose, request: RequestParts) -> RequestParts`、`on_key(url: str, data: bytes) -> bytes`、`on_segment(url: str, data: bytes) -> bytes`，参数仅限位置（覆盖时可以改名）；没覆盖的不调用；同一对象的回调会在多个线程上同时被调用。回调出错使任务失败（`HookError`）：抛出了异常或返回值的类型不对时 `__cause__` 为那个异常，返回的地址不是 http/https、请求头不合法、或 key 不是 16 字节时为 None。`Purpose`：`Playlist()`、`Key()`、`Init()`、`Segment()`；`RequestParts(url, *, headers)`。子类可以定义带参数的 `__init__`；没定义的子类传了参数时报 `TypeError`。
 - `JobRequest(source, output, *, key=None, concurrency=..., live=LiveOptions())`，`live=None` 时拒绝直播；`KeyOverride(key: bytes, *, iv: bytes | None = None)`；`LiveOptions(*, max_duration=None, stall_timeout=...)`。
 - `OutputOptions(target, *, work_dir=None, overwrite=False, keep_work_dir=False)`，`resolved_work_dir() -> Path`；`Target`：`Mp4(path)`、`Hls(path)`、`Both(*, mp4, hls)`。
 - `Unsettled`：`Fail()`、`Report()`（见 5.2 放弃任务）。

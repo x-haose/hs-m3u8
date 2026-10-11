@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use hs_m3u8_core as core;
 use hs_m3u8_core::Url;
+use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyDict, PyString, PyTuple};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
@@ -65,7 +67,7 @@ impl RequestParts {
     }
 }
 
-/// 站点适配回调的基类：继承它并覆盖需要的方法，没覆盖的不调用；在实例上赋值的函数也算覆盖。回调在后台线程里执行
+/// 站点适配回调的基类：继承它并覆盖需要的方法，没覆盖的不调用。回调在后台线程里执行
 /// （不在事件循环里），同一个对象的回调会在多个线程上同时被调用（同时下载的分片各占一个线程），有状态的回调要自己
 /// 加锁。回调出错使任务失败、不重试（见 `HookError`）。取消不会打断正在执行的回调，任务等它返回后才结束；解释器
 /// 退出时也等它返回，所以回调里的网络请求要设超时。
@@ -76,7 +78,7 @@ pub struct Hooks;
 #[gen_stub_pymethods]
 #[pymethods]
 impl Hooks {
-    /// 子类可以定义带参数的 `__init__`，这里的参数一概不用。
+    /// 子类可以定义带参数的 `__init__`，这里的参数一概不用（由 `__init__` 检查）。
     #[new]
     #[pyo3(signature = (*_args, **_kwargs))]
     #[gen_stub(override_return_type(type_repr = "typing.Self", imports = ("typing",)))]
@@ -90,6 +92,28 @@ impl Hooks {
         >,
     ) -> Self {
         Hooks
+    }
+
+    /// 不收参数（签名与构造函数相同，类型检查器与 stubtest 按此核对）：没定义 `__init__` 的子类传了参数时抛
+    /// `TypeError`。
+    #[pyo3(signature = (*args, **kwargs))]
+    fn __init__(
+        slf: &Bound<'_, Self>,
+        #[gen_stub(override_type(type_repr = "typing.Any", imports = ("typing",)))] args: &Bound<
+            '_,
+            PyTuple,
+        >,
+        #[gen_stub(override_type(type_repr = "typing.Any", imports = ("typing",)))] kwargs: Option<
+            &Bound<'_, PyDict>,
+        >,
+    ) -> PyResult<()> {
+        if args.is_empty() && kwargs.is_none_or(|kwargs| kwargs.is_empty()) {
+            return Ok(());
+        }
+        Err(PyTypeError::new_err(format!(
+            "{}() 不收参数；要收参数就在子类里定义 __init__",
+            slf.get_type().qualname()?
+        )))
     }
 
     /// 改写拉到的播放列表（如解密、转码），返回改写后的文本。`url` 为重定向之后的地址。基类的实现按 UTF-8 解码。
@@ -167,13 +191,14 @@ struct PyHooks {
 
 /// 把 Python 的 `Hooks` 实例接到 core。
 pub(crate) fn to_core(object: &Bound<'_, Hooks>) -> PyResult<Arc<dyn core::Hooks>> {
-    let base = object.py().get_type::<Hooks>();
-    // 与调用时一样从实例上取：没覆盖时取到的是绑定到它的基类方法，子类的方法、实例上赋值的函数都与它不等
+    static GETATTR_STATIC: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    let py = object.py();
+    let getattr_static = GETATTR_STATIC.import(py, "inspect", "getattr_static")?;
+    let base = py.get_type::<Hooks>();
+    // 按调用时的查找顺序（实例、类、各基类）取出原物，不经描述符、不比较值：是基类的那个即没覆盖
     let overridden = |name: &str| -> PyResult<bool> {
-        let inherited = base
-            .getattr(name)?
-            .call_method1("__get__", (object, object.get_type()))?;
-        Ok(!object.getattr(name)?.eq(inherited)?)
+        let found = getattr_static.call1((object, name))?;
+        Ok(!found.is(getattr_static.call1((&base, name))?))
     };
     Ok(Arc::new(PyHooks {
         object: object.clone().unbind(),
