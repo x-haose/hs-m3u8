@@ -212,7 +212,8 @@ variants! {
 #[pyclass(module = "hs_m3u8._native", frozen, eq, hash, get_all, from_py_object)]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct HttpOptions {
-    /// 附加到所有请求的请求头，按顺序，同名的可以有多个
+    /// 附加到所有请求的请求头，按顺序，同名的可以有多个；跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉
+    /// Cookie、Authorization 与 Proxy-Authorization
     pub headers: Headers,
     /// 经不经代理、经哪个
     pub proxy: Proxy,

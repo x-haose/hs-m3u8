@@ -67,7 +67,8 @@ impl Source {
 /// 发请求的方式。不实现 `Debug`：请求头常带 Cookie 与令牌，代理地址可能带口令（[`Proxy`] 同理）。
 #[derive(Clone, Default)]
 pub struct HttpOptions {
-    /// 附加到所有请求的请求头
+    /// 附加到所有请求的请求头；跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉 Cookie、Authorization
+    /// 与 Proxy-Authorization
     pub headers: Vec<(String, String)>,
     pub proxy: Proxy,
     /// 不校验 TLS 证书

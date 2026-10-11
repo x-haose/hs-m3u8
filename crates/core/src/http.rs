@@ -57,8 +57,10 @@ impl Http {
         on_received: Option<OnReceived>,
     ) -> Result<Self, Error> {
         let t = options.timeouts;
+        // 不自动写 Referer：开着时 reqwest 跟随重定向会把它换成上一跳的地址，盖掉调用方给的
         let mut builder = reqwest::Client::builder()
             .user_agent(concat!("hs-m3u8/", env!("CARGO_PKG_VERSION")))
+            .referer(false)
             .cookie_store(true)
             .connect_timeout(t.connect)
             .read_timeout(t.read_idle)

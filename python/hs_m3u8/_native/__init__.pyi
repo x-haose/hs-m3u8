@@ -648,7 +648,8 @@ class HttpOptions:
     @property
     def headers(self) -> builtins.tuple[tuple[builtins.str, builtins.str], ...]:
         r"""
-        附加到所有请求的请求头，按顺序，同名的可以有多个
+        附加到所有请求的请求头，按顺序，同名的可以有多个；跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉
+        Cookie、Authorization 与 Proxy-Authorization
         """
     @property
     def proxy(self) -> Proxy.System | Proxy.Direct | Proxy.Url:

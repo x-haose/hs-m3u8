@@ -1,4 +1,5 @@
-//! 请求失败的归类：重试也不会成功的证书校验失败、重定向失败不重试，原因写在错误里；HTTP 库用不上的代理报参数错误。
+//! HTTP 请求：证书校验失败与重定向失败不重试，原因写在错误里；重定向后保留调用方给的 Referer；HTTP 库用不上的代理
+//! 报参数错误。
 
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -88,6 +89,24 @@ async fn redirect_loops_are_reported_without_retrying() {
         "{err}"
     );
     assert!(!err.retryable());
+}
+
+/// 跟随重定向后的请求带的仍是调用方给的 Referer，不被换成上一跳的地址。
+#[tokio::test(flavor = "multi_thread")]
+async fn redirects_keep_the_callers_referer() {
+    let server = Server::start().await;
+    server.require_header("referer", "https://example.com/");
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n",
+    );
+    server.redirect("watch", "index.m3u8");
+    let mut source = Source::new(server.url("watch"));
+    source.http.headers = vec![("Referer".into(), "https://example.com/".into())];
+
+    let probe = engine().probe(&source).await.unwrap();
+
+    assert_eq!(probe.tracks[0].segments, 1);
 }
 
 /// HTTP 库用不上的代理（协议写错，或 socks 地址的主机名它解析不了）：报参数错误，不发出请求。不报的话代理不起作用，
