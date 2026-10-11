@@ -252,7 +252,7 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 - 路径：入参接受 `str | os.PathLike[str]`，返回的一律是 `pathlib.Path`（绝对路径）。地址是 `str`（传入时解析，返回的是解析后的规范写法），内容是 `bytes`。
 - 时长：`datetime.timedelta`；服务器要求的等待 `retry_after` 是整数秒（可能大到超出 `timedelta` 能表示的范围）。
 - 序列：返回 `tuple[T, ...]`，改不了，也就没有「改了却没生效」；传入接受任意序列。请求头传入 `Mapping[str, str]` 或 `(名, 值)` 的可迭代对象（同名可以有多个，不接受 `str`、`bytes`），保存为 `tuple[tuple[str, str], ...]`。
-- 校验：请求与选项的值在构造时检查，不合要求时抛 `InvalidInputError`：计数为负、超出范围、该至少为 1 而为 0，时长为负，地址解析不了（`Source`、`Proxy.Url`、`RequestParts`），以及 `core` 公开的校验（`Source::check_url`、`check_preference`、`HttpOptions::validate`、`Timeouts::validate`、`LiveOptions::validate`，规则只在 `core` 一份）。输出路径要按开始任务时的当前目录补全，在开始任务时检查。结果与异常类型的构造函数（供 pickle 与测试）只做类型转换，整数为负时是 `OverflowError`。
+- 校验：请求与选项的值在构造时检查，不合要求时抛 `InvalidInputError`：计数为负、超出范围、该至少为 1 而为 0，时长为负，地址解析不了（`Source`、`Proxy.Url`、`RequestParts`），以及 `core` 公开的校验（`Source::check_url`、`check_preference`、`Proxy::check_url`、`HttpOptions::validate`、`Timeouts::validate`、`LiveOptions::validate`，规则只在 `core` 一份）。输出路径要按开始任务时的当前目录补全，在开始任务时检查。结果与异常类型的构造函数（供 pickle 与测试）只做类型转换，整数为负时是 `OverflowError`。
 - 默认值取 `core` 的（`Default` 实现与常量），绑定层不另写数字；说明里写出的默认数字（如超时 15 秒、并发 16）是照抄的，改 `core` 的默认值时同步改这些说明；可否重试、区间的分片数等也由 `core` 算好、作为字段给出，绑定层不另写规则。
 - 说明：中文，每个类、字段、方法、参数都写。请求头的值、key、代理地址里的口令不进 `__repr__`。
 - 异步方法返回协程，在 asyncio 事件循环里 await（在别处驱动时抛 `RuntimeError`，不开始操作）；协程被取消或丢弃时，所等的操作随之取消。本库内部出错（缺陷）时抛 `pyo3_runtime.PanicException`。

@@ -1959,7 +1959,8 @@ class Proxy:
         @property
         def url(self) -> builtins.str:
             r"""
-            代理的地址，协议为 http、https、socks4、socks4a、socks5、socks5h；`repr` 只显示到路径，不含用户名与口令
+            代理的地址，协议为 http、https、socks4、socks4a、socks5、socks5h（构造时检查，不合要求时抛
+            `InvalidInputError`）；`repr` 只显示到路径，不含用户名与口令
             """
         def __new__(cls, url: builtins.str) -> Proxy.Url: ...
     

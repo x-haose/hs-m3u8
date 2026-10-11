@@ -10,7 +10,7 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyString, PyTuple};
 use pyo3_stub_gen::TypeInfo;
 
-use crate::convert::Address;
+use crate::convert::{Address, ProxyAddress};
 
 /// 数据类：字段只读（同名属性）。构造函数各参数只能按关键字传、都必须给；要默认值或校验的写 `@custom_new`，自己定义
 /// 构造函数。
@@ -173,10 +173,13 @@ pub(crate) fn union(variants: &[&str]) -> TypeInfo {
         .expect("枚举至少有一种取值")
 }
 
-/// 字段的类型是地址（[`Address`]，或可为 None 的）：`repr` 只显示到路径，地址常带令牌（属性本身是完整的）。
+/// 字段的类型是地址（[`Address`]、可为 None 的，或 [`ProxyAddress`]）：`repr` 只显示到路径，地址常带令牌（属性
+/// 本身是完整的）。
 pub(crate) fn is_address<T: 'static>() -> bool {
     let id = TypeId::of::<T>();
-    id == TypeId::of::<Address>() || id == TypeId::of::<Option<Address>>()
+    id == TypeId::of::<Address>()
+        || id == TypeId::of::<Option<Address>>()
+        || id == TypeId::of::<ProxyAddress>()
 }
 
 /// `名字(字段=repr, ...)`，按 `fields` 的顺序；`fields` 为各字段的名字与是否为地址（见 [`is_address`]）。

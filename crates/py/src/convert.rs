@@ -11,7 +11,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyByteArray, PyBytes, PyMapping, PyString, PyTuple};
 use pyo3_stub_gen::{PyStubType, TypeInfo};
 
-use crate::error::invalid_input;
+use crate::error::{invalid_input, to_pyerr};
 
 /// 路径：传入时接受 `str | os.PathLike[str]`，返回 `pathlib.Path`。不直接用 `PathBuf`：存根生成把它的入参写成
 /// 不带类型参数的 `os.PathLike`。
@@ -388,6 +388,47 @@ impl<'py> IntoPyObject<'py> for Address {
 }
 
 impl PyStubType for Address {
+    fn type_output() -> TypeInfo {
+        String::type_output()
+    }
+}
+
+/// 代理地址：同 [`Address`]，另按 `core::Proxy::check_url` 检查 HTTP 库用不用得上，用不上时同样抛
+/// `InvalidInputError`。
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ProxyAddress(pub(crate) Address);
+
+impl FromPyObject<'_, '_> for ProxyAddress {
+    type Error = PyErr;
+
+    fn extract(object: Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
+        let address = object.extract::<Address>()?;
+        core::Proxy::check_url(&address.0).map_err(|error| to_pyerr(object.py(), error))?;
+        Ok(ProxyAddress(address))
+    }
+}
+
+impl<'py> IntoPyObject<'py> for &ProxyAddress {
+    type Target = PyString;
+    type Output = Bound<'py, PyString>;
+    type Error = std::convert::Infallible;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        (&self.0).into_pyobject(py)
+    }
+}
+
+impl<'py> IntoPyObject<'py> for ProxyAddress {
+    type Target = PyString;
+    type Output = Bound<'py, PyString>;
+    type Error = std::convert::Infallible;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        self.0.into_pyobject(py)
+    }
+}
+
+impl PyStubType for ProxyAddress {
     fn type_output() -> TypeInfo {
         String::type_output()
     }

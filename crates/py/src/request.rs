@@ -13,7 +13,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString, PyTuple};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use crate::convert::{Address, Count, Headers, Positive, PyPath, Span};
+use crate::convert::{Address, Count, Headers, Positive, ProxyAddress, PyPath, Span};
 use crate::error::{invalid_input, to_pyerr};
 use crate::hooks::{self, Hooks};
 use crate::record::{field_names, record, reduce, variants};
@@ -201,8 +201,9 @@ variants! {
         Direct {},
         /// 经这个 HTTP 或 SOCKS 代理
         Url {
-            /// 代理的地址，协议为 http、https、socks4、socks4a、socks5、socks5h；`repr` 只显示到路径，不含用户名与口令
-            url: Address,
+            /// 代理的地址，协议为 http、https、socks4、socks4a、socks5、socks5h（构造时检查，不合要求时抛
+            /// `InvalidInputError`）；`repr` 只显示到路径，不含用户名与口令
+            url: ProxyAddress,
         },
     }
 }
@@ -749,7 +750,7 @@ impl HttpOptions {
             proxy: match &self.proxy {
                 Proxy::System {} => core::Proxy::System,
                 Proxy::Direct {} => core::Proxy::Direct,
-                Proxy::Url { url } => core::Proxy::Url(url.0.clone()),
+                Proxy::Url { url } => core::Proxy::Url(url.0.0.clone()),
             },
             insecure: self.insecure,
             timeouts: core::Timeouts {
@@ -852,7 +853,9 @@ impl From<core::HttpOptions> for HttpOptions {
             proxy: match h.proxy {
                 core::Proxy::System => Proxy::System {},
                 core::Proxy::Direct => Proxy::Direct {},
-                core::Proxy::Url(url) => Proxy::Url { url: Address(url) },
+                core::Proxy::Url(url) => Proxy::Url {
+                    url: ProxyAddress(Address(url)),
+                },
             },
             insecure: h.insecure,
             timeouts: h.timeouts.into(),

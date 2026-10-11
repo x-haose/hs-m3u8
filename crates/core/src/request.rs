@@ -84,7 +84,7 @@ impl HttpOptions {
         }
         self.timeouts.validate()?;
         if let Proxy::Url(proxy) = &self.proxy {
-            check_proxy(proxy)?;
+            Proxy::check_url(proxy)?;
         }
         Ok(())
     }
@@ -105,10 +105,14 @@ pub enum Proxy {
     Url(Url),
 }
 
-fn check_proxy(proxy: &Url) -> Result<(), Error> {
-    match crate::proxy::unusable(proxy) {
-        Some(reason) => Err(Error::InvalidInput(reason)),
-        None => Ok(()),
+impl Proxy {
+    /// 代理地址 HTTP 库用不用得上：协议为 http、https、socks4、socks4a、socks5、socks5h，且主机名合法。它用不上的
+    /// 地址不报错、请求直连，所以先拒绝。
+    pub fn check_url(url: &Url) -> Result<(), Error> {
+        match crate::proxy::unusable(url) {
+            Some(reason) => Err(Error::InvalidInput(reason)),
+            None => Ok(()),
+        }
     }
 }
 

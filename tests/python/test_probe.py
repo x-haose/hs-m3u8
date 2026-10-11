@@ -298,7 +298,7 @@ def test_invalid_arguments_are_rejected_when_constructed() -> None:
     with pytest.raises(InvalidInputError):
         Timeouts(connect=timedelta(0))
     with pytest.raises(InvalidInputError):
-        HttpOptions(proxy=Proxy.Url("sock5://127.0.0.1:9"))
+        Proxy.Url("sock5://127.0.0.1:9")
     with pytest.raises(InvalidInputError):
         LiveOptions(max_duration=timedelta(0))
     # bytes 也是整数的序列，类型检查器放行，却不是要的序列
