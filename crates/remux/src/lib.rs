@@ -1,7 +1,8 @@
 //! 转封装：把 HLS 各条轨的分片原样复制（不重编码）进一个 MP4。
 //!
 //! 输入按不连续段组（两个 `EXT-X-DISCONTINUITY` 之间）组织，每组里每条轨一份分片列表，fMP4 另带 init 段。
-//! - 组内：分片按字节顺序当作一个连续的输入读取，同一时刻只打开一个文件，不先拼成大文件。
+//! - 组内：TS 与 fMP4 的分片按字节顺序当作一个连续的输入读取，同一时刻只打开一个文件，不先拼成大文件；打包音频
+//!   （RFC 8216 3.4，没有 init 段、不以 TS 的同步字节开头）逐个分片打开，按各片 ID3 标签里的时间戳定时。
 //! - 组间：整组使用同一个时间偏移，保留组内各轨（如视频与独立音频 rendition）原有的相对时序；
 //!   各组首尾相接，下一组从上一组所有流的最晚结束时刻之后开始。
 //! - 每条轨按调用方指定的 [`Streams`] 贡献第一路视频和（或）第一路音频，没有这类流的轨不贡献（各轨合起来至少
@@ -14,6 +15,7 @@
 
 mod chain;
 mod ffi;
+mod packed;
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -26,9 +28,13 @@ use ffmpeg::{Dictionary, Packet, Rational, Rescale, Rounding, codec, encoder, fo
 use ffmpeg_next as ffmpeg;
 
 use crate::chain::{SegmentChain, ffmpeg_path};
+pub use crate::packed::id3_len;
 
 /// 时间戳在组间换算时使用的公共时间基（微秒）。
 const MICROS: Rational = Rational(1, 1_000_000);
+
+/// TS 与打包音频时间戳的时钟（90 kHz）。
+const CLOCK_90K: Rational = Rational(1, 90_000);
 
 /// 一个不连续段组里某条轨的分片，按播放顺序；fMP4 时 `init` 是该组使用的 init 段。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,7 +228,7 @@ pub enum Error {
 }
 
 /// 内容放不进 MP4：编码不受支持；后续组与第 0 组的流种类、编码参数不同，或组内解码时间戳不递增（同一条 MP4 轨的
-/// 内容须前后一致、时间戳严格递增）；或各轨都没有要取的流。
+/// 内容须前后一致、时间戳严格递增）；打包音频没有时间戳而要与其他轨对齐；或各轨都没有要取的流。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unsupported {
     #[error(
@@ -255,6 +261,12 @@ pub enum Unsupported {
         track: usize,
         kind: StreamKind,
     },
+    /// 第 `track` 条轨是打包音频，这一组的第一个分片没有 ID3 时间戳（RFC 8216 3.4 要求有），而这一组还有别的轨：
+    /// 不知道它与别的轨怎样对齐。只有它一条轨时按样本数从头计时
+    #[error(
+        "第 {group} 组第 {track} 条轨是打包音频，这一组的第一个分片没有 ID3 时间戳，无法与其他轨对齐"
+    )]
+    UntimedPackedAudio { group: usize, track: usize },
     #[error("各轨都没有要取的视频或音频流，写不出 MP4")]
     NoStreams,
 }
@@ -326,19 +338,35 @@ fn validate(streams: &[Streams], groups: &[DiscontinuityGroup]) -> Result<(), Er
     Ok(())
 }
 
-/// 打开一条轨在一组里的全部分片（init 段在前），当作一个连续的输入。返回输入与记录文件错误的位置。
-fn open_track(
-    segments: &TrackSegments,
-    group: usize,
-    track: usize,
-) -> Result<(format::context::Input, chain::Failure), Error> {
-    let paths: Vec<PathBuf> = segments
+/// 打开一条轨在一组里的分片：TS 与 fMP4 的全部分片（init 段在前）当作一个连续的输入，打包音频先打开第一个分片。
+fn open_track(segments: &TrackSegments, group: usize, track: usize) -> Result<Input, Error> {
+    let first = &segments.segments[0];
+    let packed = segments.init.is_none()
+        && packed::is_packed(first).map_err(|cause| Error::Io {
+            action: "读取",
+            path: first.clone(),
+            cause,
+        })?;
+    if packed {
+        return Packed::open(&segments.segments, group, track).map(Input::Packed);
+    }
+    let files = segments
         .init
         .iter()
         .chain(&segments.segments)
-        .cloned()
+        .map(|path| (path.clone(), 0))
         .collect();
-    let (chain, failure) = SegmentChain::new(paths).map_err(|(path, cause)| Error::Io {
+    let (ictx, failure) = open_files(files, group, track)?;
+    Ok(Input::Chain { ictx, failure })
+}
+
+/// 把 `files`（路径与开头不读的字节数）当作一个连续的输入打开。返回输入与记录文件错误的位置。
+fn open_files(
+    files: Vec<(PathBuf, u64)>,
+    group: usize,
+    track: usize,
+) -> Result<(format::context::Input, chain::Failure), Error> {
+    let (chain, failure) = SegmentChain::new(files).map_err(|(path, cause)| Error::Io {
         action: "读取",
         path,
         cause,
@@ -365,6 +393,168 @@ fn read_failure(failure: &chain::Failure) -> Option<Error> {
     })
 }
 
+/// 一条轨在一组里的输入。
+enum Input {
+    /// TS 与 fMP4：init 段与分片按字节相连，作为一个输入读
+    Chain {
+        ictx: format::context::Input,
+        /// 读分片文件出错时的路径与原因
+        failure: chain::Failure,
+    },
+    Packed(Packed),
+}
+
+impl Input {
+    /// 当前打开的 FFmpeg 输入；选流时为第一个（打包音频为第一个分片的）。
+    fn context(&self) -> &format::context::Input {
+        match self {
+            Input::Chain { ictx, .. } => ictx,
+            Input::Packed(packed) => &packed.ictx,
+        }
+    }
+
+    /// 读下一个包；读到末尾返回 false。用 `Packet::read` 而不是 ffmpeg-next 的 `packets()` 迭代器：后者把读错误当作
+    /// 读到末尾，并静默跳过 `InvalidData` 的包。
+    fn read(&mut self, packet: &mut Packet, group: usize, track: usize) -> Result<bool, Error> {
+        match self {
+            Input::Chain { ictx, failure } => match packet.read(ictx) {
+                Ok(()) => Ok(true),
+                Err(ffmpeg::Error::Eof) => Ok(false),
+                Err(cause) => Err(read_failure(failure).unwrap_or(Error::Read {
+                    group,
+                    track,
+                    cause: cause.into(),
+                })),
+            },
+            Input::Packed(packed) => packed.read(packet, group, track),
+        }
+    }
+
+    /// 打包音频，而这一组的第一个分片没有时间戳。
+    fn untimed(&self) -> bool {
+        matches!(self, Input::Packed(packed) if packed.first.is_none())
+    }
+}
+
+/// 打包音频一条轨在一组里的分片。FFmpeg 只从 0 起按样本数计时，所以逐个分片打开，把各片的音频包平移到它的 ID3
+/// 时间戳处：与同组的其他轨对齐，缺失的分片处留出空档。没有时间戳的分片接在上一片之后；这一组的第一个分片就没有
+/// 时间戳时，整组按样本数接续。
+struct Packed {
+    /// 当前分片的输入
+    ictx: format::context::Input,
+    /// 读当前分片出错时的路径与原因
+    failure: chain::Failure,
+    /// 当前分片的时间戳（90 kHz，已展开）；它没有、或这一组按样本数计时时为 None
+    timestamp: Option<i64>,
+    /// 当前分片的音频包要加的偏移，以 `audio` 的时间基为单位；读到它第一个带 DTS 的音频包时确定
+    shift: Option<i64>,
+    /// 还没打开的分片
+    rest: VecDeque<PathBuf>,
+    /// 这一组第一个分片的时间戳（90 kHz，未展开），展开其余各片的时间戳时作参照；为 None 时整组按样本数计时
+    first: Option<i64>,
+    /// 第一个分片里音频流的下标与时间基，各片的音频包都换到这个时间基；没有音频流时为 None
+    audio: Option<(usize, Rational)>,
+    /// 已读出的音频包最晚的结束时刻，以 `audio` 的时间基为单位
+    end: Option<i64>,
+}
+
+impl Packed {
+    /// 打开第一个分片；`segments` 至少有一个。
+    fn open(segments: &[PathBuf], group: usize, track: usize) -> Result<Packed, Error> {
+        let mut rest: VecDeque<PathBuf> = segments.iter().cloned().collect();
+        let path = rest.pop_front().expect("validate 保证每条轨至少一个分片");
+        let (ictx, failure, first) = open_packed_segment(path, group, track)?;
+        let audio = ictx
+            .streams()
+            .find(|s| s.parameters().medium() == media::Type::Audio)
+            .map(|s| (s.index(), s.time_base()));
+        Ok(Packed {
+            ictx,
+            failure,
+            timestamp: first.map(|first| packed::unwrap_pts(first, first)),
+            shift: None,
+            rest,
+            first,
+            audio,
+            end: None,
+        })
+    }
+
+    /// 读下一个包，音频包平移到所在分片的时间戳处、换到第一个分片的时间基；读完最后一片返回 false。
+    fn read(&mut self, packet: &mut Packet, group: usize, track: usize) -> Result<bool, Error> {
+        loop {
+            match packet.read(&mut self.ictx) {
+                Ok(()) => break,
+                Err(ffmpeg::Error::Eof) => {
+                    let Some(path) = self.rest.pop_front() else {
+                        return Ok(false);
+                    };
+                    let (ictx, failure, timestamp) = open_packed_segment(path, group, track)?;
+                    self.ictx = ictx;
+                    self.failure = failure;
+                    self.timestamp = self
+                        .first
+                        .zip(timestamp)
+                        .map(|(first, timestamp)| packed::unwrap_pts(timestamp, first));
+                    self.shift = None;
+                }
+                Err(cause) => {
+                    return Err(read_failure(&self.failure).unwrap_or(Error::Read {
+                        group,
+                        track,
+                        cause: cause.into(),
+                    }));
+                }
+            }
+        }
+        let Some((stream, time_base)) = self.audio else {
+            return Ok(true);
+        };
+        let Some(dts) = packet.dts().filter(|_| packet.stream() == stream) else {
+            return Ok(true);
+        };
+        let from = self
+            .ictx
+            .stream(stream)
+            .expect("包所属的流存在")
+            .time_base();
+        let dts = dts.rescale(from, time_base);
+        let shift = match self.shift {
+            Some(shift) => shift,
+            None => {
+                let start = match self.timestamp {
+                    Some(timestamp) => timestamp.rescale(CLOCK_90K, time_base),
+                    None => self.end.unwrap_or(dts),
+                };
+                *self.shift.insert(start - dts)
+            }
+        };
+        let pts = packet.pts().map(|pts| pts.rescale(from, time_base) + shift);
+        let duration = packet.duration().rescale(from, time_base);
+        packet.set_dts(Some(dts + shift));
+        packet.set_pts(pts);
+        packet.set_duration(duration);
+        let end = pts.unwrap_or(dts + shift).max(dts + shift) + duration;
+        self.end = Some(self.end.map_or(end, |e| e.max(end)));
+        Ok(true)
+    }
+}
+
+/// 打开打包音频的一个分片，跳过开头的 ID3 标签。返回输入、记录文件错误的位置与分片的时间戳（90 kHz，未展开）。
+fn open_packed_segment(
+    path: PathBuf,
+    group: usize,
+    track: usize,
+) -> Result<(format::context::Input, chain::Failure, Option<i64>), Error> {
+    let head = packed::read_head(&path).map_err(|cause| Error::Io {
+        action: "读取",
+        path: path.clone(),
+        cause,
+    })?;
+    let (ictx, failure) = open_files(vec![(path, head.data_start)], group, track)?;
+    Ok((ictx, failure, head.timestamp))
+}
+
 /// 一条轨在某组中被选中的一路流。
 struct Selected {
     index: usize,
@@ -379,14 +569,15 @@ fn open_selected(
     wanted: Streams,
     group: usize,
     track: usize,
-) -> Result<(format::context::Input, chain::Failure, Vec<Selected>), Error> {
-    let (ictx, failure) = open_track(segments, group, track)?;
+) -> Result<(Input, Vec<Selected>), Error> {
+    let input = open_track(segments, group, track)?;
     let mut selected = Vec::new();
     for kind in [StreamKind::Video, StreamKind::Audio] {
         if !wanted.wants(kind) {
             continue;
         }
-        let Some(stream) = ictx
+        let Some(stream) = input
+            .context()
             .streams()
             .find(|s| s.parameters().medium() == kind.medium())
         else {
@@ -408,7 +599,7 @@ fn open_selected(
             shape: ffi::shape(&stream, kind),
         });
     }
-    Ok((ictx, failure, selected))
+    Ok((input, selected))
 }
 
 /// 一条轨在第 0 组确定的一路输出流。
@@ -428,9 +619,7 @@ struct Mapping {
 struct Source {
     group: usize,
     track: usize,
-    ictx: format::context::Input,
-    /// 读分片文件出错时的路径与原因
-    failure: chain::Failure,
+    input: Input,
     /// 按输入流下标；None 表示该流不进输出
     map: Vec<Option<Mapping>>,
     /// 已读出、待写入的包及其映射；包一定带 DTS
@@ -443,12 +632,11 @@ impl Source {
     fn new(
         group: usize,
         track: usize,
-        ictx: format::context::Input,
-        failure: chain::Failure,
+        input: Input,
         selected: &[Selected],
         outputs: &[usize],
     ) -> Self {
-        let mut map = vec![None; ictx.nb_streams() as usize];
+        let mut map = vec![None; input.context().nb_streams() as usize];
         for (s, &output) in selected.iter().zip(outputs) {
             map[s.index] = Some(Mapping {
                 output,
@@ -458,8 +646,7 @@ impl Source {
         Source {
             group,
             track,
-            ictx,
-            failure,
+            input,
             map,
             queue: VecDeque::new(),
             finished: false,
@@ -467,21 +654,11 @@ impl Source {
     }
 
     /// 读下一个要写出的包。跳过未映射流的包；没有 DTS 的包计入该输出流的 `skipped`。读到末尾返回 `None`。
-    /// 用 `Packet::read` 而不是 ffmpeg-next 的 `packets()` 迭代器：后者把读错误当作读到末尾，并静默跳过
-    /// `InvalidData` 的包。
     fn read_next(&mut self, outs: &mut [OutStream]) -> Result<Option<(Packet, Mapping)>, Error> {
         loop {
             let mut packet = Packet::empty();
-            match packet.read(&mut self.ictx) {
-                Ok(()) => {}
-                Err(ffmpeg::Error::Eof) => return Ok(None),
-                Err(cause) => {
-                    return Err(read_failure(&self.failure).unwrap_or(Error::Read {
-                        group: self.group,
-                        track: self.track,
-                        cause: cause.into(),
-                    }));
-                }
+            if !self.input.read(&mut packet, self.group, self.track)? {
+                return Ok(None);
             }
             // TS 可能在文件中途出现新流，其下标超出建立映射时的流数
             let Some(mapping) = self.map.get(packet.stream()).copied().flatten() else {
@@ -599,14 +776,17 @@ fn create_outputs(
     let mut layout: Vec<Vec<TrackOutput>> = Vec::new();
     let mut sources = Vec::new();
     for (track, segments) in first.tracks.iter().enumerate() {
-        let (ictx, failure, selected) = open_selected(segments, streams[track], 0, track)?;
+        let (input, selected) = open_selected(segments, streams[track], 0, track)?;
         let mut outputs = Vec::new();
         for s in &selected {
             let kind = s.shape.kind();
             if layout.iter().flatten().any(|o| o.shape.kind() == kind) {
                 return Err(Error::DuplicateKind { track, kind });
             }
-            let stream = ictx.stream(s.index).expect("open_selected 返回的下标有效");
+            let stream = input
+                .context()
+                .stream(s.index)
+                .expect("open_selected 返回的下标有效");
             let mut ost = octx
                 .add_stream(encoder::find(codec::Id::None))
                 .map_err(|e| Error::Mux(e.into()))?;
@@ -620,14 +800,28 @@ fn create_outputs(
         // 没有要取的流的轨什么也不贡献，不读它的包
         if !outputs.is_empty() {
             let indices: Vec<usize> = outputs.iter().map(|o| o.out).collect();
-            sources.push(Source::new(0, track, ictx, failure, &selected, &indices));
+            sources.push(Source::new(0, track, input, &selected, &indices));
         }
         layout.push(outputs);
     }
     if layout.iter().all(Vec::is_empty) {
         return Err(Error::Unsupported(Unsupported::NoStreams));
     }
+    check_timed(0, &sources)?;
     Ok((layout, sources))
+}
+
+/// 一组里有打包音频的轨没有时间戳时，只有它一条轨才能定时。
+fn check_timed(group: usize, sources: &[Source]) -> Result<(), Error> {
+    match sources.iter().find(|s| s.input.untimed()) {
+        Some(untimed) if sources.len() > 1 => {
+            Err(Error::Unsupported(Unsupported::UntimedPackedAudio {
+                group,
+                track: untimed.track,
+            }))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// 写 MP4 头（moov 前置）；封装器不认识的选项视为错误。
@@ -656,7 +850,7 @@ fn open_group(
 ) -> Result<Vec<Source>, Error> {
     let mut sources = Vec::new();
     for (track, segments) in groups[group].tracks.iter().enumerate() {
-        let (ictx, failure, selected) = open_selected(segments, streams[track], group, track)?;
+        let (input, selected) = open_selected(segments, streams[track], group, track)?;
         let expected = &layout[track];
         if selected.len() != expected.len()
             || selected
@@ -682,11 +876,10 @@ fn open_group(
         }
         if !expected.is_empty() {
             let indices: Vec<usize> = expected.iter().map(|e| e.out).collect();
-            sources.push(Source::new(
-                group, track, ictx, failure, &selected, &indices,
-            ));
+            sources.push(Source::new(group, track, input, &selected, &indices));
         }
     }
+    check_timed(group, &sources)?;
     Ok(sources)
 }
 

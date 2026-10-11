@@ -1,5 +1,7 @@
 //! 分片内容校验：拦下解密错误、伪装页面、错误响应等不是媒体数据的内容，不写盘；识别没有 init 段的分片的格式。
 
+use hs_m3u8_remux::id3_len;
+
 use crate::Integrity;
 
 /// 没有 init 段的分片的格式。
@@ -50,17 +52,6 @@ fn skip_id3(mut data: &[u8]) -> Option<&[u8]> {
         data = data.get(id3_len(data)?..)?;
     }
     Some(data)
-}
-
-/// `data` 开头的 ID3v2 标签的总长（含头与尾部）；不以 ID3 标签开头、头不完整或长度字段不合法时为 None。
-pub(crate) fn id3_len(data: &[u8]) -> Option<usize> {
-    let header = data.get(..10).filter(|h| h.starts_with(b"ID3"))?;
-    // 标签长度是 4 个各 7 位的字节（最高位为 0），不含 10 字节的头；有尾部时另加 10 字节
-    let size = header[6..10].iter().try_fold(0usize, |size, &b| {
-        (b < 0x80).then_some(size << 7 | usize::from(b))
-    })?;
-    let footer = if header[5] & 0x10 != 0 { 10 } else { 0 };
-    Some(10 + size + footer)
 }
 
 /// 没有 init 段的分片须能识别出格式（见 [`standalone_format`]）。

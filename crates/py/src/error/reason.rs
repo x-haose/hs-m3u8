@@ -227,6 +227,14 @@ variants! {
             /// 流的种类
             kind: StreamKind,
         },
+        /// 这条轨是打包音频，这一组的第一个分片没有 ID3 时间戳，而这一组还有别的轨：不知道怎样与它们对齐
+        #[pyo3(constructor = (*, group, track))]
+        UntimedPackedAudio {
+            /// 第几个不连续段组
+            group: usize,
+            /// 第几条轨
+            track: usize,
+        },
         /// 各轨都没有要取的视频或音频流
         NoStreams {},
     }
@@ -441,6 +449,9 @@ impl From<core::Mp4Unsupported> for Mp4Unsupported {
                 track,
                 kind: kind.into(),
             },
+            U::UntimedPackedAudio { group, track } => {
+                Mp4Unsupported::UntimedPackedAudio { group, track }
+            }
             U::NoStreams => Mp4Unsupported::NoStreams {},
         }
     }

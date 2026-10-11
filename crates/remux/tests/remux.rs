@@ -98,6 +98,61 @@ fn concat_track(t: &TrackSegments, dir: &Path, name: &str) -> PathBuf {
     path
 }
 
+/// 打包音频样本 `name`（packed 下的目录）的各分片与各自的时长（90 kHz 时钟的 tick）。分片是裸的音频帧，不带
+/// ID3 标签。
+fn packed_fixture(name: &str) -> Vec<(PathBuf, u64)> {
+    track(&format!("packed/{name}"))
+        .segments
+        .into_iter()
+        .map(|path| {
+            let ticks = (span(&timelines(&path).1) * 90_000.0).round() as u64;
+            (path, ticks)
+        })
+        .collect()
+}
+
+/// 在 `dir` 下写一个打包音频分片：`src` 的音频帧前面加上 ID3v2.4 标签，其中的 PRIV 帧给出时间戳 `timestamp`
+/// （90 kHz）；`timestamp` 为 None 时原样复制。
+fn packed_segment(dir: &Path, src: &Path, timestamp: Option<u64>) -> PathBuf {
+    let audio = std::fs::read(src).unwrap();
+    let data = match timestamp {
+        Some(timestamp) => {
+            let owner = b"com.apple.streaming.transportStreamTimestamp\0";
+            let frame_data = [owner.as_slice(), &timestamp.to_be_bytes()].concat();
+            let syncsafe =
+                |size: usize| [size >> 21, size >> 14, size >> 7, size].map(|b| (b & 0x7F) as u8);
+            let frame = [
+                b"PRIV".as_slice(),
+                &syncsafe(frame_data.len()),
+                &[0, 0],
+                &frame_data,
+            ]
+            .concat();
+            [
+                b"ID3\x04\x00\x00".as_slice(),
+                &syncsafe(frame.len()),
+                &frame,
+                &audio,
+            ]
+            .concat()
+        }
+        None => audio,
+    };
+    let name = format!(
+        "{}-{}",
+        timestamp.map_or("untimed".to_owned(), |t| t.to_string()),
+        src.file_name().unwrap().to_str().unwrap()
+    );
+    let path = dir.join(name);
+    std::fs::write(&path, data).unwrap();
+    path
+}
+
+/// 时间线上最早的呈现时刻，秒。
+fn earliest(timeline: &Timeline) -> f64 {
+    timeline.iter().map(|p| p.0).fold(f64::INFINITY, f64::min)
+}
+
 fn span(timeline: &Timeline) -> f64 {
     let start = timeline.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
     let end = timeline
@@ -507,4 +562,106 @@ fn mp3_audio_is_rejected() {
         ),
         "实际 {err:?}"
     );
+}
+
+/// 打包音频按各分片 ID3 里的时间戳定时：与 TS 视频的相对时刻和输入一致，缺失的分片处留出空档。
+#[test]
+fn packed_audio_follows_its_id3_timestamps() {
+    let dir = work_dir("packed_timestamps");
+    let output = dir.join("out.mp4");
+    let video = track("ts_a");
+    let v_in = timelines(&concat_track(&video, &dir, "v.ts")).0;
+    // 音频比视频晚 0.1 秒开始，第二个分片缺失
+    let start = ((earliest(&v_in) + 0.1) * 90_000.0).round() as u64;
+    let segments = packed_fixture("aac");
+    let audio = TrackSegments {
+        init: None,
+        segments: vec![
+            packed_segment(&dir, &segments[0].0, Some(start)),
+            packed_segment(
+                &dir,
+                &segments[2].0,
+                Some(start + segments[0].1 + segments[1].1),
+            ),
+        ],
+    };
+
+    remux(
+        &[Streams::Video, Streams::Audio],
+        &[group([video, audio])],
+        &output,
+    )
+    .unwrap();
+
+    let (v_out, a_out) = timelines(&output);
+    let lead = a_out[0].0 - earliest(&v_out);
+    assert!(
+        (lead - 0.1).abs() < 0.001,
+        "音频应比视频晚 0.1 秒开始，实际 {lead}"
+    );
+    let first_part = timelines(&segments[0].0).1.len();
+    let gap = a_out[first_part].0 - a_out[0].0;
+    let expected = (segments[0].1 + segments[1].1) as f64 / 90_000.0;
+    assert!(
+        (gap - expected).abs() < 0.001,
+        "第三个分片应从 {expected} 秒处开始，实际 {gap}"
+    );
+}
+
+/// 打包音频的时间戳越过 33 位的回绕点时接着往后排，不当作往回跳。
+#[test]
+fn packed_audio_timestamps_wrap_around() {
+    let dir = work_dir("packed_wrap");
+    let output = dir.join("out.mp4");
+    let segments = packed_fixture("aac");
+    let wrap = 1u64 << 33;
+    let audio = TrackSegments {
+        init: None,
+        segments: vec![
+            packed_segment(&dir, &segments[0].0, Some(wrap - segments[0].1)),
+            packed_segment(&dir, &segments[1].0, Some(0)),
+        ],
+    };
+
+    let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
+
+    let expected = (segments[0].1 + segments[1].1) as f64 / 90_000.0;
+    let duration = report.streams[0].duration_us as f64 / 1e6;
+    assert!(
+        (duration - expected).abs() < 0.001,
+        "应连续 {expected} 秒，实际 {duration}"
+    );
+}
+
+/// 打包音频没有 ID3 时间戳：与别的轨同组时不知道怎样对齐，放不进 MP4；只有它一条轨时按样本数从头计时。
+#[test]
+fn untimed_packed_audio_is_used_only_alone() {
+    let dir = work_dir("packed_untimed");
+    let output = dir.join("out.mp4");
+    let segments = packed_fixture("aac");
+    let audio = TrackSegments {
+        init: None,
+        segments: segments.iter().map(|(path, _)| path.clone()).collect(),
+    };
+
+    let err = remux(
+        &[Streams::Video, Streams::Audio],
+        &[group([track("ts_a"), audio.clone()])],
+        &output,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::UntimedPackedAudio { group: 0, track: 1 })
+        ),
+        "实际 {err:?}"
+    );
+
+    let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
+    let packets: usize = segments
+        .iter()
+        .map(|(path, _)| timelines(path).1.len())
+        .sum();
+    assert_eq!(report.streams[0].packets, packets as u64);
 }

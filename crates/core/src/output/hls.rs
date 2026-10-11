@@ -16,13 +16,14 @@ use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use hs_m3u8_remux::id3_len;
+
 use super::GroupTrack;
 use super::commit::Occupant;
 use crate::entries::{self, is_canonical_number};
 use crate::error::io_error;
 use crate::ident::Fingerprint;
 use crate::selection::SelectionKey;
-use crate::verify::id3_len;
 use crate::verify::{Standalone, standalone_format};
 use crate::{Error, HlsUnsupported, Unsupported, WorkDirProblem};
 

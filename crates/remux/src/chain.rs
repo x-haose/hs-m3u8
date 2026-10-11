@@ -13,24 +13,33 @@ pub(crate) type Failure = Arc<Mutex<Option<(PathBuf, io::Error)>>>;
 
 pub(crate) struct SegmentChain {
     paths: Vec<PathBuf>,
-    /// 各文件在整个流中的起始偏移；`starts[i + 1] - starts[i]` 为第 i 个文件的长度，末项为总长
+    /// 各文件开头不读的字节数
+    skips: Vec<u64>,
+    /// 各文件在整个流中的起始偏移；`starts[i + 1] - starts[i]` 为第 i 个文件读的长度，末项为总长
     starts: Vec<u64>,
     position: u64,
-    /// 当前打开的文件：(下标, 文件, 文件内的读写位置)
+    /// 当前打开的文件：(下标, 文件, 跳过开头之后的读写位置)
     open: Option<(usize, File, u64)>,
     failure: Failure,
 }
 
 impl SegmentChain {
-    /// 按顺序串起 `paths`；只读取各文件的长度，不打开文件。
-    pub(crate) fn new(paths: Vec<PathBuf>) -> Result<(Self, Failure), (PathBuf, io::Error)> {
+    /// 按顺序串起各文件，每项为路径与开头不读的字节数；只读取各文件的长度，不打开文件。
+    pub(crate) fn new(files: Vec<(PathBuf, u64)>) -> Result<(Self, Failure), (PathBuf, io::Error)> {
+        let (paths, skips): (Vec<PathBuf>, Vec<u64>) = files.into_iter().unzip();
         let mut starts = Vec::with_capacity(paths.len() + 1);
         let mut total = 0u64;
-        for path in &paths {
+        for (path, &skip) in paths.iter().zip(&skips) {
             starts.push(total);
             let len = std::fs::metadata(path)
                 .map_err(|e| (path.clone(), e))?
-                .len();
+                .len()
+                .checked_sub(skip)
+                .ok_or_else(|| {
+                    let short =
+                        io::Error::new(io::ErrorKind::InvalidData, "文件比要跳过的开头还短");
+                    (path.clone(), short)
+                })?;
             total = total.checked_add(len).ok_or_else(|| {
                 (
                     path.clone(),
@@ -42,6 +51,7 @@ impl SegmentChain {
         let failure = Failure::default();
         let chain = SegmentChain {
             paths,
+            skips,
             starts,
             position: 0,
             open: None,
@@ -80,7 +90,7 @@ impl SegmentChain {
             // 先关掉上一个文件，保证同一时刻只占一个文件描述符
             self.open = None;
             let mut file = File::open(&self.paths[index]).map_err(|e| self.fail(index, e))?;
-            file.seek(SeekFrom::Start(offset))
+            file.seek(SeekFrom::Start(self.skips[index] + offset))
                 .map_err(|e| self.fail(index, e))?;
             self.open = Some((index, file, offset));
         }
@@ -145,7 +155,7 @@ mod tests {
             .map(|(i, data)| {
                 let path = dir.join(i.to_string());
                 std::fs::write(&path, data).unwrap();
-                path
+                (path, 0)
             })
             .collect();
         SegmentChain::new(paths).unwrap().0
@@ -176,6 +186,26 @@ mod tests {
         assert_eq!(read_from(SeekFrom::Start(6), 8), (6, Vec::new()));
         assert_eq!(read_from(SeekFrom::Start(99), 8), (99, Vec::new()));
         assert!(chain.seek(SeekFrom::Current(-200)).is_err());
+    }
+
+    #[test]
+    fn skipped_beginnings_are_not_read() {
+        let mut chain = chain_of("skip", &[b"abc", b"de"]);
+        let paths = chain.paths.clone();
+        chain = SegmentChain::new(vec![(paths[0].clone(), 1), (paths[1].clone(), 2)])
+            .unwrap()
+            .0;
+        let mut all = Vec::new();
+        chain.read_to_end(&mut all).unwrap();
+        assert_eq!(all, b"bc");
+        assert_eq!(chain.seek(SeekFrom::Start(1)).unwrap(), 1);
+        let mut rest = Vec::new();
+        chain.read_to_end(&mut rest).unwrap();
+        assert_eq!(rest, b"c");
+        let err = SegmentChain::new(vec![(paths[1].clone(), 3)])
+            .err()
+            .unwrap();
+        assert_eq!(err.1.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

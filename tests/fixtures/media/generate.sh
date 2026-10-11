@@ -62,6 +62,18 @@ read -r -a one_src <<< "$(source_args testsrc2 320x180 440 1)"
 ts_segments ts_hevc "${one_src[@]}" -c:v libx265 -preset ultrafast -x265-params log-level=error -g 25 -b:v 150k "${aac[@]}"
 ts_segments ts_mp3 "${one_src[@]}" "${h264[@]}" -c:a libmp3lame -b:a 64k
 
+# 打包音频（RFC 8216 3.4）：约 3 秒正弦音的裸音频帧按 1 秒切成 3 片，不带 ID3 标签，测试按要的时间戳加上。$1 目录名，
+# $2 扩展名，其余为编码与切分参数
+packed() {
+  local name=$1 ext=$2
+  shift 2
+  rm -rf -- "${DIR:?}/packed/$name"
+  mkdir -p "$DIR/packed/$name"
+  "${ff[@]}" -f lavfi -i sine=frequency=440:sample_rate=48000 -t 2.95 "$@" \
+    -f segment -segment_time 1 "$DIR/packed/$name/seg%d.$ext"
+}
+packed aac aac "${aac[@]}" -segment_format adts
+
 # 直播录制：4 秒、时间戳连续的节目，用于逐段放出、窗口滑动与缺失的分片
 read -r -a long_src <<< "$(source_args testsrc2 160x90 440 4)"
 ts_segments ts_long "${long_src[@]}" "${h264[@]}" "${aac[@]}"

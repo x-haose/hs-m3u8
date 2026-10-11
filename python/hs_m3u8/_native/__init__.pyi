@@ -1548,6 +1548,24 @@ class Mp4Unsupported:
         def __new__(cls, *, group: builtins.int, track: builtins.int, kind: StreamKind) -> Mp4Unsupported.DtsNotIncreasing: ...
     
     @typing.final
+    class UntimedPackedAudio(Mp4Unsupported):
+        r"""
+        这条轨是打包音频，这一组的第一个分片没有 ID3 时间戳，而这一组还有别的轨：不知道怎样与它们对齐
+        """
+        __match_args__ = ("group", "track",)
+        @property
+        def group(self) -> builtins.int:
+            r"""
+            第几个不连续段组
+            """
+        @property
+        def track(self) -> builtins.int:
+            r"""
+            第几条轨
+            """
+        def __new__(cls, *, group: builtins.int, track: builtins.int) -> Mp4Unsupported.UntimedPackedAudio: ...
+    
+    @typing.final
     class NoStreams(Mp4Unsupported):
         r"""
         各轨都没有要取的视频或音频流
@@ -1562,7 +1580,7 @@ class Mp4UnsupportedError(RequestError):
     内容放不进 MP4；可只输出本地 HLS（`Target.Hls`）。
     """
     @property
-    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.NoStreams:
+    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
         r"""
         放不进的原因
         """
