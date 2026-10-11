@@ -3,7 +3,7 @@
 use std::hash::BuildHasher;
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use hs_m3u8_hls::ByteRange;
 use reqwest::StatusCode;
@@ -206,7 +206,10 @@ impl Http {
                 status,
                 StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
             )
-            .then(|| requested_wait(&response))
+            .then(|| {
+                let value = response.headers().get(RETRY_AFTER)?.to_str().ok()?;
+                requested_wait(value, SystemTime::now())
+            })
             .flatten();
             return Err(Error::Http {
                 url: Box::new(parts.url.clone()),
@@ -269,17 +272,14 @@ impl Http {
     }
 }
 
-/// Retry-After 的秒数写法；HTTP 日期写法与无法解析的值视为没有要求。
-fn requested_wait(response: &reqwest::Response) -> Option<Duration> {
-    let seconds = response
-        .headers()
-        .get(RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
-    Some(Duration::from_secs(seconds))
+/// Retry-After 要求的等待：秒数，或 HTTP 日期离 `now` 还有多久（已经过去的为 0）；无法解析的值视为没有要求。
+fn requested_wait(value: &str, now: SystemTime) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse() {
+        return Some(Duration::from_secs(seconds));
+    }
+    let at = httpdate::parse_http_date(value).ok()?;
+    Some(at.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
 fn http_error(url: &Url, kind: HttpError) -> Error {
@@ -366,6 +366,26 @@ mod tests {
     use std::num::NonZeroU32;
 
     use super::*;
+
+    #[test]
+    fn retry_after_takes_seconds_or_an_http_date() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let later = httpdate::fmt_http_date(now + Duration::from_secs(90));
+        let earlier = httpdate::fmt_http_date(now - Duration::from_secs(90));
+        assert_eq!(requested_wait(" 120 ", now), Some(Duration::from_secs(120)));
+        assert_eq!(requested_wait(&later, now), Some(Duration::from_secs(90)));
+        assert_eq!(requested_wait(&earlier, now), Some(Duration::ZERO));
+        // RFC 9110 认可的旧写法（RFC 850 与 asctime）同样认得：都是 2027-01-15 08:00:00 GMT，即 `before` 之后 1000 秒
+        let before = now - Duration::from_secs(1000);
+        for legacy in ["Friday, 15-Jan-27 08:00:00 GMT", "Fri Jan 15 08:00:00 2027"] {
+            assert_eq!(
+                requested_wait(legacy, before),
+                Some(Duration::from_secs(1000)),
+                "{legacy}"
+            );
+        }
+        assert_eq!(requested_wait("soon", now), None);
+    }
 
     #[test]
     fn backoff_grows_exponentially_up_to_the_cap_and_never_overflows() {

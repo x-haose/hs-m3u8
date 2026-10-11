@@ -647,6 +647,7 @@ dependencies = [
  "hs-m3u8-remux",
  "hs-m3u8-sysproxy",
  "http",
+ "httpdate",
  "reqwest",
  "rustls",
  "serde",

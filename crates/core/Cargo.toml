@@ -15,6 +15,7 @@ hs-m3u8-hls = { path = "../hls" }
 hs-m3u8-remux = { path = "../remux" }
 hs-m3u8-sysproxy = { path = "../sysproxy" }
 http.workspace = true
+httpdate.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 serde.workspace = true
