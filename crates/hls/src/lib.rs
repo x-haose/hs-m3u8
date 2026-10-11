@@ -49,7 +49,8 @@ pub enum Malformed {
     /// 首行是 #EXTM3U，但不是 UTF-8 文本（RFC 8216 4.1 要求 UTF-8）；站点用了别的编码时须在解析前转码
     #[error("播放列表不是 UTF-8 文本")]
     NotUtf8,
-    /// 首行是 #EXTM3U，结尾截在多字节字符中间（多为服务器还没写完）：最后一行不完整，不解析
+    /// 首行是 #EXTM3U，结尾截在多字节字符中间（多为服务器还没写完）：最后一行不完整，不解析。别的编码的完整内容，
+    /// 唯一的非 ASCII 字符恰在结尾、又能当 UTF-8 多字节字符的开头时（如 Latin-1 的 `é`），也是这样，分不开
     #[error("播放列表在结尾的字符中间截断")]
     Truncated,
     #[error("同时含有主播放列表（EXT-X-STREAM-INF）与媒体播放列表（EXTINF）的标签")]
@@ -126,7 +127,8 @@ pub fn parse_bytes(body: &[u8], url: &Url) -> Result<Playlist, Error> {
 }
 
 /// 以 UTF-16 BOM 开头的内容按 UTF-16 解码（不成对的代理项换成 U+FFFD）；没有这个 BOM 时为 None。
-/// 简化：只认 UTF-16 的 BOM，UTF-32 的内容按 UTF-8 看首行、报 NotAPlaylist；遇到 UTF-32 的站点时再认它的 BOM。
+/// 简化：只认 UTF-16 的 BOM，UTF-32 的内容报 NotAPlaylist（UTF-32LE 的 BOM 以 UTF-16LE 的开头，按 UTF-16 解出的
+/// 首行不对）；遇到 UTF-32 的站点时再认它的 BOM。
 fn decode_utf16(body: &[u8]) -> Option<String> {
     let from_bytes = match body {
         [0xFE, 0xFF, ..] => u16::from_be_bytes,

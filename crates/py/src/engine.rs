@@ -16,8 +16,9 @@ use crate::runtime::{self, Owned};
 
 /// 下载引擎：所有任务共用一个在途请求上限。异步方法返回协程，在 asyncio 事件循环里 await（在别处驱动时抛
 /// `RuntimeError`，不开始操作）；协程被取消时，所等的操作随之取消。只能在建立它的进程里使用，fork 出的子进程要
-/// 另建；fork 时正在运行的任务所用的任务目录，子进程不占着。macOS 上 fork 出的子进程不能使用本库（证书校验与读取
-/// 系统代理要用的系统框架在 fork 之后不可用），开始操作时抛 `RuntimeError`，要用 multiprocessing 的 spawn 方式。
+/// 另建；fork 时正在运行的任务所用的任务目录，子进程不占着。macOS 上导入本库之后 fork 出的子进程不能使用本库（证书
+/// 校验与读取系统代理要用的系统框架在多线程进程 fork 之后不可用），开始操作时抛 `RuntimeError`，要用 multiprocessing
+/// 的 spawn 方式。
 /// 在 atexit 处理里第一次导入本库时，退出前不会关闭运行时（CPython 不调用 atexit 运行期间新登记的处理）：那样开始的
 /// 任务要在处理返回前等它结束。
 ///

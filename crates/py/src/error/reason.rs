@@ -70,7 +70,8 @@ variants! {
         NotAPlaylist {},
         /// 首行是 #EXTM3U，但不是 UTF-8 文本；站点用了别的编码时在 `Hooks.on_playlist` 中转码
         NotUtf8 {},
-        /// 首行是 #EXTM3U，结尾截在多字节字符中间（多为服务器还没写完）；可以重试
+        /// 首行是 #EXTM3U，结尾截在多字节字符中间（多为服务器还没写完）；可以重试。别的编码的完整内容，唯一的非 ASCII
+        /// 字符恰在结尾时也可能报这一种
         Truncated {},
         /// 同时含有主播放列表（EXT-X-STREAM-INF）与媒体播放列表（EXTINF）的标签
         Mixed {},
