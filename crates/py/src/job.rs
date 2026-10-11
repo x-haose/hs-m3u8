@@ -106,10 +106,11 @@ impl Job {
             let finished = match waiting.await {
                 Ok(Ok(output)) => Finished::Done(output.into()),
                 Ok(Err(error)) => Finished::Failed(Failure::new(error)),
-                Err(failure) => Finished::Panicked(match failure.try_into_panic() {
-                    Ok(payload) => runtime::panic_message(payload),
-                    Err(failure) => failure.to_string(),
-                }),
+                Err(failure) => match failure.try_into_panic() {
+                    Ok(payload) => Finished::Panicked(runtime::panic_message(payload)),
+                    // 被取消只会是运行时正在关闭：不送结果，各次等待得到运行时已关闭的错误
+                    Err(_) => return,
+                },
             };
             sender.send_replace(Some(Arc::new(finished)));
         });
