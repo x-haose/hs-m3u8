@@ -190,15 +190,30 @@ impl RetryPolicy {
     }
 }
 
-/// 发请求的方式。`repr` 不显示请求头的值与代理地址里的用户名、口令。
+variants! {
+    /// 请求经不经代理、经哪个。
+    pub enum Proxy {
+        /// 按系统代理设置：环境变量（如 `HTTPS_PROXY`、`NO_PROXY`）与 macOS、Windows 的系统设置
+        System {},
+        /// 不经代理，系统设置了代理也直连
+        Direct {},
+        /// 经这个 HTTP 或 SOCKS 代理
+        Url {
+            /// 代理的地址，协议为 http、https、socks4、socks4a、socks5、socks5h；`repr` 只显示到路径，不含用户名与口令
+            url: String,
+        },
+    }
+}
+
+/// 发请求的方式。`repr` 不显示请求头的值。
 #[gen_stub_pyclass]
 #[pyclass(module = "hs_m3u8._native", frozen, eq, hash, get_all, from_py_object)]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct HttpOptions {
     /// 附加到所有请求的请求头，按顺序，同名的可以有多个
     pub headers: Headers,
-    /// HTTP 或 SOCKS 代理的地址；None 时使用系统代理设置
-    pub proxy: Option<String>,
+    /// 经不经代理、经哪个
+    pub proxy: Proxy,
     /// 不校验 TLS 证书
     pub insecure: bool,
     /// 超时
@@ -210,19 +225,20 @@ pub struct HttpOptions {
 #[gen_stub_pymethods]
 #[pymethods]
 impl HttpOptions {
-    /// `headers` 为 None 时没有附加的请求头；`timeouts`、`retry` 默认取 `Timeouts()`、`RetryPolicy()`。
+    /// `headers` 为 None 时没有附加的请求头；`proxy`、`timeouts`、`retry` 默认取 `Proxy.System()`、`Timeouts()`、
+    /// `RetryPolicy()`。
     #[new]
     #[pyo3(signature = (
         *,
         headers = None,
-        proxy = None,
+        proxy = Proxy::System {},
         insecure = false,
         timeouts = Timeouts::from(core::Timeouts::default()),
         retry = RetryPolicy::from(core::RetryPolicy::default()),
     ))]
     fn new(
         headers: Option<Headers>,
-        proxy: Option<String>,
+        proxy: Proxy,
         insecure: bool,
         timeouts: Timeouts,
         retry: RetryPolicy,
@@ -237,11 +253,10 @@ impl HttpOptions {
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        let proxy = self.proxy.as_deref().map(bare_url);
         Ok(format!(
             "HttpOptions(headers={}, proxy={}, insecure={}, timeouts={}, retry={})",
             PyTuple::new(py, self.headers.names())?.repr()?,
-            proxy.into_pyobject(py)?.repr()?,
+            self.proxy.clone().into_pyobject(py)?.into_any().repr()?,
             if self.insecure { "True" } else { "False" },
             Bound::new(py, self.timeouts.clone())?.repr()?,
             Bound::new(py, self.retry.clone())?.repr()?,
@@ -691,8 +706,9 @@ impl Source {
 impl HttpOptions {
     fn to_core(&self, py: Python<'_>) -> PyResult<core::HttpOptions> {
         let proxy = match &self.proxy {
-            Some(proxy) => Some(parse_url(py, "代理地址", proxy)?),
-            None => None,
+            Proxy::System {} => core::Proxy::System,
+            Proxy::Direct {} => core::Proxy::Direct,
+            Proxy::Url { url } => core::Proxy::Url(parse_url(py, "代理地址", url)?),
         };
         let attempts =
             NonZeroU32::new(self.retry.attempts).expect("构造 RetryPolicy 时已检查至少为 1");
@@ -804,7 +820,11 @@ impl From<core::HttpOptions> for HttpOptions {
     fn from(h: core::HttpOptions) -> Self {
         HttpOptions {
             headers: Headers(h.headers),
-            proxy: h.proxy.map(String::from),
+            proxy: match h.proxy {
+                core::Proxy::System => Proxy::System {},
+                core::Proxy::Direct => Proxy::Direct {},
+                core::Proxy::Url(url) => Proxy::Url { url: url.into() },
+            },
             insecure: h.insecure,
             timeouts: h.timeouts.into(),
             retry: h.retry.into(),
@@ -854,6 +874,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Preference>()?;
     module.add_class::<Timeouts>()?;
     module.add_class::<RetryPolicy>()?;
+    module.add_class::<Proxy>()?;
     module.add_class::<HttpOptions>()?;
     module.add_class::<Source>()?;
     module.add_class::<Target>()?;

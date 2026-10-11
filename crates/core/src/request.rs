@@ -51,13 +51,12 @@ impl Source {
     }
 }
 
-/// 发请求的方式。不实现 `Debug`：请求头常带 Cookie 与令牌，代理地址可能带口令。
+/// 发请求的方式。不实现 `Debug`：请求头常带 Cookie 与令牌，代理地址可能带口令（[`Proxy`] 同理）。
 #[derive(Clone, Default)]
 pub struct HttpOptions {
     /// 附加到所有请求的请求头
     pub headers: Vec<(String, String)>,
-    /// HTTP 或 SOCKS 代理，协议为 http、https、socks4、socks4a、socks5、socks5h；None 时使用系统代理设置
-    pub proxy: Option<Url>,
+    pub proxy: Proxy,
     /// 不校验 TLS 证书
     pub insecure: bool,
     pub timeouts: Timeouts,
@@ -73,11 +72,23 @@ impl HttpOptions {
         if t.connect.is_zero() || t.read_idle.is_zero() || t.request.is_zero() {
             return Err(Error::InvalidInput("超时不能为 0".into()));
         }
-        if let Some(proxy) = &self.proxy {
+        if let Proxy::Url(proxy) = &self.proxy {
             check_proxy(proxy)?;
         }
         Ok(())
     }
+}
+
+/// 请求经不经代理、经哪个。
+#[derive(Clone, Default, PartialEq, Eq)]
+pub enum Proxy {
+    /// 按系统代理设置：环境变量（如 `HTTPS_PROXY`、`NO_PROXY`）与 macOS、Windows 的系统设置
+    #[default]
+    System,
+    /// 不经代理，系统设置了代理也直连
+    Direct,
+    /// 经这个 HTTP 或 SOCKS 代理，协议为 http、https、socks4、socks4a、socks5、socks5h
+    Url(Url),
 }
 
 /// 代理地址 HTTP 库用不用得上。它用不上的地址（协议不认识，或按 `http::Uri` 解析不出主机，如 socks 地址里的

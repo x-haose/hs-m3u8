@@ -4,7 +4,7 @@ use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
 
-use hs_m3u8_core::{Error, HttpError, Source, Url};
+use hs_m3u8_core::{Error, HttpError, Proxy, Source, Url};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
@@ -105,7 +105,7 @@ async fn proxies_the_http_library_cannot_use_are_rejected() {
         "socks5://{host}:9",
     ] {
         let mut source = Source::new(server.url("index.m3u8"));
-        source.http.proxy = Some(Url::parse(proxy).unwrap());
+        source.http.proxy = Proxy::Url(Url::parse(proxy).unwrap());
         match engine().probe(&source).await {
             Err(Error::InvalidInput(_)) => {}
             other => panic!("{proxy} 应报参数错误：{other:?}"),

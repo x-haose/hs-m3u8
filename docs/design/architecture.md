@@ -133,7 +133,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 
 ### 5.4 HTTP
 
-- `reqwest` 0.13.5（rustls）。请求配置包括请求头（Cookie、User-Agent 都经请求头传入）与代理（reqwest 用不上的代理地址不报错、不起作用，请求直连，所以按它的条件先校验：协议为 http、https、socks4、socks4a、socks5、socks5h，且按 `http::Uri` 解析得出主机，否则报参数错误）；Cookie 在任务内由响应自动保存。
+- `reqwest` 0.13.5（rustls）。请求配置包括请求头（Cookie、User-Agent 都经请求头传入）与代理（按系统设置、直连或指定的代理三者之一；指定的地址 reqwest 用不上时不报错、不起作用，请求直连，所以按它的条件先校验：协议为 http、https、socks4、socks4a、socks5、socks5h，且按 `http::Uri` 解析得出主机，否则报参数错误）；Cookie 在任务内由响应自动保存。
 - 证书校验默认开启；关闭必须显式写 `insecure: true`。证书校验失败报 `HttpError::Certificate`、跟随重定向失败（循环、次数过多）报 `HttpError::Redirect`，都不重试；rustls 的证书错误包在 `io::Error` 里，沿原因链逐层取出它包着的错误才认得出，故直接依赖 rustls（与 reqwest 用的同一个 0.23.45）。连接与传输错误的说明带上各层原因。
 - 字节范围分片用 `Range` 请求头；响应必须是 206 且长度一致，否则视为错误。
 - key 按 key URL 去重，只取一次，缓存在任务内存里。
@@ -278,7 +278,7 @@ class Job:  # 不再被引用、也没有在等它时取消任务（已开始写
 
 - `Source(url, *, preference=Preference(), http=HttpOptions(), hooks=None)`。
 - `Preference(*, variant=VariantChoice.Best(), audio=AudioChoice.Default())`；`VariantChoice`：`Best()`、`Index(index)`；`AudioChoice`：`Default()`、`Language(language)`、`Index(index)`。
-- `HttpOptions(*, headers=None, proxy=None, insecure=False, timeouts=Timeouts(), retry=RetryPolicy())`；`Timeouts(*, connect, read_idle, request)`、`RetryPolicy(*, attempts, base_delay, max_delay)`，各项可省略。
+- `HttpOptions(*, headers=None, proxy=Proxy.System(), insecure=False, timeouts=Timeouts(), retry=RetryPolicy())`，`Proxy` 为 `System()`（系统代理设置）、`Direct()`（直连）或 `Url(url)`；`Timeouts(*, connect, read_idle, request)`、`RetryPolicy(*, attempts, base_delay, max_delay)`，各项可省略。
 - `Hooks`：继承它并覆盖需要的方法——`on_playlist(url: str, body: bytes) -> bytes`、`on_request(purpose: Purpose, request: RequestParts) -> RequestParts`、`on_key(url: str, data: bytes) -> bytes`、`on_segment(url: str, data: bytes) -> bytes`，参数仅限位置（覆盖时可以改名）；没覆盖的不调用，在实例上赋值的函数也算覆盖；同一对象的回调会在多个线程上同时被调用。回调出错使任务失败（`HookError`）：抛出了异常或返回值的类型不对时 `__cause__` 为那个异常，返回的地址或请求头不合法时为 None。`Purpose`：`Playlist()`、`Key()`、`Init()`、`Segment()`；`RequestParts(url, *, headers)`。子类可以定义带参数的 `__init__`。
 - `JobRequest(source, output, *, key=None, concurrency=..., live=LiveOptions())`，`live=None` 时拒绝直播；`KeyOverride(key: bytes, *, iv: bytes | None = None)`；`LiveOptions(*, max_duration=None, stall_timeout=...)`。
 - `OutputOptions(target, *, work_dir=None, overwrite=False, keep_work_dir=False)`，`resolved_work_dir() -> Path`；`Target`：`Mp4(path)`、`Hls(path)`、`Both(*, mp4, hls)`。

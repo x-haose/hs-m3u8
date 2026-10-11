@@ -57,7 +57,7 @@ pub use report::{
     RefreshCause, Stage, StallCause,
 };
 pub use request::{
-    HttpOptions, JobRequest, KeyOverride, LiveOptions, RetryPolicy, Source, Timeouts,
+    HttpOptions, JobRequest, KeyOverride, LiveOptions, Proxy, RetryPolicy, Source, Timeouts,
 };
 pub use url::Url;
 

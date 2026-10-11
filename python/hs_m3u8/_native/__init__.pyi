@@ -57,6 +57,7 @@ __all__ = [
     "Preference",
     "Probe",
     "Progress",
+    "Proxy",
     "Purpose",
     "RefreshCause",
     "RefreshReason",
@@ -622,7 +623,7 @@ class HttpFailure:
 @typing.final
 class HttpOptions:
     r"""
-    发请求的方式。`repr` 不显示请求头的值与代理地址里的用户名、口令。
+    发请求的方式。`repr` 不显示请求头的值。
     """
     @property
     def headers(self) -> builtins.tuple[tuple[builtins.str, builtins.str], ...]:
@@ -630,9 +631,9 @@ class HttpOptions:
         附加到所有请求的请求头，按顺序，同名的可以有多个
         """
     @property
-    def proxy(self) -> typing.Optional[builtins.str]:
+    def proxy(self) -> Proxy.System | Proxy.Direct | Proxy.Url:
         r"""
-        HTTP 或 SOCKS 代理的地址；None 时使用系统代理设置
+        经不经代理、经哪个
         """
     @property
     def insecure(self) -> builtins.bool:
@@ -651,9 +652,10 @@ class HttpOptions:
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, headers: typing.Optional[collections.abc.Mapping[builtins.str, builtins.str] | collections.abc.Iterable[tuple[builtins.str, builtins.str]]] = None, proxy: typing.Optional[builtins.str] = None, insecure: builtins.bool = False, timeouts: Timeouts = ..., retry: RetryPolicy = ...) -> HttpOptions:
+    def __new__(cls, *, headers: typing.Optional[collections.abc.Mapping[builtins.str, builtins.str] | collections.abc.Iterable[tuple[builtins.str, builtins.str]]] = None, proxy: Proxy = ..., insecure: builtins.bool = False, timeouts: Timeouts = ..., retry: RetryPolicy = ...) -> HttpOptions:
         r"""
-        `headers` 为 None 时没有附加的请求头；`timeouts`、`retry` 默认取 `Timeouts()`、`RetryPolicy()`。
+        `headers` 为 None 时没有附加的请求头；`proxy`、`timeouts`、`retry` 默认取 `Proxy.System()`、`Timeouts()`、
+        `RetryPolicy()`。
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -1856,6 +1858,41 @@ class Progress:
         各参数即同名属性。
         """
     def __repr__(self) -> builtins.str: ...
+
+class Proxy:
+    r"""
+    请求经不经代理、经哪个。
+    """
+    def __repr__(self) -> builtins.str: ...
+    @typing.final
+    class System(Proxy):
+        r"""
+        按系统代理设置：环境变量（如 `HTTPS_PROXY`、`NO_PROXY`）与 macOS、Windows 的系统设置
+        """
+        __match_args__ = ()
+        def __new__(cls) -> Proxy.System: ...
+    
+    @typing.final
+    class Direct(Proxy):
+        r"""
+        不经代理，系统设置了代理也直连
+        """
+        __match_args__ = ()
+        def __new__(cls) -> Proxy.Direct: ...
+    
+    @typing.final
+    class Url(Proxy):
+        r"""
+        经这个 HTTP 或 SOCKS 代理
+        """
+        __match_args__ = ("url",)
+        @property
+        def url(self) -> builtins.str:
+            r"""
+            代理的地址，协议为 http、https、socks4、socks4a、socks5、socks5h；`repr` 只显示到路径，不含用户名与口令
+            """
+        def __new__(cls, url: builtins.str) -> Proxy.Url: ...
+    
 
 class Purpose:
     r"""

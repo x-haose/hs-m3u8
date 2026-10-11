@@ -14,7 +14,7 @@ use url::Url;
 
 use crate::hooks::{HookKind, Hooks, Purpose, RequestParts, run_hook};
 use crate::ident::bare_url;
-use crate::request::{HttpOptions, RetryPolicy, check_header};
+use crate::request::{HttpOptions, Proxy, RetryPolicy, check_header};
 use crate::{Error, HttpError, Integrity};
 
 /// 请求是否计入引擎的在途上限。
@@ -63,15 +63,19 @@ impl Http {
             .read_timeout(t.read_idle)
             .timeout(t.request)
             .tls_danger_accept_invalid_certs(options.insecure);
-        if let Some(proxy) = &options.proxy {
-            let proxy = reqwest::Proxy::all(proxy.as_str()).map_err(|e| {
-                Error::InvalidInput(format!(
-                    "代理地址不可用 {}：{}",
-                    bare_url(proxy),
-                    e.without_url()
-                ))
-            })?;
-            builder = builder.proxy(proxy);
+        match &options.proxy {
+            Proxy::System => {}
+            Proxy::Direct => builder = builder.no_proxy(),
+            Proxy::Url(proxy) => {
+                let proxy = reqwest::Proxy::all(proxy.as_str()).map_err(|e| {
+                    Error::InvalidInput(format!(
+                        "代理地址不可用 {}：{}",
+                        bare_url(proxy),
+                        e.without_url()
+                    ))
+                })?;
+                builder = builder.proxy(proxy);
+            }
         }
         let client = builder
             .build()

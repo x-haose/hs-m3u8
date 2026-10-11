@@ -35,6 +35,7 @@ from hs_m3u8 import (
     OutputOptions,
     Preference,
     Progress,
+    Proxy,
     RequestParts,
     RetryPolicy,
     Shape,
@@ -411,7 +412,7 @@ def test_requests_survive_pickle_by_value(tmp_path: Path) -> None:
         preference=Preference(variant=VariantChoice.Index(1), audio=AudioChoice.Language("en")),
         http=HttpOptions(
             headers=[("Cookie", "a"), ("Cookie", "b")],
-            proxy="socks5h://127.0.0.1:1080",
+            proxy=Proxy.Url("socks5h://127.0.0.1:1080"),
             insecure=True,
             timeouts=Timeouts(connect=timedelta(seconds=3)),
             retry=RetryPolicy(attempts=2),

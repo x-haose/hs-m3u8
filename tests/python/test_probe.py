@@ -1,6 +1,9 @@
 """探测：选轨结果与各轨概况、回调、失败时抛出的异常。"""
 
 import asyncio
+import os
+import subprocess
+import sys
 from datetime import timedelta
 
 import pytest
@@ -21,6 +24,7 @@ from hs_m3u8 import (
     PlaylistError,
     Preference,
     Probe,
+    Proxy,
     Purpose,
     RequestParts,
     RetryPolicy,
@@ -279,8 +283,8 @@ def test_invalid_arguments_are_reported_before_any_request(server: Server) -> No
     unusable = [
         Source("ftp://example.com/a.m3u8"),
         Source("不是地址"),
-        Source(url, http=HttpOptions(proxy="sock5://127.0.0.1:9")),
-        Source(url, http=HttpOptions(proxy="不是地址")),
+        Source(url, http=HttpOptions(proxy=Proxy.Url("sock5://127.0.0.1:9"))),
+        Source(url, http=HttpOptions(proxy=Proxy.Url("不是地址"))),
     ]
     for source in unusable:
         with pytest.raises(InvalidInputError):
@@ -288,8 +292,41 @@ def test_invalid_arguments_are_reported_before_any_request(server: Server) -> No
     assert server.hits("a.m3u8") == 0
 
 
+# 在子进程里跑：系统代理的环境变量只影响这个进程。直连照常探测；按系统设置时经代理，失败时退出码为 3
+SYSTEM_PROXY_SCRIPT = """
+import asyncio, sys
+from hs_m3u8 import Engine, HttpError, HttpOptions, Proxy, RetryPolicy, Source
+
+async def main(url: str, proxy: Proxy) -> None:
+    await Engine().probe(Source(url, http=HttpOptions(proxy=proxy, retry=RetryPolicy(attempts=1))))
+
+asyncio.run(main(sys.argv[1], Proxy.Direct()))
+try:
+    asyncio.run(main(sys.argv[1], Proxy.System()))
+except HttpError:
+    sys.exit(3)
+"""
+
+
+def test_direct_connections_ignore_the_system_proxy(server: Server) -> None:
+    # 系统代理指向测试服务器自己：经代理的请求以完整地址作请求目标到达，查不到内容，回 404
+    server.put("a.m3u8", MEDIA)
+    proxy = server.url("")
+    env = {**os.environ, "HTTP_PROXY": proxy, "http_proxy": proxy, "NO_PROXY": "", "no_proxy": ""}
+
+    result = subprocess.run(
+        [sys.executable, "-c", SYSTEM_PROXY_SCRIPT, server.url("a.m3u8")], env=env, check=False, timeout=60
+    )
+
+    assert result.returncode == 3
+    assert server.hits("a.m3u8") == 1
+    assert server.hits(server.url("a.m3u8")) == 1
+
+
 def test_reprs_hide_header_values_and_credentials() -> None:
-    options = HttpOptions(headers={"Cookie": "session=secret"}, proxy="http://user:password@proxy.example:8080")
+    options = HttpOptions(
+        headers={"Cookie": "session=secret"}, proxy=Proxy.Url("http://user:password@proxy.example:8080")
+    )
     request = RequestParts("https://example.com/a.ts?token=secret", headers=[("Cookie", "secret")])
     segment = SegmentRef(track=0, sequence=1, url="https://user:password@example.com/a.ts?token=secret")
     empty = SourceUnsupported.EmptyPlaylist(url="https://example.com/a.m3u8?token=secret")
