@@ -156,14 +156,16 @@ crates/py ────┼──> crates/core ──> crates/hls
 ### 5.7 扩展点（回调）
 
 ```rust
-// 默认实现均为原样返回；HookError = Box<dyn std::error::Error + Send + Sync>，原样保存在 Error::Hook 中
+// 默认实现都不改（返回 None 或原样）；HookError = Box<dyn std::error::Error + Send + Sync>，原样保存在 Error::Hook 中
 pub trait Hooks: Send + Sync {
-    fn on_playlist(&self, url: &Url, body: Vec<u8>) -> Result<Vec<u8>, HookError>;        // 结果须为 UTF-8
-    fn on_request(&self, purpose: Purpose, req: &mut RequestParts) -> Result<(), HookError>; // 改地址与请求头，每次尝试调用一次
-    fn on_key(&self, key_url: &Url, data: Vec<u8>) -> Result<Vec<u8>, HookError>;          // 结果须为 16 字节
-    fn on_segment(&self, url: &Url, data: Vec<u8>) -> Result<Vec<u8>, HookError>;          // 解密之前；init 段不经过
+    fn on_playlist(&self, url: &Url, body: &[u8]) -> Result<Option<String>, HookError>;        // 改写后的文本
+    fn on_request(&self, purpose: Purpose, req: &mut RequestParts) -> Result<(), HookError>;   // 改地址与请求头，每次尝试调用一次
+    fn on_key(&self, key_url: &Url, data: &[u8]) -> Result<Option<[u8; 16]>, HookError>;       // 变换后的 key
+    fn on_segment(&self, url: &Url, data: Vec<u8>) -> Result<Vec<u8>, HookError>;              // 解密之前；init 段不经过
 }
 ```
+
+- 回调的结果由类型保证合要求（文本、16 字节）：回调返回 None 而拉到的内容不合要求时是来源的问题（`NotUtf8`、`KeyLength`），回调给不出合要求的值时是回调的问题（绑定层把 Python 返回值转换失败报为 `Error::Hook`）。
 
 - `on_playlist` 收原始字节：加密、压缩或非 UTF-8 编码的播放列表由回调还原。
 - `on_key` 用于站点自定义的 key 变换；`on_segment` 用于去掉分片前的伪装字节（例如伪装成 PNG 的 TS）。
@@ -279,7 +281,7 @@ class Job:  # 不再被引用、也没有在等它时取消任务（已开始写
 - `Source(url, *, preference=Preference(), http=HttpOptions(), hooks=None)`。
 - `Preference(*, variant=VariantChoice.Best(), audio=AudioChoice.Default())`；`VariantChoice`：`Best()`、`Index(index)`；`AudioChoice`：`Default()`、`Language(language)`、`Index(index)`。
 - `HttpOptions(*, headers=None, proxy=Proxy.System(), insecure=False, timeouts=Timeouts(), retry=RetryPolicy())`，`Proxy` 为 `System()`（系统代理设置）、`Direct()`（直连）或 `Url(url)`；`Timeouts(*, connect, read_idle, request)`、`RetryPolicy(*, attempts, base_delay, max_delay)`，各项可省略。
-- `Hooks`：继承它并覆盖需要的方法——`on_playlist(url: str, body: bytes) -> bytes`、`on_request(purpose: Purpose, request: RequestParts) -> RequestParts`、`on_key(url: str, data: bytes) -> bytes`、`on_segment(url: str, data: bytes) -> bytes`，参数仅限位置（覆盖时可以改名）；没覆盖的不调用，在实例上赋值的函数也算覆盖；同一对象的回调会在多个线程上同时被调用。回调出错使任务失败（`HookError`）：抛出了异常或返回值的类型不对时 `__cause__` 为那个异常，返回的地址不是 http/https、或请求头不合法时为 None。`Purpose`：`Playlist()`、`Key()`、`Init()`、`Segment()`；`RequestParts(url, *, headers)`。子类可以定义带参数的 `__init__`。
+- `Hooks`：继承它并覆盖需要的方法——`on_playlist(url: str, body: bytes) -> str`、`on_request(purpose: Purpose, request: RequestParts) -> RequestParts`、`on_key(url: str, data: bytes) -> bytes`、`on_segment(url: str, data: bytes) -> bytes`，参数仅限位置（覆盖时可以改名）；没覆盖的不调用，在实例上赋值的函数也算覆盖；同一对象的回调会在多个线程上同时被调用。回调出错使任务失败（`HookError`）：抛出了异常或返回值的类型不对时 `__cause__` 为那个异常，返回的地址不是 http/https、请求头不合法、或 key 不是 16 字节时为 None。`Purpose`：`Playlist()`、`Key()`、`Init()`、`Segment()`；`RequestParts(url, *, headers)`。子类可以定义带参数的 `__init__`。
 - `JobRequest(source, output, *, key=None, concurrency=..., live=LiveOptions())`，`live=None` 时拒绝直播；`KeyOverride(key: bytes, *, iv: bytes | None = None)`；`LiveOptions(*, max_duration=None, stall_timeout=...)`。
 - `OutputOptions(target, *, work_dir=None, overwrite=False, keep_work_dir=False)`，`resolved_work_dir() -> Path`；`Target`：`Mp4(path)`、`Hls(path)`、`Both(*, mp4, hls)`。
 - `Unsettled`：`Fail()`、`Report()`（见 5.2 放弃任务）。

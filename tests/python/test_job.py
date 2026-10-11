@@ -15,6 +15,8 @@ from hs_m3u8 import (
     AudioChoice,
     Engine,
     FileError,
+    HookError,
+    HookKind,
     Hooks,
     HttpError,
     HttpErrorKind,
@@ -345,6 +347,35 @@ def test_key_overrides_decrypt_with_their_iv(server: Server, tmp_path: Path) -> 
     assert isinstance(wrong_iv.value.reason, IntegrityFailure.UnrecognizedSegment)
     assert decrypted.segments == 2
     assert server.hits("key.bin") == 0
+
+
+def test_key_hooks_return_the_key_and_other_lengths_fail_the_hook(server: Server, tmp_path: Path) -> None:
+    # key 地址给的是逐字节取反的 key；播放列表写对 IV（样本见上一个测试）
+    key, iv = bytes(range(16)), bytes(range(16, 32))
+    server.put("index.m3u8", ENCRYPTED.replace(f"IV=0x{bytes(16).hex()}", f"IV=0x{iv.hex()}"))
+    server.put("key.bin", bytes(b ^ 0xFF for b in key))
+    server.put("seg0.ts", fixture("aes/seg0.ts"))
+    server.put("seg1.ts", fixture("aes/seg1.ts"))
+    output = OutputOptions(Target.Mp4(tmp_path / "out.mp4"))
+
+    class Invert(Hooks):
+        def on_key(self, url: str, data: bytes) -> bytes:
+            del url
+            return bytes(b ^ 0xFF for b in data)
+
+    class Truncate(Hooks):
+        def on_key(self, url: str, data: bytes) -> bytes:
+            del url
+            return data[:15]
+
+    with pytest.raises(HookError) as truncated:
+        run(JobRequest(Source(server.url("index.m3u8"), hooks=Truncate()), output))
+    decrypted = run(JobRequest(Source(server.url("index.m3u8"), hooks=Invert()), output))
+
+    assert truncated.value.hook == HookKind.Key()
+    assert truncated.value.__cause__ is None
+    assert truncated.value.key_url == server.url("key.bin")
+    assert decrypted.segments == 2
 
 
 def test_segment_hooks_transform_segments_before_they_are_checked(server: Server, tmp_path: Path) -> None:

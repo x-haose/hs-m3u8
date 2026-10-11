@@ -337,7 +337,7 @@ class HlsUnsupportedError(RequestError):
 class HookError(HsM3u8Error):
     r"""
     回调出错，任务失败、不重试。回调抛出了异常、或返回值的类型不对时，`__cause__` 为那个异常（类型不对时是
-    `TypeError`）；返回的地址不是 http/https、或请求头不合法时为 None，原因在说明里。
+    `TypeError`）；返回的地址不是 http/https、请求头不合法、或 key 不是 16 字节时为 None，原因在说明里。
     """
     @property
     def hook(self) -> HookKind.Playlist | HookKind.Request | HookKind.Key | HookKind.Segment:
@@ -402,9 +402,9 @@ class Hooks:
         r"""
         子类可以定义带参数的 `__init__`，这里的参数一概不用。
         """
-    def on_playlist(self, url: builtins.str, body: bytes, /) -> bytes:
+    def on_playlist(self, url: builtins.str, body: bytes, /) -> str:
         r"""
-        改写拉到的播放列表（如解密、转码），返回改写后的内容，须为 UTF-8 文本。`url` 为重定向之后的地址。
+        改写拉到的播放列表（如解密、转码），返回改写后的文本。`url` 为重定向之后的地址。基类的实现按 UTF-8 解码。
         """
     def on_request(self, purpose: Purpose, request: RequestParts, /) -> RequestParts:
         r"""
@@ -413,7 +413,7 @@ class Hooks:
         """
     def on_key(self, url: builtins.str, data: bytes, /) -> bytes:
         r"""
-        变换拉到的 key（如站点自定义的 key 加密），返回 16 字节的 key。`url` 为播放列表中的 key 地址。
+        变换拉到的 key（如站点自定义的 key 加密），返回 16 字节的 key，否则任务失败。`url` 为播放列表中的 key 地址。
         """
     def on_segment(self, url: builtins.str, data: bytes, /) -> bytes:
         r"""
@@ -874,7 +874,7 @@ class JobType:
 @typing.final
 class KeyLengthError(SourceError):
     r"""
-    key 不是 16 字节。
+    拉到的 key 不是 16 字节（`Hooks.on_key` 返回的不对时是 `HookError`）。
     """
     @property
     def url(self) -> builtins.str:

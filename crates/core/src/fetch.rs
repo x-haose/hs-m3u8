@@ -266,7 +266,7 @@ async fn fetch_segment(
     Ok(data)
 }
 
-/// 取 key：同一地址只拉取一次，经 `on_key` 回调后必须是 16 字节。拉取失败不缓存，下次重新拉取。
+/// 取 key：同一地址只拉取一次。`on_key` 回调不改时拉到的必须是 16 字节。拉取失败不缓存，下次重新拉取。
 /// 请求与回调的错误包装为 [`Error::Key`]（取消除外）。
 async fn key_for(ctx: &Ctx, url: &Url, cancel: &CancellationToken) -> Result<[u8; 16], Error> {
     let cell = ctx
@@ -292,15 +292,19 @@ async fn key_for(ctx: &Ctx, url: &Url, cancel: &CancellationToken) -> Result<[u8
                 .map_err(wrap)?
                 .body;
             let hook_url = url.clone();
-            let data = run_hook(&ctx.hooks, HookKind::Key, move |hooks| {
-                hooks.on_key(&hook_url, body)
+            let (body, transformed) = run_hook(&ctx.hooks, HookKind::Key, move |hooks| {
+                let transformed = hooks.on_key(&hook_url, &body)?;
+                Ok((body, transformed))
             })
             .await
             .map_err(wrap)?;
-            <[u8; 16]>::try_from(data.as_slice()).map_err(|_| Error::KeyLength {
-                url: Box::new(url.clone()),
-                length: data.len(),
-            })
+            match transformed {
+                Some(key) => Ok(key),
+                None => <[u8; 16]>::try_from(body.as_slice()).map_err(|_| Error::KeyLength {
+                    url: Box::new(url.clone()),
+                    length: body.len(),
+                }),
+            }
         })
         .await?;
     Ok(*key)

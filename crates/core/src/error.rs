@@ -76,6 +76,7 @@ pub enum Error {
     /// 取 key 失败；`cause` 为请求或回调的错误
     #[error("取 key {} 失败：{}", bare_url(.url), cause_text(.cause, .url))]
     Key { url: Box<Url>, cause: Box<Error> },
+    /// 拉到的 key 不是 16 字节（`on_key` 回调没有改它）
     #[error("key {} 应为 16 字节，实际 {length} 字节", bare_url(.url))]
     KeyLength { url: Box<Url>, length: usize },
     #[error("数据校验失败（{}）：{kind}", bare_url(.url))]

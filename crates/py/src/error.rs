@@ -669,7 +669,7 @@ exception! {
 }
 
 exception! {
-    /// key 不是 16 字节。
+    /// 拉到的 key 不是 16 字节（`Hooks.on_key` 返回的不对时是 `HookError`）。
     pub struct KeyLengthError extends SourceError {
         /// key 的地址
         pub url: Address,
@@ -739,7 +739,7 @@ exception! {
 
 exception! {
     /// 回调出错，任务失败、不重试。回调抛出了异常、或返回值的类型不对时，`__cause__` 为那个异常（类型不对时是
-    /// `TypeError`）；返回的地址不是 http/https、或请求头不合法时为 None，原因在说明里。
+    /// `TypeError`）；返回的地址不是 http/https、请求头不合法、或 key 不是 16 字节时为 None，原因在说明里。
     pub struct HookError extends HsM3u8Error {
         /// 哪个回调
         pub hook: HookKind,

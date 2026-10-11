@@ -639,10 +639,8 @@ struct SiteHooks;
 const DISGUISE: &[u8] = b"\x89PNG\r\n\x1a\n";
 
 impl Hooks for SiteHooks {
-    fn on_playlist(&self, _url: &Url, body: Vec<u8>) -> Result<Vec<u8>, HookError> {
-        Ok(String::from_utf8(body)?
-            .replace("{segment}", "seg")
-            .into_bytes())
+    fn on_playlist(&self, _url: &Url, body: &[u8]) -> Result<Option<String>, HookError> {
+        Ok(Some(std::str::from_utf8(body)?.replace("{segment}", "seg")))
     }
 
     fn on_request(&self, _purpose: Purpose, request: &mut RequestParts) -> Result<(), HookError> {
@@ -650,8 +648,9 @@ impl Hooks for SiteHooks {
         Ok(())
     }
 
-    fn on_key(&self, _url: &Url, data: Vec<u8>) -> Result<Vec<u8>, HookError> {
-        Ok(data.iter().map(|b| b ^ 0xFF).collect())
+    fn on_key(&self, _url: &Url, data: &[u8]) -> Result<Option<[u8; 16]>, HookError> {
+        let key: [u8; 16] = data.try_into()?;
+        Ok(Some(key.map(|b| b ^ 0xFF)))
     }
 
     fn on_segment(&self, _url: &Url, data: Vec<u8>) -> Result<Vec<u8>, HookError> {

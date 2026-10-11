@@ -131,10 +131,10 @@ def test_hooks_rewrite_playlists_and_requests(server: Server) -> None:
     server.put("media.m3u8", "不是播放列表")
 
     class Rewrite(Hooks):
-        def on_playlist(self, url: str, body: bytes) -> bytes:
+        def on_playlist(self, url: str, body: bytes) -> str:
             assert url.endswith("/media.m3u8")
             assert body == "不是播放列表".encode()
-            return MEDIA.encode()
+            return MEDIA
 
         def on_request(self, purpose: Purpose, request: RequestParts) -> RequestParts:
             assert purpose == Purpose.Playlist()
@@ -159,9 +159,9 @@ def test_hooks_may_take_arguments_rename_parameters_and_be_set_on_the_instance(s
             del kind
             return RequestParts(parts.url, headers=(*parts.headers, ("X-Token", self.token)))
 
-    def rewrite(url: str, body: bytes) -> bytes:
+    def rewrite(url: str, body: bytes) -> str:
         del url, body
-        return MEDIA.encode()
+        return MEDIA
 
     signer = Signer("t")
     vars(signer)["on_playlist"] = rewrite
@@ -175,7 +175,7 @@ def test_hook_failures_carry_the_original_exception(server: Server) -> None:
     server.put("media.m3u8", MEDIA)
 
     class Broken(Hooks):
-        def on_playlist(self, url: str, body: bytes) -> bytes:
+        def on_playlist(self, url: str, body: bytes) -> str:
             del url, body
             message = "站点改版了"
             raise ValueError(message)

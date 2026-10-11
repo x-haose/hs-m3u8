@@ -91,11 +91,15 @@ impl Hooks {
         Hooks
     }
 
-    /// 改写拉到的播放列表（如解密、转码），返回改写后的内容，须为 UTF-8 文本。`url` 为重定向之后的地址。
+    /// 改写拉到的播放列表（如解密、转码），返回改写后的文本。`url` 为重定向之后的地址。基类的实现按 UTF-8 解码。
     #[pyo3(signature = (url, body, /))]
-    fn on_playlist<'py>(&self, url: String, body: Bound<'py, PyBytes>) -> Bound<'py, PyBytes> {
+    fn on_playlist<'py>(
+        &self,
+        url: String,
+        body: Bound<'py, PyBytes>,
+    ) -> PyResult<Bound<'py, PyString>> {
         let _ = url;
-        body
+        PyString::from_encoded_object(&body, Some(c"utf-8"), Some(c"strict"))
     }
 
     /// 发出请求前修改地址与请求头（如签名），返回改过的请求（`RequestParts` 不可变，改时新建一个）。每次尝试（含
@@ -106,7 +110,7 @@ impl Hooks {
         request
     }
 
-    /// 变换拉到的 key（如站点自定义的 key 加密），返回 16 字节的 key。`url` 为播放列表中的 key 地址。
+    /// 变换拉到的 key（如站点自定义的 key 加密），返回 16 字节的 key，否则任务失败。`url` 为播放列表中的 key 地址。
     #[pyo3(signature = (url, data, /))]
     fn on_key<'py>(&self, url: String, data: Bound<'py, PyBytes>) -> Bound<'py, PyBytes> {
         let _ = url;
@@ -139,6 +143,18 @@ fn hook_error(failure: PyErr) -> core::HookError {
     Box::new(PyHookError(failure))
 }
 
+/// 回调返回的内容不合要求；回调本身没有抛异常，`HookError` 没有 `__cause__`。
+#[derive(Debug)]
+struct InvalidReturn(String);
+
+impl fmt::Display for InvalidReturn {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for InvalidReturn {}
+
 /// core 的回调：只调用 Python 子类覆盖了的方法。
 struct PyHooks {
     object: Py<Hooks>,
@@ -168,24 +184,40 @@ pub(crate) fn to_core(object: &Bound<'_, Hooks>) -> PyResult<Arc<dyn core::Hooks
 }
 
 impl PyHooks {
-    /// 调用 `method(url, data)`，返回的须是 `bytes`。
-    fn transform(&self, method: &str, url: &Url, data: &[u8]) -> Result<Vec<u8>, core::HookError> {
+    /// 调用 `method(url, data)`，用 `take` 取回结果；返回值的类型不对时报 `take` 抛的异常。
+    fn call<T>(
+        &self,
+        method: &str,
+        url: &Url,
+        data: &[u8],
+        take: impl FnOnce(&Bound<'_, PyAny>) -> PyResult<T>,
+    ) -> Result<T, core::HookError> {
         Python::attach(|py| {
             let result =
                 self.object
                     .call_method1(py, method, (url.as_str(), PyBytes::new(py, data)))?;
-            Ok(result.cast_bound::<PyBytes>(py)?.as_bytes().to_vec())
+            take(result.bind(py))
         })
         .map_err(hook_error)
+    }
+
+    /// 调用 `method(url, data)`，返回的须是 `bytes`。
+    fn transform(&self, method: &str, url: &Url, data: &[u8]) -> Result<Vec<u8>, core::HookError> {
+        self.call(method, url, data, |result| {
+            Ok(result.cast::<PyBytes>()?.as_bytes().to_vec())
+        })
     }
 }
 
 impl core::Hooks for PyHooks {
-    fn on_playlist(&self, url: &Url, body: Vec<u8>) -> Result<Vec<u8>, core::HookError> {
+    fn on_playlist(&self, url: &Url, body: &[u8]) -> Result<Option<String>, core::HookError> {
         if !self.playlist {
-            return Ok(body);
+            return Ok(None);
         }
-        self.transform("on_playlist", url, &body)
+        self.call("on_playlist", url, body, |result| {
+            result.extract::<String>()
+        })
+        .map(Some)
     }
 
     fn on_request(
@@ -214,11 +246,19 @@ impl core::Hooks for PyHooks {
         Ok(())
     }
 
-    fn on_key(&self, url: &Url, data: Vec<u8>) -> Result<Vec<u8>, core::HookError> {
+    fn on_key(&self, url: &Url, data: &[u8]) -> Result<Option<[u8; 16]>, core::HookError> {
         if !self.key {
-            return Ok(data);
+            return Ok(None);
         }
-        self.transform("on_key", url, &data)
+        let key = self.transform("on_key", url, data)?;
+        let length = key.len();
+        <[u8; 16]>::try_from(key)
+            .map(Some)
+            .map_err(|_| -> core::HookError {
+                Box::new(InvalidReturn(format!(
+                    "on_key 返回的 key 应为 16 字节，实际 {length} 字节"
+                )))
+            })
     }
 
     fn on_segment(&self, url: &Url, data: Vec<u8>) -> Result<Vec<u8>, core::HookError> {

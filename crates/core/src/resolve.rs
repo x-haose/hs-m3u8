@@ -130,15 +130,20 @@ async fn load_playlist(
     let final_url = response.url;
     let hook_url = final_url.clone();
     let body = response.body;
-    let body = run_hook(hooks, HookKind::Playlist, move |hooks| {
-        hooks.on_playlist(&hook_url, body)
+    let (body, rewritten) = run_hook(hooks, HookKind::Playlist, move |hooks| {
+        let rewritten = hooks.on_playlist(&hook_url, &body)?;
+        Ok((body, rewritten))
     })
     .await?;
     let malformed = |cause| Error::Playlist {
         url: Box::new(final_url.clone()),
         cause: Box::new(cause),
     };
-    hls::parse_bytes(&body, &final_url).map_err(|e| match e {
+    let parsed = match &rewritten {
+        Some(text) => hls::parse(text, &final_url),
+        None => hls::parse_bytes(&body, &final_url),
+    };
+    parsed.map_err(|e| match e {
         hls::Error::Malformed(cause) => malformed(cause),
         hls::Error::Unsupported { line, what } => Error::Unsupported(Unsupported::Encryption {
             url: Box::new(final_url.clone()),

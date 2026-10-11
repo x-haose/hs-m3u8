@@ -61,11 +61,14 @@ impl fmt::Display for HookKind {
 
 /// 站点适配回调。在阻塞线程池中执行；返回 `Err` 时任务失败，不重试。
 /// 取消不会打断正在执行的回调，任务等它返回后才结束。
+///
+/// 改写内容的回调返回 `None` 表示不改：拉到的内容不合要求时是来源的问题（如 [`crate::Error::KeyLength`]）；
+/// 返回的值由类型保证合要求。
 pub trait Hooks: Send + Sync {
-    /// 改写拉到的播放列表（如解密、转码）；结果须为 UTF-8 文本。`url` 为重定向之后的地址。
-    fn on_playlist(&self, url: &Url, body: Vec<u8>) -> Result<Vec<u8>, HookError> {
-        let _ = url;
-        Ok(body)
+    /// 改写拉到的播放列表（如解密、转码），返回改写后的文本。`url` 为重定向之后的地址。
+    fn on_playlist(&self, url: &Url, body: &[u8]) -> Result<Option<String>, HookError> {
+        let _ = (url, body);
+        Ok(None)
     }
 
     /// 发出请求前修改地址与请求头（如签名）。每次尝试（含重试）调用一次；改后的请求不合法时任务失败。
@@ -74,10 +77,10 @@ pub trait Hooks: Send + Sync {
         Ok(())
     }
 
-    /// 变换拉到的 key（如站点自定义的 key 加密）；结果须为 16 字节。`url` 为播放列表中的 key 地址。
-    fn on_key(&self, url: &Url, data: Vec<u8>) -> Result<Vec<u8>, HookError> {
-        let _ = url;
-        Ok(data)
+    /// 变换拉到的 key（如站点自定义的 key 加密），返回 key。`url` 为播放列表中的 key 地址。
+    fn on_key(&self, url: &Url, data: &[u8]) -> Result<Option<[u8; 16]>, HookError> {
+        let _ = (url, data);
+        Ok(None)
     }
 
     /// 在解密之前变换分片（如去掉伪装成图片的前缀字节）。`url` 为播放列表中的分片地址；init 段不经过此回调。
