@@ -24,6 +24,7 @@ mod job;
 mod live;
 mod output;
 mod probe;
+mod proxy;
 mod report;
 mod request;
 mod resolve;

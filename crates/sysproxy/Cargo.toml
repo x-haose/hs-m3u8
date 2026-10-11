@@ -1,0 +1,20 @@
+[package]
+name = "hs-m3u8-sysproxy"
+version = "0.0.0"
+description = "Read the operating system's proxy settings as stored: macOS SystemConfiguration, Windows Internet Settings"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[target.'cfg(target_os = "macos")'.dependencies]
+system-configuration.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-registry.workspace = true
+
+[lints.rust]
+# 本 crate 是 macOS SystemConfiguration 的 FFI 边界：core-foundation 没有把数组元素当 CF 对象读的安全接口。
+# unsafe 只在 src/macos.rs 读数组元素的那一处。
+unsafe_code = "allow"

@@ -7,12 +7,13 @@ set -euo pipefail
 rules=(
   "hs-m3u8-hls tokio reqwest ffmpeg-next ffmpeg-sys-next hs-m3u8-remux hs-m3u8-core"
   "hs-m3u8-remux tokio reqwest hs-m3u8-hls hs-m3u8-core"
+  "hs-m3u8-sysproxy tokio reqwest hs-m3u8-hls hs-m3u8-remux hs-m3u8-core"
   "hs-m3u8-core tauri pyo3"
 )
 
 # 每行：<包> <不得直接依赖的包>...：只经由 core 的再导出（core::hls、core::remux）使用
 direct_rules=(
-  "hs-m3u8-py hs-m3u8-hls hs-m3u8-remux"
+  "hs-m3u8-py hs-m3u8-hls hs-m3u8-remux hs-m3u8-sysproxy"
 )
 
 tree() {

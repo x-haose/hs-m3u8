@@ -2,7 +2,7 @@
 
 - 状态：已采纳
 - 日期：2026-10-09
-- 相关决定：ADR-0001（技术路线）、ADR-0002（FFmpeg）、ADR-0003（仓库与迁移）、ADR-0004（产品范围）、ADR-0005（前端技术栈）、ADR-0006（播放列表解析）
+- 相关决定：ADR-0001（技术路线）、ADR-0002（FFmpeg）、ADR-0003（仓库与迁移）、ADR-0004（产品范围）、ADR-0005（前端技术栈）、ADR-0006（播放列表解析）、ADR-0007（系统代理）
 
 ## 1. 目标与非目标
 
@@ -30,7 +30,8 @@ hs-m3u8/
 ├── crates/
 │   ├── hls/                播放列表解析与规范化、选轨、IV 推导；纯计算，无 IO
 │   ├── core/               下载任务：HTTP、调度、解密校验、续传、直播录制、合并编排、进度
-│   ├── remux/              FFmpeg 转封装；全项目唯一的 FFI 边界
+│   ├── remux/              FFmpeg 转封装；FFmpeg 的 FFI 边界
+│   ├── sysproxy/           读操作系统的代理设置原文（macOS 系统设置、Windows 注册表）；SystemConfiguration 的 FFI 边界
 │   └── py/                 PyO3 绑定（cdylib），模块名 hs_m3u8._native（Python 绑定阶段建立）
 ├── python/hs_m3u8/         Python 包：再导出原生模块、py.typed，存根由 pyo3-stub-gen 生成（同上）
 ├── apps/desktop/           Tauri 应用：src-tauri/ 与前端（GUI 阶段建立）
@@ -47,10 +48,11 @@ hs-m3u8/
 ```
 apps/desktop ─┐
 crates/py ────┼──> crates/core ──> crates/hls
-              │          └──────> crates/remux
+              │          ├──────> crates/remux
+              │          └──────> crates/sysproxy
 ```
 
-- `hls` 不依赖 tokio、reqwest、ffmpeg；`remux` 不依赖 `core`、`hls`、tokio、reqwest；`core` 不依赖 tauri、pyo3。
+- `hls` 不依赖 tokio、reqwest、ffmpeg；`remux` 不依赖 `core`、`hls`、tokio、reqwest；`sysproxy` 只读不解析，不依赖 tokio、reqwest 与其他 crate；`core` 不依赖 tauri、pyo3。
 - 跨边界一律翻译：`hls` 不暴露第三方解析库的类型；`py` 与 `apps/desktop` 把 `core` 的类型转成各自的表示，`core` 不出现 Python 或前端的概念。`core` 的公开接口只重新导出用到的 `hls` 类型（选轨偏好与解析错误，在 `core::hls` 下）与 `remux` 的合并报告和错误（在 `core::remux` 下），绑定层只依赖 `core`。
 - 以上由检查命令机器判定（第 10 节），不靠人看。
 
@@ -133,7 +135,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 
 ### 5.4 HTTP
 
-- `reqwest` 0.13.5（rustls）。请求配置包括请求头（Cookie、User-Agent 都经请求头传入）与代理（按系统设置、直连或指定的代理三者之一；指定的地址 reqwest 用不上时不报错、不起作用，请求直连，所以按它的条件先校验：协议为 http、https、socks4、socks4a、socks5、socks5h，且按 `http::Uri` 解析得出主机，否则报参数错误）；Cookie 在任务内由响应自动保存。
+- `reqwest` 0.13.5（rustls）。请求配置包括请求头（Cookie、User-Agent 都经请求头传入）与代理（按系统设置、直连或指定的代理三者之一；reqwest 用不上的地址不报错、不起作用，请求直连，所以按它的条件先校验：协议为 http、https、socks4、socks4a、socks5、socks5h，且按 `http::Uri` 解析得出主机，否则报参数错误）。系统设置也由 core 读取（`proxy` 模块，见 ADR-0007），不交给 reqwest：它读到写错的值同样悄悄直连，macOS 上还只读 HTTP、HTTPS 两项、不读例外。先看环境变量（规则同 curl，另认大写的 `HTTP_PROXY`），没设时看 macOS 的系统设置或 Windows 的 Internet 选项（原文由 `sysproxy` 读出；SOCKS 代理代替没设的 http、https 代理，例外支持通配符、网段与 `<local>`）；每一项按上面的条件检查，用不了的（写错、用了 PAC 或 macOS 的自动发现）报参数错误，结果显式交给 reqwest。Windows 的「自动检测设置」（WPAD）不看：它默认开着，多数网络里并没有可发现的代理；Cookie 在任务内由响应自动保存。
 - 证书校验默认开启；关闭必须显式写 `insecure: true`。证书校验失败报 `HttpError::Certificate`、跟随重定向失败（循环、次数过多）报 `HttpError::Redirect`，都不重试；rustls 的证书错误包在 `io::Error` 里，沿原因链逐层取出它包着的错误才认得出，故直接依赖 rustls（与 reqwest 用的同一个 0.23.45）。连接与传输错误的说明带上各层原因。
 - 字节范围分片用 `Range` 请求头；响应必须是 206 且长度一致，否则视为错误。
 - key 按 key URL 去重，只取一次，缓存在任务内存里。

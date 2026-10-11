@@ -306,10 +306,11 @@ def test_invalid_arguments_are_rejected_when_constructed() -> None:
         SourceUnsupported.DiscontinuityMismatch(track=1, first=b"\x01", found=())
 
 
-# 在子进程里跑：系统代理的环境变量只影响这个进程。直连照常探测；按系统设置时经代理，失败时退出码为 3
+# 在子进程里跑：系统代理的环境变量只影响这个进程。直连照常探测；按系统设置时经代理，请求失败时退出码为 3，代理设置
+# 用不了时为 4
 SYSTEM_PROXY_SCRIPT = """
 import asyncio, sys
-from hs_m3u8 import Engine, HttpError, HttpOptions, Proxy, RetryPolicy, Source
+from hs_m3u8 import Engine, HttpError, HttpOptions, InvalidInputError, Proxy, RetryPolicy, Source
 
 async def main(url: str, proxy: Proxy) -> None:
     await Engine().probe(Source(url, http=HttpOptions(proxy=proxy, retry=RetryPolicy(attempts=1))))
@@ -319,22 +320,40 @@ try:
     asyncio.run(main(sys.argv[1], Proxy.System()))
 except HttpError:
     sys.exit(3)
+except InvalidInputError:
+    sys.exit(4)
 """
+
+
+# 子进程跑完的上限，秒；只在出错时才会等满
+CHILD_LIMIT = 60.0
+
+
+def run_with_system_proxy(server: Server, proxy: str) -> int:
+    """在子进程里先直连、再按系统设置（环境变量为 `proxy`）探测，返回退出码。"""
+    env = {**os.environ, "HTTP_PROXY": proxy, "http_proxy": proxy, "NO_PROXY": "", "no_proxy": ""}
+    script = [sys.executable, "-c", SYSTEM_PROXY_SCRIPT, server.url("a.m3u8")]
+    return subprocess.run(script, env=env, check=False, timeout=CHILD_LIMIT).returncode
 
 
 def test_direct_connections_ignore_the_system_proxy(server: Server) -> None:
     # 系统代理指向测试服务器自己：经代理的请求以完整地址作请求目标到达，查不到内容，回 404
     server.put("a.m3u8", MEDIA)
-    proxy = server.url("")
-    env = {**os.environ, "HTTP_PROXY": proxy, "http_proxy": proxy, "NO_PROXY": "", "no_proxy": ""}
 
-    result = subprocess.run(
-        [sys.executable, "-c", SYSTEM_PROXY_SCRIPT, server.url("a.m3u8")], env=env, check=False, timeout=60
-    )
+    code = run_with_system_proxy(server, server.url(""))
 
-    assert result.returncode == 3
+    assert code == 3
     assert server.hits("a.m3u8") == 1
     assert server.hits(server.url("a.m3u8")) == 1
+
+
+def test_unusable_system_proxies_fail_instead_of_connecting_directly(server: Server) -> None:
+    server.put("a.m3u8", MEDIA)
+
+    code = run_with_system_proxy(server, "sock5://127.0.0.1:9")
+
+    assert code == 4
+    assert server.hits("a.m3u8") == 1
 
 
 def test_reprs_hide_header_values_and_credentials() -> None:

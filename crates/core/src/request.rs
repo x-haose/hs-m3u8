@@ -93,7 +93,10 @@ impl HttpOptions {
 /// 请求经不经代理、经哪个。
 #[derive(Clone, Default, PartialEq, Eq)]
 pub enum Proxy {
-    /// 按系统代理设置：环境变量（如 `HTTPS_PROXY`、`NO_PROXY`）与 macOS、Windows 的系统设置
+    /// 按系统代理设置：先看环境变量（规则同 curl：`http_proxy`、`https_proxy`、`all_proxy`、`no_proxy`，小写的优先，
+    /// 另认大写的 `HTTP_PROXY`），没设时看 macOS 的系统设置（HTTP、HTTPS、SOCKS 代理与例外）或 Windows 的 Internet
+    /// 选项（含分协议的写法与例外），其他平台即直连。探测与开始任务时读取；读不出或读到用不了的值（写错、用了 PAC
+    /// 或自动发现）时报 [`Error::InvalidInput`]，可改用 `Direct` 或 `Url`
     #[default]
     System,
     /// 不经代理，系统设置了代理也直连
@@ -102,29 +105,11 @@ pub enum Proxy {
     Url(Url),
 }
 
-/// 代理地址 HTTP 库用不用得上。它用不上的地址（协议不认识，或按 `http::Uri` 解析不出主机，如 socks 地址里的
-/// 国际化域名）不报错，只是不用代理、请求直连，用户却以为走了代理；这里按同样的条件先拒绝。
 fn check_proxy(proxy: &Url) -> Result<(), Error> {
-    if !matches!(
-        proxy.scheme(),
-        "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
-    ) {
-        return Err(Error::InvalidInput(format!(
-            "代理只支持 http、https、socks4、socks4a、socks5、socks5h：{}",
-            bare_url(proxy)
-        )));
+    match crate::proxy::unusable(proxy) {
+        Some(reason) => Err(Error::InvalidInput(reason)),
+        None => Ok(()),
     }
-    let usable = proxy
-        .as_str()
-        .parse::<http::Uri>()
-        .is_ok_and(|uri| uri.authority().is_some());
-    if !usable {
-        return Err(Error::InvalidInput(format!(
-            "代理地址的主机名不合法（国际化域名须先转成 punycode）：{}",
-            bare_url(proxy)
-        )));
-    }
-    Ok(())
 }
 
 /// 一个下载任务的配置。用 [`JobRequest::new`] 取默认值后按需修改字段。

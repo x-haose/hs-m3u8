@@ -14,6 +14,7 @@ use url::Url;
 
 use crate::hooks::{HookKind, Hooks, Purpose, RequestParts, run_hook};
 use crate::ident::bare_url;
+use crate::proxy;
 use crate::request::{HttpOptions, Proxy, RetryPolicy, check_header};
 use crate::{Error, HttpError, Integrity};
 
@@ -64,7 +65,14 @@ impl Http {
             .timeout(t.request)
             .tls_danger_accept_invalid_certs(options.insecure);
         match &options.proxy {
-            Proxy::System => {}
+            Proxy::System => {
+                builder = match proxy::system_proxy()? {
+                    None => builder.no_proxy(),
+                    Some(system) => builder.proxy(reqwest::Proxy::custom(move |url| {
+                        system.proxy_for(url).cloned()
+                    })),
+                };
+            }
             Proxy::Direct => builder = builder.no_proxy(),
             Proxy::Url(proxy) => {
                 let proxy = reqwest::Proxy::all(proxy.as_str()).map_err(|e| {

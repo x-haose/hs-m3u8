@@ -1934,7 +1934,10 @@ class Proxy:
     @typing.final
     class System(Proxy):
         r"""
-        按系统代理设置：环境变量（如 `HTTPS_PROXY`、`NO_PROXY`）与 macOS、Windows 的系统设置
+        按系统代理设置：先看环境变量（规则同 curl：`http_proxy`、`https_proxy`、`all_proxy`、`no_proxy`，小写的
+        优先，另认大写的 `HTTP_PROXY`），没设时看 macOS 的系统设置（HTTP、HTTPS、SOCKS 代理与例外）或 Windows 的
+        Internet 选项（含分协议的写法与例外），其他平台即直连。探测与开始任务时读取；读不出或读到用不了的值（写错、
+        用了 PAC 或自动发现）时抛 `InvalidInputError`，可改用 `Proxy.Direct()` 或 `Proxy.Url(...)`
         """
         __match_args__ = ()
         def __new__(cls) -> Proxy.System: ...
