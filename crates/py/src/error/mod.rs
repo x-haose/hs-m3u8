@@ -138,40 +138,25 @@ fn reduce<'py>(object: &Bound<'py, PyAny>, fields: &[&str]) -> PyResult<Bound<'p
 
 /// 异常的直接上级：建立异常时依次初始化到它为止的各层。
 trait Parent: PyClass {
-    fn initializer<L: PyClass<BaseType = Self>>(
-        base: HsM3u8Error,
-        leaf: L,
-    ) -> PyClassInitializer<L>;
+    /// 从基类 `base` 起，经本类及以上各层，到它的子类 `leaf` 的初始化。
+    fn chain<L: PyClass<BaseType = Self>>(base: HsM3u8Error, leaf: L) -> PyClassInitializer<L>;
 }
 
 impl Parent for HsM3u8Error {
-    fn initializer<L: PyClass<BaseType = Self>>(
-        base: HsM3u8Error,
-        leaf: L,
-    ) -> PyClassInitializer<L> {
+    fn chain<L: PyClass<BaseType = Self>>(base: HsM3u8Error, leaf: L) -> PyClassInitializer<L> {
         PyClassInitializer::from(base).add_subclass(leaf)
     }
 }
 
 impl Parent for RequestError {
-    fn initializer<L: PyClass<BaseType = Self>>(
-        base: HsM3u8Error,
-        leaf: L,
-    ) -> PyClassInitializer<L> {
-        PyClassInitializer::from(base)
-            .add_subclass(RequestError {})
-            .add_subclass(leaf)
+    fn chain<L: PyClass<BaseType = Self>>(base: HsM3u8Error, leaf: L) -> PyClassInitializer<L> {
+        HsM3u8Error::chain(base, RequestError {}).add_subclass(leaf)
     }
 }
 
 impl Parent for SourceError {
-    fn initializer<L: PyClass<BaseType = Self>>(
-        base: HsM3u8Error,
-        leaf: L,
-    ) -> PyClassInitializer<L> {
-        PyClassInitializer::from(base)
-            .add_subclass(SourceError {})
-            .add_subclass(leaf)
+    fn chain<L: PyClass<BaseType = Self>>(base: HsM3u8Error, leaf: L) -> PyClassInitializer<L> {
+        HsM3u8Error::chain(base, SourceError {}).add_subclass(leaf)
     }
 }
 
@@ -218,7 +203,7 @@ macro_rules! exception {
                 leftovers: Option<Seq<Leftover>>,
             ) -> PyClassInitializer<Self> {
                 let base = HsM3u8Error::new(message, retryable, retry_after, segment, key_url, leftovers);
-                <$parent as Parent>::initializer(base, $name { $($field),* })
+                <$parent as Parent>::chain(base, $name { $($field),* })
             }
 
             /// 同构造函数：把说明放进 `args`。
@@ -455,7 +440,7 @@ pub(crate) fn to_pyerr(py: Python<'_>, error: core::Error) -> PyErr {
 /// 参数在 Python 侧就能判定不对时抛的 `InvalidInputError`。
 pub(crate) fn invalid_input(py: Python<'_>, message: String) -> PyErr {
     let base = HsM3u8Error::plain(false, None);
-    instance(py, RequestError::initializer(base, InvalidInputError {}))
+    instance(py, RequestError::chain(base, InvalidInputError {}))
         .and_then(|object| raised(object, message))
         .unwrap_or_else(|failure| failure)
 }
@@ -493,7 +478,7 @@ fn exception(
         E::Hook { hook, cause } => {
             let object = instance(
                 py,
-                HsM3u8Error::initializer(base, HookError { hook: hook.into() }),
+                HsM3u8Error::chain(base, HookError { hook: hook.into() }),
             )?;
             let error = raised(object, message)?;
             if let Some(PyHookError(original)) = cause.downcast_ref::<PyHookError>() {
@@ -501,14 +486,14 @@ fn exception(
             }
             return Ok(error);
         }
-        E::InvalidInput(_) => instance(py, RequestError::initializer(base, InvalidInputError {}))?,
+        E::InvalidInput(_) => instance(py, RequestError::chain(base, InvalidInputError {}))?,
         E::OutputExists(path) => instance(
             py,
-            RequestError::initializer(base, OutputExistsError { path: path.into() }),
+            RequestError::chain(base, OutputExistsError { path: path.into() }),
         )?,
         E::OutputOccupied { path, ancestor } => instance(
             py,
-            RequestError::initializer(
+            RequestError::chain(
                 base,
                 OutputOccupiedError {
                     path: path.into(),
@@ -518,7 +503,7 @@ fn exception(
         )?,
         E::Select(failure) => instance(
             py,
-            RequestError::initializer(
+            RequestError::chain(
                 base,
                 SelectError {
                     reason: failure.into(),
@@ -527,85 +512,57 @@ fn exception(
         )?,
         E::Unsupported(unsupported) => {
             use core::Unsupported as U;
-            let unsupported_source = |reason| SourceUnsupportedError { reason };
-            match unsupported {
-                U::Live => instance(py, RequestError::initializer(base, LiveNotEnabledError {}))?,
-                U::Mp4(reason) => instance(
-                    py,
-                    RequestError::initializer(
-                        base,
-                        Mp4UnsupportedError {
-                            reason: reason.into(),
-                        },
-                    ),
-                )?,
-                U::Hls(reason) => instance(
-                    py,
-                    RequestError::initializer(
-                        base,
-                        HlsUnsupportedError {
-                            reason: reason.into(),
-                        },
-                    ),
-                )?,
-                U::EmptyPlaylist(url) => {
-                    let reason = SourceUnsupported::EmptyPlaylist { url: Address(*url) };
-                    instance(
-                        py,
-                        SourceError::initializer(base, unsupported_source(reason)),
-                    )?
+            let reason = match unsupported {
+                U::Live => {
+                    let leaf = LiveNotEnabledError {};
+                    return raised(instance(py, RequestError::chain(base, leaf))?, message);
                 }
-                U::NoTargetDuration(url) => {
-                    let reason = SourceUnsupported::NoTargetDuration { url: Address(*url) };
-                    instance(
-                        py,
-                        SourceError::initializer(base, unsupported_source(reason)),
-                    )?
-                }
-                U::Encryption { url, line, what } => {
-                    let reason = SourceUnsupported::Encrypted {
-                        url: Address(*url),
-                        line,
-                        encryption: what.into(),
+                U::Mp4(reason) => {
+                    let leaf = Mp4UnsupportedError {
+                        reason: reason.into(),
                     };
-                    instance(
-                        py,
-                        SourceError::initializer(base, unsupported_source(reason)),
-                    )?
+                    return raised(instance(py, RequestError::chain(base, leaf))?, message);
                 }
+                U::Hls(reason) => {
+                    let leaf = HlsUnsupportedError {
+                        reason: reason.into(),
+                    };
+                    return raised(instance(py, RequestError::chain(base, leaf))?, message);
+                }
+                U::EmptyPlaylist(url) => SourceUnsupported::EmptyPlaylist { url: Address(*url) },
+                U::NoTargetDuration(url) => {
+                    SourceUnsupported::NoTargetDuration { url: Address(*url) }
+                }
+                U::Encryption { url, line, what } => SourceUnsupported::Encrypted {
+                    url: Address(*url),
+                    line,
+                    encryption: what.into(),
+                },
                 U::InitChangesWithinGroup {
                     track,
                     discontinuity,
-                } => {
-                    let reason = SourceUnsupported::InitChangesWithinGroup {
-                        track,
-                        discontinuity,
-                    };
-                    instance(
-                        py,
-                        SourceError::initializer(base, unsupported_source(reason)),
-                    )?
-                }
+                } => SourceUnsupported::InitChangesWithinGroup {
+                    track,
+                    discontinuity,
+                },
                 U::DiscontinuityMismatch {
                     track,
                     first,
                     found,
-                } => {
-                    let reason = SourceUnsupported::DiscontinuityMismatch {
-                        track,
-                        first: Seq(first),
-                        found: Seq(found),
-                    };
-                    instance(
-                        py,
-                        SourceError::initializer(base, unsupported_source(reason)),
-                    )?
-                }
-            }
+                } => SourceUnsupported::DiscontinuityMismatch {
+                    track,
+                    first: Seq(first),
+                    found: Seq(found),
+                },
+            };
+            instance(
+                py,
+                SourceError::chain(base, SourceUnsupportedError { reason }),
+            )?
         }
         E::Playlist { url, cause } => instance(
             py,
-            SourceError::initializer(
+            SourceError::chain(
                 base,
                 PlaylistError {
                     url: Address(*url),
@@ -615,11 +572,11 @@ fn exception(
         )?,
         E::NotMediaPlaylist { url } => instance(
             py,
-            SourceError::initializer(base, NotMediaPlaylistError { url: Address(*url) }),
+            SourceError::chain(base, NotMediaPlaylistError { url: Address(*url) }),
         )?,
         E::Integrity { url, kind } => instance(
             py,
-            SourceError::initializer(
+            SourceError::chain(
                 base,
                 IntegrityError {
                     url: Address(*url),
@@ -629,7 +586,7 @@ fn exception(
         )?,
         E::KeyLength { url, length } => instance(
             py,
-            SourceError::initializer(
+            SourceError::chain(
                 base,
                 KeyLengthError {
                     url: Address(*url),
@@ -639,7 +596,7 @@ fn exception(
         )?,
         E::Http { url, kind, .. } => instance(
             py,
-            HsM3u8Error::initializer(
+            HsM3u8Error::chain(
                 base,
                 HttpError {
                     url: Address(*url),
@@ -649,7 +606,7 @@ fn exception(
         )?,
         E::LiveStalled { track, cause } => instance(
             py,
-            HsM3u8Error::initializer(
+            HsM3u8Error::chain(
                 base,
                 LiveStalledError {
                     track,
@@ -668,7 +625,7 @@ fn exception(
                 path: path.into(),
                 errno: errno_of(py, &os_error)?,
             };
-            let error = raised(instance(py, HsM3u8Error::initializer(base, leaf))?, message)?;
+            let error = raised(instance(py, HsM3u8Error::chain(base, leaf))?, message)?;
             error.set_cause(py, Some(os_error));
             return Ok(error);
         }
@@ -678,14 +635,14 @@ fn exception(
                 root: root.into(),
                 errno: errno_of(py, &os_error)?,
             };
-            let error = raised(instance(py, HsM3u8Error::initializer(base, leaf))?, message)?;
+            let error = raised(instance(py, HsM3u8Error::chain(base, leaf))?, message)?;
             error.set_cause(py, Some(os_error));
             return Ok(error);
         }
-        E::Remux(_) => instance(py, HsM3u8Error::initializer(base, RemuxError {}))?,
+        E::Remux(_) => instance(py, HsM3u8Error::chain(base, RemuxError {}))?,
         E::WorkDir { path, problem } => instance(
             py,
-            HsM3u8Error::initializer(
+            HsM3u8Error::chain(
                 base,
                 WorkDirError {
                     path: path.into(),
@@ -693,10 +650,8 @@ fn exception(
                 },
             ),
         )?,
-        E::NothingRecorded => {
-            instance(py, HsM3u8Error::initializer(base, NothingRecordedError {}))?
-        }
-        E::Cancelled => instance(py, HsM3u8Error::initializer(base, JobCancelledError {}))?,
+        E::NothingRecorded => instance(py, HsM3u8Error::chain(base, NothingRecordedError {}))?,
+        E::Cancelled => instance(py, HsM3u8Error::chain(base, JobCancelledError {}))?,
     };
     raised(object, message)
 }
@@ -729,9 +684,9 @@ fn errno_of(py: Python<'_>, os_error: &PyErr) -> PyResult<Option<i32>> {
 
 fn instance<'py, L: PyClass>(
     py: Python<'py>,
-    initializer: PyClassInitializer<L>,
+    chain: PyClassInitializer<L>,
 ) -> PyResult<Bound<'py, PyAny>> {
-    Ok(Bound::new(py, initializer)?.into_any())
+    Ok(Bound::new(py, chain)?.into_any())
 }
 
 /// 填上说明（`args`，`str(异常)` 即它），做成可以抛出的异常。
