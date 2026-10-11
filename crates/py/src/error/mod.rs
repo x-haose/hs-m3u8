@@ -453,12 +453,9 @@ pub(crate) fn to_pyerr(py: Python<'_>, error: core::Error) -> PyErr {
     exception(py, error, base, message).unwrap_or_else(|failure| failure)
 }
 
-/// 参数在 Python 侧就能判定不对时抛的 `InvalidInputError`。
+/// 参数在 Python 侧就能判定不对时抛的 `InvalidInputError`：与 core 判定的一样翻译，说明的写法也一样。
 pub(crate) fn invalid_input(py: Python<'_>, message: String) -> PyErr {
-    let base = HsM3u8Error::plain(false, None);
-    instance(py, RequestError::chain(base, InvalidInputError {}))
-        .and_then(|object| raised(object, message))
-        .unwrap_or_else(|failure| failure)
+    to_pyerr(py, core::Error::InvalidInput(message))
 }
 
 /// `error` 对应的异常：剥掉说明位置的包装，记进 `base`，按里面的原因选类。
