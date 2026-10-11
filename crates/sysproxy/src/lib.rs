@@ -14,7 +14,8 @@ pub enum Settings {
     Windows(Windows),
 }
 
-/// macOS 系统设置里的代理（与 `scutil --proxy` 列出的是同一份）。各代理在开关打开时才有。
+/// macOS 系统设置里的代理（与 `scutil --proxy` 列出的是同一份，系统已规范化，见 `macos::read`）。各代理在开关打开
+/// 时才有。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MacOs {
     /// 网页代理（HTTP）
@@ -65,11 +66,10 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// 读本机的代理设置。没有这类设置的平台、macOS 上读不到代理设置（见 `macos::read`）、Windows 上没有 Internet 选项
-/// 时为 None。
+/// 读本机的代理设置。没有这类设置的平台、Windows 上没有 Internet 选项时为 None。
 pub fn read() -> Result<Option<Settings>, Error> {
     #[cfg(target_os = "macos")]
-    return macos::read().map(|settings| settings.map(Settings::MacOs));
+    return macos::read().map(|settings| Some(Settings::MacOs(settings)));
     #[cfg(windows)]
     return windows::read().map(|settings| settings.map(Settings::Windows));
     #[cfg(not(any(target_os = "macos", windows)))]

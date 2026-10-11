@@ -87,7 +87,10 @@ impl Bypass {
             (Bypass::Host(expected), Host::Domain(name)) => {
                 name.trim_end_matches('.').eq_ignore_ascii_case(expected)
             }
-            (Bypass::Pattern(pattern), _) => glob(pattern, &host.to_string().to_ascii_lowercase()),
+            (Bypass::Pattern(pattern), Host::Domain(name)) => {
+                glob(pattern, &name.trim_end_matches('.').to_ascii_lowercase())
+            }
+            (Bypass::Pattern(pattern), _) => glob(pattern, &host.to_string()),
             (Bypass::Network { address, prefix }, Host::Ipv4(ip)) => {
                 in_network(IpAddr::V4(*ip), *address, *prefix)
             }

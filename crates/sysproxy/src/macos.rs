@@ -10,16 +10,18 @@ use system_configuration::dynamic_store::SCDynamicStoreBuilder;
 
 use crate::{Error, MacOs, Server};
 
-/// 读代理设置。SCDynamicStoreCopyProxies 在没有代理设置与出错时都返回 NULL，分不开，都当作没有设置（None）。
-pub(crate) fn read() -> Result<Option<MacOs>, Error> {
+/// 读代理设置。SCDynamicStoreCopyProxies 给出的是系统规范化之后的设置，与系统里其他应用看到的相同：开着却没填服务器、
+/// 端口越界的代理当作没开，例外列表里有一项不合规时整张作废；没有代理设置时是空字典，读取失败也是，两者分不开。
+pub(crate) fn read() -> Result<MacOs, Error> {
     let store = SCDynamicStoreBuilder::new("hs-m3u8")
         .build()
         .ok_or_else(|| Error("建不出读取系统设置的 SCDynamicStore 会话".to_owned()))?;
-    let Some(proxies) = store.get_proxies() else {
-        return Ok(None);
-    };
+    // 只在传入的选项不是字典时为 NULL，这里不传选项
+    let proxies = store
+        .get_proxies()
+        .ok_or_else(|| Error("读取系统代理设置失败".to_owned()))?;
     let proxies = Proxies(&proxies);
-    Ok(Some(MacOs {
+    Ok(MacOs {
         http: proxies.server("HTTP")?,
         https: proxies.server("HTTPS")?,
         socks: proxies.server("SOCKS")?,
@@ -27,7 +29,7 @@ pub(crate) fn read() -> Result<Option<MacOs>, Error> {
         exclude_simple_hostnames: proxies.flag("ExcludeSimpleHostnames")?,
         auto_config: proxies.flag("ProxyAutoConfigEnable")?,
         auto_discovery: proxies.flag("ProxyAutoDiscoveryEnable")?,
-    }))
+    })
 }
 
 struct Proxies<'a>(&'a CFDictionary<CFString, CFType>);

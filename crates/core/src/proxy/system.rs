@@ -2,9 +2,13 @@
 //! Chromium 与 Python：
 //! - 没设 http、https 代理时用 SOCKS 代理代替（macOS 的为 SOCKS5，由代理解析主机名；Windows 的 `socks=` 为 SOCKS4）；
 //! - 例外里带通配符的按通配符，IP 地址或前缀按网段（可省略后面的 0，如 `169.254/16`，省略掩码时按写出的段数），开头
-//!   为 `.` 的含其子域名，`<local>` 指不含点的主机名，其余为恰好这个主机名；
+//!   为 `.` 或 `*.` 的指其子域名，`<local>` 指不含点的主机名，其余为恰好这个主机名；不支持端口；
+//! - 本机与链路本地地址总不经代理（见 [`implicit`]）；
 //! - 用了自动代理配置（PAC）、macOS 的自动发现代理时报错：本库不执行 PAC，也不做发现。Windows 的「自动检测设置」
 //!   （WPAD）不看：它默认开着，多数网络里并没有可发现的代理。
+//!
+//! macOS 给出的是系统规范化之后的设置，与系统里其他应用看到的相同：开着却没填服务器、端口越界的代理当作没开，例外
+//! 列表里有一项不合规时整张作废。这些情况系统不报错，这里也看不到。
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -45,6 +49,7 @@ fn from_macos(settings: MacOs) -> Result<Option<SystemProxy>, String> {
     if settings.exclude_simple_hostnames {
         bypass.push(Bypass::SimpleHostnames);
     }
+    bypass.extend(implicit());
     Ok(Some(SystemProxy {
         source: ProxySource::MacOs,
         http,
@@ -74,7 +79,10 @@ fn macos_server(
     };
     let host = match host.parse::<Ipv6Addr>() {
         Ok(_) => format!("[{host}]"),
-        Err(_) => host.to_owned(),
+        Err(_) => match Host::parse(host) {
+            Ok(Host::Domain(_) | Host::Ipv4(_)) => host.to_owned(),
+            _ => return Err(format!("的服务器 {host:?} 不是主机名或 IP 地址")),
+        },
     };
     proxy_url(&format!("{scheme}://{host}:{port}")).map(Some)
 }
@@ -103,8 +111,14 @@ fn from_windows(settings: Windows) -> Result<Option<SystemProxy>, String> {
     if http.is_none() && https.is_none() {
         return Ok(None);
     }
-    let bypass = exceptions(settings.bypass.as_deref().unwrap_or_default().split(';'))
+    // `<-loopback>`：本机地址也按设置经代理
+    let is_loopback = |entry: &&str| entry.trim().eq_ignore_ascii_case("<-loopback>");
+    let entries = settings.bypass.as_deref().unwrap_or_default().split(';');
+    let mut bypass = exceptions(entries.clone().filter(|entry| !is_loopback(entry)))
         .map_err(|entry| format!("Windows 的代理例外（ProxyOverride）{entry:?} 无法识别"))?;
+    if !entries.clone().any(|entry| is_loopback(&entry)) {
+        bypass.extend(implicit());
+    }
     Ok(Some(SystemProxy {
         source: ProxySource::Windows,
         http,
@@ -114,9 +128,14 @@ fn from_windows(settings: Windows) -> Result<Option<SystemProxy>, String> {
 }
 
 /// ProxyServer 里 http、https 地址各用的代理：`主机:端口` 用于所有协议；分协议的 `http=…;https=…;socks=…` 中没设的
-/// 用 socks 的，其他协议（如 ftp）的用不到。
+/// 用 socks 的，ftp、gopher 的用不到，不认识的协议名报错。
 fn windows_servers(server: &str) -> Result<Proxies, String> {
-    if !server.contains('=') {
+    // 分协议的写法有 `;`，或第一个 `=` 之前只有字母（协议名）；单个代理的地址里也可能有 `=`（如口令里）
+    let per_protocol = server.contains(';')
+        || server
+            .split_once('=')
+            .is_some_and(|(protocol, _)| protocol.trim().bytes().all(|b| b.is_ascii_alphabetic()));
+    if !per_protocol {
         let proxy = windows_proxy(server, "http")?;
         return Ok((Some(proxy.clone()), Some(proxy)));
     }
@@ -127,7 +146,8 @@ fn windows_servers(server: &str) -> Result<Proxies, String> {
             "http" => http = Some(windows_proxy(address, "http")?),
             "https" => https = Some(windows_proxy(address, "http")?),
             "socks" => socks = Some(windows_proxy(address, "socks4")?),
-            _ => {}
+            "ftp" | "gopher" => {}
+            other => return Err(format!("里的协议 {other:?} 无法识别")),
         }
     }
     Ok((http.or_else(|| socks.clone()), https.or(socks)))
@@ -143,9 +163,13 @@ fn windows_proxy(address: &str, scheme: &str) -> Result<Url, String> {
     }
 }
 
-/// 用不了时为原因（接在「某某设置」之后；不带地址，可能有口令）。
+/// 用不了时为原因（接在「某某设置」之后；不带地址，可能有口令）。地址只能有协议、主机与端口：多出路径、查询串时，
+/// 多半是主机里有 `/`、`?` 等，端口被当成了路径。
 fn proxy_url(text: &str) -> Result<Url, String> {
     let url = Url::parse(text).map_err(|e| format!("的地址无法解析（{e}）"))?;
+    if !matches!(url.path(), "" | "/") || url.query().is_some() || url.fragment().is_some() {
+        return Err("的地址只能有协议、主机与端口".to_owned());
+    }
     match unusable(&url) {
         Some(reason) => Err(format!("：{reason}")),
         None => Ok(url),
@@ -168,17 +192,44 @@ fn exception(entry: &str) -> Option<Bypass> {
     if let Some(network) = ip_prefix(entry) {
         return Some(network);
     }
-    let entry = entry.to_ascii_lowercase();
-    if let Some(domain) = entry.strip_prefix('.') {
-        return Some(Bypass::Pattern(format!("*.{domain}")));
+    let entry = entry.trim_end_matches('.');
+    if entry.contains(':') {
+        return None;
+    }
+    if let Some(domain) = entry.strip_prefix("*.").or_else(|| entry.strip_prefix('.'))
+        && !domain.contains(['*', '?'])
+    {
+        return Some(Bypass::Pattern(format!("*.{}", domain_name(domain)?)));
     }
     if entry.contains(['*', '?']) {
-        return Some(Bypass::Pattern(entry));
+        return Some(Bypass::Pattern(entry.to_ascii_lowercase()));
     }
-    match Host::parse(&entry) {
-        Ok(Host::Domain(host)) => Some(Bypass::Host(host)),
+    domain_name(entry).map(Bypass::Host)
+}
+
+/// 地址里的写法：国际化域名转成 punycode，小写；不是域名时为 None。
+fn domain_name(name: &str) -> Option<String> {
+    match Host::parse(name) {
+        Ok(Host::Domain(domain)) => Some(domain),
         _ => None,
     }
+}
+
+/// 不必写进例外、总不经代理的本机与链路本地地址，同 Chromium 对系统设置的做法：`localhost`、`*.localhost`、
+/// `127.0.0.0/8`、`::1`、`169.254.0.0/16`、`fe80::/10`。
+fn implicit() -> [Bypass; 6] {
+    let network = |address: &str, prefix| Bypass::Network {
+        address: address.parse().expect("字面量是 IP 地址"),
+        prefix,
+    };
+    [
+        Bypass::Host("localhost".to_owned()),
+        Bypass::Pattern("*.localhost".to_owned()),
+        network("127.0.0.0", 8),
+        network("::1", 128),
+        network("169.254.0.0", 16),
+        network("fe80::", 10),
+    ]
 }
 
 /// IP 地址或网段；IPv4 可省略后面的 0，省略掩码时按写出的段数（`10` 即 `10.0.0.0/8`）；IPv6 地址可带方括号。
@@ -246,6 +297,11 @@ mod tests {
         }
     }
 
+    /// `rules` 后面接上隐式的例外。
+    fn with_implicit(rules: Vec<Bypass>) -> Vec<Bypass> {
+        rules.into_iter().chain(implicit()).collect()
+    }
+
     #[test]
     fn macos_settings_follow_chromium() {
         assert!(from_macos(MacOs::default()).unwrap().is_none());
@@ -256,9 +312,12 @@ mod tests {
             exceptions: vec![
                 "127.0.0.1".into(),
                 "169.254/16".into(),
+                "10".into(),
                 "*.Local".into(),
-                "localhost".into(),
+                "localhost.".into(),
                 ".corp.example".into(),
+                "*.例子.com".into(),
+                "例子.com".into(),
                 "<local>".into(),
                 " ".into(),
             ],
@@ -272,16 +331,33 @@ mod tests {
         );
         assert_eq!(
             found.bypass,
-            [
+            with_implicit(vec![
                 net("127.0.0.1", 32),
                 net("169.254.0.0", 16),
+                net("10.0.0.0", 8),
                 Bypass::Pattern("*.local".into()),
                 Bypass::Host("localhost".into()),
                 Bypass::Pattern("*.corp.example".into()),
+                Bypass::Pattern("*.xn--fsqu00a.com".into()),
+                Bypass::Host("xn--fsqu00a.com".into()),
                 Bypass::SimpleHostnames,
                 Bypass::SimpleHostnames,
-            ]
+            ])
         );
+        // 隐式的例外：本机与链路本地地址不经代理
+        for local in [
+            "http://localhost/",
+            "http://a.localhost/",
+            "http://127.9.0.1/",
+            "http://[::1]/",
+        ] {
+            assert!(
+                found.proxy_for(&Url::parse(local).unwrap()).is_none(),
+                "{local}"
+            );
+        }
+        let corp = Url::parse("http://a.corp.example./x").unwrap();
+        assert!(found.proxy_for(&corp).is_none());
     }
 
     #[test]
@@ -319,14 +395,22 @@ mod tests {
             })
             .contains("没填服务器")
         );
-        assert!(
-            reason(MacOs {
+        for exception in ["a b", "*.example.com:8080"] {
+            let found = reason(MacOs {
                 http: server("p", Some(1)),
-                exceptions: vec!["a b".into()],
+                exceptions: vec![exception.into()],
                 ..MacOs::default()
-            })
-            .contains("\"a b\"")
-        );
+            });
+            assert!(found.contains(&format!("{exception:?}")), "{found}");
+        }
+        // 主机里有 `/`、`?` 时端口会被当成路径或查询串
+        for host in ["p/x", "p?x", "http://p"] {
+            let found = reason(MacOs {
+                socks: server(host, Some(1)),
+                ..MacOs::default()
+            });
+            assert!(found.contains("不是主机名"), "{found}");
+        }
     }
 
     #[test]
@@ -360,19 +444,29 @@ mod tests {
         );
         assert_eq!(
             single.bypass,
-            [
+            with_implicit(vec![
                 Bypass::SimpleHostnames,
                 Bypass::Pattern("10.*".into()),
                 net("192.168.1.1", 32),
                 Bypass::Pattern("*.example.com".into()),
-            ]
+            ])
         );
+        // <-loopback>：本机地址也按设置经代理
+        let loopback = from_windows(windows("p:1", "<-loopback>"))
+            .unwrap()
+            .unwrap();
+        assert!(loopback.bypass.is_empty());
         // 分协议：没设的用 socks 的（SOCKS4），用不到的协议略过，写了协议的照用
         let split = from_windows(windows("ftp=f:21; socks=s:1080;https=https://h:443;", ""))
             .unwrap()
             .unwrap();
         assert_eq!(urls(&split), (some("socks4://s:1080"), some("https://h/")));
         assert!(from_windows(windows("ftp=f:21", "")).unwrap().is_none());
+        // 单个代理的口令里有 `=` 时不当作分协议的写法
+        let password = from_windows(windows("http://user:p=ss@p:1", ""))
+            .unwrap()
+            .unwrap();
+        assert_eq!(urls(&password).0, some("http://user:p%3Dss@p:1/"));
     }
 
     #[test]
@@ -390,6 +484,10 @@ mod tests {
         assert!(reason("p:1", Some("http://wpad/proxy.pac")).contains("PAC"));
         assert!(reason(" ", None).contains("没填地址"));
         assert!(reason("http=p:1;s:2", None).contains("协议=地址"));
+        for server in ["htps=p:1", "=p:1", "http=p:1;htps=q:2"] {
+            assert!(reason(server, None).contains("无法识别"), "{server}");
+        }
+        assert!(reason("p/x:1", None).contains("只能有协议、主机与端口"));
         assert!(reason("http=ftp://user:secret@p:1", None).contains("只支持"));
         assert!(!reason("http=ftp://user:secret@p:1", None).contains("secret"));
     }

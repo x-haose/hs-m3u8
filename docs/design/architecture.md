@@ -135,7 +135,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 
 ### 5.4 HTTP
 
-- `reqwest` 0.13.5（rustls）。请求配置包括请求头（Cookie、User-Agent 都经请求头传入）与代理（按系统设置、直连或指定的代理三者之一；reqwest 用不上的地址不报错、不起作用，请求直连，所以按它的条件先校验：协议为 http、https、socks4、socks4a、socks5、socks5h，且按 `http::Uri` 解析得出主机，否则报参数错误）。系统设置也由 core 读取（`proxy` 模块，见 ADR-0007），不交给 reqwest：它读到写错的值同样悄悄直连，macOS 上还只读 HTTP、HTTPS 两项、不读例外。先看环境变量（规则同 curl，另认大写的 `HTTP_PROXY`），没设时看 macOS 的系统设置或 Windows 的 Internet 选项（原文由 `sysproxy` 读出；SOCKS 代理代替没设的 http、https 代理，例外支持通配符、网段与 `<local>`）；每一项按上面的条件检查，用不了的（写错、用了 PAC 或 macOS 的自动发现）报参数错误，结果显式交给 reqwest。读到的设置经 `core::system_proxy` 公开（来源、各协议的代理与例外），界面据此显示当前生效的代理。Windows 的「自动检测设置」（WPAD）不看：它默认开着，多数网络里并没有可发现的代理；Cookie 在任务内由响应自动保存。
+- `reqwest` 0.13.5（rustls）。请求配置包括请求头（Cookie、User-Agent 都经请求头传入）与代理（按系统设置、直连或指定的代理三者之一；reqwest 用不上的地址不报错、不起作用，请求直连，所以按它的条件先校验：协议为 http、https、socks4、socks4a、socks5、socks5h，且按 `http::Uri` 解析得出主机，否则报参数错误）。系统设置也由 core 读取（`proxy` 模块，见 ADR-0007），不交给 reqwest：它读到写错的值同样悄悄直连，macOS 上还只读 HTTP、HTTPS 两项、不读例外。先看环境变量（规则同 curl，另认大写的 `HTTP_PROXY`），没设时看 macOS 的系统设置或 Windows 的 Internet 选项（原文由 `sysproxy` 读出；SOCKS 代理代替没设的 http、https 代理，例外支持通配符、网段与 `<local>`，本机与链路本地地址总不经代理；环境变量 `no_proxy` 对两种来源都起作用；macOS 读到的是系统规范化之后的设置，与系统里其他应用看到的相同）；每一项按上面的条件检查，用不了的（写错、用了 PAC 或 macOS 的自动发现）报参数错误，结果显式交给 reqwest。读到的设置经 `core::system_proxy` 公开（来源、各协议的代理与例外），界面据此显示当前生效的代理。Windows 的「自动检测设置」（WPAD）不看：它默认开着，多数网络里并没有可发现的代理；Cookie 在任务内由响应自动保存。
 - 证书校验默认开启；关闭必须显式写 `insecure: true`。证书校验失败报 `HttpError::Certificate`、跟随重定向失败（循环、次数过多）报 `HttpError::Redirect`，都不重试；rustls 的证书错误包在 `io::Error` 里，沿原因链逐层取出它包着的错误才认得出，故直接依赖 rustls（与 reqwest 用的同一个 0.23.45）。连接与传输错误的说明带上各层原因。
 - 字节范围分片用 `Range` 请求头；响应必须是 206 且长度一致，否则视为错误。
 - key 按 key URL 去重，只取一次，缓存在任务内存里。
