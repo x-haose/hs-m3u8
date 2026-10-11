@@ -147,21 +147,37 @@ fn glob(pattern: &str, text: &str) -> bool {
     pattern[p..].iter().all(|&c| c == '*')
 }
 
-/// 本机的系统代理设置，即 [`crate::Proxy::System`] 用的；没设代理时为 None。读不出或读到用不了的值时报
-/// [`Error::InvalidInput`]，说明是哪一项。每次调用重新读取。
+/// 本机的系统代理设置，即 [`crate::Proxy::System`] 用的；没设代理时为 None。读到用不了的值时报
+/// [`Error::InvalidInput`]，说明是哪一项；操作系统的接口失败时报 [`Error::SystemProxy`]。每次调用重新读取。
 pub fn system_proxy() -> Result<Option<SystemProxy>, Error> {
-    read(&env_var, system::read).map_err(|reason| {
-        Error::InvalidInput(format!(
+    read(&env_var, system::read).map_err(|trouble| match trouble {
+        Trouble::Unusable(reason) => Error::InvalidInput(format!(
             "系统代理设置用不了，可改为直连或指定代理地址：{reason}"
-        ))
+        )),
+        Trouble::Unreadable(reason) => Error::SystemProxy(reason),
     })
 }
 
-/// 按 `var` 读到的环境变量与 `system` 读到的操作系统设置定出系统代理；用不了时为原因。
+/// 定不出系统代理的原因。
+#[derive(Debug)]
+enum Trouble {
+    /// 设置的值用不了
+    Unusable(String),
+    /// 操作系统的接口失败
+    Unreadable(String),
+}
+
+impl From<String> for Trouble {
+    fn from(reason: String) -> Self {
+        Trouble::Unusable(reason)
+    }
+}
+
+/// 按 `var` 读到的环境变量与 `system` 读到的操作系统设置定出系统代理。
 fn read(
     var: env::Lookup<'_>,
-    system: impl FnOnce() -> Result<Option<SystemProxy>, String>,
-) -> Result<Option<SystemProxy>, String> {
+    system: impl FnOnce() -> Result<Option<SystemProxy>, Trouble>,
+) -> Result<Option<SystemProxy>, Trouble> {
     let found = match env::proxies(var)? {
         Some((http, https)) => Some(SystemProxy {
             source: ProxySource::Environment,

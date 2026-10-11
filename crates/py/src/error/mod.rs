@@ -395,6 +395,12 @@ exception! {
 }
 
 exception! {
+    /// 读不出操作系统的代理设置（`Proxy.System()` 时）：系统的接口失败。设置的值用不了（写错、用了 PAC 等）是
+    /// `InvalidInputError`。可改用 `Proxy.Direct()` 或 `Proxy.Url(...)`。
+    pub struct SystemProxyError extends HsM3u8Error {}
+}
+
+exception! {
     /// 合并 MP4 失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是 `Mp4UnsupportedError`。
     pub struct RemuxError extends HsM3u8Error {}
 }
@@ -668,6 +674,7 @@ fn exception(
             error.set_cause(py, Some(os_error));
             return Ok(error);
         }
+        E::SystemProxy(_) => instance(py, HsM3u8Error::chain(base, SystemProxyError {}))?,
         E::Remux(_) => instance(py, HsM3u8Error::chain(base, RemuxError {}))?,
         E::WorkDir { path, problem } => instance(
             py,
@@ -757,6 +764,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<LiveStalledError>()?;
     module.add_class::<FileError>()?;
     module.add_class::<VolumeUnavailableError>()?;
+    module.add_class::<SystemProxyError>()?;
     module.add_class::<RemuxError>()?;
     module.add_class::<WorkDirError>()?;
     module.add_class::<NothingRecordedError>()?;

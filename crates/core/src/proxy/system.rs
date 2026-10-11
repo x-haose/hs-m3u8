@@ -15,16 +15,17 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use hs_m3u8_sysproxy::{MacOs, Server, Settings, Windows};
 use url::{Host, Url};
 
-use super::{Bypass, Proxies, ProxySource, SystemProxy, unusable};
+use super::{Bypass, Proxies, ProxySource, SystemProxy, Trouble, unusable};
 
-/// 操作系统的代理设置；没设代理、或没有这类设置的平台为 None。用不了时为原因。
-pub(super) fn read() -> Result<Option<SystemProxy>, String> {
-    match hs_m3u8_sysproxy::read() {
-        Err(e) => Err(format!("读不到操作系统的代理设置：{e}")),
-        Ok(None) => Ok(None),
+/// 操作系统的代理设置；没设代理、或没有这类设置的平台为 None。
+pub(super) fn read() -> Result<Option<SystemProxy>, Trouble> {
+    let found = match hs_m3u8_sysproxy::read() {
+        Err(e) => return Err(Trouble::Unreadable(e.to_string())),
+        Ok(None) => return Ok(None),
         Ok(Some(Settings::MacOs(settings))) => from_macos(settings),
         Ok(Some(Settings::Windows(settings))) => from_windows(settings),
-    }
+    };
+    Ok(found?)
 }
 
 fn from_macos(settings: MacOs) -> Result<Option<SystemProxy>, String> {

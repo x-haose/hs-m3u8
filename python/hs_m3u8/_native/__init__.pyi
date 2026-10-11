@@ -80,6 +80,7 @@ __all__ = [
     "StallReason",
     "StreamKind",
     "StreamReport",
+    "SystemProxyError",
     "Target",
     "Timeouts",
     "TrackInfo",
@@ -2711,6 +2712,22 @@ class StreamReport:
         各参数即同名属性。
         """
     def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class SystemProxyError(HsM3u8Error):
+    r"""
+    读不出操作系统的代理设置（`Proxy.System()` 时）：系统的接口失败。设置的值用不了（写错、用了 PAC 等）是
+    `InvalidInputError`。可改用 `Proxy.Direct()` 或 `Proxy.Url(...)`。
+    """
+    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> SystemProxyError:
+        r"""
+        `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
+        None 时为空。
+        """
+    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+        r"""
+        同构造函数：把说明放进 `args`。
+        """
 
 class Target:
     r"""
