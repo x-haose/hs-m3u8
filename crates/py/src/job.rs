@@ -1,5 +1,6 @@
 //! 运行中的任务：等结果、取消、停止、读进度。
 
+use std::any::Any;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use hs_m3u8_core as core;
@@ -107,7 +108,7 @@ impl Job {
                 Ok(Ok(output)) => Finished::Done(output.into()),
                 Ok(Err(error)) => Finished::Failed(Failure::new(error)),
                 Err(failure) => match failure.try_into_panic() {
-                    Ok(payload) => Finished::Panicked(runtime::panic_message(payload)),
+                    Ok(payload) => Finished::Panicked(panic_message(payload)),
                     // 被取消只会是运行时正在关闭：不送结果，各次等待得到运行时已关闭的错误
                     Err(_) => return,
                 },
@@ -117,6 +118,17 @@ impl Job {
         Job {
             running: Owned::new(Running { control, finished }),
         }
+    }
+}
+
+/// panic 的说明：`panic!` 给的字符串。
+fn panic_message(payload: Box<dyn Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => payload.downcast_ref::<&str>().map_or_else(
+            || "（panic 的值不是字符串）".to_owned(),
+            |message| (*message).to_owned(),
+        ),
     }
 }
 
@@ -186,7 +198,7 @@ impl Job {
         .await?;
         cancel_on_drop.armed = false;
         let Ok(finished) = finished else {
-            return Err(runtime::closed());
+            return Err(runtime::closed_error());
         };
         match &*finished {
             Finished::Done(output) => Ok(output.clone()),

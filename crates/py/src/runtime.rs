@@ -1,11 +1,11 @@
-//! 运行下载的 tokio 运行时、对象所属的进程，以及 fork 前后与解释器退出时的处理。
+//! 运行下载的 tokio 运行时、对象所属的进程，以及 fork 前后与解释器退出时的处理。异步方法在运行时上执行，结果经
+//! asyncio 事件循环送回协程（见 [`require_event_loop`]）。
 //!
 //! 每个进程一个运行时，第一次用到时建立，解释器退出前关闭（见 [`shutdown`]）。经 `os.fork`（含 multiprocessing 的
 //! fork 方式）fork 出的子进程里没有父进程运行时的工作线程，也没有父进程建立的任务与在途请求：子进程第一次用到时
 //! 另建运行时（macOS 上不建，见 [`after_fork_in_child`]）；父进程建立的引擎、任务与协程在子进程里拒绝使用，回收时
 //! 不销毁（见 [`Owned`]）；继承来的任务目录锁在子进程里关掉（见 `core::prepare_fork`）。
 
-use std::any::Any;
 use std::cell::RefCell;
 use std::convert::Infallible;
 use std::future::Future;
@@ -127,7 +127,7 @@ where
 /// [`spawn`] 的句柄：await 得到结果，在建立它的进程里被丢弃时中止任务。
 pub(crate) struct Spawned<T>(Owned<AbortOnDropHandle<T>>);
 
-/// 结果：任务内部 panic 原样继续（由 PyO3 转为 `PanicException`）；运行时已关闭时为 [`closed`] 的异常；在 fork
+/// 结果：任务内部 panic 原样继续（由 PyO3 转为 `PanicException`）；运行时已关闭时为 [`closed_error`]；在 fork
 /// 出的子进程里（如 fork 时正在等的协程，在子进程里继续等）为 `RuntimeError`。
 impl<T> Future for Spawned<T> {
     type Output = PyResult<T>;
@@ -142,26 +142,15 @@ impl<T> Future for Spawned<T> {
             Err(failure) => match failure.try_into_panic() {
                 Ok(payload) => std::panic::resume_unwind(payload),
                 // 句柄被丢弃时才中止任务，那时已没有人等它；能等到的只有运行时关闭
-                Err(_) => Err(closed()),
+                Err(_) => Err(closed_error()),
             },
         })
     }
 }
 
 /// 运行时已关闭（解释器正在退出），等的结果不会来了。
-pub(crate) fn closed() -> PyErr {
+pub(crate) fn closed_error() -> PyErr {
     PyRuntimeError::new_err("解释器正在退出，运行时已关闭，等不到结果")
-}
-
-/// panic 的说明：`panic!` 给的字符串。
-pub(crate) fn panic_message(payload: Box<dyn Any + Send>) -> String {
-    match payload.downcast::<String>() {
-        Ok(message) => *message,
-        Err(payload) => payload.downcast_ref::<&str>().map_or_else(
-            || "（panic 的值不是字符串）".to_owned(),
-            |message| (*message).to_owned(),
-        ),
-    }
 }
 
 /// 只属于建立它的进程的值（引擎、任务及等它们的协程所持有的），按 fork 的代次判断。引擎持有跨任务共享的请求名额，

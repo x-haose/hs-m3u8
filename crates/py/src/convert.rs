@@ -263,9 +263,7 @@ macro_rules! counts {
 
             fn extract(object: Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
                 let value = Count::<$raw>::at_least(object, 1)?;
-                <$nonzero>::new(value)
-                    .map(Positive)
-                    .ok_or_else(|| out_of_range(object, 1, <$raw>::MAX))
+                Ok(Positive(<$nonzero>::new(value).expect("at_least(1) 保证不为 0")))
             }
         }
 

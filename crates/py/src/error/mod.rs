@@ -466,6 +466,7 @@ fn exception(
     message: String,
 ) -> PyResult<PyErr> {
     use core::Error as E;
+    use core::Unsupported as U;
     let object = match error {
         E::Segment {
             track,
@@ -526,56 +527,68 @@ fn exception(
                 },
             ),
         )?,
-        E::Unsupported(unsupported) => {
-            use core::Unsupported as U;
-            let reason = match unsupported {
-                U::Live => {
-                    let leaf = LiveNotEnabledError {};
-                    return raised(instance(py, RequestError::chain(base, leaf))?, message);
-                }
-                U::Mp4(reason) => {
-                    let leaf = Mp4UnsupportedError {
-                        reason: reason.into(),
-                    };
-                    return raised(instance(py, RequestError::chain(base, leaf))?, message);
-                }
-                U::Hls(reason) => {
-                    let leaf = HlsUnsupportedError {
-                        reason: reason.into(),
-                    };
-                    return raised(instance(py, RequestError::chain(base, leaf))?, message);
-                }
-                U::EmptyPlaylist(url) => SourceUnsupported::EmptyPlaylist { url: Address(*url) },
-                U::NoTargetDuration(url) => {
-                    SourceUnsupported::NoTargetDuration { url: Address(*url) }
-                }
-                U::Encryption { url, line, what } => SourceUnsupported::Encrypted {
-                    url: Address(*url),
-                    line,
-                    encryption: what.into(),
+        E::Unsupported(U::Live) => instance(py, RequestError::chain(base, LiveNotEnabledError {}))?,
+        E::Unsupported(U::Mp4(reason)) => instance(
+            py,
+            RequestError::chain(
+                base,
+                Mp4UnsupportedError {
+                    reason: reason.into(),
                 },
-                U::InitChangesWithinGroup {
-                    track,
-                    discontinuity,
-                } => SourceUnsupported::InitChangesWithinGroup {
-                    track,
-                    discontinuity,
+            ),
+        )?,
+        E::Unsupported(U::Hls(reason)) => instance(
+            py,
+            RequestError::chain(
+                base,
+                HlsUnsupportedError {
+                    reason: reason.into(),
                 },
-                U::DiscontinuityMismatch {
-                    track,
-                    first,
-                    found,
-                } => SourceUnsupported::DiscontinuityMismatch {
-                    track,
-                    first: Seq(first),
-                    found: Seq(found),
-                },
-            };
-            instance(
-                py,
-                SourceError::chain(base, SourceUnsupportedError { reason }),
-            )?
-        }
+            ),
+        )?,
+        E::Unsupported(U::EmptyPlaylist(url)) => unsupported_source(
+            py,
+            base,
+            SourceUnsupported::EmptyPlaylist { url: Address(*url) },
+        )?,
+        E::Unsupported(U::NoTargetDuration(url)) => unsupported_source(
+            py,
+            base,
+            SourceUnsupported::NoTargetDuration { url: Address(*url) },
+        )?,
+        E::Unsupported(U::Encryption { url, line, what }) => unsupported_source(
+            py,
+            base,
+            SourceUnsupported::Encrypted {
+                url: Address(*url),
+                line,
+                encryption: what.into(),
+            },
+        )?,
+        E::Unsupported(U::InitChangesWithinGroup {
+            track,
+            discontinuity,
+        }) => unsupported_source(
+            py,
+            base,
+            SourceUnsupported::InitChangesWithinGroup {
+                track,
+                discontinuity,
+            },
+        )?,
+        E::Unsupported(U::DiscontinuityMismatch {
+            track,
+            first,
+            found,
+        }) => unsupported_source(
+            py,
+            base,
+            SourceUnsupported::DiscontinuityMismatch {
+                track,
+                first: Seq(first),
+                found: Seq(found),
+            },
+        )?,
         E::Playlist { url, cause } => instance(
             py,
             SourceError::chain(
@@ -696,6 +709,18 @@ fn os_error(cause: io::Error, path: &Path) -> PyErr {
 /// `OSError` 的 `errno`：Windows 上是 Python 由系统错误码换算的。
 fn errno_of(py: Python<'_>, os_error: &PyErr) -> PyResult<Option<i32>> {
     os_error.value(py).getattr("errno")?.extract()
+}
+
+/// 来源用到了不支持的特性：`SourceUnsupportedError`。
+fn unsupported_source(
+    py: Python<'_>,
+    base: HsM3u8Error,
+    reason: SourceUnsupported,
+) -> PyResult<Bound<'_, PyAny>> {
+    instance(
+        py,
+        SourceError::chain(base, SourceUnsupportedError { reason }),
+    )
 }
 
 fn instance<'py, L: PyClass>(
