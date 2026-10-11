@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use hs_m3u8_sysproxy::{MacOs, Server, Settings, Windows};
 use url::{Host, Url};
 
-use super::{Bypass, ProxySource, SystemProxy, unusable};
+use super::{Bypass, Proxies, ProxySource, SystemProxy, unusable};
 
 /// 操作系统的代理设置；没设代理、或没有这类设置的平台为 None。用不了时为原因。
 pub(super) fn read() -> Result<Option<SystemProxy>, String> {
@@ -115,7 +115,7 @@ fn from_windows(settings: Windows) -> Result<Option<SystemProxy>, String> {
 
 /// ProxyServer 里 http、https 地址各用的代理：`主机:端口` 用于所有协议；分协议的 `http=…;https=…;socks=…` 中没设的
 /// 用 socks 的，其他协议（如 ftp）的用不到。
-fn windows_servers(server: &str) -> Result<(Option<Url>, Option<Url>), String> {
+fn windows_servers(server: &str) -> Result<Proxies, String> {
     if !server.contains('=') {
         let proxy = windows_proxy(server, "http")?;
         return Ok((Some(proxy.clone()), Some(proxy)));

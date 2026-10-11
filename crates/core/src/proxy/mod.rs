@@ -2,7 +2,7 @@
 //! 值时不报错、请求直连，用户却以为走了代理。
 //!
 //! 先看环境变量（见 [`mod@env`]）；环境变量里没设代理时看操作系统的设置（见 [`system`]）：macOS 的系统设置、Windows 的
-//! Internet 选项，其他平台即直连。
+//! Internet 选项，其他平台即直连。环境变量 `no_proxy` 对两者都起作用。
 
 mod env;
 mod system;
@@ -39,6 +39,9 @@ impl SystemProxy {
         (!self.bypass.iter().any(|rule| rule.matches(&host))).then_some(proxy)
     }
 }
+
+/// http、https 地址各用的代理；None 时直连。
+type Proxies = (Option<Url>, Option<Url>);
 
 /// 系统代理设置从哪里读到。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -144,15 +147,32 @@ fn glob(pattern: &str, text: &str) -> bool {
 /// 本机的系统代理设置，即 [`crate::Proxy::System`] 用的；没设代理时为 None。读不出或读到用不了的值时报
 /// [`Error::InvalidInput`]，说明是哪一项。每次调用重新读取。
 pub fn system_proxy() -> Result<Option<SystemProxy>, Error> {
-    let found = match env::read(&env_var) {
-        Ok(None) => system::read(),
-        found => found,
-    };
-    found.map_err(|reason| {
+    read(&env_var, system::read).map_err(|reason| {
         Error::InvalidInput(format!(
             "系统代理设置用不了，可改为直连或指定代理地址：{reason}"
         ))
     })
+}
+
+/// 按 `var` 读到的环境变量与 `system` 读到的操作系统设置定出系统代理；用不了时为原因。
+fn read(
+    var: env::Lookup<'_>,
+    system: impl FnOnce() -> Result<Option<SystemProxy>, String>,
+) -> Result<Option<SystemProxy>, String> {
+    let found = match env::proxies(var)? {
+        Some((http, https)) => Some(SystemProxy {
+            source: ProxySource::Environment,
+            http,
+            https,
+            bypass: Vec::new(),
+        }),
+        None => system()?,
+    };
+    let Some(mut found) = found else {
+        return Ok(None);
+    };
+    found.bypass.extend(env::exceptions(var)?);
+    Ok(Some(found))
 }
 
 /// 环境变量的值；没设时为 None，不是 UTF-8 时为原因。
@@ -270,5 +290,32 @@ mod tests {
             address: address.parse().unwrap(),
             prefix,
         }
+    }
+
+    #[test]
+    fn environment_exceptions_apply_to_either_source() {
+        let system = || {
+            Ok(Some(SystemProxy {
+                source: ProxySource::MacOs,
+                bypass: vec![Bypass::SimpleHostnames],
+                ..proxy(Vec::new())
+            }))
+        };
+        let no_proxy = env::tests::lookup(&[("no_proxy", "a.example")]);
+        let found = read(&no_proxy, system).unwrap().unwrap();
+        assert_eq!(found.source, ProxySource::MacOs);
+        assert_eq!(
+            found.bypass,
+            [Bypass::SimpleHostnames, Bypass::Domain("a.example".into())]
+        );
+        // 环境变量设了代理时不看操作系统的设置；没有代理时不看例外写得对不对
+        let both = env::tests::lookup(&[("http_proxy", "p:1"), ("no_proxy", "a.example")]);
+        let found = read(&both, || unreachable!("环境变量设了代理"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.source, ProxySource::Environment);
+        assert_eq!(found.bypass, [Bypass::Domain("a.example".into())]);
+        let broken = env::tests::lookup(&[("no_proxy", "b:80")]);
+        assert!(read(&broken, || Ok(None)).unwrap().is_none());
     }
 }
