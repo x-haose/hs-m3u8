@@ -1,6 +1,10 @@
-"""对外接口的说明是否齐全：导出的每个类、它的属性与方法、带数据的枚举的每种取值，以及存根里的构造函数都要有说明。"""
+"""对外接口的约定：说明齐全，几个字段的枚举取值只收关键字参数。
+
+要有说明的：导出的每个类、它的属性与方法、带数据的枚举的每种取值，以及存根里的构造函数。
+"""
 
 import ast
+import inspect
 from pathlib import Path
 
 import hs_m3u8
@@ -44,3 +48,25 @@ def test_every_public_name_is_documented() -> None:
 
 def test_every_constructor_in_the_stub_is_documented() -> None:
     assert undocumented_constructors(ast.parse(STUB.read_text(encoding="utf-8"))) == []
+
+
+def positional_variants(owner: type, path: str) -> list[str]:
+    """`owner` 里两个以上参数能按位置传的枚举取值，按 `path.取值` 列出。"""
+    found: list[str] = []
+    for name, member in vars(owner).items():
+        if name.startswith("_") or not (isinstance(member, type) and issubclass(member, owner)):
+            continue
+        positional = [
+            parameter
+            for parameter in inspect.signature(member).parameters.values()
+            if parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+        ]
+        if len(positional) >= 2:
+            found.append(f"{path}.{name}")
+    return found
+
+
+def test_enum_values_with_several_fields_take_keywords_only() -> None:
+    # 同类型的字段（如几个下标）按位置写反时不报错
+    found = [item for name in hs_m3u8.__all__ for item in positional_variants(getattr(hs_m3u8, name), name)]
+    assert found == []

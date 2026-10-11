@@ -38,6 +38,7 @@ variants! {
         /// 主播放列表里没有变体
         NoVariants {},
         /// `VariantChoice.Index` 的下标超出范围
+        #[pyo3(constructor = (*, index, count))]
         VariantIndexOutOfRange {
             /// 给的下标
             index: usize,
@@ -45,6 +46,7 @@ variants! {
             count: usize,
         },
         /// 所选变体的音频组里没有这个语言的音频
+        #[pyo3(constructor = (*, group, language, available))]
         AudioLanguageNotFound {
             /// 音频组
             group: String,
@@ -54,6 +56,7 @@ variants! {
             available: Seq<String>,
         },
         /// `AudioChoice.Index` 的下标超出范围
+        #[pyo3(constructor = (*, index, count))]
         AudioIndexOutOfRange {
             /// 给的下标
             index: usize,
@@ -61,6 +64,7 @@ variants! {
             count: usize,
         },
         /// 指定的音频不在所选变体引用的音频组里
+        #[pyo3(constructor = (*, index, group))]
         NotVariantAudio {
             /// 给的下标
             index: usize,
@@ -82,6 +86,7 @@ variants! {
         /// 同时含有主播放列表（EXT-X-STREAM-INF）与媒体播放列表（EXTINF）的标签
         Mixed {},
         /// 语法错误
+        #[pyo3(constructor = (*, line, detail))]
         Syntax {
             /// 出错的行，从 1 起
             line: usize,
@@ -123,6 +128,7 @@ variants! {
             url: Address,
         },
         /// EXT-X-KEY 用了本库解不了的加密
+        #[pyo3(constructor = (*, url, line, encryption))]
         Encrypted {
             /// 播放列表的地址
             url: Address,
@@ -132,6 +138,7 @@ variants! {
             encryption: Encryption,
         },
         /// 同一不连续段内 EXT-X-MAP 发生变化
+        #[pyo3(constructor = (*, track, discontinuity))]
         InitChangesWithinGroup {
             /// 第几条轨
             track: usize,
@@ -139,6 +146,7 @@ variants! {
             discontinuity: u64,
         },
         /// 各轨的不连续段不一致
+        #[pyo3(constructor = (*, track, first, found))]
         DiscontinuityMismatch {
             /// 与第 0 条轨不一致的轨
             track: usize,
@@ -161,6 +169,7 @@ variants! {
             length: usize,
         },
         /// 字节范围请求返回的长度不对
+        #[pyo3(constructor = (*, expected, found))]
         RangeLength {
             /// 应有的字节数
             expected: u64,
@@ -184,6 +193,7 @@ variants! {
     /// 内容放不进 MP4 的原因；可只输出本地 HLS（`Target.Hls`），它原样保留分片，不受这些限制。
     pub enum Mp4Unsupported {
         /// 编码放不进 MP4（只支持 H.264、HEVC、AAC）
+        #[pyo3(constructor = (*, group, track, kind, codec))]
         Codec {
             /// 第几个不连续段组
             group: usize,
@@ -195,6 +205,7 @@ variants! {
             codec: String,
         },
         /// 流的种类与第 0 组不同
+        #[pyo3(constructor = (*, group, track))]
         LayoutChanged {
             /// 第几个不连续段组
             group: usize,
@@ -202,6 +213,7 @@ variants! {
             track: usize,
         },
         /// 编码参数与第 0 组不同
+        #[pyo3(constructor = (*, group, track, kind, first, found))]
         ParamsChanged {
             /// 第几个不连续段组
             group: usize,
@@ -216,6 +228,7 @@ variants! {
         },
         /// 解码时间戳不递增：往回跳多为来源在时间戳重新开始处漏标了 EXT-X-DISCONTINUITY，重复多为相邻分片首尾
         /// 重复了一帧
+        #[pyo3(constructor = (*, group, track, kind))]
         DtsNotIncreasing {
             /// 第几个不连续段组
             group: usize,
@@ -289,6 +302,7 @@ variants! {
             detail: String,
         },
         /// 记录是另一个格式版本写的：比本库新时用更新的版本续传；旧时用写下它的版本做完，或放弃任务
+        #[pyo3(constructor = (*, file, found, supported))]
         UnsupportedVersion {
             /// 哪个文件：job.json 或 outputs.json
             file: String,
@@ -300,6 +314,7 @@ variants! {
         /// 记录的任务类型与本次不同：记录的是直播、本次是点播，多为中断期间直播结束了而请求没开启直播
         /// （`JobRequest.live`），开启即可续录，或用 `Engine.merge_recorded` 只合并；记录的是点播、本次是直播，换一个
         /// 任务目录
+        #[pyo3(constructor = (*, recorded, current))]
         KindMismatch {
             /// 记录的
             recorded: JobType,

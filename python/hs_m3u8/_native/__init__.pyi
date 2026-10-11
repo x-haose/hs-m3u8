@@ -739,7 +739,7 @@ class IntegrityFailure:
             r"""
             实际的字节数
             """
-        def __new__(cls, expected: builtins.int, found: builtins.int) -> IntegrityFailure.RangeLength: ...
+        def __new__(cls, *, expected: builtins.int, found: builtins.int) -> IntegrityFailure.RangeLength: ...
     
     @typing.final
     class UnrecognizedSegment(IntegrityFailure):
@@ -1054,7 +1054,7 @@ class LiveEnd:
             r"""
             看起来已结束的原因
             """
-        def __new__(cls, track: builtins.int, cause: StallCause) -> LiveEnd.Stalled: ...
+        def __new__(cls, *, track: builtins.int, cause: StallCause) -> LiveEnd.Stalled: ...
     
     @typing.final
     class Restarted(LiveEnd):
@@ -1086,7 +1086,7 @@ class LiveEnd:
             r"""
             矛盾处的媒体序号
             """
-        def __new__(cls, track: builtins.int, sequence: builtins.int) -> LiveEnd.Inconsistent: ...
+        def __new__(cls, *, track: builtins.int, sequence: builtins.int) -> LiveEnd.Inconsistent: ...
     
 
 @typing.final
@@ -1252,7 +1252,7 @@ class Malformed:
             r"""
             错在哪里
             """
-        def __new__(cls, line: builtins.int, detail: builtins.str) -> Malformed.Syntax: ...
+        def __new__(cls, *, line: builtins.int, detail: builtins.str) -> Malformed.Syntax: ...
     
 
 @typing.final
@@ -1454,7 +1454,7 @@ class Mp4Unsupported:
             r"""
             FFmpeg 的编码名
             """
-        def __new__(cls, group: builtins.int, track: builtins.int, kind: StreamKind, codec: builtins.str) -> Mp4Unsupported.Codec: ...
+        def __new__(cls, *, group: builtins.int, track: builtins.int, kind: StreamKind, codec: builtins.str) -> Mp4Unsupported.Codec: ...
     
     @typing.final
     class LayoutChanged(Mp4Unsupported):
@@ -1472,7 +1472,7 @@ class Mp4Unsupported:
             r"""
             第几条轨
             """
-        def __new__(cls, group: builtins.int, track: builtins.int) -> Mp4Unsupported.LayoutChanged: ...
+        def __new__(cls, *, group: builtins.int, track: builtins.int) -> Mp4Unsupported.LayoutChanged: ...
     
     @typing.final
     class ParamsChanged(Mp4Unsupported):
@@ -1505,7 +1505,7 @@ class Mp4Unsupported:
             r"""
             这一组的参数
             """
-        def __new__(cls, group: builtins.int, track: builtins.int, kind: StreamKind, first: Shape, found: Shape) -> Mp4Unsupported.ParamsChanged: ...
+        def __new__(cls, *, group: builtins.int, track: builtins.int, kind: StreamKind, first: Shape, found: Shape) -> Mp4Unsupported.ParamsChanged: ...
     
     @typing.final
     class DtsNotIncreasing(Mp4Unsupported):
@@ -1529,7 +1529,7 @@ class Mp4Unsupported:
             r"""
             流的种类
             """
-        def __new__(cls, group: builtins.int, track: builtins.int, kind: StreamKind) -> Mp4Unsupported.DtsNotIncreasing: ...
+        def __new__(cls, *, group: builtins.int, track: builtins.int, kind: StreamKind) -> Mp4Unsupported.DtsNotIncreasing: ...
     
     @typing.final
     class NoStreams(Mp4Unsupported):
@@ -2017,7 +2017,7 @@ class RefreshReason:
             r"""
             错在哪里
             """
-        def __new__(cls, line: builtins.int, detail: builtins.str) -> RefreshReason.Syntax: ...
+        def __new__(cls, *, line: builtins.int, detail: builtins.str) -> RefreshReason.Syntax: ...
     
 
 @typing.final
@@ -2203,7 +2203,7 @@ class SelectFailure:
             r"""
             变体个数
             """
-        def __new__(cls, index: builtins.int, count: builtins.int) -> SelectFailure.VariantIndexOutOfRange: ...
+        def __new__(cls, *, index: builtins.int, count: builtins.int) -> SelectFailure.VariantIndexOutOfRange: ...
     
     @typing.final
     class AudioLanguageNotFound(SelectFailure):
@@ -2226,7 +2226,7 @@ class SelectFailure:
             r"""
             组里有的语言
             """
-        def __new__(cls, group: builtins.str, language: builtins.str, available: collections.abc.Sequence[builtins.str]) -> SelectFailure.AudioLanguageNotFound: ...
+        def __new__(cls, *, group: builtins.str, language: builtins.str, available: collections.abc.Sequence[builtins.str]) -> SelectFailure.AudioLanguageNotFound: ...
     
     @typing.final
     class AudioIndexOutOfRange(SelectFailure):
@@ -2244,7 +2244,7 @@ class SelectFailure:
             r"""
             音频 rendition 的个数
             """
-        def __new__(cls, index: builtins.int, count: builtins.int) -> SelectFailure.AudioIndexOutOfRange: ...
+        def __new__(cls, *, index: builtins.int, count: builtins.int) -> SelectFailure.AudioIndexOutOfRange: ...
     
     @typing.final
     class NotVariantAudio(SelectFailure):
@@ -2262,7 +2262,7 @@ class SelectFailure:
             r"""
             所选变体引用的音频组；变体没有引用音频组时为 None
             """
-        def __new__(cls, index: builtins.int, group: typing.Optional[builtins.str]) -> SelectFailure.NotVariantAudio: ...
+        def __new__(cls, *, index: builtins.int, group: typing.Optional[builtins.str]) -> SelectFailure.NotVariantAudio: ...
     
 
 @typing.final
@@ -2314,7 +2314,7 @@ class Shape:
             r"""
             高，像素
             """
-        def __new__(cls, codec: builtins.str, width: builtins.int, height: builtins.int) -> Shape.Video: ...
+        def __new__(cls, *, codec: builtins.str, width: builtins.int, height: builtins.int) -> Shape.Video: ...
     
     @typing.final
     class Audio(Shape):
@@ -2337,7 +2337,7 @@ class Shape:
             r"""
             声道数
             """
-        def __new__(cls, codec: builtins.str, sample_rate: builtins.int, channels: builtins.int) -> Shape.Audio: ...
+        def __new__(cls, *, codec: builtins.str, sample_rate: builtins.int, channels: builtins.int) -> Shape.Audio: ...
     
 
 @typing.final
@@ -2442,7 +2442,7 @@ class SourceUnsupported:
             r"""
             加密方式
             """
-        def __new__(cls, url: builtins.str, line: builtins.int, encryption: Encryption) -> SourceUnsupported.Encrypted: ...
+        def __new__(cls, *, url: builtins.str, line: builtins.int, encryption: Encryption) -> SourceUnsupported.Encrypted: ...
     
     @typing.final
     class InitChangesWithinGroup(SourceUnsupported):
@@ -2460,7 +2460,7 @@ class SourceUnsupported:
             r"""
             不连续段编号
             """
-        def __new__(cls, track: builtins.int, discontinuity: builtins.int) -> SourceUnsupported.InitChangesWithinGroup: ...
+        def __new__(cls, *, track: builtins.int, discontinuity: builtins.int) -> SourceUnsupported.InitChangesWithinGroup: ...
     
     @typing.final
     class DiscontinuityMismatch(SourceUnsupported):
@@ -2483,7 +2483,7 @@ class SourceUnsupported:
             r"""
             这条轨的各不连续段编号
             """
-        def __new__(cls, track: builtins.int, first: collections.abc.Sequence[builtins.int], found: collections.abc.Sequence[builtins.int]) -> SourceUnsupported.DiscontinuityMismatch: ...
+        def __new__(cls, *, track: builtins.int, first: collections.abc.Sequence[builtins.int], found: collections.abc.Sequence[builtins.int]) -> SourceUnsupported.DiscontinuityMismatch: ...
     
 
 @typing.final
@@ -2997,7 +2997,7 @@ class WorkDirProblem:
             r"""
             本库支持的版本
             """
-        def __new__(cls, file: builtins.str, found: builtins.int, supported: builtins.int) -> WorkDirProblem.UnsupportedVersion: ...
+        def __new__(cls, *, file: builtins.str, found: builtins.int, supported: builtins.int) -> WorkDirProblem.UnsupportedVersion: ...
     
     @typing.final
     class KindMismatch(WorkDirProblem):
@@ -3017,7 +3017,7 @@ class WorkDirProblem:
             r"""
             本次的
             """
-        def __new__(cls, recorded: JobType, current: JobType) -> WorkDirProblem.KindMismatch: ...
+        def __new__(cls, *, recorded: JobType, current: JobType) -> WorkDirProblem.KindMismatch: ...
     
     @typing.final
     class NotLiveRecording(WorkDirProblem):

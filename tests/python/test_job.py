@@ -147,7 +147,9 @@ def test_downloads_write_the_mp4_and_report_its_streams(server: Server, tmp_path
     assert output.mp4 is not None
     assert output.mp4.path == target
     assert target.is_file()
-    assert {type(stream.shape) for stream in output.mp4.report.streams} == {Shape.Video, Shape.Audio}
+    shapes = [stream.shape for stream in output.mp4.report.streams]
+    assert sum(isinstance(shape, Shape.Video) for shape in shapes) == 1
+    assert sum(isinstance(shape, Shape.Audio) for shape in shapes) == 1
     assert all(stream.packets > 0 for stream in output.mp4.report.streams)
     assert (output.segments, output.hls, output.live, output.leftovers) == (2, None, None, ())
     assert not (tmp_path / "out.hsdl").exists()

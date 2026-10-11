@@ -75,6 +75,7 @@ variants! {
         /// 内容为空，多为服务器还没写完
         Empty {},
         /// 语法错误，多为服务器还没写完
+        #[pyo3(constructor = (*, line, detail))]
         Syntax {
             /// 出错的行，从 1 起
             line: usize,
@@ -155,6 +156,7 @@ variants! {
     /// 一路流的编码参数。
     pub enum Shape {
         /// 视频
+        #[pyo3(constructor = (*, codec, width, height))]
         Video {
             /// FFmpeg 的编码名，如 `h264`、`hevc`
             codec: String,
@@ -164,6 +166,7 @@ variants! {
             height: u32,
         },
         /// 音频
+        #[pyo3(constructor = (*, codec, sample_rate, channels))]
         Audio {
             /// FFmpeg 的编码名，如 `aac`
             codec: String,
@@ -263,6 +266,7 @@ variants! {
         /// 各轨都录满了 `LiveOptions.max_duration`
         DurationReached {},
         /// 一条轨停滞，且看起来是直播已结束：它与其他轨都不再出新分片；故障导致的停滞是 `LiveStalledError`
+        #[pyo3(constructor = (*, track, cause))]
         Stalled {
             /// 第几条轨
             track: usize,
@@ -276,6 +280,7 @@ variants! {
         },
         /// 一条轨在某个序号处与之前刷新得到的播放列表矛盾：同一序号换了分片，或不连续段编号对不上（服务器错误）；
         /// 之后的分片未录
+        #[pyo3(constructor = (*, track, sequence))]
         Inconsistent {
             /// 第几条轨
             track: usize,

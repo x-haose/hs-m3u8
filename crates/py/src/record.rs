@@ -75,7 +75,8 @@ macro_rules! record {
 
 /// 枚举：每种取值是一个子类（不带数据的也是，如 `Stage.Writing()`），用 `match` 或 `isinstance` 分辨。存根里，属性与
 /// 返回值的类型写成各取值类的并集（如 `Stage.Preparing | ... | Stage.Done`），类型检查器才能判断 `match` 是否穷尽；
-/// 参数的类型写基类，接受任一取值。
+/// 参数的类型写基类，接受任一取值。两个以上字段的取值在定义处写 `#[pyo3(constructor = (*, 各字段))]`，构造时只收
+/// 关键字参数（同类型的字段按位置写反时不报错）；只有一个字段的可按位置传。
 macro_rules! variants {
     (
         $(#[$meta:meta])*
