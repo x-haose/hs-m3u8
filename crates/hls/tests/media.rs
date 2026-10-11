@@ -312,12 +312,35 @@ fn malformed_input_is_reported_with_its_line() {
             other => panic!("应报不是播放列表：{other:?}"),
         }
     }
-    // 截在多字节字符中间（服务器还没写完）与截在它之前一样
-    let title = "#EXTM3U\n#EXTINF:4,第一集\na.ts\n#EXTINF:4,第".as_bytes();
-    assert_eq!(
-        bytes(&title[..title.len() - 1]),
-        bytes(&title[..title.len() - 3])
-    );
+    // 带 BOM 的 UTF-16 按 UTF-16 看首行
+    let utf16 = |text: &str, to_bytes: fn(u16) -> [u8; 2]| -> Vec<u8> {
+        "\u{FEFF}"
+            .encode_utf16()
+            .chain(text.encode_utf16())
+            .flat_map(to_bytes)
+            .collect()
+    };
+    for to_bytes in [u16::to_le_bytes, u16::to_be_bytes] {
+        match bytes(&utf16("#EXTM3U\n#EXTINF:4,\na.ts\n", to_bytes)) {
+            Err(Error::Malformed(Malformed::NotUtf8)) => {}
+            other => panic!("应报不是 UTF-8：{other:?}"),
+        }
+        match bytes(&utf16("<html></html>", to_bytes)) {
+            Err(Error::Malformed(Malformed::NotAPlaylist)) => {}
+            other => panic!("应报不是播放列表：{other:?}"),
+        }
+    }
+    // 截在多字节字符中间（服务器还没写完）：最后一行不完整，不当作「第1」解析；连首行都没有时与空内容一样
+    let cut = "#EXTM3U\n#EXTINF:4,\na.ts\n#EXTINF:4,\n第1段.ts\n".as_bytes();
+    let cut = &cut[..cut.len() - "段.ts\n".len() + 1];
+    match bytes(cut) {
+        Err(Error::Malformed(Malformed::Truncated)) => {}
+        other => panic!("应报截断：{other:?}"),
+    }
+    match bytes(&"第".as_bytes()[..1]) {
+        Err(Error::Malformed(Malformed::Empty)) => {}
+        other => panic!("应报为空：{other:?}"),
+    }
     // 空内容与「不是播放列表」分开：前者多为服务器还没写完
     for empty in ["", " \r\n", "\u{FEFF}\n"] {
         assert_eq!(malformed(empty), Malformed::Empty);

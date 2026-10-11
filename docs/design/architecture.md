@@ -69,7 +69,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 - 不连续段序号 = `EXT-X-DISCONTINUITY-SEQUENCE`（缺省 0）加上此前出现的 `EXT-X-DISCONTINUITY` 个数。
 - 媒体序号、不连续段序号、字节范围的结束位置超出 64 位整数时报错。
 - 所有 URI 按**该播放列表的最终 URL**（跟随重定向之后）解析。
-- 解析错误分两类：内容不是合法的播放列表为 `Malformed`（为空 `Empty`、首行不是 `#EXTM3U` 为 `NotAPlaylist`、首行对而不是 UTF-8 文本为 `NotUtf8`（RFC 8216 4.1；别的编码由调用方在 `on_playlist` 回调中转码；只是结尾的字符不完整时按之前的部分解析）、主与媒体播放列表的标签混在一起为 `Mixed`、带行号的 `Syntax`），用了不支持的加密为 `Unsupported`（带 `hls::Encryption`）。
+- 解析错误分两类：内容不是合法的播放列表为 `Malformed`（为空 `Empty`、首行不是 `#EXTM3U` 为 `NotAPlaylist`、首行对而不是 UTF-8 文本为 `NotUtf8`（RFC 8216 4.1；别的编码由调用方在 `on_playlist` 回调中转码；带 UTF-16 BOM 的按 UTF-16 看首行）、首行对而结尾截在多字节字符中间为 `Truncated`（服务器没写完，最后一行不完整，不解析）、主与媒体播放列表的标签混在一起为 `Mixed`、带行号的 `Syntax`），用了不支持的加密为 `Unsupported`（带 `hls::Encryption`）。
 
 选轨（`select`）：
 
@@ -178,7 +178,7 @@ pub trait Hooks: Send + Sync {
 | 类别 | 变体 | 可否重试 |
 |---|---|---|
 | 改请求再试 | `InvalidInput`；`OutputExists`（要求覆盖）；`OutputOccupied`（换路径，含上级不是目录而建不出来的）；`Select`（选轨偏好与来源不符）；`Unsupported::Live`（开启直播录制）；`Unsupported::Mp4`、`Unsupported::Hls`（内容放不进这种输出，改用另一种） | 改请求后再试 |
-| 来源本身不行 | `Playlist`（内容不是合法的播放列表）、`NotMediaPlaylist`、`Unsupported` 的其余各项（无分片、不支持的加密、无法合并的布局）、`Integrity`、`KeyLength` | 否 |
+| 来源本身不行 | `Playlist`（内容不是合法的播放列表）、`NotMediaPlaylist`、`Unsupported` 的其余各项（无分片、不支持的加密、无法合并的布局）、`Integrity`、`KeyLength` | 否；`Playlist` 的 `Truncated` 可以 |
 | 网络 | `Http`（在最外层时来自播放列表或 init 段的请求；证书校验失败、重定向失败不重试） | 看 `HttpError::retryable` |
 | 说明出在哪里 | `Segment`、`Key`（哪个分片或 key）；`LiveStalled`（直播哪条轨停滞，取不到时带 `HttpFailure`，刷新失败时带 `RefreshCause`）；`Cleanup`（失败后收拾也没做完，带残留列表） | 看包着的原因 |
 | 读写文件、合并 | `Io`；`VolumeUnavailable`（路径的根读不到：盘不在、共享连不上，接上后再试）；`Remux`（FFmpeg 初始化、读分片、写出或回读核对出错，内容放不进 MP4 的除外） | 否 |
@@ -199,7 +199,7 @@ pub trait Hooks: Send + Sync {
 - **一致性**：分片的身份（地址最后一段与字节范围）与不连续段编号须与上次刷新一致，否则结束录制（`LiveEnd::Inconsistent`）；媒体序号回退且与上次窗口不重叠，连续两次即结束录制（`LiveEnd::Restarted`，多为编码器重启；一次多半是 CDN 的旧缓存）。没有分片的播放列表不参与比对。
 - **不连续段编号**：按 RFC 8216 是绝对的（没写 `EXT-X-DISCONTINUITY-SEQUENCE` 即为 0）。服务器不守规定、带 DISCONTINUITY 的分片滑出后编号整体变小时，靠与上次重叠的分片校正；没有重叠时沿用当前校正，算出的编号比已用过的小则新分片另起一组，不打乱分组顺序。
 - **缺失**：两次刷新之间已滑出窗口的分片，以及列出了但 404/410 或重试后仍失败的分片与 init 段，记为缺失，录制继续；进度里计数，结果里给出序号区间与原因。缺失不插入不连续标记：保留原时间戳，成片在该处时间线留空，各轨之间的同步不受影响（RFC 8216 不允许用媒体序号在轨间同步，人为切组需要这样做）。FFmpeg 读 fMP4 默认按 `tfdt` 取时间戳，TS 自带时间戳，空档都能保留。
-- **失败**：刷新取不到（含 404/410）、内容为空或语法错误（服务器未写完）时等下次刷新；其他刷新失败（401/403 等、内容不是播放列表、DRM、回调出错）以及分片的 key 失败、校验失败、回调出错、写盘失败，使任务失败。
+- **失败**：刷新取不到（含 404/410）、内容为空、截断或语法错误（服务器未写完）时等下次刷新；其他刷新失败（401/403 等、内容不是播放列表、DRM、回调出错）以及分片的 key 失败、校验失败、回调出错、写盘失败，使任务失败。
 - **init 段**：要录的分片引用的 init 段首次出现时拉取（不占引擎名额；续录时会话定下后才拉），按内容命名，签名地址每次刷新都不同也只存一份；同一不连续段内 init 内容变化时任务失败。init 段先落盘，再下载引用它的分片。
 - **停滞**：任一轨持续 `stall_timeout`（默认 60 秒，至少三个目标时长）没有录到新分片，从录制开始起算，会话定下时重新起算；有分片排着队或在下载、或续录判定期间已拿到候选（见「会话与续录」，在等核对或等其他轨）时是在等本任务，不算。播放列表不再出新分片（两个目标时长内没有列出过；`StallCause::NoNewSegments`）或已被删除（`PlaylistGone`），且其他轨也不再出，视为直播结束：判定期间停滞的是还没拿到候选的轨，它们这次都不录，其余照常定下会话；之后把已拉到的处理完、照常合并。以下为故障，任务以 `Error::LiveStalled` 失败，目录保留：刷新一直失败；刷新请求超过一个目标时长仍未返回；仍在列出新分片却一个都下载不成功（带最近一次失败的原因，能否重试随之）；这条轨不再出新分片或播放列表已被删除而其他轨仍在出（`TrackStopped`，只有前者可以重试）。服务器要求的重试等待长到无法表示时不再刷新，由停滞判定结束。
 - **结束**：所有轨出现 `#EXT-X-ENDLIST`；调用方 `JobControl::stop`；各轨都录满 `max_duration`（每轨之前各会话已录的、本次排入下载的与本次列出了但取不到的分片声明时长之和；窗口已滑过的时长未知，不计）；停滞；或上述服务器前后矛盾。之后不再刷新，把已拉到的播放列表处理完、已列出的分片下完再合并；续录时会话定下之前停止则立即结束，不录新的分片。
@@ -289,7 +289,7 @@ class Job:  # 不再被引用、也没有在等它时取消任务（已开始写
 结果（字段同 `core`，微秒数改为 `timedelta`，名字去掉 `_us`）：
 
 - `Probe`：`master: MasterInfo | None`、`tracks: tuple[TrackInfo, ...]`、`live: bool`；`MasterInfo`：`variants: tuple[VariantInfo, ...]`、`audio: tuple[AudioInfo, ...]`、`selected: Selected`；`VariantInfo`、`AudioInfo`、`Selected`、`TrackInfo`、`Resolution`。
-- `Progress`：`stage: Stage`、`selected`、`segments_done`、`segments_total`、`segments_failed`、`segments_expired`、`duration: timedelta`、`bytes`、`received`、`refresh_errors: tuple[RefreshCause | None, ...]`；`Stage`：`Preparing()`、`Downloading()`、`Recording()`、`Writing()`、`Done()`；`RefreshCause`：`reason: RefreshReason`（`Http(failure)`、`Empty()`、`Syntax(line, detail)`）、`retryable`、`retry_after`。
+- `Progress`：`stage: Stage`、`selected`、`segments_done`、`segments_total`、`segments_failed`、`segments_expired`、`duration: timedelta`、`bytes`、`received`、`refresh_errors: tuple[RefreshCause | None, ...]`；`Stage`：`Preparing()`、`Downloading()`、`Recording()`、`Writing()`、`Done()`；`RefreshCause`：`reason: RefreshReason`（`Http(failure)`、`Empty()`、`Truncated()`、`Syntax(line, detail)`）、`retryable`、`retry_after`。
 - `HttpFailure`：`kind: HttpErrorKind`、`retryable: bool`、`retry_after: int | None`；`HttpErrorKind`：`Status(code)`、`RangeIgnored(code)`、`Timeout()`、`Certificate(detail)`、`Redirect(detail)`、`Connect(detail)`、`InvalidRequest(detail)`、`Transport(detail)`。
 - `Output`：`mp4: Mp4Output | None`、`hls: Path | None`、`segments`、`bytes`、`leftovers: tuple[Leftover, ...]`、`live: LiveReport | None`；`Mp4Output`：`path`、`report: MediaReport`；`MediaReport`：`streams: tuple[StreamReport, ...]`；`StreamReport`：`shape: Shape`、`packets`、`skipped_without_dts`、`duration`；`Shape`：`Video(codec, width, height)`、`Audio(codec, sample_rate, channels)`；`StreamKind`：`Video()`、`Audio()`。
 - `Leftover`：`path`、`kind: LeftoverKind`、`cause: str`；`LeftoverKind`：`Removable()`、`Displaced(target)`、`Installed()`、`WorkDir()`。
@@ -309,7 +309,7 @@ HsM3u8Error                       retryable: bool、retry_after: int | None、se
 │   ├── Mp4UnsupportedError       reason: Mp4Unsupported；可只输出本地 HLS
 │   └── HlsUnsupportedError       reason: HlsUnsupported；可只输出 MP4
 ├── SourceError                   来源本身不行
-│   ├── PlaylistError             url、reason: Malformed（Empty、NotAPlaylist、NotUtf8、Mixed、Syntax(line, detail)）
+│   ├── PlaylistError             url、reason: Malformed（Empty、NotAPlaylist、NotUtf8、Truncated、Mixed、Syntax(line, detail)）
 │   ├── NotMediaPlaylistError     url
 │   ├── SourceUnsupportedError    reason: SourceUnsupported（EmptyPlaylist、NoTargetDuration、Encrypted、InitChangesWithinGroup、DiscontinuityMismatch）
 │   ├── IntegrityError            url、reason: IntegrityFailure

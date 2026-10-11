@@ -1196,11 +1196,11 @@ class LiveReport:
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __repr__(self) -> builtins.str: ...
     def __new__(cls, *, end: typing.Optional[LiveEnd], session_count: builtins.int, missed: collections.abc.Sequence[Missed]) -> LiveReport:
         r"""
         各参数即同名属性。
         """
+    def __repr__(self) -> builtins.str: ...
 
 @typing.final
 class LiveStalledError(HsM3u8Error):
@@ -1258,6 +1258,14 @@ class Malformed:
         """
         __match_args__ = ()
         def __new__(cls) -> Malformed.NotUtf8: ...
+    
+    @typing.final
+    class Truncated(Malformed):
+        r"""
+        首行是 #EXTM3U，结尾截在多字节字符中间（多为服务器还没写完）；可以重试
+        """
+        __match_args__ = ()
+        def __new__(cls) -> Malformed.Truncated: ...
     
     @typing.final
     class Mixed(Malformed):
@@ -1776,7 +1784,7 @@ class PlaylistError(SourceError):
         播放列表的地址（重定向之后的）
         """
     @property
-    def reason(self) -> Malformed.Empty | Malformed.NotAPlaylist | Malformed.NotUtf8 | Malformed.Mixed | Malformed.Syntax:
+    def reason(self) -> Malformed.Empty | Malformed.NotAPlaylist | Malformed.NotUtf8 | Malformed.Truncated | Malformed.Mixed | Malformed.Syntax:
         r"""
         不合法的原因
         """
@@ -1996,7 +2004,7 @@ class RefreshCause:
     直播一次刷新失败；这类失败等下次刷新，不使任务立即失败。
     """
     @property
-    def reason(self) -> RefreshReason.Http | RefreshReason.Empty | RefreshReason.Syntax:
+    def reason(self) -> RefreshReason.Http | RefreshReason.Empty | RefreshReason.Truncated | RefreshReason.Syntax:
         r"""
         失败的原因
         """
@@ -2046,6 +2054,14 @@ class RefreshReason:
         """
         __match_args__ = ()
         def __new__(cls) -> RefreshReason.Empty: ...
+    
+    @typing.final
+    class Truncated(RefreshReason):
+        r"""
+        结尾截在多字节字符中间，多为服务器还没写完
+        """
+        __match_args__ = ()
+        def __new__(cls) -> RefreshReason.Truncated: ...
     
     @typing.final
     class Syntax(RefreshReason):

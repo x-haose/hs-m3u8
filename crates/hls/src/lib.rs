@@ -49,6 +49,9 @@ pub enum Malformed {
     /// 首行是 #EXTM3U，但不是 UTF-8 文本（RFC 8216 4.1 要求 UTF-8）；站点用了别的编码时须在解析前转码
     #[error("播放列表不是 UTF-8 文本")]
     NotUtf8,
+    /// 首行是 #EXTM3U，结尾截在多字节字符中间（多为服务器还没写完）：最后一行不完整，不解析
+    #[error("播放列表在结尾的字符中间截断")]
+    Truncated,
     #[error("同时含有主播放列表（EXT-X-STREAM-INF）与媒体播放列表（EXTINF）的标签")]
     Mixed,
     #[error("第 {line} 行：{kind}")]
@@ -104,17 +107,38 @@ pub enum Encryption {
 }
 
 /// 解析拉到的播放列表内容，须为 UTF-8（RFC 8216 4.1）。不是 UTF-8 时先看首行：不是 `#EXTM3U`（如媒体文件、
-/// 图片）报 [`Malformed::NotAPlaylist`] 或 [`Malformed::Empty`]，是才报 [`Malformed::NotUtf8`]。只有结尾的字符
-/// 不完整（服务器还没写完）时按之前的部分解析，与截在别处一样。其余同 [`parse`]。
+/// 图片）报 [`Malformed::NotAPlaylist`] 或 [`Malformed::Empty`]；是的话，只有结尾的字符不完整时报
+/// [`Malformed::Truncated`]，否则报 [`Malformed::NotUtf8`]。带 UTF-16 BOM 的按 UTF-16 看首行。其余同 [`parse`]。
 pub fn parse_bytes(body: &[u8], url: &Url) -> Result<Playlist, Error> {
-    match std::str::from_utf8(body) {
-        Ok(text) => parse(text, url),
-        Err(e) if e.error_len().is_none() => parse_bytes(&body[..e.valid_up_to()], url),
-        Err(_) => {
-            check_header(&String::from_utf8_lossy(body))?;
-            Err(Malformed::NotUtf8.into())
-        }
+    let e = match std::str::from_utf8(body) {
+        Ok(text) => return parse(text, url),
+        Err(e) => e,
+    };
+    if e.error_len().is_none() {
+        // 出错的只有结尾那个字符：第一段即之前的全部
+        check_header(body.utf8_chunks().next().map_or("", |chunk| chunk.valid()))?;
+        return Err(Malformed::Truncated.into());
     }
+    check_header(
+        &decode_utf16(body).unwrap_or_else(|| String::from_utf8_lossy(body).into_owned()),
+    )?;
+    Err(Malformed::NotUtf8.into())
+}
+
+/// 以 UTF-16 BOM 开头的内容按 UTF-16 解码（不成对的代理项换成 U+FFFD）；没有这个 BOM 时为 None。
+/// 简化：只认 UTF-16 的 BOM，UTF-32 的内容按 UTF-8 看首行、报 NotAPlaylist；遇到 UTF-32 的站点时再认它的 BOM。
+fn decode_utf16(body: &[u8]) -> Option<String> {
+    let from_bytes = match body {
+        [0xFE, 0xFF, ..] => u16::from_be_bytes,
+        [0xFF, 0xFE, ..] => u16::from_le_bytes,
+        _ => return None,
+    };
+    let units = body.as_chunks().0.iter().map(|&pair| from_bytes(pair));
+    Some(
+        char::decode_utf16(units)
+            .map(|unit| unit.unwrap_or(char::REPLACEMENT_CHARACTER))
+            .collect(),
+    )
 }
 
 /// 解析播放列表。`url` 为该播放列表的最终 URL（跟随重定向之后），所有相对 URI 按它解析。

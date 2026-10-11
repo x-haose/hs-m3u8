@@ -236,6 +236,7 @@ impl Error {
             Error::Segment { cause, .. } | Error::Key { cause, .. } => cause.retryable(),
             Error::Cleanup { failure, .. } => failure.retryable(),
             Error::LiveStalled { cause, .. } => cause.retryable(),
+            Error::Playlist { cause, .. } => **cause == hs_m3u8_hls::Malformed::Truncated,
             _ => false,
         }
     }

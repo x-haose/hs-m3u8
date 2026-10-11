@@ -109,7 +109,8 @@ async fn refresh_errors_show_in_progress_until_recovered() {
     assert_eq!(progress.borrow().refresh_errors, [None]);
 }
 
-/// 刷新拿到写了一半的播放列表（为空，或末尾的 EXTINF 还没有 URI 行）：等下次刷新，进度里给出原因；写完后照常录。
+/// 刷新拿到写了一半的播放列表（为空、末尾的 EXTINF 还没有 URI 行，或截在多字节字符中间）：等下次刷新，进度里
+/// 给出原因；写完后照常录。
 #[tokio::test(flavor = "multi_thread")]
 async fn half_written_playlists_are_waited_out() {
     let dir = test_dir("live_half_written");
@@ -126,9 +127,15 @@ async fn half_written_playlists_are_waited_out() {
         line: 6,
         kind: SyntaxError::InfoWithoutUri { tag: "EXTINF" },
     };
+    let mut cut = (playlist(&[0], false) + "#EXTINF:1,\n第1段.ts\n").into_bytes();
+    cut.truncate(cut.len() - "段.ts\n".len() + 1);
     let half_written = [
-        (String::new(), RefreshCause::Empty),
-        (playlist(&[0], false) + "#EXTINF:1,\n", dangling),
+        (Vec::new(), RefreshCause::Empty),
+        (
+            (playlist(&[0], false) + "#EXTINF:1,\n").into_bytes(),
+            dangling,
+        ),
+        (cut, RefreshCause::Truncated),
     ];
     for (text, cause) in half_written {
         server.put("live.m3u8", text);

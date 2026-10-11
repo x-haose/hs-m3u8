@@ -533,12 +533,13 @@ impl Recorder<'_> {
     }
 }
 
-/// 刷新失败中可以等下次刷新的及其原因：取不到（含 404/410，直播结束时常见）、内容为空或语法错误（服务器
+/// 刷新失败中可以等下次刷新的及其原因：取不到（含 404/410，直播结束时常见）、内容为空、截断或语法错误（服务器
 /// 没写完）。其余（401/403 等、内容不是播放列表、DRM、回调出错）为 None，使任务失败。
 fn waitable_refresh_error(error: &Error) -> Option<RefreshCause> {
     match error {
         Error::Playlist { cause, .. } => match &**cause {
             hls::Malformed::Empty => Some(RefreshCause::Empty),
+            hls::Malformed::Truncated => Some(RefreshCause::Truncated),
             hls::Malformed::Syntax { line, kind } => Some(RefreshCause::Syntax {
                 line: *line,
                 kind: kind.clone(),

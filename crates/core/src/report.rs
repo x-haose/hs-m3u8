@@ -56,6 +56,9 @@ pub enum RefreshCause {
     /// 内容为空，多为服务器还没写完
     #[error("播放列表为空")]
     Empty,
+    /// 结尾截在多字节字符中间，多为服务器还没写完
+    #[error("播放列表在结尾的字符中间截断")]
+    Truncated,
     /// 语法错误，多为服务器还没写完
     #[error("第 {line} 行：{kind}")]
     Syntax { line: usize, kind: hls::SyntaxError },
@@ -66,7 +69,7 @@ impl RefreshCause {
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
             RefreshCause::Http(failure) => failure.retry_after,
-            RefreshCause::Empty | RefreshCause::Syntax { .. } => None,
+            RefreshCause::Empty | RefreshCause::Truncated | RefreshCause::Syntax { .. } => None,
         }
     }
 
@@ -75,7 +78,7 @@ impl RefreshCause {
     pub fn retryable(&self) -> bool {
         match self {
             RefreshCause::Http(failure) => failure.kind.retryable(),
-            RefreshCause::Empty | RefreshCause::Syntax { .. } => true,
+            RefreshCause::Empty | RefreshCause::Truncated | RefreshCause::Syntax { .. } => true,
         }
     }
 }

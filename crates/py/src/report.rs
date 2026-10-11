@@ -74,6 +74,8 @@ variants! {
         },
         /// 内容为空，多为服务器还没写完
         Empty {},
+        /// 结尾截在多字节字符中间，多为服务器还没写完
+        Truncated {},
         /// 语法错误，多为服务器还没写完
         #[pyo3(constructor = (*, line, detail))]
         Syntax {
@@ -397,6 +399,7 @@ impl From<core::RefreshCause> for RefreshCause {
                 failure: failure.into(),
             },
             core::RefreshCause::Empty => RefreshReason::Empty {},
+            core::RefreshCause::Truncated => RefreshReason::Truncated {},
             core::RefreshCause::Syntax { line, kind } => RefreshReason::Syntax {
                 line,
                 detail: kind.to_string(),
