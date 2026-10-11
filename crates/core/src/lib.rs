@@ -62,7 +62,7 @@ pub use request::{
     HttpOptions, JobRequest, KeyOverride, LiveOptions, Proxy, RetryPolicy, Source, Timeouts,
 };
 pub use url::Url;
-pub use workdir::{ForkGuard, LockFiles, prepare_fork};
+pub use workdir::{ForkGuard, LockFiles, close_inherited_locks, prepare_fork};
 
 /// 公开接口用到的合并报告与合并错误的类型。
 pub mod remux {

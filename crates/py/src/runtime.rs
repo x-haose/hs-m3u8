@@ -31,7 +31,8 @@ static RUNTIME: Mutex<Slot> = Mutex::new(Slot::Empty);
 enum Slot {
     /// 还没用到
     Empty,
-    Running(Runtime),
+    /// 建立它的进程（见 [`Process`]）与运行时
+    Running(Process, Runtime),
     /// 不再建立，用到时抛 `RuntimeError`，值为原因：解释器正在退出（[`EXITING`]），或在 macOS 上 fork 出的子进程里
     /// （[`FORKED_ON_MACOS`]）
     Refused(&'static str),
@@ -42,8 +43,25 @@ const EXITING: &str = "解释器正在退出，不再开始新的操作";
 /// 证书校验与读取系统代理要用 Apple 的系统框架，它们在多线程进程 fork 出的子进程里不可用，一用就使进程崩溃。
 const FORKED_ON_MACOS: &str = "macOS 上 fork 出的子进程不能使用本库：证书校验与读取系统代理要用的系统框架在 fork 之后不可用；改用 multiprocessing 的 spawn 方式";
 
-/// fork 的代次：子进程里加一。对象记下建立时的代次，不同即是从父进程继承来的。
+/// fork 的代次：子进程里加一（见 [`after_fork_in_child`]）。
 static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// 一个进程：进程号与 fork 代次，两者都对得上才是同一个。只看代次不够：子进程里本库的 fork 处理运行之前（先导入的
+/// 模块的处理排在前面），代次还没加一；只看进程号也不够：父进程退出后，它的进程号可能分给继承了它对象的孙进程。
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Process {
+    id: u32,
+    generation: u64,
+}
+
+impl Process {
+    fn current() -> Self {
+        Process {
+            id: std::process::id(),
+            generation: GENERATION.load(Ordering::Relaxed),
+        }
+    }
+}
 
 fn runtime() -> MutexGuard<'static, Slot> {
     RUNTIME.lock().expect("持锁期间不会 panic")
@@ -52,8 +70,14 @@ fn runtime() -> MutexGuard<'static, Slot> {
 /// 本进程的运行时，第一次用到时建立；不再建立时（见 [`Slot::Refused`]）抛 `RuntimeError`。
 pub(crate) fn handle() -> PyResult<Handle> {
     let mut slot = runtime();
+    if let Slot::Running(process, _) = &*slot
+        && *process != Process::current()
+    {
+        // fork 出的子进程里，本库的 fork 处理还没运行
+        leave_inherited(&mut slot);
+    }
     match &*slot {
-        Slot::Running(runtime) => Ok(runtime.handle().clone()),
+        Slot::Running(_, runtime) => Ok(runtime.handle().clone()),
         Slot::Refused(reason) => Err(PyRuntimeError::new_err(*reason)),
         Slot::Empty => {
             let built = Builder::new_multi_thread()
@@ -61,9 +85,22 @@ pub(crate) fn handle() -> PyResult<Handle> {
                 .build()
                 .map_err(|cause| PyOSError::new_err(format!("建立 tokio 运行时失败：{cause}")))?;
             let handle = built.handle().clone();
-            *slot = Slot::Running(built);
+            *slot = Slot::Running(Process::current(), built);
             Ok(handle)
         }
+    }
+}
+
+/// fork 出的子进程里：换下从父进程继承来的运行时，不销毁（销毁要等它的工作线程退出，而它们不在子进程里）；macOS
+/// 上此后不再建立（见 [`FORKED_ON_MACOS`]）。
+fn leave_inherited(slot: &mut Slot) {
+    let next = if cfg!(target_os = "macos") {
+        Slot::Refused(FORKED_ON_MACOS)
+    } else {
+        Slot::Empty
+    };
+    if let Slot::Running(_, inherited) = std::mem::replace(slot, next) {
+        std::mem::forget(inherited);
     }
 }
 
@@ -77,7 +114,8 @@ const SIGNAL_CHECK: Duration = Duration::from_millis(100);
 /// 登记不上（CPython 不调用 atexit 运行期间新登记的处理）。
 #[pyfunction]
 fn shutdown(py: Python<'_>) -> PyResult<()> {
-    let Slot::Running(runtime) = std::mem::replace(&mut *runtime(), Slot::Refused(EXITING)) else {
+    let Slot::Running(_, runtime) = std::mem::replace(&mut *runtime(), Slot::Refused(EXITING))
+    else {
         return Ok(());
     };
     let (closed, done) = mpsc::channel::<Infallible>();
@@ -155,27 +193,26 @@ pub(crate) fn closed_error() -> PyErr {
     PyRuntimeError::new_err("解释器正在退出，运行时已关闭，等不到结果")
 }
 
-/// 只属于建立它的进程的值（引擎、任务及等它们的协程所持有的），按 fork 的代次判断。引擎持有跨任务共享的请求名额，
+/// 只属于建立它的进程（见 [`Process`]）的值：引擎、任务及等它们的协程所持有的。引擎持有跨任务共享的请求名额，
 /// 任务与协程等的是父进程运行时上的后台任务，都不随 fork 进入子进程：在子进程里用，名额可能永远被占着、结果永远等
 /// 不到，所以拒绝。在子进程里回收时不销毁里面的值：销毁 tokio 的同步原语要拿它们的锁，fork 时若父进程的线程正拿着，
 /// 子进程就会永远等下去。
 pub(crate) struct Owned<T> {
     /// drop 时才取走
     value: Option<T>,
-    /// 建立时的 fork 代次
-    generation: u64,
+    owner: Process,
 }
 
 impl<T> Owned<T> {
     pub(crate) fn new(value: T) -> Self {
         Owned {
             value: Some(value),
-            generation: GENERATION.load(Ordering::Relaxed),
+            owner: Process::current(),
         }
     }
 
     fn is_here(&self) -> bool {
-        self.generation == GENERATION.load(Ordering::Relaxed)
+        self.owner == Process::current()
     }
 
     /// 在建立它的进程里时为里面的值，在 fork 出的子进程里为 None。
@@ -208,9 +245,12 @@ impl<T> Drop for Owned<T> {
 }
 
 fn foreign(what: &str) -> PyErr {
-    PyRuntimeError::new_err(format!(
-        "{what}：只能在建立它的进程里使用；fork 出的子进程要另建 Engine"
-    ))
+    let instead = if cfg!(target_os = "macos") {
+        "macOS 上 fork 出的子进程不能使用本库，要改用 multiprocessing 的 spawn 方式"
+    } else {
+        "fork 出的子进程要另建 Engine"
+    };
+    PyRuntimeError::new_err(format!("{what}：只能在建立它的进程里使用；{instead}"))
 }
 
 thread_local! {
@@ -232,23 +272,16 @@ fn after_fork_in_parent() {
     FORKING.with_borrow_mut(Option::take);
 }
 
-/// 关掉继承来的任务目录锁，不用继承来的运行时；macOS 上此后不再建立运行时（见 [`FORKED_ON_MACOS`]）。
+/// 关掉继承来的任务目录锁，代次加一，换下继承来的运行时（见 [`leave_inherited`]）。
 #[pyfunction]
 fn after_fork_in_child() {
-    let locks = FORKING
-        .with_borrow_mut(Option::take)
-        .expect("fork 前已拿到");
-    locks.child();
-    GENERATION.fetch_add(1, Ordering::Relaxed);
-    let next = if cfg!(target_os = "macos") {
-        Slot::Refused(FORKED_ON_MACOS)
-    } else {
-        Slot::Empty
-    };
-    if let Slot::Running(inherited) = std::mem::replace(&mut *runtime(), next) {
-        // 销毁要等它的工作线程退出，而它们不在子进程里
-        std::mem::forget(inherited);
+    match FORKING.with_borrow_mut(Option::take) {
+        Some(locks) => locks.child(),
+        // 本库在这次 fork 开始之后才登记（另一个线程正在导入它），fork 前的处理没有运行
+        None => core::close_inherited_locks(),
     }
+    GENERATION.fetch_add(1, Ordering::Relaxed);
+    leave_inherited(&mut runtime());
 }
 
 /// 登记解释器退出时与 fork 前后的处理（没有 fork 的平台上只有前者）。

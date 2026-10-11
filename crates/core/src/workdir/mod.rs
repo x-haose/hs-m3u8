@@ -137,6 +137,15 @@ pub fn prepare_fork(
     ForkGuard(lock(&HELD).expect("持锁期间不会 panic"))
 }
 
+/// fork 出的子进程里、fork 之前没能调用 [`prepare_fork`] 时用（如它在 fork 开始之后才登记为 fork 前的处理）：登记表
+/// 此刻没被拿着才关掉继承来的锁文件。被拿着时，拿着它的是父进程里的线程，不在子进程里，这把锁再也放不开：继承来的
+/// 锁文件留到子进程退出，子进程里再加锁的任务会一直等着。
+pub fn close_inherited_locks() {
+    if let Ok(mut held) = HELD.try_lock() {
+        held.0.clear();
+    }
+}
+
 /// 见 [`prepare_fork`]。
 pub struct ForkGuard(MutexGuard<'static, LockFiles>);
 
