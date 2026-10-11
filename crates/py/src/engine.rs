@@ -5,7 +5,6 @@ use std::num::NonZeroUsize;
 use hs_m3u8_core as core;
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
-use tokio::task::JoinError;
 
 use crate::convert::{Positive, PyPath, Seq};
 use crate::error::to_pyerr;
@@ -61,8 +60,8 @@ impl Engine {
         runtime::require_event_loop()?;
         let source = Python::attach(|py| source.get().to_core(py))?;
         let engine = self.inner.clone();
-        let probed = runtime::spawn(async move { engine.probe(&source).await })?.await;
-        match joined(probed) {
+        let probed = runtime::spawn(async move { engine.probe(&source).await })?.await?;
+        match probed {
             Ok(probe) => Ok(probe.into()),
             Err(error) => Err(Python::attach(|py| to_pyerr(py, error))),
         }
@@ -115,18 +114,12 @@ impl Engine {
         let engine = self.inner.clone();
         let unsettled = core::Unsettled::from(&unsettled);
         let discarded =
-            runtime::spawn(async move { engine.discard(&work_dir.0, unsettled).await })?.await;
-        match joined(discarded) {
+            runtime::spawn(async move { engine.discard(&work_dir.0, unsettled).await })?.await?;
+        match discarded {
             Ok(leftovers) => Ok(leftovers.into_iter().map(Leftover::from).collect()),
             Err(error) => Err(Python::attach(|py| to_pyerr(py, error))),
         }
     }
-}
-
-/// 运行时上的任务的结果。任务只会因句柄被丢弃而中止，那时已没有人等它；内部 panic 原样继续，由 PyO3 转为
-/// `PanicException`。
-fn joined<T>(result: Result<T, JoinError>) -> T {
-    result.unwrap_or_else(|failure| std::panic::resume_unwind(failure.into_panic()))
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {

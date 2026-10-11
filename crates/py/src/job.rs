@@ -22,7 +22,7 @@ use crate::runtime::{self, Owner};
 #[pyclass(module = "hs_m3u8._native", frozen)]
 pub struct Job {
     control: core::JobControl,
-    /// 任务结束前为 None；任务内部 panic 时发送端关闭而没有值
+    /// 任务结束前为 None；运行时关闭（解释器正在退出）时发送端关闭而没有值
     finished: watch::Receiver<Option<Arc<Finished>>>,
     owner: Owner,
 }
@@ -31,6 +31,8 @@ pub struct Job {
 enum Finished {
     Done(Output),
     Failed(Failure),
+    /// 本库内部出错：panic 的说明
+    Panicked(String),
 }
 
 /// 任务的错误。翻译为异常要取得 GIL，放到第一次等待时做：后台任务不碰解释器。
@@ -62,12 +64,18 @@ impl Job {
     pub(crate) fn spawn(runtime: &Handle, job: core::Job) -> Job {
         let control = job.control();
         let (sender, finished) = watch::channel(None);
+        // 等结果放在单独的任务里：它 panic 时，从它的句柄取得原因
+        let waiting = runtime.spawn(job.wait());
         runtime.spawn(async move {
-            let finished = match job.wait().await {
-                Ok(output) => Finished::Done(output.into()),
-                Err(error) => Finished::Failed(Failure {
+            let finished = match waiting.await {
+                Ok(Ok(output)) => Finished::Done(output.into()),
+                Ok(Err(error)) => Finished::Failed(Failure {
                     error: Mutex::new(Some(error)),
                     exception: PyOnceLock::new(),
+                }),
+                Err(failure) => Finished::Panicked(match failure.try_into_panic() {
+                    Ok(payload) => runtime::panic_message(payload),
+                    Err(failure) => failure.to_string(),
                 }),
             };
             sender.send_replace(Some(Arc::new(finished)));
@@ -136,8 +144,8 @@ impl Job {
         Ok(())
     }
 
-    /// 等任务结束，返回输出；失败时抛 `HsM3u8Error` 的子类，本库内部出错时抛 `pyo3_runtime.PanicException`。可多次
-    /// 等待，得到同一结果或同一异常；等待的协程被取消时任务也取消。
+    /// 等任务结束，返回输出；失败时抛 `HsM3u8Error` 的子类，本库内部出错时抛 `pyo3_runtime.PanicException`，解释器
+    /// 正在退出（运行时已关闭）时抛 `RuntimeError`。可多次等待，得到同一结果或同一异常；等待的协程被取消时任务也取消。
     async fn wait(&self) -> PyResult<Output> {
         self.owner.check("Job")?;
         runtime::require_event_loop()?;
@@ -152,11 +160,12 @@ impl Job {
             .map(|value| value.clone().expect("wait_for 返回时值已满足条件"));
         cancel_on_drop.disarm();
         let Ok(finished) = finished else {
-            return Err(PanicException::new_err("任务内部出错，没有结果"));
+            return Err(runtime::closed());
         };
         match &*finished {
             Finished::Done(output) => Ok(output.clone()),
             Finished::Failed(failure) => Err(Python::attach(|py| failure.raise(py))),
+            Finished::Panicked(message) => Err(PanicException::new_err(message.clone())),
         }
     }
 }

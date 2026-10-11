@@ -5,6 +5,7 @@
 //! 另建运行时；父进程建立的引擎、任务与协程在子进程里拒绝使用，回收时什么也不做（见 [`Owner`]）；继承来的任务
 //! 目录锁在子进程里关掉（见 `core::prepare_fork`）。
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::convert::Infallible;
 use std::future::Future;
@@ -21,7 +22,6 @@ use pyo3::exceptions::{PyOSError, PyRuntimeError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use tokio::runtime::{Builder, Handle, Runtime};
-use tokio::task::JoinError;
 use tokio_util::task::AbortOnDropHandle;
 
 /// 本进程的运行时；fork 出的子进程里，从父进程继承来的那个不销毁也不用，见 [`after_fork_in_child`]。
@@ -126,12 +126,36 @@ pub(crate) struct Spawned<T> {
     owner: Owner,
 }
 
+/// 结果：任务内部 panic 原样继续（由 PyO3 转为 `PanicException`）；运行时已关闭时为 [`closed`] 的异常。
 impl<T> Future for Spawned<T> {
-    type Output = Result<T, JoinError>;
+    type Output = PyResult<T>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let handle = self.handle.as_mut().expect("句柄只在 drop 时取走");
-        Pin::new(handle).poll(cx)
+        Pin::new(handle).poll(cx).map(|joined| match joined {
+            Ok(value) => Ok(value),
+            Err(failure) => match failure.try_into_panic() {
+                Ok(payload) => std::panic::resume_unwind(payload),
+                // 句柄被丢弃时才中止任务，那时已没有人等它；能等到的只有运行时关闭
+                Err(_) => Err(closed()),
+            },
+        })
+    }
+}
+
+/// 运行时已关闭（解释器正在退出），等的结果不会来了。
+pub(crate) fn closed() -> PyErr {
+    PyRuntimeError::new_err("解释器正在退出，运行时已关闭，等不到结果")
+}
+
+/// panic 的说明：`panic!` 给的字符串。
+pub(crate) fn panic_message(payload: Box<dyn Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(message) => *message,
+        Err(payload) => payload.downcast_ref::<&str>().map_or_else(
+            || "（panic 的值不是字符串）".to_owned(),
+            |message| (*message).to_owned(),
+        ),
     }
 }
 
