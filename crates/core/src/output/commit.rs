@@ -92,9 +92,13 @@ pub(super) fn check(o: &PendingOutput, overwrite: bool) -> Result<Occupant, Erro
     }
 }
 
-/// 输出路径建不建得出来：建不出来时报 [`Error::OutputOccupied`]（带上挡住的上级），不看路径上现在的东西。
+/// 输出路径建不建得出来：没有这一项时看最近的已存在的上级，建不出来报 [`Error::OutputOccupied`]（带上挡住的
+/// 上级）；有这一项时不看内容，在加锁之前，同一任务目录的任务可能正在换它。
 pub(super) fn check_creatable(o: &PendingOutput) -> Result<(), Error> {
-    match occupant(o)? {
+    if exists(o.target())? {
+        return Ok(());
+    }
+    match occupant_by_ancestor(o.target())? {
         Occupant::Blocked { ancestor } => Err(occupied(o, Some(ancestor))),
         _ => Ok(()),
     }
