@@ -16,7 +16,7 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use crate::convert::{Address, Count, Headers, Positive, PyPath, Span};
 use crate::error::{invalid_input, to_pyerr};
 use crate::hooks::{self, Hooks};
-use crate::record::{record, reduce, variants};
+use crate::record::{field_names, record, reduce, variants};
 
 variants! {
     /// 选哪个变体。
@@ -274,7 +274,13 @@ impl HttpOptions {
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
         reduce(
             slf.as_any(),
-            &["headers", "proxy", "insecure", "timeouts", "retry"],
+            field_names!(HttpOptions {
+                headers,
+                proxy,
+                insecure,
+                timeouts,
+                retry,
+            }),
         )
     }
 }
@@ -368,7 +374,15 @@ impl Source {
     fn __reduce__<'py>(
         slf: &Bound<'py, Self>,
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
-        reduce(slf.as_any(), &["url", "preference", "http", "hooks"])
+        reduce(
+            slf.as_any(),
+            field_names!(Source {
+                url,
+                preference,
+                http,
+                hooks,
+            }),
+        )
     }
 
     /// 回调对象常引用来源（如存着用到它的请求），引用环要靠垃圾回收器经这里找到。
@@ -507,7 +521,7 @@ impl KeyOverride {
     fn __reduce__<'py>(
         slf: &Bound<'py, Self>,
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
-        reduce(slf.as_any(), &["key", "iv"])
+        reduce(slf.as_any(), field_names!(KeyOverride { key, iv }))
     }
 }
 
@@ -680,7 +694,13 @@ impl JobRequest {
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
         reduce(
             slf.as_any(),
-            &["source", "output", "key", "concurrency", "live"],
+            field_names!(JobRequest {
+                source,
+                output,
+                key,
+                concurrency,
+                live,
+            }),
         )
     }
 

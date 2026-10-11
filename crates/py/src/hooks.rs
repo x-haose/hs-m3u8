@@ -13,7 +13,7 @@ use pyo3::types::{PyBytes, PyDict, PyString, PyTuple};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use crate::convert::{Address, Headers};
-use crate::record::{reduce, variants};
+use crate::record::{field_names, reduce, variants};
 
 variants! {
     /// 请求的用途。
@@ -63,7 +63,7 @@ impl RequestParts {
     fn __reduce__<'py>(
         slf: &Bound<'py, Self>,
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
-        reduce(slf.as_any(), &["url", "headers"])
+        reduce(slf.as_any(), field_names!(RequestParts { url, headers }))
     }
 }
 

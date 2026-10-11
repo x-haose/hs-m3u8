@@ -132,7 +132,18 @@ macro_rules! variants {
     };
 }
 
-pub(crate) use {record, variants};
+/// 类型 `$ty` 全部字段的名字，按给出的顺序；手写 `__reduce__` 的类用它列出要交给构造函数的属性。
+macro_rules! field_names {
+    ($ty:ident { $($field:ident),* $(,)? }) => {{
+        // 不带 `..` 的解构：漏写、多写字段时编译不过，pickle 就不会悄悄丢掉新加的字段
+        let _check = |value: &$ty| {
+            let $ty { $($field: _),* } = value;
+        };
+        &[$(stringify!($field)),*]
+    }};
+}
+
+pub(crate) use {field_names, record, variants};
 
 /// 各取值类的并集，如 `Stage.Preparing | Stage.Done`；都定义在本模块里，存根里直接写类名。
 pub(crate) fn union(variants: &[&str]) -> TypeInfo {

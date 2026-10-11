@@ -15,7 +15,7 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use crate::convert::{Address, PyPath, Seq};
 use crate::hooks::PyHookError;
-use crate::record::{partial, record, variants};
+use crate::record::{field_names, partial, record, variants};
 use crate::report::{
     HttpErrorKind, HttpFailure, Leftover, RefreshCause, Shape, StallCause, StreamKind,
 };
@@ -370,15 +370,6 @@ pub struct HsM3u8Error {
     pub leftovers: Seq<Leftover>,
 }
 
-/// 本类属性的名字：pickle 时与各子类自己的属性一起交给构造函数。
-const BASE_FIELDS: [&str; 5] = [
-    "retryable",
-    "retry_after",
-    "segment",
-    "key_url",
-    "leftovers",
-];
-
 #[gen_stub_pymethods]
 #[pymethods]
 impl HsM3u8Error {
@@ -458,7 +449,14 @@ impl HsM3u8Error {
 /// 异常的 pickle：`(partial(类, 各属性), args, __dict__)`，`__dict__` 里是 `add_note` 等加上的东西；`fields` 为
 /// 基类之外的属性。
 fn reduce<'py>(object: &Bound<'py, PyAny>, fields: &[&str]) -> PyResult<Bound<'py, PyTuple>> {
-    let fields: Vec<&str> = fields.iter().chain(&BASE_FIELDS).copied().collect();
+    let base = field_names!(HsM3u8Error {
+        retryable,
+        retry_after,
+        segment,
+        key_url,
+        leftovers,
+    });
+    let fields: Vec<&str> = fields.iter().chain(base).copied().collect();
     let rebuild = partial(object, &fields)?;
     let args = object.getattr("args")?;
     let state = object.getattr("__dict__")?;
