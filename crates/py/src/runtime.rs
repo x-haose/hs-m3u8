@@ -1,15 +1,20 @@
-//! 运行下载的 tokio 运行时、对象所属的进程，以及 fork 前后的处理。
+//! 运行下载的 tokio 运行时、对象所属的进程，以及 fork 前后与解释器退出时的处理。
 //!
-//! 每个进程一个运行时，第一次用到时建立。经 `os.fork`（含 multiprocessing 的 fork 方式）fork 出的子进程里没有父进程
-//! 运行时的工作线程，也没有父进程建立的任务与在途请求：子进程第一次用到时另建运行时；父进程建立的引擎、任务与协程在
-//! 子进程里拒绝使用，回收时什么也不做（见 [`Owner`]）；继承来的任务目录锁在子进程里关掉（见 `core::prepare_fork`）。
+//! 每个进程一个运行时，第一次用到时建立，解释器退出前关闭（见 [`shutdown`]）。经 `os.fork`（含 multiprocessing 的
+//! fork 方式）fork 出的子进程里没有父进程运行时的工作线程，也没有父进程建立的任务与在途请求：子进程第一次用到时
+//! 另建运行时；父进程建立的引擎、任务与协程在子进程里拒绝使用，回收时什么也不做（见 [`Owner`]）；继承来的任务
+//! 目录锁在子进程里关掉（见 `core::prepare_fork`）。
 
 use std::cell::RefCell;
+use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Mutex, MutexGuard};
 use std::task::{Context, Poll};
+use std::thread;
+use std::time::Duration;
 
 use hs_m3u8_core as core;
 use pyo3::exceptions::{PyOSError, PyRuntimeError};
@@ -19,28 +24,73 @@ use tokio::task::JoinError;
 use tokio_util::task::AbortOnDropHandle;
 
 /// 本进程的运行时；fork 出的子进程里，从父进程继承来的那个不销毁也不用，见 [`after_fork_in_child`]。
-static RUNTIME: Mutex<Option<Runtime>> = Mutex::new(None);
+static RUNTIME: Mutex<Slot> = Mutex::new(Slot::Empty);
+
+enum Slot {
+    /// 还没用到
+    Empty,
+    Running(Runtime),
+    /// 解释器正在退出，已关闭，不再建立
+    Closed,
+}
 
 /// fork 的代次：子进程里加一。对象记下建立时的代次，不同即是从父进程继承来的。
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
-fn runtime() -> MutexGuard<'static, Option<Runtime>> {
+fn runtime() -> MutexGuard<'static, Slot> {
     RUNTIME.lock().expect("持锁期间不会 panic")
 }
 
-/// 本进程的运行时，第一次用到时建立。
+/// 本进程的运行时，第一次用到时建立；解释器正在退出时抛 `RuntimeError`。
 pub(crate) fn handle() -> PyResult<Handle> {
-    let mut runtime = runtime();
-    if let Some(runtime) = &*runtime {
-        return Ok(runtime.handle().clone());
+    let mut slot = runtime();
+    match &*slot {
+        Slot::Running(runtime) => Ok(runtime.handle().clone()),
+        Slot::Closed => Err(PyRuntimeError::new_err("解释器正在退出，不再开始新的操作")),
+        Slot::Empty => {
+            let built = Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|cause| PyOSError::new_err(format!("建立 tokio 运行时失败：{cause}")))?;
+            let handle = built.handle().clone();
+            *slot = Slot::Running(built);
+            Ok(handle)
+        }
     }
-    let built = Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .map_err(|cause| PyOSError::new_err(format!("建立 tokio 运行时失败：{cause}")))?;
-    let handle = built.handle().clone();
-    *runtime = Some(built);
-    Ok(handle)
+}
+
+/// 等关闭运行时的线程时，多久查一次 Ctrl+C。
+const SIGNAL_CHECK: Duration = Duration::from_millis(100);
+
+/// 解释器退出前（atexit）关闭本进程的运行时：丢掉其上的任务（任务目录保持中断时的样子，可以续传），等正在执行的
+/// 回调返回，之后再没有线程进入解释器。解释器开始终结后再进入的线程会被终止或永远挂起，回调做了一半的事就丢了。
+/// 等待期间释放 GIL，回调才执行得完；Ctrl+C 放弃等待，这时仍在执行的回调可能使进程异常退出。
+#[pyfunction]
+fn shutdown(py: Python<'_>) -> PyResult<()> {
+    let Slot::Running(runtime) = std::mem::replace(&mut *runtime(), Slot::Closed) else {
+        return Ok(());
+    };
+    let (closed, done) = mpsc::channel::<Infallible>();
+    // 在另一个线程里关闭，这里才能一边等一边响应 Ctrl+C
+    let close = move || {
+        drop(runtime);
+        drop(closed);
+    };
+    if py.detach(|| thread::Builder::new().spawn(close)).is_err() {
+        // 建不了线程：没执行的 close 随 spawn 的失败被丢弃，运行时已在释放 GIL 期间关闭
+        return Ok(());
+    }
+    let mut done = done;
+    loop {
+        // 接收端不能在线程间共用，交给释放 GIL 的闭包再拿回来
+        let (received, receiver) = py.detach(move || (done.recv_timeout(SIGNAL_CHECK), done));
+        done = receiver;
+        match received {
+            Err(RecvTimeoutError::Timeout) => py.check_signals()?,
+            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+            Ok(never) => match never {},
+        }
+    }
 }
 
 /// 在运行时上执行 `future`；返回的句柄被丢弃（等它的协程被取消）时中止它。
@@ -108,7 +158,7 @@ impl Owner {
 
 /// fork 期间拿着的锁：fork 时别的线程若正在改运行时或任务目录锁的登记，子进程里的副本就是改了一半的。
 struct Forking {
-    runtime: MutexGuard<'static, Option<Runtime>>,
+    runtime: MutexGuard<'static, Slot>,
     locks: core::ForkGuard,
 }
 
@@ -135,13 +185,19 @@ fn after_fork_in_child() {
         .with_borrow_mut(Option::take)
         .expect("fork 前已拿到");
     GENERATION.fetch_add(1, Ordering::Relaxed);
-    // 销毁要等它的工作线程退出，而它们不在子进程里
-    std::mem::forget(runtime.take());
+    if let Slot::Running(inherited) = std::mem::replace(&mut *runtime, Slot::Empty) {
+        // 销毁要等它的工作线程退出，而它们不在子进程里
+        std::mem::forget(inherited);
+    }
     locks.child();
 }
 
-/// 登记 fork 前后的处理；没有 fork 的平台上什么也不做。
+/// 登记解释器退出时与 fork 前后的处理（没有 fork 的平台上只有前者）。
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module
+        .py()
+        .import("atexit")?
+        .call_method1("register", (wrap_pyfunction!(shutdown, module)?,))?;
     if cfg!(unix) {
         let handlers = pyo3::types::PyDict::new(module.py());
         handlers.set_item("before", wrap_pyfunction!(before_fork, module)?)?;

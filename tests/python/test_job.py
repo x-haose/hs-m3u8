@@ -6,7 +6,9 @@ import errno
 import gc
 import os
 import pickle
+import subprocess
 import sys
+import threading
 from datetime import timedelta
 from pathlib import Path
 
@@ -425,6 +427,59 @@ def test_live_recordings_end_at_endlist_and_report_missing_segments(server: Serv
     assert (progress.segments_done, progress.segments_failed, progress.segments_expired) == (1, 1, 0)
     # 读到的字节含播放列表与取不到的请求，多于写进任务目录的分片
     assert progress.received > progress.bytes > 0
+
+
+# 在子进程里跑：任务的回调还在执行（等 stdin）时脚本就结束了。脚本自己登记的 atexit 处理在本库的之前运行（后登记的
+# 先运行），打印 exiting 后，测试才放行回调；回调写出标记文件即执行完了
+UNFINISHED_HOOK_SCRIPT = """
+import asyncio, atexit, sys, threading
+from hs_m3u8 import Engine, Hooks, JobRequest, OutputOptions, Source, Target
+
+started = threading.Event()
+
+class Slow(Hooks):
+    def on_playlist(self, url: str, body: bytes) -> str:
+        started.set()
+        sys.stdin.readline()
+        with open(sys.argv[3], "w") as marker:
+            marker.write("done")
+        return body.decode()
+
+atexit.register(print, "exiting", flush=True)
+
+async def main() -> None:
+    request = JobRequest(Source(sys.argv[1], hooks=Slow()), OutputOptions(Target.Mp4(sys.argv[2])))
+    job = Engine().start(request)
+    await asyncio.to_thread(started.wait)
+    del job
+
+asyncio.run(main())
+"""
+
+
+def test_interpreter_exit_waits_for_running_hooks(server: Server, tmp_path: Path) -> None:
+    put_media(server, VOD)
+    marker = tmp_path / "marker"
+    script = [sys.executable, "-c", UNFINISHED_HOOK_SCRIPT, server.url("index.m3u8"), str(tmp_path / "a.mp4")]
+    lines: list[str] = []
+
+    with subprocess.Popen([*script, str(marker)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as child:
+        stdin, stdout = child.stdin, child.stdout
+        assert stdin is not None
+        assert stdout is not None
+        try:
+            reader = threading.Thread(target=lambda: lines.append(stdout.readline()))
+            reader.start()
+            reader.join(ARRIVAL)
+            stdin.write("go\n")
+            stdin.close()
+            code = child.wait(ARRIVAL)
+        finally:
+            child.kill()
+
+    assert lines == ["exiting\n"]
+    assert code == 0
+    assert marker.read_text() == "done"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows 没有 fork")
