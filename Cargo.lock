@@ -645,6 +645,7 @@ dependencies = [
  "cbc",
  "hs-m3u8-hls",
  "hs-m3u8-remux",
+ "http",
  "reqwest",
  "rustls",
  "serde",

@@ -1,4 +1,4 @@
-//! 请求失败的归类：重试也不会成功的证书校验失败、重定向失败不重试，原因写在错误里；代理的协议写错时报参数错误。
+//! 请求失败的归类：重试也不会成功的证书校验失败、重定向失败不重试，原因写在错误里；HTTP 库用不上的代理报参数错误。
 
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -90,20 +90,26 @@ async fn redirect_loops_are_reported_without_retrying() {
     assert!(!err.retryable());
 }
 
-/// 代理的协议写错（如 sock5）：报参数错误，不发出请求。不报的话代理不起作用，请求直连。
+/// HTTP 库用不上的代理（协议写错，或 socks 地址的主机名它解析不了）：报参数错误，不发出请求。不报的话代理不起作用，
+/// 请求直连。
 #[tokio::test(flavor = "multi_thread")]
-async fn proxies_with_unknown_schemes_are_rejected() {
+async fn proxies_the_http_library_cannot_use_are_rejected() {
     let server = Server::start().await;
     server.put(
         "index.m3u8",
         "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n",
     );
-    let mut source = Source::new(server.url("index.m3u8"));
-    source.http.proxy = Some(Url::parse("sock5://127.0.0.1:9").unwrap());
-
-    match engine().probe(&source).await {
-        Err(Error::InvalidInput(message)) => assert!(message.contains("sock5"), "{message}"),
-        other => panic!("应报参数错误：{other:?}"),
+    for proxy in [
+        "sock5://127.0.0.1:9",
+        "socks5://例子:9",
+        "socks5://{host}:9",
+    ] {
+        let mut source = Source::new(server.url("index.m3u8"));
+        source.http.proxy = Some(Url::parse(proxy).unwrap());
+        match engine().probe(&source).await {
+            Err(Error::InvalidInput(_)) => {}
+            other => panic!("{proxy} 应报参数错误：{other:?}"),
+        }
     }
     assert_eq!(server.hits("index.m3u8"), 0);
 }

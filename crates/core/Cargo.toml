@@ -13,6 +13,7 @@ aes.workspace = true
 cbc.workspace = true
 hs-m3u8-hls = { path = "../hls" }
 hs-m3u8-remux = { path = "../remux" }
+http.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 serde.workspace = true

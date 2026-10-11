@@ -73,20 +73,36 @@ impl HttpOptions {
         if t.connect.is_zero() || t.read_idle.is_zero() || t.request.is_zero() {
             return Err(Error::InvalidInput("超时不能为 0".into()));
         }
-        // 只放行 HTTP 库支持的协议：协议写错（如 sock5）时代理不起作用、请求直连，用户以为走了代理
-        if let Some(proxy) = &self.proxy
-            && !matches!(
-                proxy.scheme(),
-                "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
-            )
-        {
-            return Err(Error::InvalidInput(format!(
-                "代理只支持 http、https、socks4、socks4a、socks5、socks5h：{}",
-                bare_url(proxy)
-            )));
+        if let Some(proxy) = &self.proxy {
+            check_proxy(proxy)?;
         }
         Ok(())
     }
+}
+
+/// 代理地址 HTTP 库用不用得上。它用不上的地址（协议不认识，或按 `http::Uri` 解析不出主机，如 socks 地址里的
+/// 国际化域名）不报错，只是不用代理、请求直连，用户却以为走了代理；这里按同样的条件先拒绝。
+fn check_proxy(proxy: &Url) -> Result<(), Error> {
+    if !matches!(
+        proxy.scheme(),
+        "http" | "https" | "socks4" | "socks4a" | "socks5" | "socks5h"
+    ) {
+        return Err(Error::InvalidInput(format!(
+            "代理只支持 http、https、socks4、socks4a、socks5、socks5h：{}",
+            bare_url(proxy)
+        )));
+    }
+    let usable = proxy
+        .as_str()
+        .parse::<http::Uri>()
+        .is_ok_and(|uri| uri.authority().is_some());
+    if !usable {
+        return Err(Error::InvalidInput(format!(
+            "代理地址的主机名不合法（国际化域名须先转成 punycode）：{}",
+            bare_url(proxy)
+        )));
+    }
+    Ok(())
 }
 
 /// 一个下载任务的配置。用 [`JobRequest::new`] 取默认值后按需修改字段。

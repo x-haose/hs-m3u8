@@ -133,7 +133,7 @@ crates/py ────┼──> crates/core ──> crates/hls
 
 ### 5.4 HTTP
 
-- `reqwest` 0.13.5（rustls）。请求配置包括请求头（Cookie、User-Agent 都经请求头传入）与代理（协议为 http、https、socks4、socks4a、socks5、socks5h，别的报参数错误：reqwest 不认识的协议不起作用，请求直连）；Cookie 在任务内由响应自动保存。
+- `reqwest` 0.13.5（rustls）。请求配置包括请求头（Cookie、User-Agent 都经请求头传入）与代理（reqwest 用不上的代理地址不报错、不起作用，请求直连，所以按它的条件先校验：协议为 http、https、socks4、socks4a、socks5、socks5h，且按 `http::Uri` 解析得出主机，否则报参数错误）；Cookie 在任务内由响应自动保存。
 - 证书校验默认开启；关闭必须显式写 `insecure: true`。证书校验失败报 `HttpError::Certificate`、跟随重定向失败（循环、次数过多）报 `HttpError::Redirect`，都不重试；rustls 的证书错误包在 `io::Error` 里，沿原因链逐层取出它包着的错误才认得出，故直接依赖 rustls（与 reqwest 用的同一个 0.23.45）。连接与传输错误的说明带上各层原因。
 - 字节范围分片用 `Range` 请求头；响应必须是 206 且长度一致，否则视为错误。
 - key 按 key URL 去重，只取一次，缓存在任务内存里。
