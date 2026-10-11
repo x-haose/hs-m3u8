@@ -145,7 +145,7 @@ impl<T: PyStubType> PyStubType for Seq<T> {
     }
 }
 
-/// 请求头：按顺序，同名的可以有多个。传入时接受 `Mapping[str, str]` 或 `(名, 值)` 的序列，交给 Python 的是
+/// 请求头：按顺序，同名的可以有多个。传入时接受 `Mapping[str, str]` 或 `(名, 值)` 的可迭代对象，交给 Python 的是
 /// `tuple[tuple[str, str], ...]`。
 #[derive(Clone, PartialEq, Eq, Hash, Default)]
 pub(crate) struct Headers(pub(crate) Vec<(String, String)>);
@@ -157,7 +157,7 @@ impl FromPyObject<'_, '_> for Headers {
         // str 与 bytes 也能迭代，空串会被当作没有请求头
         if object.is_instance_of::<PyString>() || object.is_instance_of::<PyBytes>() {
             return Err(PyTypeError::new_err(
-                "请求头应为映射或 (名, 值) 的序列，不能是 str 或 bytes",
+                "请求头应为映射或 (名, 值) 的可迭代对象，不能是 str 或 bytes",
             ));
         }
         if let Ok(mapping) = object.cast::<PyMapping>() {
