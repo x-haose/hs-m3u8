@@ -295,12 +295,29 @@ fn malformed_input_is_reported_with_its_line() {
         malformed("<html><body>403 Forbidden</body></html>"),
         Malformed::NotAPlaylist
     );
-    // 不是 UTF-8 的内容（这里是 GBK 编码的「标题」）单独报出，不当作「不是播放列表」
+    // 不是 UTF-8 的播放列表（这里是 GBK 编码的「标题」）单独报出；首行就不对的二进制内容仍是「不是播放列表」
+    let bytes = |body: &[u8]| parse_bytes(body, &url("https://example.com/a.m3u8"));
     let gbk = b"#EXTM3U\n#EXTINF:4,\xb1\xea\xcc\xe2\na.ts\n";
-    match parse_bytes(gbk, &url("https://example.com/a.m3u8")) {
+    match bytes(gbk) {
         Err(Error::Malformed(Malformed::NotUtf8)) => {}
         other => panic!("应报不是 UTF-8：{other:?}"),
     }
+    for binary in [
+        &b"\x47\x40\x11\x10\x00\xff\xfe"[..],
+        b"\x89PNG\r\n\x1a\n\xff",
+        b"\x1f\x8b\x08\x00\xff",
+    ] {
+        match bytes(binary) {
+            Err(Error::Malformed(Malformed::NotAPlaylist)) => {}
+            other => panic!("应报不是播放列表：{other:?}"),
+        }
+    }
+    // 截在多字节字符中间（服务器还没写完）与截在它之前一样
+    let title = "#EXTM3U\n#EXTINF:4,第一集\na.ts\n#EXTINF:4,第".as_bytes();
+    assert_eq!(
+        bytes(&title[..title.len() - 1]),
+        bytes(&title[..title.len() - 3])
+    );
     // 空内容与「不是播放列表」分开：前者多为服务器还没写完
     for empty in ["", " \r\n", "\u{FEFF}\n"] {
         assert_eq!(malformed(empty), Malformed::Empty);

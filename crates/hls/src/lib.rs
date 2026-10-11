@@ -46,7 +46,7 @@ pub enum Malformed {
     Empty,
     #[error("不是 HLS 播放列表：第一行应为 #EXTM3U")]
     NotAPlaylist,
-    /// 不是 UTF-8 文本（RFC 8216 4.1 要求 UTF-8）；站点用了别的编码时须在解析前转码
+    /// 首行是 #EXTM3U，但不是 UTF-8 文本（RFC 8216 4.1 要求 UTF-8）；站点用了别的编码时须在解析前转码
     #[error("播放列表不是 UTF-8 文本")]
     NotUtf8,
     #[error("同时含有主播放列表（EXT-X-STREAM-INF）与媒体播放列表（EXTINF）的标签")]
@@ -103,25 +103,26 @@ pub enum Encryption {
     Method(String),
 }
 
-/// 解析拉到的播放列表内容：须为 UTF-8（RFC 8216 4.1），否则报 [`Malformed::NotUtf8`]；其余同 [`parse`]。
+/// 解析拉到的播放列表内容，须为 UTF-8（RFC 8216 4.1）。不是 UTF-8 时先看首行：不是 `#EXTM3U`（如媒体文件、
+/// 图片）报 [`Malformed::NotAPlaylist`] 或 [`Malformed::Empty`]，是才报 [`Malformed::NotUtf8`]。只有结尾的字符
+/// 不完整（服务器还没写完）时按之前的部分解析，与截在别处一样。其余同 [`parse`]。
 pub fn parse_bytes(body: &[u8], url: &Url) -> Result<Playlist, Error> {
-    let text = std::str::from_utf8(body).map_err(|_| Malformed::NotUtf8)?;
-    parse(text, url)
+    match std::str::from_utf8(body) {
+        Ok(text) => parse(text, url),
+        Err(e) if e.error_len().is_none() => parse_bytes(&body[..e.valid_up_to()], url),
+        Err(_) => {
+            check_header(&String::from_utf8_lossy(body))?;
+            Err(Malformed::NotUtf8.into())
+        }
+    }
 }
 
 /// 解析播放列表。`url` 为该播放列表的最终 URL（跟随重定向之后），所有相对 URI 按它解析。
 pub fn parse(text: &str, url: &Url) -> Result<Playlist, Error> {
-    if text.trim_start_matches('\u{FEFF}').trim().is_empty() {
-        return Err(Malformed::Empty.into());
-    }
-    let mut iter = lines(text);
-    match iter.next() {
-        Some(first) if matches!(&first.kind, LineKind::Tag { name, .. } if name == "EXTM3U") => {}
-        _ => return Err(Malformed::NotAPlaylist.into()),
-    }
+    check_header(text)?;
     let mut has_stream_inf = false;
     let mut has_extinf = false;
-    for line in iter {
+    for line in lines(text).skip(1) {
         if let LineKind::Tag { name, .. } = &line.kind {
             has_stream_inf |= name == "EXT-X-STREAM-INF";
             has_extinf |= name == "EXTINF";
@@ -131,6 +132,19 @@ pub fn parse(text: &str, url: &Url) -> Result<Playlist, Error> {
         (true, true) => Err(Malformed::Mixed.into()),
         (true, false) => Ok(Playlist::Master(master::parse(text, url)?)),
         (false, _) => media::parse(text, url).map(Playlist::Media),
+    }
+}
+
+/// 内容不为空，且首行是 `#EXTM3U`。
+fn check_header(text: &str) -> Result<(), Malformed> {
+    if text.trim_start_matches('\u{FEFF}').trim().is_empty() {
+        return Err(Malformed::Empty);
+    }
+    match lines(text).next() {
+        Some(first) if matches!(&first.kind, LineKind::Tag { name, .. } if name == "EXTM3U") => {
+            Ok(())
+        }
+        _ => Err(Malformed::NotAPlaylist),
     }
 }
 

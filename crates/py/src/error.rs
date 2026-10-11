@@ -77,7 +77,7 @@ variants! {
         Empty {},
         /// 第一行不是 #EXTM3U
         NotAPlaylist {},
-        /// 不是 UTF-8 文本；站点用了别的编码时在 `Hooks.on_playlist` 中转码
+        /// 首行是 #EXTM3U，但不是 UTF-8 文本；站点用了别的编码时在 `Hooks.on_playlist` 中转码
         NotUtf8 {},
         /// 同时含有主播放列表（EXT-X-STREAM-INF）与媒体播放列表（EXTINF）的标签
         Mixed {},

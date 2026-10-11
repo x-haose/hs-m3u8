@@ -1207,7 +1207,7 @@ class Malformed:
     @typing.final
     class NotUtf8(Malformed):
         r"""
-        不是 UTF-8 文本；站点用了别的编码时在 `Hooks.on_playlist` 中转码
+        首行是 #EXTM3U，但不是 UTF-8 文本；站点用了别的编码时在 `Hooks.on_playlist` 中转码
         """
         __match_args__ = ()
         def __new__(cls) -> Malformed.NotUtf8: ...
