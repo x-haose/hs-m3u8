@@ -91,10 +91,13 @@ impl Engine {
         NonZeroUsize::new(JobRequest::DEFAULT_CONCURRENCY.get() * 4).unwrap();
 
     /// `max_requests`：所有任务合计同时在途的 key、分片与点播 init 段请求数。播放列表与直播刷新时新出现的
-    /// init 段不占名额，以免直播刷新排在其他任务的大批下载之后。
+    /// init 段不占名额，以免直播刷新排在其他任务的大批下载之后。超过 [`Semaphore::MAX_PERMITS`] 的按它算：
+    /// 它远超能同时发出的请求数，同样相当于不限。
     pub fn new(max_requests: NonZeroUsize) -> Self {
         Engine {
-            requests: Arc::new(Semaphore::new(max_requests.get())),
+            requests: Arc::new(Semaphore::new(
+                max_requests.get().min(Semaphore::MAX_PERMITS),
+            )),
         }
     }
 
