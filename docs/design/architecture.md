@@ -251,7 +251,7 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 - 类型：不出现没写元素类型的 `dict` 与 `list`；`Any` 只用于 `Hooks` 的 `__new__` 与 `__init__` 的参数（不收参数，由 `__init__` 在运行时检查；子类的 `__init__` 才有意义，写成 `Any` 类型检查器才按子类的 `__init__` 检查）。调用方能据以处理的信息都是有类型的字段；只供人看的细节（播放列表语法错误的具体内容、FFmpeg 的错误说明等）是 `str`，`str(异常)` 是完整说明。
 - 路径：入参接受 `str | os.PathLike[str]`，返回的一律是 `pathlib.Path`（绝对路径）。地址是 `str`（传入时解析，返回的是解析后的规范写法），内容是 `bytes`。
 - 时长：`datetime.timedelta`；服务器要求的等待 `retry_after` 是整数秒（可能大到超出 `timedelta` 能表示的范围）。
-- 序列：返回 `tuple[T, ...]`，改不了，也就没有「改了却没生效」；传入接受任意序列。请求头传入 `Mapping[str, str]` 或 `(名, 值)` 的可迭代对象（同名可以有多个，不接受 `str`、`bytes`），保存为 `tuple[tuple[str, str], ...]`。
+- 序列：返回 `tuple[T, ...]`，改不了，也就没有「改了却没生效」；传入接受序列，不接受 `str` 与二进制缓冲区（`bytes`、`bytearray`、`memoryview` 等，它们会被拆成字符或整数）。请求头传入 `Mapping[str, str]` 或 `(名, 值)` 的可迭代对象（同名可以有多个，同样不接受 `str` 与二进制缓冲区），保存为 `tuple[tuple[str, str], ...]`。
 - 校验：请求与选项的值在构造时检查，不合要求时抛 `InvalidInputError`：计数为负、超出范围、该至少为 1 而为 0，时长为负，地址解析不了（`Source`、`Proxy.Url`、`RequestParts`），以及 `core` 公开的校验（`Source::check_url`、`check_preference`、`Proxy::check_url`、`HttpOptions::validate`、`Timeouts::validate`、`LiveOptions::validate`，规则只在 `core` 一份）。输出路径要按开始任务时的当前目录补全，在开始任务时检查。结果与异常类型的构造函数（供 pickle 与测试）只做类型转换，整数为负时是 `OverflowError`。
 - 默认值取 `core` 的（`Default` 实现与常量），绑定层不另写数字；说明里写出的默认数字（如超时 15 秒、并发 16）是照抄的，改 `core` 的默认值时同步改这些说明；可否重试、区间的分片数等也由 `core` 算好、作为字段给出，绑定层不另写规则。
 - 说明：中文，每个类、字段、方法、参数都写。请求头的值、key、代理地址里的口令不进 `__repr__`。
