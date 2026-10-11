@@ -85,8 +85,8 @@ py_check: py_stubs py_develop
 	@# 生成的文件须已提交或暂存：重新生成后与暂存区一致，且没有未纳入版本库的新文件
 	git diff --exit-code -- python/hs_m3u8
 	@test -z "$$(git ls-files --others --exclude-standard -- python/hs_m3u8)" || { git ls-files --others --exclude-standard -- python/hs_m3u8; echo "以上生成的文件未纳入版本库"; exit 1; }
-	uv run --no-sync ruff format --check python tests/python scripts
-	uv run --no-sync ruff check python tests/python scripts
+	uv run --no-sync ruff format --check python tests/python scripts examples
+	uv run --no-sync ruff check python tests/python scripts examples
 	@# 类型检查含 scripts/check_typing.py：按取值写全的 match 须是穷尽的
 	uv run --no-sync mypy
 	uv run --no-sync basedpyright --pythonpath $(PYTHON)
