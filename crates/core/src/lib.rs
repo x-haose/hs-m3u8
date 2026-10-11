@@ -53,6 +53,7 @@ pub use ident::bare_url;
 pub use info::{AudioInfo, MasterInfo, Selected, TrackInfo, VariantInfo};
 pub use output::{OutputOptions, Target};
 pub use probe::Probe;
+pub use proxy::{Bypass, ProxySource, SystemProxy, system_proxy};
 pub use report::{
     Leftover, LeftoverKind, LiveEnd, LiveReport, MissReason, Missed, Mp4Output, Output, Progress,
     RefreshCause, Stage, StallCause,

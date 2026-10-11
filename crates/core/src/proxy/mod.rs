@@ -16,7 +16,7 @@ use crate::ident::bare_url;
 
 /// 系统代理设置。不实现 `Debug`：代理地址可能带口令。
 #[derive(Clone, PartialEq, Eq)]
-pub(crate) struct SystemProxy {
+pub struct SystemProxy {
     /// 从哪里读到的
     pub source: ProxySource,
     /// 访问 http 地址时经的代理；None 时直连
@@ -42,7 +42,7 @@ impl SystemProxy {
 
 /// 系统代理设置从哪里读到。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ProxySource {
+pub enum ProxySource {
     /// 环境变量（`http_proxy`、`https_proxy`、`all_proxy`、`no_proxy` 等）
     Environment,
     /// macOS 的系统设置（网络 → 代理）
@@ -53,7 +53,7 @@ pub(crate) enum ProxySource {
 
 /// 一条不经代理的规则；主机名不区分大小写。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Bypass {
+pub enum Bypass {
     /// 所有主机
     All,
     /// 这个域名及其子域名；小写，不含首尾的点
@@ -141,9 +141,9 @@ fn glob(pattern: &str, text: &str) -> bool {
     pattern[p..].iter().all(|&c| c == '*')
 }
 
-/// 本机的系统代理设置，见模块说明；没设代理时为 None。读不出或读到用不了的值时报 [`Error::InvalidInput`]，说明是
-/// 哪一项。
-pub(crate) fn system_proxy() -> Result<Option<SystemProxy>, Error> {
+/// 本机的系统代理设置，即 [`crate::Proxy::System`] 用的；没设代理时为 None。读不出或读到用不了的值时报
+/// [`Error::InvalidInput`]，说明是哪一项。每次调用重新读取。
+pub fn system_proxy() -> Result<Option<SystemProxy>, Error> {
     let found = match env::read(&env_var) {
         Ok(None) => system::read(),
         found => found,
