@@ -467,6 +467,8 @@ impl Source {
     }
 
     /// 读下一个要写出的包。跳过未映射流的包；没有 DTS 的包计入该输出流的 `skipped`。读到末尾返回 `None`。
+    /// 用 `Packet::read` 而不是 ffmpeg-next 的 `packets()` 迭代器：后者把读错误当作读到末尾，并静默跳过
+    /// `InvalidData` 的包。
     fn read_next(&mut self, outs: &mut [OutStream]) -> Result<Option<(Packet, Mapping)>, Error> {
         loop {
             let mut packet = Packet::empty();

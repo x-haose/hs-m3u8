@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 依赖方向检查（docs/design/architecture.md 第 3 节）：各 crate 的正常依赖与构建依赖（全部目标平台）中不得出现
+# 依赖方向检查：各 crate 的正常依赖与构建依赖（全部目标平台）中不得出现
 # 所列的包。测试依赖不在此列。命中时打印依赖路径并以 1 退出。
 set -euo pipefail
 

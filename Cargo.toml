@@ -18,6 +18,7 @@ cbc = "0.2.1"
 ffmpeg-next = { version = "9.0.0", default-features = false, features = ["format", "static"] }
 http = "1.5.0"
 libc = "0.2.190"
+# abi3-py312：开启 abi3 时，3.12 起才能用 Rust 定义继承 Exception 的类（异常要带有类型的字段）；
 # experimental-async：#[pymethods] 里的 async fn 返回 Python 协程
 pyo3 = { version = "0.29.3", features = ["abi3-py312", "experimental-async", "multiple-pymethods"] }
 # 默认特性带 numpy 等类型的存根支持，用不上；infer_signature 生成参数默认值的写法

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 下载并编译本项目使用的精简 FFmpeg 静态库，安装到 third_party/ffmpeg/dist（可用第一个参数改安装目录，
 # 该目录会被整个删除重建，所以只接受不存在、为空或由本脚本装过的目录）。
-# 组件只含转封装所需（docs/adr/0002）；configure 得出的许可证不是 LGPL 时失败。
+# 组件只含转封装所需；configure 得出的许可证不是 LGPL 时失败。
 # Windows：在已加载 MSVC 环境的 MSYS2 bash 中运行，产物为 MSVC 静态库（*.lib）。
 set -euo pipefail
 

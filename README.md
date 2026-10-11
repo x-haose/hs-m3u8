@@ -12,8 +12,6 @@ HLS（m3u8）下载器。本分支是 Rust 重写：Rust 库、Python 包（`hs-
 | `crates/py`：Python 绑定（`hs_m3u8`，Python ≥ 3.12） | 可用，尚未发布到 PyPI |
 | 桌面应用（Tauri） | 未开始 |
 
-设计见 [docs/design/architecture.md](docs/design/architecture.md)，主要取舍见 [docs/adr](docs/adr)。
-
 ## 能力
 
 - 点播：TS 与 fMP4 分片、AES-128、字节范围、不连续段，视频与独立音频 rendition 合并为一个 MP4，不重编码；也可输出可直接播放的本地 HLS 目录，或两者都要。
