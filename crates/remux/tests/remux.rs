@@ -458,12 +458,12 @@ fn same_stream_kind_from_two_tracks_is_rejected() {
     );
 }
 
-/// 另一条轨提供音频时只取本轨的视频：本轨混着的音频不进输出，其编码（MP3）也不检查。
+/// 另一条轨提供音频时只取本轨的视频：本轨混着的音频不进输出，其编码（MP2）也不检查。
 #[test]
 fn unwanted_streams_are_dropped_without_codec_checks() {
     let dir = work_dir("unwanted_streams");
     let output = dir.join("out.mp4");
-    let (muxed, audio) = (track("ts_mp3"), track("fmp4_a/audio"));
+    let (muxed, audio) = (track("ts_mp2"), track("fmp4_a/audio"));
 
     let report = remux(
         &[Streams::Video, Streams::Audio],
@@ -544,24 +544,79 @@ fn resolution_change_between_groups_is_rejected() {
     );
 }
 
+/// MP2 音频，以及采样率低于 16 kHz 的 MP3（MP4 封装器不收）放不进 MP4。
 #[test]
-fn mp3_audio_is_rejected() {
-    let dir = work_dir("mp3");
+fn mp2_and_low_rate_mp3_audio_are_rejected() {
+    let dir = work_dir("rejected_audio");
     let output = dir.join("out.mp4");
 
-    let err = remux(&[Streams::All], &[group([track("ts_mp3")])], &output).unwrap_err();
+    for (name, codec) in [("ts_mp2", "mp2"), ("ts_mp3_8k", "mp3")] {
+        let err = remux(&[Streams::All], &[group([track(name)])], &output).unwrap_err();
 
-    assert!(
-        matches!(
-            err,
-            Error::Unsupported(Unsupported::Codec {
-                kind: StreamKind::Audio,
-                codec: "mp3",
-                ..
-            })
-        ),
-        "实际 {err:?}"
-    );
+        assert!(
+            matches!(
+                &err,
+                Error::Unsupported(Unsupported::Codec {
+                    kind: StreamKind::Audio,
+                    codec: found,
+                    ..
+                }) if *found == codec
+            ),
+            "{name}：实际 {err:?}"
+        );
+    }
+}
+
+/// AC-3、E-AC-3、MP3 音频：TS 里的与打包音频都原样复制，MP4 里的样本描述分别带 dac3、dec3 与 esds。
+#[test]
+fn ac3_eac3_and_mp3_audio_are_copied() {
+    let dir = work_dir("more_audio");
+    let output = dir.join("out.mp4");
+
+    for (ts, packed, codec, sample_entry) in [
+        ("ts_ac3", "ac3", "ac3", b"dac3"),
+        ("ts_eac3", "eac3", "eac3", b"dec3"),
+        ("ts_mp3", "mp3", "mp3", b"esds"),
+    ] {
+        let muxed = track(ts);
+        let report = remux(&[Streams::All], &[group([muxed.clone()])], &output).unwrap();
+        let a_in = timelines(&concat_track(&muxed, &dir, "in.ts")).1;
+        assert_eq!(
+            (report.streams[1].shape.codec(), report.streams[1].packets),
+            (codec, a_in.len() as u64),
+            "{ts}"
+        );
+        assert!(
+            std::fs::read(&output)
+                .unwrap()
+                .windows(4)
+                .any(|w| w == sample_entry),
+            "{ts} 的输出应有 {}",
+            String::from_utf8_lossy(sample_entry)
+        );
+
+        let segments = packed_fixture(packed);
+        let mut at = 900_000;
+        let mut tagged = Vec::new();
+        for (path, ticks) in &segments {
+            tagged.push(packed_segment(&dir, path, Some(at)));
+            at += ticks;
+        }
+        let audio = TrackSegments {
+            init: None,
+            segments: tagged,
+        };
+        let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
+        let packets: usize = segments
+            .iter()
+            .map(|(path, _)| timelines(path).1.len())
+            .sum();
+        assert_eq!(
+            (report.streams[0].shape.codec(), report.streams[0].packets),
+            (codec, packets as u64),
+            "{packed}"
+        );
+    }
 }
 
 /// 打包音频按各分片 ID3 里的时间戳定时：与 TS 视频的相对时刻和输入一致，缺失的分片处留出空档。

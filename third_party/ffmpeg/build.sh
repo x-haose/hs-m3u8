@@ -64,9 +64,9 @@ flags=(
   --disable-asm --enable-pic
   --disable-everything --disable-avdevice --disable-avfilter --disable-swscale --disable-swresample
   --enable-protocol=file
-  --enable-demuxer=mpegts,mov,aac
+  --enable-demuxer=mpegts,mov,aac,ac3,eac3,mp3
   --enable-muxer=mp4
-  --enable-parser=h264,hevc,aac
+  --enable-parser=h264,hevc,aac,ac3,mpegaudio
   --enable-decoder=h264,hevc,aac
   --enable-bsf=aac_adtstoasc,extract_extradata
 )

@@ -8,7 +8,9 @@
 //! - 每条轨按调用方指定的 [`Streams`] 贡献第一路视频和（或）第一路音频，没有这类流的轨不贡献（各轨合起来至少
 //!   一路），未指定种类的流不进输出、不检查编码；同一类流只能来自一条轨；后续组的流布局与编码参数必须与第一组
 //!   一致，每路流的解码时间戳必须严格递增（组内不能往回跳或重复）。
-//! - 只接受 H.264、HEVC 视频与 AAC 音频，与 FFmpeg 构建启用的组件一致。
+//! - 只接受 H.264、HEVC 视频与 AAC、AC-3、E-AC-3、MP3 音频，与 FFmpeg 构建启用的组件一致；MP3 的采样率须不低于
+//!   16 kHz（MP4 封装器不收更低的）。简化：E-AC-3 每帧不足 6 块时 MP4 封装器把相邻几帧并成一个样本，回读的包数与
+//!   写入的对不上，按核对失败报错；遇到这样的来源再改为按块数核对。
 //!
 //! 输出写完回读核对每路流的包数并落盘；失败时输出上可能留有写了一半的文件。输出要么完整、要么不存在由调用方
 //! 写到临时路径、成功后改名、失败时删除来保证。错误信息已包含原因，不经 `source()` 重复给出。
@@ -64,10 +66,16 @@ impl StreamKind {
         }
     }
 
-    fn accepts(self, id: codec::Id) -> bool {
+    fn accepts(self, id: codec::Id, shape: &Shape) -> bool {
         match self {
             StreamKind::Video => matches!(id, codec::Id::H264 | codec::Id::HEVC),
-            StreamKind::Audio => id == codec::Id::AAC,
+            StreamKind::Audio => match id {
+                codec::Id::AAC | codec::Id::AC3 | codec::Id::EAC3 => true,
+                codec::Id::MP3 => {
+                    matches!(shape, Shape::Audio { sample_rate, .. } if *sample_rate >= 16_000)
+                }
+                _ => false,
+            },
         }
     }
 }
@@ -109,7 +117,7 @@ pub enum Shape {
         height: u32,
     },
     Audio {
-        /// FFmpeg 的编码名，如 `aac`
+        /// FFmpeg 的编码名，如 `aac`、`ac3`、`eac3`、`mp3`
         codec: &'static str,
         /// Hz
         sample_rate: u32,
@@ -232,7 +240,7 @@ pub enum Error {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unsupported {
     #[error(
-        "第 {group} 组第 {track} 条轨的{kind}编码 {codec} 放不进 MP4（只支持 H.264、HEVC、AAC）"
+        "第 {group} 组第 {track} 条轨的{kind}编码 {codec} 放不进 MP4（只支持 H.264、HEVC、AAC、AC-3、E-AC-3 与采样率不低于 16 kHz 的 MP3）"
     )]
     Codec {
         group: usize,
@@ -584,7 +592,8 @@ fn open_selected(
             continue;
         };
         let id = stream.parameters().id();
-        if !kind.accepts(id) {
+        let shape = ffi::shape(&stream, kind);
+        if !kind.accepts(id, &shape) {
             return Err(Error::Unsupported(Unsupported::Codec {
                 group,
                 track,
@@ -596,7 +605,7 @@ fn open_selected(
             index: stream.index(),
             time_base: stream.time_base(),
             id,
-            shape: ffi::shape(&stream, kind),
+            shape,
         });
     }
     Ok((input, selected))
