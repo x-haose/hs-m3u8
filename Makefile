@@ -29,7 +29,7 @@ rs_check: rs_fmt rs_lint rs_clippy rs_doc rs_test rs_cov
 rs_fmt:
 	cargo fmt --all --check
 
-# 与平台无关的检查：依赖方向、压制属性、依赖的安全公告与许可证
+# 与平台无关的检查：依赖方向、压制属性与注释、依赖的安全公告与许可证
 rs_lint:
 	scripts/check_deps.sh
 	scripts/check_no_suppression.sh

@@ -38,7 +38,7 @@ hs-m3u8/
 ├── third_party/
 │   ├── ffmpeg/             FFmpeg 构建脚本：固定版本与 configure 参数
 │   └── ffmpeg-sys-next/    ffmpeg-sys-next 的本地修改版，差异见其中的 PATCHED.md
-├── scripts/                检查脚本：依赖方向、禁止压制属性
+├── scripts/                检查脚本：依赖方向、禁止压制属性与注释
 ├── tests/fixtures/         测试样本（用 ffmpeg testsrc 生成，不含第三方内容）
 └── docs/
 ```
@@ -368,7 +368,7 @@ HsM3u8Error                       retryable: bool、retry_after: int | None、se
 
 1. `cargo fmt --check`
 2. 依赖方向：`scripts/check_deps.sh` 用 `cargo tree` 断言第 3 节（含传递依赖与全部目标平台）
-3. 禁止压制属性：`scripts/check_no_suppression.sh`（`#[allow]`、`#[expect]`，含 `cfg_attr` 包裹的）
+3. 禁止压制属性与注释：`scripts/check_no_suppression.sh`（Rust 的 `#[allow]`、`#[expect]`，含 `cfg_attr` 包裹的；Python 与 README 示例里的 `noqa`（含整文件的）、`type: ignore`、`pyright:`、`mypy:`、`fmt: off/skip`、`isort: skip`）
 4. `cargo deny check`（`deny.toml`）：安全公告与撤回版本、许可证白名单（只允许宽松许可证；FFmpeg 的 LGPL 由其构建脚本检查）、禁用 OpenSSL、依赖只来自 crates.io
 5. `cargo clippy --workspace --all-targets -- -D warnings`
 6. 文档：`cargo doc --workspace --no-deps --document-private-items`，告警即失败（文档注释里的链接须都能解析）
