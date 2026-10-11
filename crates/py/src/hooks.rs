@@ -116,15 +116,12 @@ impl Hooks {
         )))
     }
 
-    /// 改写拉到的播放列表（如解密、转码），返回改写后的文本。`url` 为重定向之后的地址。基类的实现按 UTF-8 解码。
+    /// 改写拉到的播放列表（如解密、转码），返回改写后的文本；返回 None 表示不改，与没覆盖一样按 UTF-8 解析拉到的
+    /// 内容（基类的实现即如此，只改部分地址时其余的交给 `super()`）。`url` 为重定向之后的地址。
     #[pyo3(signature = (url, body, /))]
-    fn on_playlist<'py>(
-        &self,
-        url: String,
-        body: Bound<'py, PyBytes>,
-    ) -> PyResult<Bound<'py, PyString>> {
-        let _ = url;
-        PyString::from_encoded_object(&body, Some(c"utf-8"), Some(c"strict"))
+    fn on_playlist(&self, url: String, body: Bound<'_, PyBytes>) -> Option<String> {
+        let _ = (url, body);
+        None
     }
 
     /// 发出请求前修改地址与请求头（如签名），返回改过的请求（`RequestParts` 不可变，改时新建一个）。每次尝试（含
@@ -135,11 +132,13 @@ impl Hooks {
         request
     }
 
-    /// 变换拉到的 key（如站点自定义的 key 加密），返回 16 字节的 key，否则任务失败。`url` 为播放列表中的 key 地址。
+    /// 变换拉到的 key（如站点自定义的 key 加密），返回 16 字节的 key，长度不对时任务失败（`HookError`）；返回 None
+    /// 表示不改，与没覆盖一样用拉到的 key，它不是 16 字节时为 `KeyLengthError`（基类的实现即如此）。`url` 为播放列表
+    /// 中的 key 地址。
     #[pyo3(signature = (url, data, /))]
-    fn on_key<'py>(&self, url: String, data: Bound<'py, PyBytes>) -> Bound<'py, PyBytes> {
-        let _ = url;
-        data
+    fn on_key<'py>(&self, url: String, data: Bound<'py, PyBytes>) -> Option<Bound<'py, PyBytes>> {
+        let _ = (url, data);
+        None
     }
 
     /// 在解密之前变换分片（如去掉伪装成图片的前缀字节），返回变换后的内容。`url` 为播放列表中的分片地址；init 段
@@ -210,7 +209,8 @@ pub(crate) fn to_core(object: &Bound<'_, Hooks>) -> PyResult<Arc<dyn core::Hooks
 }
 
 impl PyHooks {
-    /// 调用 `method(url, data)`，用 `take` 取回结果；返回值的类型不对时报 `take` 抛的异常。
+    /// 调用 `method(url, data)`，用 `take` 取回结果；返回值的类型不对时报 `take` 抛的异常（取 `bytes` 时用
+    /// `cast`，不接受 bytearray 等可以转换的类型）。
     fn call<T>(
         &self,
         method: &str,
@@ -225,13 +225,6 @@ impl PyHooks {
                 .map_err(|failure| hook_error(py, failure))
         })
     }
-
-    /// 调用 `method(url, data)`，返回的须是 `bytes`。
-    fn transform(&self, method: &str, url: &Url, data: &[u8]) -> Result<Vec<u8>, core::HookError> {
-        self.call(method, url, data, |result| {
-            Ok(result.cast::<PyBytes>()?.as_bytes().to_vec())
-        })
-    }
 }
 
 impl core::Hooks for PyHooks {
@@ -240,9 +233,8 @@ impl core::Hooks for PyHooks {
             return Ok(None);
         }
         self.call("on_playlist", url, body, |result| {
-            result.extract::<String>()
+            result.extract::<Option<String>>()
         })
-        .map(Some)
     }
 
     fn on_request(
@@ -274,7 +266,15 @@ impl core::Hooks for PyHooks {
         if !self.key {
             return Ok(None);
         }
-        let key = self.transform("on_key", url, data)?;
+        let key = self.call("on_key", url, data, |result| {
+            if result.is_none() {
+                return Ok(None);
+            }
+            Ok(Some(result.cast::<PyBytes>()?.as_bytes().to_vec()))
+        })?;
+        let Some(key) = key else {
+            return Ok(None);
+        };
         let length = key.len();
         <[u8; 16]>::try_from(key)
             .map(Some)
@@ -289,7 +289,9 @@ impl core::Hooks for PyHooks {
         if !self.segment {
             return Ok(data);
         }
-        self.transform("on_segment", url, &data)
+        self.call("on_segment", url, &data, |result| {
+            Ok(result.cast::<PyBytes>()?.as_bytes().to_vec())
+        })
     }
 }
 

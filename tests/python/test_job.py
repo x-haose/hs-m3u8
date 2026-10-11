@@ -31,6 +31,7 @@ from hs_m3u8 import (
     InvalidInputError,
     JobCancelledError,
     JobRequest,
+    KeyLengthError,
     KeyOverride,
     Leftover,
     LeftoverKind,
@@ -413,7 +414,7 @@ def test_key_overrides_decrypt_with_their_iv(server: Server, tmp_path: Path) -> 
     assert server.hits("key.bin") == 0
 
 
-def test_key_hooks_return_the_key_and_other_lengths_fail_the_hook(server: Server, tmp_path: Path) -> None:
+def test_key_hooks_return_the_key_or_none_and_other_lengths_fail_the_hook(server: Server, tmp_path: Path) -> None:
     # key 地址给的是逐字节取反的 key；播放列表写对 IV（样本见上一个测试）
     key, iv = bytes(range(16)), bytes(range(16, 32))
     server.put("index.m3u8", ENCRYPTED.replace(f"IV=0x{bytes(16).hex()}", f"IV=0x{iv.hex()}"))
@@ -432,14 +433,27 @@ def test_key_hooks_return_the_key_and_other_lengths_fail_the_hook(server: Server
             del url
             return data[:15]
 
+    # 交给基类即不改：拉到的 key 长度不对是来源的问题，不算回调的
+    class Delegate(Hooks):
+        def on_key(self, url: str, data: bytes) -> bytes | None:
+            return super().on_key(url, data)
+
     with pytest.raises(HookError) as truncated:
         run(JobRequest(Source(server.url("index.m3u8"), hooks=Truncate()), output))
     decrypted = run(JobRequest(Source(server.url("index.m3u8"), hooks=Invert()), output))
+    server.put("key.bin", bytes(15))
+    with pytest.raises(KeyLengthError) as short:
+        run(
+            JobRequest(
+                Source(server.url("index.m3u8"), hooks=Delegate()), OutputOptions(Target.Mp4(tmp_path / "short.mp4"))
+            )
+        )
 
     assert truncated.value.hook == HookKind.Key()
     assert truncated.value.__cause__ is None
     assert truncated.value.key_url == server.url("key.bin")
     assert decrypted.segments == 2
+    assert short.value.length == 15
 
 
 def test_segment_hooks_transform_segments_before_they_are_checked(server: Server, tmp_path: Path) -> None:

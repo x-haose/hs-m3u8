@@ -428,18 +428,21 @@ class Hooks:
         不收参数（签名与构造函数相同，类型检查器与 stubtest 按此核对）：没定义 `__init__` 的子类传了参数时抛
         `TypeError`。
         """
-    def on_playlist(self, url: builtins.str, body: bytes, /) -> str:
+    def on_playlist(self, url: builtins.str, body: bytes, /) -> typing.Optional[builtins.str]:
         r"""
-        改写拉到的播放列表（如解密、转码），返回改写后的文本。`url` 为重定向之后的地址。基类的实现按 UTF-8 解码。
+        改写拉到的播放列表（如解密、转码），返回改写后的文本；返回 None 表示不改，与没覆盖一样按 UTF-8 解析拉到的
+        内容（基类的实现即如此，只改部分地址时其余的交给 `super()`）。`url` 为重定向之后的地址。
         """
     def on_request(self, purpose: Purpose, request: RequestParts, /) -> RequestParts:
         r"""
         发出请求前修改地址与请求头（如签名），返回改过的请求（`RequestParts` 不可变，改时新建一个）。每次尝试（含
         重试）调用一次；改后的请求不合法时任务失败。
         """
-    def on_key(self, url: builtins.str, data: bytes, /) -> bytes:
+    def on_key(self, url: builtins.str, data: bytes, /) -> typing.Optional[bytes]:
         r"""
-        变换拉到的 key（如站点自定义的 key 加密），返回 16 字节的 key，否则任务失败。`url` 为播放列表中的 key 地址。
+        变换拉到的 key（如站点自定义的 key 加密），返回 16 字节的 key，长度不对时任务失败（`HookError`）；返回 None
+        表示不改，与没覆盖一样用拉到的 key，它不是 16 字节时为 `KeyLengthError`（基类的实现即如此）。`url` 为播放列表
+        中的 key 地址。
         """
     def on_segment(self, url: builtins.str, data: bytes, /) -> bytes:
         r"""
