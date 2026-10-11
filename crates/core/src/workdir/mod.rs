@@ -20,9 +20,12 @@ mod names;
 mod outputs;
 mod record;
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, TryLockError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 pub(crate) use self::names::{SegmentName, SessionStart};
 use self::names::{init_file_name, parse_init_name, parse_segment_name, segment_file_name};
@@ -97,10 +100,43 @@ impl Layout {
     }
 }
 
-/// 任务目录的排他锁：同一任务目录同一时间只有一个任务。
+/// 任务目录的排他锁：同一任务目录同一时间只有一个任务。加了锁的锁文件登记在 [`HELD`]，drop 时取出关闭，即释放。
 pub(crate) struct Lock {
-    /// 加了锁的锁文件，关闭（drop）即释放
-    _file: File,
+    /// 在 [`HELD`] 里的编号
+    id: u64,
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        held().remove(&self.id);
+    }
+}
+
+/// 本进程持有的锁文件，按 [`Lock`] 的编号。锁跟着打开的文件走，fork 出的子进程也就继承了它们，见 [`prepare_fork`]。
+static HELD: Mutex<BTreeMap<u64, File>> = Mutex::new(BTreeMap::new());
+
+fn held() -> MutexGuard<'static, BTreeMap<u64, File>> {
+    HELD.lock()
+        .expect("持锁期间只做插入、删除与清空，不会 panic")
+}
+
+/// fork 之前调用；fork 之后在子进程里调用返回值的 [`ForkGuard::child`]，在父进程里丢弃它。
+///
+/// fork 出的子进程继承父进程打开的文件，也就继承了任务目录的锁：父进程的任务结束、关掉自己那份之后锁仍在，直到
+/// 子进程退出，期间续传或放弃这个任务都报 [`WorkDirProblem::Locked`]。子进程关掉继承来的锁文件即可，父进程的锁
+/// 不受影响。返回的 [`ForkGuard`] 拿着登记表的锁，fork 期间别的线程改不了登记。
+pub fn prepare_fork() -> ForkGuard {
+    ForkGuard(held())
+}
+
+/// 见 [`prepare_fork`]。
+pub struct ForkGuard(MutexGuard<'static, BTreeMap<u64, File>>);
+
+impl ForkGuard {
+    /// fork 出的子进程里调用：关掉从父进程继承来的锁文件。
+    pub fn child(mut self) {
+        self.0.clear();
+    }
 }
 
 /// 已打开并加锁的任务目录；锁在 drop 时释放。
@@ -421,7 +457,12 @@ fn acquire(root: &Path) -> Result<Lock, Error> {
         .open(&path)
         .map_err(io_error("创建", &path))?;
     match file.try_lock() {
-        Ok(()) => Ok(Lock { _file: file }),
+        Ok(()) => {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let id = NEXT.fetch_add(1, Ordering::Relaxed);
+            held().insert(id, file);
+            Ok(Lock { id })
+        }
         Err(TryLockError::WouldBlock) => Err(Error::WorkDir {
             path: root.to_path_buf(),
             problem: WorkDirProblem::Locked,

@@ -16,7 +16,7 @@ use crate::request::{JobRequest, OutputOptions, Source, Unsettled};
 use crate::runtime::{self, Owner};
 
 /// 下载引擎：所有任务共用一个在途请求上限。异步方法返回协程，在 asyncio 事件循环里 await；协程被取消时，所等的操作
-/// 随之取消。只能在建立它的进程里使用，fork 出的子进程要另建。
+/// 随之取消。只能在建立它的进程里使用，fork 出的子进程要另建；fork 时正在运行的任务所用的任务目录，子进程不占着。
 ///
 /// `max_requests`：所有任务合计同时在途的 key、分片与点播 init 段请求数，至少 1，默认为每个任务默认并发的四倍。
 /// 播放列表与直播刷新时新出现的 init 段不占名额，以免直播刷新排在其他任务的大批下载之后。
@@ -71,13 +71,13 @@ impl Engine {
     fn start(&self, py: Python<'_>, request: &Bound<'_, JobRequest>) -> PyResult<Job> {
         self.owner.check("Engine")?;
         let request = request.get().to_core(py)?;
-        let runtime = runtime::get()?;
+        let runtime = runtime::handle()?;
         let job = {
             let _entered = runtime.enter();
             self.inner.start(request)
         };
         let job = job.map_err(|error| to_pyerr(py, error))?;
-        Ok(Job::spawn(runtime, job))
+        Ok(Job::spawn(&runtime, job))
     }
 
     /// 不联网，只把任务目录中已录到的直播分片写成输出；用于中断后不再续录、或来源已取不到的录制。进度给出已录的
@@ -86,13 +86,13 @@ impl Engine {
     /// 再次运行即可续传）；目录不存在或没有已完成的分片时抛 `NothingRecordedError`。结果的 `LiveReport.end` 为 None。
     fn merge_recorded(&self, py: Python<'_>, output: OutputOptions) -> PyResult<Job> {
         self.owner.check("Engine")?;
-        let runtime = runtime::get()?;
+        let runtime = runtime::handle()?;
         let job = {
             let _entered = runtime.enter();
             self.inner.merge_recorded(output.to_core())
         };
         let job = job.map_err(|error| to_pyerr(py, error))?;
-        Ok(Job::spawn(runtime, job))
+        Ok(Job::spawn(&runtime, job))
     }
 
     /// 放弃任务：删除任务目录 `work_dir`（相对路径按当前目录补全），只删本库写的文件。先按其中的记录收拾写到一半的

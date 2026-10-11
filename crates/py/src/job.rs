@@ -8,7 +8,7 @@ use pyo3::panic::PanicException;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
-use tokio::runtime::Runtime;
+use tokio::runtime::Handle;
 use tokio::sync::watch;
 
 use crate::error::to_pyerr;
@@ -58,7 +58,7 @@ impl Failure {
 impl Job {
     /// 在 `runtime` 上等 `job` 结束，把结果交给各次 `wait`。等待的后台任务随 `job` 结束而结束：`Job` 被回收时取消
     /// `job`，core 保证取消后任务会结束。
-    pub(crate) fn spawn(runtime: &Runtime, job: core::Job) -> Job {
+    pub(crate) fn spawn(runtime: &Handle, job: core::Job) -> Job {
         let control = job.control();
         let (sender, finished) = watch::channel(None);
         runtime.spawn(async move {
@@ -79,24 +79,32 @@ impl Job {
     }
 }
 
+/// fork 出的子进程里回收时什么也不做：任务在父进程的运行时上（见 [`Owner`]）。
 impl Drop for Job {
     fn drop(&mut self) {
-        self.control.cancel();
+        if self.owner.is_current() {
+            self.control.cancel();
+        }
     }
 }
 
-/// 等待被取消（协程被丢弃）时取消任务；正常拿到结果后解除。
-struct CancelOnDrop(Option<core::JobControl>);
+/// 等待被取消（协程被丢弃）时取消任务，在 fork 出的子进程里除外（同 `Job`）；正常拿到结果后解除。
+struct CancelOnDrop {
+    control: Option<core::JobControl>,
+    owner: Owner,
+}
 
 impl CancelOnDrop {
     fn disarm(&mut self) {
-        self.0 = None;
+        self.control = None;
     }
 }
 
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
-        if let Some(control) = self.0.take() {
+        if let Some(control) = self.control.take()
+            && self.owner.is_current()
+        {
             control.cancel();
         }
     }
@@ -132,7 +140,10 @@ impl Job {
     async fn wait(&self) -> PyResult<Output> {
         self.owner.check("Job")?;
         let mut finished = self.finished.clone();
-        let mut cancel_on_drop = CancelOnDrop(Some(self.control.clone()));
+        let mut cancel_on_drop = CancelOnDrop {
+            control: Some(self.control.clone()),
+            owner: self.owner,
+        };
         let finished = finished
             .wait_for(Option::is_some)
             .await

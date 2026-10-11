@@ -3,6 +3,8 @@
 import asyncio
 import copy
 import errno
+import gc
+import os
 import pickle
 import sys
 from datetime import timedelta
@@ -423,6 +425,51 @@ def test_live_recordings_end_at_endlist_and_report_missing_segments(server: Serv
     assert (progress.segments_done, progress.segments_failed, progress.segments_expired) == (1, 1, 0)
     # 读到的字节含播放列表与取不到的请求，多于写进任务目录的分片
     assert progress.received > progress.bytes > 0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows 没有 fork")
+# 测的就是在多线程进程里 fork；子进程只回收对象、等管道、退出，不做会死锁的事
+@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
+def test_forked_children_hold_no_work_dir_locks_and_leave_parent_jobs_alone(server: Server, tmp_path: Path) -> None:
+    put_media(server, VOD)
+    gate = server.gate("seg1.ts")
+    request = one_at_a_time(server, Target.Mp4(tmp_path / "out.mp4"))
+    # 子进程等父进程续传完再退出（父进程退出时管道也会关上）：它活着时父进程照样能续传
+    parent_done, wait_parent = os.pipe()
+    children: list[int] = []
+
+    async def main() -> Output:
+        engine = Engine()
+        job = engine.start(request)
+        await arrived(gate)
+        pid = os.fork()
+        if pid == 0:
+            # 子进程：回收继承来的任务不碰父进程的运行时，没有无法抛出的异常；退出码 0 为是
+            code = 1
+            try:
+                unraisable: list[object] = []
+                sys.unraisablehook = unraisable.append
+                del job
+                gc.collect()
+                os.read(parent_done, 1)
+                code = 3 if unraisable else 0
+            finally:
+                os._exit(code)
+        children.append(pid)
+        job.cancel()
+        with pytest.raises(JobCancelledError):
+            await job.wait()
+        gate.release()
+        return await engine.start(request).wait()
+
+    try:
+        output = asyncio.run(main())
+    finally:
+        os.write(wait_parent, b"\0")
+        exit_codes = [os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]) for pid in children]
+
+    assert output.segments == 2
+    assert exit_codes == [0]
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="只有 Windows 造得出读不到的根（不存在的盘符）")

@@ -27,6 +27,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     job::register(module)?;
     report::register(module)?;
     request::register(module)?;
+    runtime::register(module)?;
     Ok(())
 }
 
