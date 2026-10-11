@@ -2,8 +2,8 @@
 //!
 //! 每个进程一个运行时，第一次用到时建立，解释器退出前关闭（见 [`shutdown`]）。经 `os.fork`（含 multiprocessing 的
 //! fork 方式）fork 出的子进程里没有父进程运行时的工作线程，也没有父进程建立的任务与在途请求：子进程第一次用到时
-//! 另建运行时；父进程建立的引擎、任务与协程在子进程里拒绝使用，回收时不销毁（见 [`Owned`]）；继承来的任务目录锁
-//! 在子进程里关掉（见 `core::prepare_fork`）。
+//! 另建运行时（macOS 上不建，见 [`after_fork_in_child`]）；父进程建立的引擎、任务与协程在子进程里拒绝使用，回收时
+//! 不销毁（见 [`Owned`]）；继承来的任务目录锁在子进程里关掉（见 `core::prepare_fork`）。
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -32,9 +32,15 @@ enum Slot {
     /// 还没用到
     Empty,
     Running(Runtime),
-    /// 解释器正在退出，已关闭，不再建立
-    Closed,
+    /// 不再建立，用到时抛 `RuntimeError`，值为原因：解释器正在退出（[`EXITING`]），或在 macOS 上 fork 出的子进程里
+    /// （[`FORKED_ON_MACOS`]）
+    Refused(&'static str),
 }
+
+const EXITING: &str = "解释器正在退出，不再开始新的操作";
+
+/// 证书校验与读取系统代理要用 Apple 的系统框架，它们在多线程进程 fork 出的子进程里不可用，一用就使进程崩溃。
+const FORKED_ON_MACOS: &str = "macOS 上 fork 出的子进程不能使用本库：证书校验与读取系统代理要用的系统框架在 fork 之后不可用；改用 multiprocessing 的 spawn 方式";
 
 /// fork 的代次：子进程里加一。对象记下建立时的代次，不同即是从父进程继承来的。
 static GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -43,12 +49,12 @@ fn runtime() -> MutexGuard<'static, Slot> {
     RUNTIME.lock().expect("持锁期间不会 panic")
 }
 
-/// 本进程的运行时，第一次用到时建立；解释器正在退出时抛 `RuntimeError`。
+/// 本进程的运行时，第一次用到时建立；不再建立时（见 [`Slot::Refused`]）抛 `RuntimeError`。
 pub(crate) fn handle() -> PyResult<Handle> {
     let mut slot = runtime();
     match &*slot {
         Slot::Running(runtime) => Ok(runtime.handle().clone()),
-        Slot::Closed => Err(PyRuntimeError::new_err("解释器正在退出，不再开始新的操作")),
+        Slot::Refused(reason) => Err(PyRuntimeError::new_err(*reason)),
         Slot::Empty => {
             let built = Builder::new_multi_thread()
                 .enable_all()
@@ -69,7 +75,7 @@ const SIGNAL_CHECK: Duration = Duration::from_millis(100);
 /// 等待期间释放 GIL，回调才执行得完；Ctrl+C 放弃等待，这时仍在执行的回调可能使进程异常退出。
 #[pyfunction]
 fn shutdown(py: Python<'_>) -> PyResult<()> {
-    let Slot::Running(runtime) = std::mem::replace(&mut *runtime(), Slot::Closed) else {
+    let Slot::Running(runtime) = std::mem::replace(&mut *runtime(), Slot::Refused(EXITING)) else {
         return Ok(());
     };
     let (closed, done) = mpsc::channel::<Infallible>();
@@ -235,6 +241,7 @@ fn after_fork_in_parent() {
     FORKING.with_borrow_mut(Option::take);
 }
 
+/// 关掉继承来的任务目录锁，不用继承来的运行时；macOS 上此后不再建立运行时（见 [`FORKED_ON_MACOS`]）。
 #[pyfunction]
 fn after_fork_in_child() {
     let locks = FORKING
@@ -242,7 +249,12 @@ fn after_fork_in_child() {
         .expect("fork 前已拿到");
     locks.child();
     GENERATION.fetch_add(1, Ordering::Relaxed);
-    if let Slot::Running(inherited) = std::mem::replace(&mut *runtime(), Slot::Empty) {
+    let next = if cfg!(target_os = "macos") {
+        Slot::Refused(FORKED_ON_MACOS)
+    } else {
+        Slot::Empty
+    };
+    if let Slot::Running(inherited) = std::mem::replace(&mut *runtime(), next) {
         // 销毁要等它的工作线程退出，而它们不在子进程里
         std::mem::forget(inherited);
     }

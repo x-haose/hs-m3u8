@@ -119,6 +119,15 @@ def discard(work_dir: Path) -> tuple[Leftover, ...]:
     return asyncio.run(Engine().discard(work_dir))
 
 
+def probe_refused(url: str) -> bool:
+    """在新的事件循环里用新的 Engine 探测 `url`：本库以 RuntimeError 拒绝时为 True。"""
+    try:
+        asyncio.run(Engine().probe(Source(url)))
+    except RuntimeError:
+        return True
+    return False
+
+
 async def arrived(gate: Gate) -> None:
     assert await asyncio.to_thread(gate.arrived.wait, ARRIVAL)
 
@@ -522,15 +531,20 @@ def test_forked_children_hold_no_work_dir_locks_and_leave_parent_jobs_alone(serv
         await arrived(gate)
         pid = os.fork()
         if pid == 0:
-            # 子进程：回收继承来的任务不碰父进程的运行时，没有无法抛出的异常；退出码 0 为是
+            # 子进程：回收继承来的任务不碰父进程的运行时，没有无法抛出的异常；另建的 Engine 能用，macOS 上则明确拒绝
+            # （系统框架在 fork 之后不可用）。都对时退出码为 0
             code = 1
             try:
                 unraisable: list[object] = []
                 sys.unraisablehook = unraisable.append
                 del job
                 gc.collect()
+                refused: list[bool] = []
+                probing = threading.Thread(target=lambda: refused.append(probe_refused(server.url("index.m3u8"))))
+                probing.start()
+                probing.join()
                 os.read(parent_done, 1)
-                code = 3 if unraisable else 0
+                code = 3 if unraisable else 4 if refused != [sys.platform == "darwin"] else 0
             finally:
                 os._exit(code)
         children.append(pid)
