@@ -7,6 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hs_m3u8_core as core;
+use pyo3::PyTraverseError;
+use pyo3::gc::PyVisit;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString, PyTuple};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
@@ -368,6 +370,12 @@ impl Source {
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyTuple>)> {
         reduce(slf.as_any(), &["url", "preference", "http", "hooks"])
     }
+
+    /// 回调对象常引用来源（如存着用到它的请求），引用环要靠垃圾回收器经这里找到。
+    #[gen_stub(skip)]
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.hooks)
+    }
 }
 
 variants! {
@@ -674,6 +682,12 @@ impl JobRequest {
             slf.as_any(),
             &["source", "output", "key", "concurrency", "live"],
         )
+    }
+
+    /// 见 `Source.__traverse__`。
+    #[gen_stub(skip)]
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.source)
     }
 }
 

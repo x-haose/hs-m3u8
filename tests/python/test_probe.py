@@ -1,9 +1,11 @@
 """探测：选轨结果与各轨概况、回调、失败时抛出的异常。"""
 
 import asyncio
+import gc
 import os
 import subprocess
 import sys
+import weakref
 from datetime import timedelta
 
 import pytest
@@ -19,8 +21,10 @@ from hs_m3u8 import (
     HttpErrorKind,
     HttpOptions,
     InvalidInputError,
+    JobRequest,
     LiveOptions,
     Malformed,
+    OutputOptions,
     PlaylistError,
     Preference,
     Probe,
@@ -33,6 +37,7 @@ from hs_m3u8 import (
     SelectFailure,
     Source,
     SourceUnsupported,
+    Target,
     Timeouts,
     VariantChoice,
 )
@@ -163,6 +168,20 @@ def test_hooks_may_take_arguments_and_rename_parameters(server: Server) -> None:
 
     assert result.tracks[0].segments == 2
     assert ("x-token", "t") in server.headers("media.m3u8")
+
+
+def test_hooks_referring_back_to_their_request_are_collected() -> None:
+    # 回调 → 请求 → 来源 → 回调：请求与来源都要向垃圾回收器报出它们引用的对象
+    class Holder(Hooks):
+        request: JobRequest | None = None
+
+    hooks = Holder()
+    hooks.request = JobRequest(Source("https://example.com/a.m3u8", hooks=hooks), OutputOptions(Target.Mp4("a.mp4")))
+    collected = weakref.ref(hooks)
+    del hooks
+    gc.collect()
+
+    assert collected() is None
 
 
 def test_hook_failures_carry_the_original_exception(server: Server) -> None:
