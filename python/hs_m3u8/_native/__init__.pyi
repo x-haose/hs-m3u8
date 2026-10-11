@@ -450,7 +450,8 @@ class HsM3u8Error(builtins.Exception):
     r"""
     本库所有异常的基类。`str(异常)` 是完整说明（地址只显示到路径，不含查询串与凭据）。
     
-    各异常类都能构造（如在测试里模拟失败）：说明按位置给出，其余按关键字，本类的属性可省略。可以 pickle 与 copy。
+    各异常类都能构造（如在测试里模拟失败）：说明按位置给出，其余按关键字，本类的属性可省略；Python 里继承它们时，
+    子类须保持这个构造签名，构造与 pickle 都按它调用。可以 pickle 与 copy，只保证同一版本之间。
     """
     @property
     def retryable(self) -> builtins.bool:

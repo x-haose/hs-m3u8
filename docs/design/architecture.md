@@ -235,9 +235,9 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
   - 数据类不可变，按值比较、可哈希（`Source` 里的回调按对象身份），带按字段列出的 `__repr__`；都有构造函数，除 `Source` 的地址、`JobRequest` 的来源与输出、`OutputOptions` 的输出等打头的参数外只能按关键字传，结果类型的各参数都必须给（用于在测试里模拟结果）；
   - 枚举的每种取值是一个子类，带数据的（如变体选择、录制的结束原因）与不带数据的（如 `Stage.Writing()`）一样，用 `match` 或 `isinstance` 分辨：PyO3 的简单枚举在运行时不是 `enum.Enum`，pyo3-stub-gen 却把它写成 `enum.Enum` 的子类，存根与运行时对不上。存根里属性与返回值的类型写成各取值类的并集（如 `Stage.Preparing | … | Stage.Done`），按取值写全的 `match` 才是穷尽的，漏写时类型检查器报错；参数的类型写基类；
   - 异常也是 PyO3 类（继承 `Exception`），属性带类型；构造函数为 `(message, *, 自己的属性, 基类的属性可省略)`。PyO3 不给原生基类传参数，说明由 `__init__` 放进 `args`，`__init__` 与构造函数签名相同，类型检查器与 stubtest 才对得上；
-  - 数据类、枚举取值与异常都能 pickle 与 copy：`__reduce__` 交出 `functools.partial(类, 各属性)`，按关键字调用构造函数重建；进程池在进程之间传参数、结果与异常要用到；
+  - 数据类、枚举取值与异常都能 pickle 与 copy：`__reduce__` 交出 `functools.partial(类, 各属性)`，按关键字调用构造函数重建；进程池在进程之间传参数、结果与异常要用到。只保证同一版本之间：格式里没有版本号，字段改了含义时旧数据会被按新含义读出。异常的 Python 子类须保持基类的构造签名，构造与 pickle 都按它调用；
   - 回调基类 `Hooks` 是可被 Python 继承的 PyO3 类。
-- 类型存根（`python/hs_m3u8/_native/__init__.pyi`）由 pyo3-stub-gen 从这些 Rust 定义生成，说明取自 `///`：存根写的类型就是运行时实际的类型。默认值不是字面量的几个构造函数（`Engine`、`Timeouts`、`RetryPolicy`、`LiveOptions`、`JobRequest`），签名以存根语法手写在 `crates/py` 里对应类型的旁边，默认值写 `...`：PyO3 的运行时签名把这类默认值显示为 `...`，生成的存根却写出具体的值（时长的写法语法都不对），stubtest 核对不过；参数与默认值的有无仍由 stubtest 核对。
+- 类型存根（`python/hs_m3u8/_native/__init__.pyi`）由 pyo3-stub-gen 从这些 Rust 定义生成，说明取自 `///`：存根写的类型就是运行时实际的类型。默认值是整数、时长或 `Some(...)` 的几个构造函数（`Engine`、`Timeouts`、`RetryPolicy`、`LiveOptions`、`JobRequest`），签名以存根语法手写在 `crates/py` 里对应类型的旁边，默认值写 `...`：PyO3 的运行时签名把这类默认值显示为 `...`，生成的存根却写出具体的值（时长的写法语法都不对），stubtest 核对不过；其余不是字面量的默认值（如 `Preference()`）两边都写 `...`，不必手写。参数与默认值的有无仍由 stubtest 核对。
 - `python/hs_m3u8`：`__init__.py`（再导出全部公开名字）同样由 pyo3-stub-gen 生成，带 `py.typed`。
 - 只提供异步接口，脚本用 `asyncio.run(...)`：同步版本只是它的包装；核心的写法保证进程在任何时刻退出都不留半个输出、可以续传，Ctrl+C 不需要特殊处理。
 - PyO3 0.29.3（`experimental-async`：异步方法返回 Python 协程，`asyncio.run`、`create_task` 都能直接用）+ maturin 1.15.0 + pyo3-stub-gen 0.23.1；`abi3-py312` wheel（最低 Python 3.12，见 ADR-0001），FFmpeg 静态链接进扩展模块。
@@ -262,7 +262,7 @@ StrPath = str | os.PathLike[str]  # 本节的简写；包里不定义它，存�
 
 
 class Engine:
-    def __init__(self, *, max_requests: int = ...) -> None: ...  # 所有任务合计的在途请求数，默认见 core
+    def __new__(cls, *, max_requests: int = ...) -> Engine: ...  # 所有任务合计的在途请求数，默认见 core
     async def probe(self, source: Source) -> Probe: ...
     def start(self, request: JobRequest) -> Job: ...  # 参数错误立即抛出
     def merge_recorded(self, output: OutputOptions) -> Job: ...
@@ -327,7 +327,6 @@ HsM3u8Error                       retryable: bool、retry_after: int | None、se
 
 `SelectFailure`、`Mp4Unsupported`、`HlsUnsupported`、`SourceUnsupported`（其中不支持的加密为 `Encrypted(url, line, encryption)`，`Encryption`：`SampleAes()`、`Drm(keyformat)`、`Method(name)`）、`IntegrityFailure`、`StallReason`、`WorkDirProblem` 都是带数据的枚举，取值与字段同 `core` 的对应类型；`HookKind`：`Playlist()`、`Request()`、`Key()`、`Segment()`；`JobType`（`WorkDirProblem.KindMismatch` 用）：`Vod()`、`Live()`。
 
-0.1.x 的对应关系：`key` → `JobRequest(key=KeyOverride(...))`；`get_m3u8_func` → `Hooks.on_playlist`；`*_request_before` → `Hooks.on_request`；`key_response_after` → `Hooks.on_key`；`ts_response_after` → `Hooks.on_segment`；`merge`、`del_hls` → `Target`。
 
 ### 7.4 质量门
 
@@ -388,6 +387,7 @@ HsM3u8Error                       retryable: bool、retry_after: int | None、se
 
 1. 高并发下 Python 回调的 GIL 竞争（`on_segment` 每个分片调用一次）。
 2. 资源嗅探的注入脚本（GUI 阶段）。
+3. PyO3 的 `experimental-async`（异步方法返回协程）官方仍标为开发中：升级 PyO3 后，协程的取消、丢弃与跨线程唤醒的行为靠 Python 端到端测试兜住。
 
 待定：
 
@@ -395,4 +395,4 @@ HsM3u8Error                       retryable: bool、retry_after: int | None、se
 
 ## 依据的版本（2026-10-08 查 crates.io）
 
-tokio 1.53.2、tokio-util 0.7.19、rustls 0.23.45 与 tokio-rustls 0.26.6（2026-10-10，取 Cargo.lock 中 reqwest 已用的版本；后者仅测试用）、reqwest 0.13.5、axum 0.8.9（2026-10-09 查，仅测试用）、aes 0.9.3、cbc 0.2.1、url 2.5.8、thiserror 2.0.21、serde 1.0.229、serde_json 1.0.151、sha2 0.11.0、rusqlite 0.40.2、pyo3 0.29.3、maturin 1.15.0、ffmpeg-next 9.0.0、tauri 2.12.1、cargo-deny 0.20.2、cargo-llvm-cov 0.9.1（2026-10-09 查）、libc 0.2.190（2026-10-10 查，仅测试用）、pyo3-stub-gen 0.23.1，以及 Python 侧的开发工具 mypy 2.4.0、basedpyright 1.40.2、ruff 0.17.0、pytest 9.1.1（2026-10-11 查）。
+tokio 1.53.2、tokio-util 0.7.20、http 1.5.0（2026-10-11 查，已在依赖树中）、rustls 0.23.45 与 tokio-rustls 0.26.6（2026-10-10，取 Cargo.lock 中 reqwest 已用的版本；后者仅测试用）、reqwest 0.13.5、axum 0.8.9（2026-10-09 查，仅测试用）、aes 0.9.3、cbc 0.2.1、url 2.5.8、thiserror 2.0.21、serde 1.0.229、serde_json 1.0.151、sha2 0.11.0、rusqlite 0.40.2、pyo3 0.29.3、maturin 1.15.0、ffmpeg-next 9.0.0、tauri 2.12.1、cargo-deny 0.20.2、cargo-llvm-cov 0.9.1（2026-10-09 查）、libc 0.2.190（2026-10-10 查，仅测试用）、pyo3-stub-gen 0.23.1，以及 Python 侧的开发工具 mypy 2.4.0、basedpyright 1.40.2、ruff 0.17.0、pytest 9.1.1（2026-10-11 查）。
