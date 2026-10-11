@@ -112,7 +112,13 @@ class Server:
             self._statuses[path] = (code, list(headers))
 
     def gate(self, path: str) -> Gate:
-        """之后对 `path` 的请求先停住，等返回的闸门放行。"""
+        """之后对 `path` 的请求先停住，等返回的闸门放行。
+
+        只用于 HTTP：闸门用 MSG_PEEK 查客户端是否断开，TLS 套接字不支持。
+        """
+        if self._scheme != "http":
+            message = "闸门只用于 HTTP 服务"
+            raise NotImplementedError(message)
         gate = Gate()
         with self._lock:
             self._gates[path] = gate

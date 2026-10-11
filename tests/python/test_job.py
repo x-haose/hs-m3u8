@@ -301,7 +301,8 @@ def test_interrupted_recordings_can_be_merged_without_the_network(server: Server
         job = Engine().start(request)
         await arrived(gate)
         job.cancel()
-        gate.release()
+        # 等客户端放弃停住的请求，不放行：放行的话取消与响应同时就绪，seg1 可能照样下完
+        assert await asyncio.to_thread(gate.abandoned.wait, ARRIVAL)
         with pytest.raises(JobCancelledError):
             await job.wait()
 
@@ -561,6 +562,14 @@ def test_unreachable_work_dirs_fail_or_are_reported_as_asked() -> None:
     assert [(leftover.path, leftover.kind) for leftover in leftovers] == [(work_dir, LeftoverKind.WorkDir())]
 
 
+class Tagger(Hooks):
+    """带状态的回调；定义在模块里，pickle 才找得到这个类。"""
+
+    def __init__(self, tag: str) -> None:
+        """`tag` 即同名属性。"""
+        self.tag = tag
+
+
 def test_requests_survive_pickle_by_value(tmp_path: Path) -> None:
     source = Source(
         "https://example.com/a.m3u8?token=t",
@@ -591,6 +600,10 @@ def test_requests_survive_pickle_by_value(tmp_path: Path) -> None:
         assert_survives_pickle(value)
     assert request != JobRequest(source, output)
     assert hash(request) == hash(pickle.loads(pickle.dumps(request)))
+    # 回调按对象身份比较，重建出的是另一个对象：只能看它的类与状态
+    rebuilt = pickle.loads(pickle.dumps(Source("https://example.com/a.m3u8", hooks=Tagger("t"))))
+    assert isinstance(rebuilt.hooks, Tagger)
+    assert rebuilt.hooks.tag == "t"
 
 
 def test_invalid_job_arguments_are_reported_and_keys_stay_out_of_reprs(server: Server, tmp_path: Path) -> None:
