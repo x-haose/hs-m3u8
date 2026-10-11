@@ -182,7 +182,7 @@ impl Job {
 
     /// 等任务结束，返回输出；失败时抛 `HsM3u8Error` 的子类，本库内部出错时抛 `pyo3_runtime.PanicException`，解释器
     /// 正在退出（运行时已关闭）时抛 `RuntimeError`。可多次等待，得到同一结果或同一异常；等待的协程被取消时任务也取消。
-    async fn wait(&self) -> PyResult<Output> {
+    pub(crate) async fn wait(&self) -> PyResult<Output> {
         let running = self.running.get("Job")?;
         runtime::require_event_loop()?;
         let mut finished = running.finished.clone();

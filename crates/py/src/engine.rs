@@ -1,16 +1,16 @@
-//! 下载引擎：持有跨任务共享的在途请求上限。
+//! 下载引擎：持有跨任务共享的在途请求上限；`download` 按默认设置下载一次。
 
 use std::num::NonZeroUsize;
 
 use hs_m3u8_core as core;
 use pyo3::prelude::*;
-use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
 
-use crate::convert::{Positive, PyPath, Seq};
+use crate::convert::{Address, Headers, Positive, PyPath, Seq};
 use crate::error::to_pyerr;
 use crate::info::Probe;
 use crate::job::Job;
-use crate::report::Leftover;
+use crate::report::{Leftover, Output};
 use crate::request::{JobRequest, OutputOptions, Source, Unsettled};
 use crate::runtime::{self, Owned};
 
@@ -71,13 +71,7 @@ impl Engine {
     fn start(&self, py: Python<'_>, request: &Bound<'_, JobRequest>) -> PyResult<Job> {
         let engine = self.inner.get("Engine")?;
         let request = request.get().to_core(py)?;
-        let runtime = runtime::handle()?;
-        let job = {
-            let _entered = runtime.enter();
-            engine.start(request)
-        };
-        let job = job.map_err(|error| to_pyerr(py, error))?;
-        Ok(Job::spawn(&runtime, job))
+        start_job(py, || engine.start(request))
     }
 
     /// 不联网，只把任务目录中已录到的直播分片写成输出；用于中断后不再续录、或来源已取不到的录制。进度给出已录的
@@ -86,13 +80,7 @@ impl Engine {
     /// 再次运行即可续传）；目录不存在或没有已完成的分片时抛 `NothingRecordedError`。结果的 `LiveReport.end` 为 None。
     fn merge_recorded(&self, py: Python<'_>, output: OutputOptions) -> PyResult<Job> {
         let engine = self.inner.get("Engine")?;
-        let runtime = runtime::handle()?;
-        let job = {
-            let _entered = runtime.enter();
-            engine.merge_recorded(output.to_core())
-        };
-        let job = job.map_err(|error| to_pyerr(py, error))?;
-        Ok(Job::spawn(&runtime, job))
+        start_job(py, || engine.merge_recorded(output.to_core()))
     }
 
     /// 放弃任务：删除任务目录 `work_dir`（相对路径按当前目录补全），只删本库写的文件。先按其中的记录收拾写到一半的
@@ -120,6 +108,43 @@ impl Engine {
     }
 }
 
+/// 在本进程的运行时里调用 `start`（core 在当前运行时上启动任务），返回任务句柄。
+fn start_job(
+    py: Python<'_>,
+    start: impl FnOnce() -> Result<core::Job, core::Error>,
+) -> PyResult<Job> {
+    let runtime = runtime::handle()?;
+    let job = {
+        let _entered = runtime.enter();
+        start()
+    };
+    let job = job.map_err(|error| to_pyerr(py, error))?;
+    Ok(Job::spawn(&runtime, job))
+}
+
+/// 下载点播来源 `url`，存成 MP4 文件 `path`：选最高清的变体（见 `VariantChoice.Best`）与它的默认音频，16 个分片
+/// 并发，按系统代理设置。`headers` 附加到所有请求，如站点要求的 Referer、Cookie。
+///
+/// 等同 `await Engine().start(JobRequest(Source(url, http=HttpOptions(headers=headers)),
+/// OutputOptions(Target.Mp4(path)), live=None)).wait()`，抛的异常也相同：MP4 已存在时抛 `OutputExistsError`，来源是
+/// 直播时抛 `LiveNotEnabledError`。中断后再次调用即续传。要探测、看进度、录制直播、调并发、输出本地 HLS，或让多个
+/// 任务共用请求上限，用 `Engine`。
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (url, path, *, headers = None))]
+async fn download(url: Address, path: PyPath, headers: Option<Headers>) -> PyResult<Output> {
+    runtime::require_event_loop()?;
+    let mut source = core::Source::new(url.0);
+    source.http.headers = headers.map(|headers| headers.0).unwrap_or_default();
+    let mut request =
+        core::JobRequest::new(source, core::OutputOptions::new(core::Target::Mp4(path.0)));
+    request.live = None;
+    let engine = core::Engine::new(core::Engine::DEFAULT_MAX_REQUESTS);
+    let job = Python::attach(|py| start_job(py, || engine.start(request)))?;
+    job.wait().await
+}
+
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_class::<Engine>()
+    module.add_class::<Engine>()?;
+    module.add_function(wrap_pyfunction!(download, module)?)
 }

@@ -25,6 +25,18 @@ HLS（m3u8）下载器。本分支是 Rust 重写：Rust 库、Python 包（`hs-
 
 只有异步接口，脚本用 `asyncio.run`。所有类型、属性与参数都有类型标注与说明，`mypy --strict` 与 basedpyright 严格模式下可用。
 
+给地址与保存路径，下载最高清的一路，存成 MP4：
+
+```python
+import asyncio
+
+from hs_m3u8 import download
+
+asyncio.run(download("https://example.com/master.m3u8", "downloads/video.mp4"))
+```
+
+站点要求请求头时加 `headers={"Referer": "https://example.com/"}`；中断后再次调用即续传。要先探测清晰度与音轨、看进度、录制直播、调并发、输出本地 HLS 或用站点适配回调，用 `Engine`：
+
 ```python
 import asyncio
 
@@ -93,11 +105,11 @@ asyncio.run(main())
 
 | 0.1.x | 1.0 |
 |---|---|
-| `await M3u8Downloader(m3u8_url, save_path, ...).run()` | `await Engine().start(JobRequest(Source(m3u8_url), OutputOptions(Target.Mp4(mp4_path)))).wait()` |
+| `await M3u8Downloader(m3u8_url, save_path, ...).run()` | `await download(m3u8_url, mp4_path)`；用到 `headers` 以外的参数时写成 `await Engine().start(JobRequest(Source(m3u8_url), OutputOptions(Target.Mp4(mp4_path)))).wait()` |
 | `run()` 不返回结果，分片缺失、合并失败等多数失败只写进日志 | 失败时 `wait()` 抛 `HsM3u8Error` 的子类：`RequestError` 要改请求，`retryable` 为真的稍后重试可能成功 |
 | MP4 已存在时跳过，同一份列表可以反复运行 | 抛 `OutputExistsError`：要跳过就捕获它，要替换用 `OutputOptions(overwrite=True)` |
 | `save_path` 是目录：MP4 写在 `save_path/<目录名>.mp4`，分片在 `save_path/hls` | `Target.Mp4` 给 MP4 文件的路径；分片在任务目录（默认与 MP4 同级、名为 `<主名>.hsdl`） |
-| `headers` | `HttpOptions(headers=...)` |
+| `headers` | `download(..., headers=...)`，或 `HttpOptions(headers=...)` |
 | `max_workers` | `JobRequest(concurrency=...)` |
 | `key=M3u8Key(key, iv)`，iv 可写十六进制字符串 | `JobRequest(key=KeyOverride(key, iv=...))`，iv 是 16 字节的 `bytes`（十六进制字符串用 `bytes.fromhex(iv.removeprefix("0x"))` 转） |
 | `is_decrypt` | 不需要：按播放列表的 `EXT-X-KEY` 解密 |

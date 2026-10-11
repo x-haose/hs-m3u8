@@ -1,7 +1,7 @@
 """Python 包对外接口的约定，不满足时列出并以 1 退出。
 
-- 说明齐全：导出的每个类、它的属性与方法、带数据的枚举的每种取值，以及存根里各类的构造函数（它们的说明只在存根
-  里，运行时看不到；枚举取值的构造函数由存根生成器按字段生成，参数即取值类的属性，不查）。
+- 说明齐全：导出的每个函数与类、类的属性与方法、带数据的枚举的每种取值，以及存根里各类的构造函数（它们的说明只在
+  存根里，运行时看不到；枚举取值的构造函数由存根生成器按字段生成，参数即取值类的属性，不查）。
 - 两个以上字段的枚举取值只收关键字参数：同类型的字段（如几个下标）按位置写反时不报错。
 """
 
@@ -15,9 +15,11 @@ import hs_m3u8
 STUB = Path(hs_m3u8.__file__).parent / "_native" / "__init__.pyi"
 
 
-def undocumented(owner: type, path: str) -> list[str]:
+def undocumented(owner: object, path: str) -> list[str]:
     """`owner` 与它的公开成员里没有说明的，按 `path.成员` 列出；嵌套的类（枚举的取值）一并检查。"""
     missing = [] if (owner.__doc__ or "").strip() else [path]
+    if not isinstance(owner, type):
+        return missing
     for name, member in vars(owner).items():
         if name.startswith("_"):
             continue
@@ -64,7 +66,10 @@ def main() -> int:
     stub = ast.parse(STUB.read_text(encoding="utf-8"))
     problems += [f"存根里的构造函数没有说明：{item}" for item in undocumented_constructors(stub)]
     problems += [
-        f"两个以上字段能按位置传：{item}" for name, owner in exported for item in positional_variants(owner, name)
+        f"两个以上字段能按位置传：{item}"
+        for name, owner in exported
+        if isinstance(owner, type)
+        for item in positional_variants(owner, name)
     ]
     for problem in problems:
         sys.stderr.write(problem + "\n")

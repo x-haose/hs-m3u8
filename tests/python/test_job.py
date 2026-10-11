@@ -37,6 +37,7 @@ from hs_m3u8 import (
     Leftover,
     LeftoverKind,
     LiveEnd,
+    LiveNotEnabledError,
     LiveOptions,
     MissReason,
     Output,
@@ -55,6 +56,7 @@ from hs_m3u8 import (
     Unsettled,
     VariantChoice,
     VolumeUnavailableError,
+    download,
 )
 
 VOD = """#EXTM3U
@@ -192,6 +194,22 @@ def test_downloads_write_the_mp4_and_report_its_streams(server: Server, tmp_path
     assert not (tmp_path / "out.hsdl").exists()
     assert progress.stage == Stage.Done()
     assert (progress.segments_done, progress.segments_total) == (2, 2)
+
+
+def test_download_sends_the_headers_and_refuses_live_sources(server: Server, tmp_path: Path) -> None:
+    put_media(server, VOD)
+    target = tmp_path / "out.mp4"
+
+    output = asyncio.run(download(server.url("index.m3u8"), target, headers={"Referer": "https://example.com/"}))
+
+    assert output.mp4 is not None
+    assert output.mp4.path == target
+    assert (output.segments, output.live) == (2, None)
+    assert ("referer", "https://example.com/") in server.headers("seg1.ts")
+
+    put_media(server, LIVE)
+    with pytest.raises(LiveNotEnabledError):
+        asyncio.run(download(server.url("index.m3u8"), tmp_path / "live.mp4"))
 
 
 def test_both_outputs_are_written_and_waits_get_the_same_result(server: Server, tmp_path: Path) -> None:
