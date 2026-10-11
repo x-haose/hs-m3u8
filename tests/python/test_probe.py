@@ -301,6 +301,9 @@ def test_invalid_arguments_are_rejected_when_constructed() -> None:
         HttpOptions(proxy=Proxy.Url("sock5://127.0.0.1:9"))
     with pytest.raises(InvalidInputError):
         LiveOptions(max_duration=timedelta(0))
+    # bytes 也是整数的序列，类型检查器放行，却不是要的序列
+    with pytest.raises(TypeError):
+        SourceUnsupported.DiscontinuityMismatch(track=1, first=b"\x01", found=())
 
 
 # 在子进程里跑：系统代理的环境变量只影响这个进程。直连照常探测；按系统设置时经代理，失败时退出码为 3

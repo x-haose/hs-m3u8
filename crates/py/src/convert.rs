@@ -8,7 +8,7 @@ use hs_m3u8_core as core;
 use hs_m3u8_core::Url;
 use pyo3::exceptions::{PyOverflowError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyMapping, PyString, PyTuple};
+use pyo3::types::{PyByteArray, PyBytes, PyMapping, PyString, PyTuple};
 use pyo3_stub_gen::{PyStubType, TypeInfo};
 
 use crate::error::invalid_input;
@@ -62,7 +62,8 @@ impl PyStubType for PyPath {
     }
 }
 
-/// 序列：交给 Python 的是 `tuple`，改不了，也就没有「改了却没生效」；传入时接受列表、元组等序列（不接受 `str`）。
+/// 序列：交给 Python 的是 `tuple`，改不了，也就没有「改了却没生效」；传入时接受列表、元组等序列（不接受 `str`、
+/// `bytes` 与 `bytearray`：它们也是序列，会被拆成一个个字符或整数）。
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct Seq<T>(pub(crate) Vec<T>);
 
@@ -85,6 +86,9 @@ where
     type Error = PyErr;
 
     fn extract(object: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
+        if object.is_instance_of::<PyBytes>() || object.is_instance_of::<PyByteArray>() {
+            return Err(PyTypeError::new_err("应为序列，不能是 bytes 或 bytearray"));
+        }
         object.extract::<Vec<T>>().map(Seq)
     }
 }
