@@ -219,12 +219,10 @@ class Encryption:
 class Engine:
     r"""
     下载引擎：所有任务共用一个在途请求上限。异步方法返回协程，在 asyncio 事件循环里 await（在别处驱动时抛
-    `RuntimeError`，不开始操作）；协程被取消时，所等的操作随之取消。只能在建立它的进程里使用，fork 出的子进程要
-    另建；fork 时正在运行的任务所用的任务目录，子进程不占着。macOS 上导入本库之后 fork 出的子进程不能使用本库（证书
-    校验与读取系统代理要用的系统框架在多线程进程 fork 之后不可用），开始操作时抛 `RuntimeError`，要用 multiprocessing
-    的 spawn 方式。
-    在 atexit 处理里第一次导入本库时，退出前不会关闭运行时（CPython 不调用 atexit 运行期间新登记的处理）：那样开始的
-    任务要在处理返回前等它结束。
+    `RuntimeError`，不开始操作）；协程被取消时，所等的操作随之取消。只能在建立它的进程里使用：fork 出的子进程要另建，
+    不占着 fork 时正在运行的任务所用的任务目录；macOS 上导入本库之后 fork 出的子进程不能使用本库（系统框架在 fork
+    之后不可用），开始操作时抛 `RuntimeError`，要用 multiprocessing 的 spawn 方式。在 atexit 处理里第一次导入本库时，
+    退出前不会关闭运行时，那样开始的任务要在处理返回前等它结束。
     
     `max_requests`：所有任务合计同时在途的 key、分片与点播 init 段请求数，至少 1，默认为每个任务默认并发的四倍。
     播放列表与直播刷新时新出现的 init 段不占名额，以免直播刷新排在其他任务的大批下载之后。
@@ -1898,11 +1896,9 @@ class Proxy:
     @typing.final
     class System(Proxy):
         r"""
-        按系统代理设置：先看环境变量（规则同 curl：`http_proxy`、`https_proxy`、`all_proxy`，小写的优先，空值等于
-        没设，另认大写的 `HTTP_PROXY`），没设时看 macOS 的系统设置（HTTP、HTTPS、SOCKS 代理与例外）或 Windows 的
-        Internet 选项（含分协议的写法与例外），其他平台即直连；环境变量 `no_proxy` 对两者都起作用。探测与开始任务时
-        读取；读不出或读到用不了的值（写错、
-        用了 PAC 或自动发现）时抛 `InvalidInputError`，可改用 `Proxy.Direct()` 或 `Proxy.Url(...)`
+        按系统代理设置：先看环境变量（规则同 curl，另认大写的 `HTTP_PROXY`；`no_proxy` 对系统设置的代理同样起作用），
+        没设代理时看 macOS 的系统设置或 Windows 的 Internet 选项，其他平台即直连。探测与开始任务时读取；读不出或读到
+        用不了的值（写错、用了 PAC 或自动发现）时抛 `InvalidInputError`，可改用 `Proxy.Direct()` 或 `Proxy.Url(...)`
         """
         __match_args__ = ()
         def __new__(cls) -> Proxy.System: ...

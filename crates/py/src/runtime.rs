@@ -43,11 +43,11 @@ const EXITING: &str = "解释器正在退出，不再开始新的操作";
 /// 证书校验与读取系统代理要用 Apple 的系统框架，它们在多线程进程 fork 出的子进程里不可用，一用就使进程崩溃。
 const FORKED_ON_MACOS: &str = "macOS 上 fork 出的子进程不能使用本库：证书校验与读取系统代理要用的系统框架在 fork 之后不可用；改用 multiprocessing 的 spawn 方式";
 
-/// fork 的代次：子进程里加一（见 [`after_fork_in_child`]）。
+/// fork 计数：子进程里加一（见 [`after_fork_in_child`]）。
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// 一个进程：进程号与 fork 代次，两者都对得上才是同一个。只看代次不够：子进程里本库的 fork 处理运行之前（先导入的
-/// 模块的处理排在前面），代次还没加一；只看进程号也不够：父进程退出后，它的进程号可能分给继承了它对象的孙进程。
+/// 一个进程：进程号与 fork 计数，两者都对得上才是同一个。只看计数不够：子进程里本库的 fork 处理运行之前（先导入的
+/// 模块的处理排在前面），计数还没加一；只看进程号也不够：父进程退出后，它的进程号可能分给继承了它对象的孙进程。
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Process {
     id: u32,
@@ -107,11 +107,10 @@ fn leave_inherited(slot: &mut Slot) {
 /// 等关闭运行时的线程时，多久查一次 Ctrl+C。
 const SIGNAL_CHECK: Duration = Duration::from_millis(100);
 
-/// 解释器退出前（atexit）关闭本进程的运行时：丢掉其上的任务（任务目录保持中断时的样子，可以续传），等阻塞线程池里
-/// 正在执行的操作（回调、写文件、合并 MP4）做完、丢掉排队的，之后再没有线程进入解释器。解释器开始终结后再进入的线程
-/// 会被终止或永远挂起，回调做了一半的事就丢了。等待期间释放 GIL，回调才执行得完；Ctrl+C 放弃等待，这时仍在执行的
-/// 回调、以及完成时去唤醒协程的后台线程，可能在终结后进入解释器、使进程异常退出。在 atexit 处理里第一次导入本库时
-/// 登记不上（CPython 不调用 atexit 运行期间新登记的处理）。
+/// 解释器退出前（atexit）关闭本进程的运行时：丢掉其上的任务（任务目录可以续传），放开 GIL 等阻塞线程池里正在执行的
+/// 操作（回调、写文件、合并 MP4）做完，之后再没有线程进入解释器（终结开始后进入的线程会被终止或永远挂起）。Ctrl+C
+/// 放弃等待，这时仍在执行的操作与唤醒协程的后台线程可能使进程异常退出。在 atexit 处理里第一次导入本库时登记不上
+/// （CPython 不调用 atexit 运行期间新登记的处理）。
 #[pyfunction]
 fn shutdown(py: Python<'_>) -> PyResult<()> {
     let Slot::Running(_, runtime) = std::mem::replace(&mut *runtime(), Slot::Refused(EXITING))
@@ -272,7 +271,7 @@ fn after_fork_in_parent() {
     FORKING.with_borrow_mut(Option::take);
 }
 
-/// 关掉继承来的任务目录锁，代次加一，换下继承来的运行时（见 [`leave_inherited`]）。
+/// 关掉继承来的任务目录锁，fork 计数加一，换下继承来的运行时（见 [`leave_inherited`]）。
 #[pyfunction]
 fn after_fork_in_child() {
     match FORKING.with_borrow_mut(Option::take) {

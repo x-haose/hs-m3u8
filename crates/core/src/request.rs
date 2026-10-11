@@ -93,10 +93,9 @@ impl HttpOptions {
 /// 请求经不经代理、经哪个。
 #[derive(Clone, Default, PartialEq, Eq)]
 pub enum Proxy {
-    /// 按系统代理设置：先看环境变量（规则同 curl：`http_proxy`、`https_proxy`、`all_proxy`，小写的优先，空值等于没设，
-    /// 另认大写的 `HTTP_PROXY`），没设时看 macOS 的系统设置（HTTP、HTTPS、SOCKS 代理与例外）或 Windows 的 Internet
-    /// 选项（含分协议的写法与例外），其他平台即直连；环境变量 `no_proxy` 对两者都起作用。探测与开始任务时读取；读不出或读到用不了的值（写错、用了 PAC
-    /// 或自动发现）时报 [`Error::InvalidInput`]，可改用 `Direct` 或 `Url`
+    /// 按系统代理设置（见 [`crate::system_proxy`]）：先看环境变量（规则同 curl），没设代理时看 macOS 的系统设置或
+    /// Windows 的 Internet 选项，其他平台即直连。探测与开始任务时读取；读不出或读到用不了的值（写错、用了 PAC 或自动
+    /// 发现）时报 [`Error::InvalidInput`]，可改用 `Direct` 或 `Url`
     #[default]
     System,
     /// 不经代理，系统设置了代理也直连

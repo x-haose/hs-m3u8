@@ -112,12 +112,12 @@ class Server:
             self._statuses[path] = (code, list(headers))
 
     def gate(self, path: str) -> Gate:
-        """之后对 `path` 的请求先停住，等返回的闸门放行。
+        """之后对 `path` 的请求先停住，返回的 `Gate` 放行后才响应。
 
-        只用于 HTTP：闸门用 MSG_PEEK 查客户端是否断开，TLS 套接字不支持。
+        只用于 HTTP：停住期间用 MSG_PEEK 查客户端是否断开，TLS 套接字不支持。
         """
         if self._scheme != "http":
-            message = "闸门只用于 HTTP 服务"
+            message = "停住请求只用于 HTTP 服务"
             raise NotImplementedError(message)
         gate = Gate()
         with self._lock:
@@ -135,7 +135,7 @@ class Server:
             return list(self._headers.get(path, []))
 
     def close(self) -> None:
-        """放行所有闸门，停止服务，等服务线程结束。"""
+        """放行所有停住的请求，停止服务，等服务线程结束。"""
         with self._lock:
             gates = list(self._gates.values())
         for gate in gates:
@@ -149,7 +149,7 @@ class Server:
     def respond(
         self, path: str, headers: list[tuple[str, str]], client: socket.socket
     ) -> tuple[int, list[tuple[str, str]], bytes] | None:
-        """记下这次请求，有闸门时先停住，再返回状态码、响应头与内容；停住期间客户端 `client` 断开时返回 None。
+        """记下这次请求，要停住时先停住，再返回状态码、响应头与内容；停住期间客户端 `client` 断开时返回 None。
 
         设了状态码的返回它，放了内容的返回 200，都没有的返回 404。
         """
