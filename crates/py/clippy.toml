@@ -1,2 +1,3 @@
-# 构造函数的参数即 Python 侧的关键字参数，个数由类的字段决定（异常另有基类的五个）
-too-many-arguments-threshold = 16
+# 构造函数的参数即 Python 侧的关键字参数，个数由类的字段决定（异常另有基类的五个）；取现在最多的个数（FileError 的
+# __init__），再多时看是否该拆类
+too-many-arguments-threshold = 10

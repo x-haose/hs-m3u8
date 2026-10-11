@@ -18,6 +18,9 @@ export UV_PROJECT_ENVIRONMENT := $(VENV)
 PYTHON := $(abspath $(VENV)/bin/python)
 export PYO3_PYTHON := $(PYTHON)
 
+# README 里的 Python 示例抽成文件（每个代码块一个）放在这里做类型检查
+README_EXAMPLES := target/readme-examples
+
 check: rs_check py_check
 
 # Rust 的全部检查；CI 按平台调用其中的子目标
@@ -85,7 +88,12 @@ py_check: py_stubs py_develop
 	uv run --no-sync ruff format --check python tests/python
 	uv run --no-sync ruff check python tests/python
 	uv run --no-sync mypy
-	uv run --no-sync basedpyright
+	uv run --no-sync basedpyright --pythonpath $(PYTHON)
+	@# README 里的示例同样要过类型检查，接口改了而示例没跟上时在这里失败
+	rm -rf $(README_EXAMPLES) && mkdir -p $(README_EXAMPLES)
+	awk -v dir=$(README_EXAMPLES) '/^```python$$/ { n++; file = dir "/example_" n ".py"; next } /^```$$/ { file = "" } file != "" { print > file }' README.md
+	uv run --no-sync mypy $(README_EXAMPLES)
+	uv run --no-sync basedpyright --pythonpath $(PYTHON) $(README_EXAMPLES)
 	@# pyo3-stub-gen 不生成 @disjoint_base（PEP 800），而 PyO3 的类在运行时都是 disjoint base；只影响对多重继承原生类的检查
 	uv run --no-sync python -m mypy.stubtest hs_m3u8 --ignore-disjoint-bases
 	uv run --no-sync pytest
