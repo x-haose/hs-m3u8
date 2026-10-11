@@ -25,7 +25,7 @@ use std::fs::{self, File, TryLockError};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{LockResult, Mutex, MutexGuard};
 
 pub(crate) use self::names::{SegmentName, SessionStart};
 use self::names::{init_file_name, parse_init_name, parse_segment_name, segment_file_name};
@@ -108,34 +108,42 @@ pub(crate) struct Lock {
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        held().remove(&self.id);
+        held().0.remove(&self.id);
     }
 }
 
-/// 本进程持有的锁文件，按 [`Lock`] 的编号。锁跟着打开的文件走，fork 出的子进程也就继承了它们，见 [`prepare_fork`]。
-static HELD: Mutex<BTreeMap<u64, File>> = Mutex::new(BTreeMap::new());
+/// 本进程持有的任务目录锁文件：[`prepare_fork`] 锁住的登记表的内容。
+pub struct LockFiles(BTreeMap<u64, File>);
 
-fn held() -> MutexGuard<'static, BTreeMap<u64, File>> {
-    HELD.lock()
-        .expect("持锁期间只做插入、删除与清空，不会 panic")
+/// 登记表。锁跟着打开的文件走，fork 出的子进程也就继承了它们，见 [`prepare_fork`]。从打开锁文件到登记、从取出到
+/// 关闭都拿着它，所以没有已打开而不在表里的锁文件；这些地方持有期间不等别的锁（[`ForkGuard`] 除外）。
+static HELD: Mutex<LockFiles> = Mutex::new(LockFiles(BTreeMap::new()));
+
+fn held() -> MutexGuard<'static, LockFiles> {
+    HELD.lock().expect("持锁期间不会 panic")
 }
 
-/// fork 之前调用；fork 之后在子进程里调用返回值的 [`ForkGuard::child`]，在父进程里丢弃它。
+/// fork 之前调用：用 `lock` 锁住登记表；fork 之后在子进程里调用返回值的 [`ForkGuard::child`]，在父进程里丢弃它。
 ///
 /// fork 出的子进程继承父进程打开的文件，也就继承了任务目录的锁：父进程的任务结束、关掉自己那份之后锁仍在，直到
 /// 子进程退出，期间续传或放弃这个任务都报 [`WorkDirProblem::Locked`]。子进程关掉继承来的锁文件即可，父进程的锁
 /// 不受影响。返回的 [`ForkGuard`] 拿着登记表的锁，fork 期间别的线程改不了登记。
-pub fn prepare_fork() -> ForkGuard {
-    ForkGuard(held())
+///
+/// `lock` 为怎么等登记表的锁，通常即 [`Mutex::lock`]。拿着它去等别的锁的，只有另一个正在 fork 的线程（它拿着
+/// [`ForkGuard`] 执行 fork 前后的其他处理）：调用方持有那些处理也要的锁（如 Python 的 GIL）时，等待期间要放开。
+pub fn prepare_fork(
+    lock: impl FnOnce(&'static Mutex<LockFiles>) -> LockResult<MutexGuard<'static, LockFiles>>,
+) -> ForkGuard {
+    ForkGuard(lock(&HELD).expect("持锁期间不会 panic"))
 }
 
 /// 见 [`prepare_fork`]。
-pub struct ForkGuard(MutexGuard<'static, BTreeMap<u64, File>>);
+pub struct ForkGuard(MutexGuard<'static, LockFiles>);
 
 impl ForkGuard {
     /// fork 出的子进程里调用：关掉从父进程继承来的锁文件。
     pub fn child(mut self) {
-        self.0.clear();
+        self.0.0.clear();
     }
 }
 
@@ -450,6 +458,8 @@ fn ensure_empty(root: &Path) -> Result<(), Error> {
 /// 打开锁文件并加排他锁；已被别的任务锁住时报 [`WorkDirProblem::Locked`]。
 fn acquire(root: &Path) -> Result<Lock, Error> {
     let path = root.join(LOCK_FILE);
+    // 打开之前拿住登记表，加锁失败时关掉文件之后才放开（`file` 先于它 drop）
+    let mut held = held();
     let file = File::options()
         .create(true)
         .truncate(false)
@@ -460,7 +470,7 @@ fn acquire(root: &Path) -> Result<Lock, Error> {
         Ok(()) => {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let id = NEXT.fetch_add(1, Ordering::Relaxed);
-            held().insert(id, file);
+            held.0.insert(id, file);
             Ok(Lock { id })
         }
         Err(TryLockError::WouldBlock) => Err(Error::WorkDir {

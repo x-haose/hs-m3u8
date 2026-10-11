@@ -20,11 +20,12 @@ use std::time::Duration;
 use hs_m3u8_core as core;
 use pyo3::exceptions::{PyOSError, PyRuntimeError};
 use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
+use pyo3::sync::{MutexExt, PyOnceLock};
 use tokio::runtime::{Builder, Handle, Runtime};
 use tokio_util::task::AbortOnDropHandle;
 
-/// 本进程的运行时；fork 出的子进程里，从父进程继承来的那个不销毁也不用，见 [`after_fork_in_child`]。
+/// 本进程的运行时；fork 出的子进程里，从父进程继承来的那个不销毁也不用，见 [`after_fork_in_child`]。只在持有 GIL、
+/// 期间不放开 GIL 时访问：fork 也在持有 GIL 时发生，所以 fork 时没有别的线程拿着它，fork 前后不必另外锁住。
 static RUNTIME: Mutex<Slot> = Mutex::new(Slot::Empty);
 
 enum Slot {
@@ -193,22 +194,18 @@ impl Owner {
     }
 }
 
-/// fork 期间拿着的锁：fork 时别的线程若正在改运行时或任务目录锁的登记，子进程里的副本就是改了一半的。
-struct Forking {
-    runtime: MutexGuard<'static, Slot>,
-    locks: core::ForkGuard,
-}
-
 thread_local! {
-    /// fork 前拿到、fork 后在同一线程里放开的锁
-    static FORKING: RefCell<Option<Forking>> = const { RefCell::new(None) };
+    /// fork 前拿到、fork 后在同一线程里放开的任务目录锁登记表：fork 时别的线程若正在改登记，子进程里的副本就是改了
+    /// 一半的
+    static FORKING: RefCell<Option<core::ForkGuard>> = const { RefCell::new(None) };
 }
 
+/// 锁住任务目录锁的登记表。等的时候放开 GIL：拿着它的可能是另一个正在 fork 的线程，它要等 GIL 执行 fork 前后的
+/// 其他处理（Python 写的处理让出 GIL 时，别的线程就会进来）。
 #[pyfunction]
-fn before_fork() {
-    let locks = core::prepare_fork();
-    let runtime = runtime();
-    FORKING.with_borrow_mut(|forking| *forking = Some(Forking { runtime, locks }));
+fn before_fork(py: Python<'_>) {
+    let locks = core::prepare_fork(|registry| registry.lock_py_attached(py));
+    FORKING.with_borrow_mut(|forking| *forking = Some(locks));
 }
 
 #[pyfunction]
@@ -218,15 +215,15 @@ fn after_fork_in_parent() {
 
 #[pyfunction]
 fn after_fork_in_child() {
-    let Forking { mut runtime, locks } = FORKING
+    let locks = FORKING
         .with_borrow_mut(Option::take)
         .expect("fork 前已拿到");
+    locks.child();
     GENERATION.fetch_add(1, Ordering::Relaxed);
-    if let Slot::Running(inherited) = std::mem::replace(&mut *runtime, Slot::Empty) {
+    if let Slot::Running(inherited) = std::mem::replace(&mut *runtime(), Slot::Empty) {
         // 销毁要等它的工作线程退出，而它们不在子进程里
         std::mem::forget(inherited);
     }
-    locks.child();
 }
 
 /// 登记解释器退出时与 fork 前后的处理（没有 fork 的平台上只有前者）。
