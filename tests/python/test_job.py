@@ -6,6 +6,7 @@ import errno
 import gc
 import os
 import pickle
+import select
 import subprocess
 import sys
 import threading
@@ -119,6 +120,31 @@ def run(request: JobRequest) -> Output:
 
 def discard(work_dir: Path) -> tuple[Leftover, ...]:
     return asyncio.run(Engine().discard(work_dir))
+
+
+def readable(fd: int) -> bool:
+    """等 `fd` 可读，最多等 `ARRIVAL` 秒。"""
+    return bool(select.select([fd], [], [], ARRIVAL)[0])
+
+
+def forked_child_exit_code(unraisable: list[object], url: str, parent_done: int) -> int:
+    """子进程回收了继承来的对象之后的检查，返回退出码。
+
+    在新线程里用新的 Engine 探测 `url`，等 `parent_done` 可读（父进程续传完或退出）。没有无法抛出的异常、另建的
+    Engine 能用（macOS 上明确拒绝）时为 0，否则把原因写到 stderr。
+    """
+    refused: list[bool] = []
+    probing = threading.Thread(target=lambda: refused.append(probe_refused(url)))
+    probing.start()
+    probing.join()
+    os.read(parent_done, 1)
+    if unraisable:
+        sys.stderr.write(f"子进程里有无法抛出的异常：{unraisable!r}\n")
+        return 3
+    if refused != [sys.platform == "darwin"]:
+        sys.stderr.write(f"子进程另建的 Engine 被拒绝：{refused!r}\n")
+        return 4
+    return 0
 
 
 def probe_refused(url: str) -> bool:
@@ -565,6 +591,8 @@ def test_forked_children_hold_no_work_dir_locks_and_leave_parent_jobs_alone(serv
     request = one_at_a_time(server, Target.Mp4(tmp_path / "out.mp4"))
     # 子进程等父进程续传完再退出（父进程退出时管道也会关上）：它活着时父进程照样能续传
     parent_done, wait_parent = os.pipe()
+    # 子进程里 os.fork 返回时 fork 处理已跑完、继承来的锁文件已关：这时才让父进程续传
+    child_ready, signal_ready = os.pipe()
     children: list[int] = []
 
     async def main() -> Output:
@@ -577,27 +605,17 @@ def test_forked_children_hold_no_work_dir_locks_and_leave_parent_jobs_alone(serv
             # （系统框架在 fork 之后不可用）。都对时退出码为 0，否则把原因写到 stderr
             code = 1
             try:
+                os.write(signal_ready, b"\0")
                 unraisable: list[object] = []
                 sys.unraisablehook = unraisable.append
                 del job
                 gc.collect()
-                refused: list[bool] = []
-                probing = threading.Thread(target=lambda: refused.append(probe_refused(server.url("index.m3u8"))))
-                probing.start()
-                probing.join()
-                os.read(parent_done, 1)
-                if unraisable:
-                    sys.stderr.write(f"子进程里有无法抛出的异常：{unraisable!r}\n")
-                    code = 3
-                elif refused != [sys.platform == "darwin"]:
-                    sys.stderr.write(f"子进程另建的 Engine 被拒绝：{refused!r}\n")
-                    code = 4
-                else:
-                    code = 0
-                sys.stderr.flush()
+                code = forked_child_exit_code(unraisable, server.url("index.m3u8"), parent_done)
             finally:
                 os._exit(code)
         children.append(pid)
+        os.close(signal_ready)
+        assert await asyncio.to_thread(readable, child_ready)
         job.cancel()
         with pytest.raises(JobCancelledError):
             await job.wait()
