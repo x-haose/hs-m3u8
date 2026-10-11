@@ -1,16 +1,16 @@
-//! 下载引擎：持有跨任务共享的在途请求上限；`download` 按默认设置下载一次。
+//! 下载引擎：持有跨任务共享的在途请求上限。
 
 use std::num::NonZeroUsize;
 
 use hs_m3u8_core as core;
 use pyo3::prelude::*;
-use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction, gen_stub_pymethods};
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use crate::convert::{Address, Headers, Positive, PyPath, Seq};
+use crate::convert::{Positive, PyPath, Seq};
 use crate::error::to_pyerr;
 use crate::info::Probe;
 use crate::job::Job;
-use crate::report::{Leftover, Output};
+use crate::report::Leftover;
 use crate::request::{JobRequest, OutputOptions, Source, Unsettled};
 use crate::runtime::{self, Owned};
 
@@ -122,29 +122,6 @@ fn start_job(
     Ok(Job::spawn(&runtime, job))
 }
 
-/// 下载点播来源 `url`，存成 MP4 文件 `path`：选最高清的变体（见 `VariantChoice.Best`）与它的默认音频，16 个分片
-/// 并发，按系统代理设置。`headers` 附加到所有请求，如站点要求的 Referer、Cookie。
-///
-/// 等同 `await Engine().start(JobRequest(Source(url, http=HttpOptions(headers=headers)),
-/// OutputOptions(Target.Mp4(path)), live=None)).wait()`，抛的异常也相同：MP4 已存在时抛 `OutputExistsError`，来源是
-/// 直播时抛 `LiveNotEnabledError`。中断后再次调用即续传。要探测、看进度、录制直播、调并发、输出本地 HLS，或让多个
-/// 任务共用请求上限，用 `Engine`。
-#[gen_stub_pyfunction]
-#[pyfunction]
-#[pyo3(signature = (url, path, *, headers = None))]
-async fn download(url: Address, path: PyPath, headers: Option<Headers>) -> PyResult<Output> {
-    runtime::require_event_loop()?;
-    let mut source = core::Source::new(url.0);
-    source.http.headers = headers.map(|headers| headers.0).unwrap_or_default();
-    let mut request =
-        core::JobRequest::new(source, core::OutputOptions::new(core::Target::Mp4(path.0)));
-    request.live = None;
-    let engine = core::Engine::new(core::Engine::DEFAULT_MAX_REQUESTS);
-    let job = Python::attach(|py| start_job(py, || engine.start(request)))?;
-    job.wait().await
-}
-
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    module.add_class::<Engine>()?;
-    module.add_function(wrap_pyfunction!(download, module)?)
+    module.add_class::<Engine>()
 }

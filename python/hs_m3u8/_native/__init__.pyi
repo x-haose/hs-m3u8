@@ -90,7 +90,6 @@ __all__ = [
     "VolumeUnavailableError",
     "WorkDirError",
     "WorkDirProblem",
-    "download",
 ]
 
 class AudioChoice:
@@ -3112,15 +3111,4 @@ class WorkDirProblem:
         __match_args__ = ()
         def __new__(cls) -> WorkDirProblem.SourceUnverified: ...
     
-
-async def download(url: builtins.str, path: builtins.str | os.PathLike[str], *, headers: typing.Optional[collections.abc.Mapping[builtins.str, builtins.str] | collections.abc.Iterable[tuple[builtins.str, builtins.str]]] = None) -> Output:
-    r"""
-    下载点播来源 `url`，存成 MP4 文件 `path`：选最高清的变体（见 `VariantChoice.Best`）与它的默认音频，16 个分片
-    并发，按系统代理设置。`headers` 附加到所有请求，如站点要求的 Referer、Cookie。
-    
-    等同 `await Engine().start(JobRequest(Source(url, http=HttpOptions(headers=headers)),
-    OutputOptions(Target.Mp4(path)), live=None)).wait()`，抛的异常也相同：MP4 已存在时抛 `OutputExistsError`，来源是
-    直播时抛 `LiveNotEnabledError`。中断后再次调用即续传。要探测、看进度、录制直播、调并发、输出本地 HLS，或让多个
-    任务共用请求上限，用 `Engine`。
-    """
 
