@@ -16,7 +16,6 @@ URL = "https://demo.unified-streaming.com/k8s/live/stable/live.isml/.m3u8"
 
 
 async def main() -> None:
-    """录制，Ctrl+C 时停止，结束后说明录到了多少、为什么结束。"""
     request = JobRequest(
         Source(URL),
         OutputOptions(Target.Mp4("downloads/live.mp4")),
@@ -25,13 +24,16 @@ async def main() -> None:
     job = Engine().start(request)
 
     def stop(*_: object) -> None:
-        """停止录制，并恢复原来的 Ctrl+C 处理。"""
+        """停止录制；再按 Ctrl+C 时按原来的处理（取消）。"""
         job.stop()
         signal.signal(signal.SIGINT, previous)
 
     previous = signal.signal(signal.SIGINT, stop)
     print("录制中，按 Ctrl+C 停止")
-    output = await job.wait()
+    try:
+        output = await job.wait()
+    finally:
+        signal.signal(signal.SIGINT, previous)
     if output.live is not None:
         print("结束原因：", output.live.end, "，录了", job.progress().duration)
         for missed in output.live.missed:

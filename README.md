@@ -25,7 +25,7 @@ HLS（m3u8）下载器。本分支是 Rust 重写：Rust 库、Python 包（`hs-
 
 只有异步接口，脚本用 `asyncio.run`。所有类型、属性与参数都有类型标注与说明，`mypy --strict` 与 basedpyright 严格模式下可用。
 
-给地址与保存路径，下载最高清的一路，存成 MP4：
+给地址与保存路径，下载最高清的变体，存成 MP4：
 
 ```python
 import asyncio
@@ -40,75 +40,38 @@ asyncio.run(download("https://example.com/master.m3u8", "downloads/video.mp4"))
 ```python
 import asyncio
 
-from hs_m3u8 import (
-    Engine,
-    HsM3u8Error,
-    Hooks,
-    HttpOptions,
-    JobRequest,
-    OutputOptions,
-    Purpose,
-    RequestError,
-    RequestParts,
-    Source,
-    Target,
-)
-
-
-class Signer(Hooks):
-    """站点适配：给每个请求加上签名头。没覆盖的回调不调用。"""
-
-    def __init__(self, token: str) -> None:
-        self.token = token
-
-    def on_request(self, purpose: Purpose, request: RequestParts) -> RequestParts:
-        return RequestParts(request.url, headers=(*request.headers, ("X-Sign", self.token)))
+from hs_m3u8 import Engine, JobRequest, OutputOptions, Source, Target
 
 
 async def main() -> None:
     engine = Engine()
-    source = Source(
-        "https://example.com/master.m3u8",
-        http=HttpOptions(headers={"User-Agent": "Mozilla/5.0"}),
-        hooks=Signer("..."),
-    )
-
-    probe = await engine.probe(source)  # 可选的清晰度与音轨、时长、是否直播
+    source = Source("https://example.com/master.m3u8")
+    probe = await engine.probe(source)  # 可选的清晰度与音轨、各轨的分片数与时长、是否直播
     if probe.master is not None:
         print("将下载", probe.master.selected.variant.resolution)
-
     job = engine.start(JobRequest(source, OutputOptions(Target.Mp4("downloads/video.mp4"))))
-    waiting = asyncio.create_task(job.wait())
-    while True:  # 每秒显示一次进度，任务一结束就不再等
-        done, _ = await asyncio.wait({waiting}, timeout=1)
-        progress = job.progress()
-        print(f"{progress.segments_done}/{progress.segments_total}")
-        if done:
-            break
-    try:
-        output = await waiting
-    except RequestError as error:  # 改请求再试：输出已存在、选轨偏好与来源不符等
-        print("请求不对：", error)
-    except HsM3u8Error as error:
-        print(error, "（稍后重试可能成功）" if error.retryable else "")
-    else:
-        if output.mp4 is not None:
-            print("已保存到", output.mp4.path)
+    output = await job.wait()  # 等待期间可用 job.progress() 看进度，录制直播时用 job.stop() 停止
+    print("已保存到", output.mp4.path if output.mp4 else None)
 
 
 asyncio.run(main())
 ```
 
-中断后用同样的请求再次运行即续传；直播用 `job.stop()` 停止并写出已录到的部分。放弃任务用 `Engine.discard(任务目录)`，它会收拾写到一半的输出。数据类、枚举取值与异常都能 pickle（如交给进程池），只保证同一版本之间。
+选轨偏好、请求头与代理、站点适配回调在 `Source` 上，输出种类与任务目录在 `OutputOptions` 上，并发、直播录制方式与自定义 key 在 `JobRequest` 上。中断后用同样的请求再次运行即续传；直播用 `job.stop()` 停止并写出已录到的部分。放弃任务用 `Engine.discard(任务目录)`，它会收拾写到一半的输出。数据类、枚举取值与异常都能 pickle（如交给进程池），只保证同一版本之间。
 
-`examples/` 里是可以直接运行的示例，用的是公开的测试流：`download.py`（最简单的用法）、`progress.py`（进度与失败的分类）、`probe.py`（探测后挑清晰度）、`live.py`（录制直播，Ctrl+C 停止）、`hooks.py`（站点适配回调）、`batch.py`（批量下载）。
+`examples/` 里是可以直接运行的示例，用的是公开的测试流：`download.py`（最简单的用法）、`progress.py`（进度与失败的分类）、`probe.py`（探测后挑清晰度）、`live.py`（录制直播，Ctrl+C 停止）、`hooks.py`（站点适配回调）、`batch.py`（批量下载）。在仓库里运行（先按「开发」一节装好 Rust 与 uv）：
+
+```bash
+make ffmpeg && make py_develop
+uv run --no-sync python examples/download.py
+```
 
 从 0.1.x 迁移：
 
 | 0.1.x | 1.0 |
 |---|---|
-| `await M3u8Downloader(m3u8_url, save_path, ...).run()` | `await download(m3u8_url, mp4_path)`；用到 `headers` 以外的参数时写成 `await Engine().start(JobRequest(Source(m3u8_url), OutputOptions(Target.Mp4(mp4_path)))).wait()` |
-| `run()` 不返回结果，分片缺失、合并失败等多数失败只写进日志 | 失败时 `wait()` 抛 `HsM3u8Error` 的子类：`RequestError` 要改请求，`retryable` 为真的稍后重试可能成功 |
+| `await M3u8Downloader(m3u8_url, save_path, ...).run()` | `await download(m3u8_url, mp4_path)`；用到 `headers` 以外的参数时写成 `await Engine().start(JobRequest(Source(m3u8_url), OutputOptions(Target.Mp4(mp4_path)), live=None)).wait()` |
+| `run()` 不返回结果，分片缺失、合并失败等多数失败只写进日志 | 失败时抛 `HsM3u8Error` 的子类：`RequestError` 要改请求，`retryable` 为真的稍后重试可能成功 |
 | MP4 已存在时跳过，同一份列表可以反复运行 | 抛 `OutputExistsError`：要跳过就捕获它，要替换用 `OutputOptions(overwrite=True)` |
 | `save_path` 是目录：MP4 写在 `save_path/<目录名>.mp4`，分片在 `save_path/hls` | `Target.Mp4` 给 MP4 文件的路径；分片在任务目录（默认与 MP4 同级、名为 `<主名>.hsdl`） |
 | `headers` | `download(..., headers=...)`，或 `HttpOptions(headers=...)` |

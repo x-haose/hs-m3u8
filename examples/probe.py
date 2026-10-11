@@ -1,8 +1,8 @@
-"""先探测，列出可选的清晰度与音轨，再挑一路下载。
+"""先探测，列出可选的清晰度与音轨，再挑一个变体下载。
 
-用的是 Apple 公开的 bipbop 测试流：24 路清晰度、三组音轨（AAC、AC-3、E-AC-3）。默认选的最高画质配的是 AC-3 音轨，
+用的是 Apple 公开的 bipbop 测试流：24 个变体、三组音轨（AAC、AC-3、E-AC-3）。默认选的最高画质配的是 AC-3 音轨，
 MP4 放不进（会报 Mp4UnsupportedError，可改为输出本地 HLS）；这里挑音频为 AAC（CODECS 写作 mp4a.40.2）的变体里码率
-最低的一路，约 40 MB。
+最低的那个，约 40 MB。
 """
 
 import asyncio
@@ -13,7 +13,6 @@ URL = "https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_a
 
 
 async def main() -> None:
-    """列出探测结果，选音频为 AAC 的变体里码率最低的下载。"""
     engine = Engine()
     probe = await engine.probe(Source(URL))
     if probe.master is None:

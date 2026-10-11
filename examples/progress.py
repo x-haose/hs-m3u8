@@ -5,14 +5,13 @@
 
 import asyncio
 
-from hs_m3u8 import Engine, HsM3u8Error, JobRequest, OutputOptions, RequestError, Source, Target
+from hs_m3u8 import Engine, HsM3u8Error, Job, JobRequest, Output, OutputOptions, RequestError, Source, Target
 
 URL = "https://test-streams.mux.dev/test_001/stream.m3u8"
 
 
-async def main() -> None:
-    """下载并显示进度，失败时按类别给出处理建议。"""
-    job = Engine().start(JobRequest(Source(URL), OutputOptions(Target.Mp4("downloads/progress.mp4"))))
+async def watch(job: Job) -> Output:
+    """等任务结束，期间每秒显示一次进度。"""
     waiting = asyncio.create_task(job.wait())
     while True:
         done, _ = await asyncio.wait({waiting}, timeout=1)
@@ -20,10 +19,14 @@ async def main() -> None:
         megabytes = progress.received / 1_000_000
         print(f"{progress.segments_done}/{progress.segments_total} 个分片，已读 {megabytes:.1f} MB")
         if done:
-            break
+            return await waiting
+
+
+async def main() -> None:
     try:
-        output = await waiting
-    except RequestError as error:  # 请求本身要改：输出已存在、选轨偏好与来源不符等
+        job = Engine().start(JobRequest(Source(URL), OutputOptions(Target.Mp4("downloads/progress.mp4"))))
+        output = await watch(job)
+    except RequestError as error:  # 改请求再试：参数不对、输出已存在、选轨偏好与来源不符等
         print("请求不对：", error)
     except HsM3u8Error as error:
         print(error, "（稍后重试可能成功）" if error.retryable else "")
