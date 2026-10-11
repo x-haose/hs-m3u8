@@ -62,8 +62,8 @@ impl fmt::Display for HookKind {
 /// 站点适配回调。在阻塞线程池中执行；返回 `Err` 时任务失败，不重试。
 /// 取消不会打断正在执行的回调，任务等它返回后才结束。
 ///
-/// 改写内容的回调返回 `None` 表示不改：拉到的内容不合要求时是来源的问题（如 [`crate::Error::KeyLength`]）；
-/// 返回的值由类型保证合要求。
+/// `on_playlist`、`on_key` 返回 `None` 表示不改：拉到的内容不合要求时是来源的问题（如
+/// [`crate::Error::KeyLength`]）；返回的值由类型保证合要求。
 pub trait Hooks: Send + Sync {
     /// 改写拉到的播放列表（如解密、转码），返回改写后的文本。`url` 为重定向之后的地址。
     fn on_playlist(&self, url: &Url, body: &[u8]) -> Result<Option<String>, HookError> {

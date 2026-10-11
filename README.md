@@ -96,10 +96,12 @@ asyncio.run(main())
 | 0.1.x | 1.0 |
 |---|---|
 | `await M3u8Downloader(m3u8_url, save_path, ...).run()` | `await Engine().start(JobRequest(Source(m3u8_url), OutputOptions(Target.Mp4(mp4_path)))).wait()` |
+| `run()` 不返回结果，分片缺失、合并失败等多数失败只写进日志 | 失败时 `wait()` 抛 `HsM3u8Error` 的子类：`RequestError` 要改请求，`retryable` 为真的稍后重试可能成功 |
+| MP4 已存在时跳过，同一份列表可以反复运行 | 抛 `OutputExistsError`：要跳过就捕获它，要替换用 `OutputOptions(overwrite=True)` |
 | `save_path` 是目录：MP4 写在 `save_path/<目录名>.mp4`，分片在 `save_path/hls` | `Target.Mp4` 给 MP4 文件的路径；分片在任务目录（默认与 MP4 同级、名为 `<主名>.hsdl`） |
 | `headers` | `HttpOptions(headers=...)` |
 | `max_workers` | `JobRequest(concurrency=...)` |
-| `key=M3u8Key(key, iv)`，iv 可写十六进制字符串 | `JobRequest(key=KeyOverride(key, iv=...))`，iv 是 16 字节的 `bytes`（十六进制字符串用 `bytes.fromhex` 转） |
+| `key=M3u8Key(key, iv)`，iv 可写十六进制字符串 | `JobRequest(key=KeyOverride(key, iv=...))`，iv 是 16 字节的 `bytes`（十六进制字符串用 `bytes.fromhex(iv.removeprefix("0x"))` 转） |
 | `is_decrypt` | 不需要：按播放列表的 `EXT-X-KEY` 解密 |
 | `get_m3u8_func`、`m3u8_response_after` | `Hooks.on_playlist`（返回改写后的文本） |
 | `m3u8_request_before`、`key_request_before`、`ts_request_before` | `Hooks.on_request`（`purpose` 区分用途） |

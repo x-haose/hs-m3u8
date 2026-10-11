@@ -134,7 +134,6 @@ macro_rules! variants {
         #[::pyo3_stub_gen::derive::gen_stub_pymethods]
         #[::pyo3::pymethods]
         impl $name {
-            /// `类型.取值(字段=repr, ...)`。
             fn __repr__(slf: &::pyo3::Bound<'_, Self>) -> ::pyo3::PyResult<String> {
                 let name = slf.as_any().get_type().qualname()?.to_string();
                 $crate::record::fields_repr(slf.as_any(), &name, &slf.get().field_list())

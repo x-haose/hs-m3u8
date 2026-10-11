@@ -70,9 +70,11 @@ pub(crate) fn handle() -> PyResult<Handle> {
 /// 等关闭运行时的线程时，多久查一次 Ctrl+C。
 const SIGNAL_CHECK: Duration = Duration::from_millis(100);
 
-/// 解释器退出前（atexit）关闭本进程的运行时：丢掉其上的任务（任务目录保持中断时的样子，可以续传），等正在执行的
-/// 回调返回，之后再没有线程进入解释器。解释器开始终结后再进入的线程会被终止或永远挂起，回调做了一半的事就丢了。
-/// 等待期间释放 GIL，回调才执行得完；Ctrl+C 放弃等待，这时仍在执行的回调可能使进程异常退出。
+/// 解释器退出前（atexit）关闭本进程的运行时：丢掉其上的任务（任务目录保持中断时的样子，可以续传），等阻塞线程池里
+/// 正在执行的操作（回调、写文件、合并 MP4）做完、丢掉排队的，之后再没有线程进入解释器。解释器开始终结后再进入的线程
+/// 会被终止或永远挂起，回调做了一半的事就丢了。等待期间释放 GIL，回调才执行得完；Ctrl+C 放弃等待，这时仍在执行的
+/// 回调、以及完成时去唤醒协程的后台线程，可能在终结后进入解释器、使进程异常退出。在 atexit 处理里第一次导入本库时
+/// 登记不上（CPython 不调用 atexit 运行期间新登记的处理）。
 #[pyfunction]
 fn shutdown(py: Python<'_>) -> PyResult<()> {
     let Slot::Running(runtime) = std::mem::replace(&mut *runtime(), Slot::Refused(EXITING)) else {

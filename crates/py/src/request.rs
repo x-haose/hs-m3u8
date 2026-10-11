@@ -202,7 +202,7 @@ variants! {
         /// 经这个 HTTP 或 SOCKS 代理
         Url {
             /// 代理的地址，协议为 http、https、socks4、socks4a、socks5、socks5h（构造时检查，不合要求时抛
-            /// `InvalidInputError`）；`repr` 只显示到路径，不含用户名与口令
+            /// `InvalidInputError`）；读到的是解析后的规范写法，可能与传入的不同；`repr` 只显示到路径，不含用户名与口令
             url: ProxyAddress,
         },
     }
@@ -293,9 +293,9 @@ impl HttpOptions {
 #[gen_stub_pyclass]
 #[pyclass(module = "hs_m3u8._native", frozen, eq, hash, get_all)]
 pub struct Source {
-    /// 主播放列表或媒体播放列表的地址，只支持 http/https。它去掉用户名、密码、查询串与片段后，连同
-    /// `preference`，称为来源：任务目录记录的来源不同即是另一个任务；来源相同而完整地址不同（如换了令牌）时，
-    /// 直播按 `LiveOptions` 的规则续录
+    /// 主播放列表或媒体播放列表的地址，只支持 http/https；读到的是解析后的规范写法（主机名小写、补上路径 `/`、
+    /// 百分号编码等），可能与传入的不同。它去掉用户名、密码、查询串与片段后，连同 `preference`，称为来源：任务目录
+    /// 记录的来源不同即是另一个任务；来源相同而完整地址不同（如换了令牌）时，直播按 `LiveOptions` 的规则续录
     pub url: Address,
     /// 选轨偏好
     pub preference: Preference,

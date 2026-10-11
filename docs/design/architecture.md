@@ -168,7 +168,6 @@ pub trait Hooks: Send + Sync {
 ```
 
 - 回调的结果由类型保证合要求（文本、16 字节）：回调返回 None 而拉到的内容不合要求时是来源的问题（`NotUtf8`、`KeyLength`），回调给不出合要求的值时是回调的问题（绑定层把 Python 返回值转换失败报为 `Error::Hook`）。
-
 - `on_playlist` 收原始字节：加密、压缩或非 UTF-8 编码的播放列表由回调还原。
 - `on_key` 用于站点自定义的 key 变换；`on_segment` 用于去掉分片前的伪装字节（例如伪装成 PNG 的 TS）。
 - 回调在阻塞线程池中执行；出错时任务失败（`Error::Hook`，带出错的是哪个回调），错误不可重试；取消不打断正在执行的回调。
@@ -235,7 +234,7 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 
 - `crates/py`：PyO3 绑定（cdylib），模块 `hs_m3u8._native`，只依赖 `core`。对外的类型都是这里定义的 PyO3 类，由 `core` 的类型逐个翻译而来：
   - 数据类不可变，按值比较、可哈希（`Source` 里的回调按对象身份），带按字段列出的 `__repr__`；都有构造函数，除 `Source` 的地址、`JobRequest` 的来源与输出、`OutputOptions` 的输出等打头的参数外只能按关键字传，结果类型的各参数都必须给（用于在测试里模拟结果）；
-  - 枚举的每种取值是一个子类，带数据的（如变体选择、录制的结束原因）与不带数据的（如 `Stage.Writing()`）一样，用 `match` 或 `isinstance` 分辨：PyO3 的简单枚举在运行时不是 `enum.Enum`，pyo3-stub-gen 却把它写成 `enum.Enum` 的子类，存根与运行时对不上。存根里属性与返回值的类型写成各取值类的并集（如 `Stage.Preparing | … | Stage.Done`），按取值写全的 `match` 才是穷尽的，漏写时类型检查器报错；参数的类型写基类；
+  - 枚举的每种取值是一个子类，带数据的（如变体选择、录制的结束原因）与不带数据的（如 `Stage.Writing()`）一样，用 `match` 或 `isinstance` 分辨：PyO3 的简单枚举在运行时不是 `enum.Enum`，pyo3-stub-gen 却把它写成 `enum.Enum` 的子类，存根与运行时对不上。存根里属性与返回值的类型写成各取值类的并集（如 `Stage.Preparing | … | Stage.Done`），按取值写全的 `match` 才是穷尽的，漏写时类型检查器报错；参数的类型写基类；两个以上字段的取值只收关键字参数（单个字段的照常可按位置传），`match` 的按位置模式不受影响；
   - 异常也是 PyO3 类（继承 `Exception`），属性带类型；构造函数为 `(message, *, 自己的属性, 基类的属性可省略)`。PyO3 不给原生基类传参数，说明由 `__init__` 放进 `args`，`__init__` 与构造函数签名相同，类型检查器与 stubtest 才对得上；
   - 数据类、枚举取值与异常都能 pickle 与 copy：`__reduce__` 交出 `functools.partial(类, 各属性)`，按关键字调用构造函数重建；进程池在进程之间传参数、结果与异常要用到。只保证同一版本之间：格式里没有版本号，字段改了含义时旧数据会被按新含义读出。异常的 Python 子类须保持基类的构造签名，构造与 pickle 都按它调用；
   - 回调基类 `Hooks` 是可被 Python 继承的 PyO3 类。
@@ -243,7 +242,7 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 - `python/hs_m3u8`：`__init__.py`（再导出全部公开名字）同样由 pyo3-stub-gen 生成，带 `py.typed`。
 - 只提供异步接口，脚本用 `asyncio.run(...)`：同步版本只是它的包装；核心的写法保证进程在任何时刻退出都不留半个输出、可以续传，Ctrl+C 不需要特殊处理。
 - PyO3 0.29.3（`experimental-async`：异步方法返回 Python 协程，`asyncio.run`、`create_task` 都能直接用）+ maturin 1.15.0 + pyo3-stub-gen 0.23.1；`abi3-py312` wheel（最低 Python 3.12，见 ADR-0001），FFmpeg 静态链接进扩展模块。
-- 运行时：每个进程一个 tokio 运行时，第一次用到时建立。经 `os.fork`（含 multiprocessing 的 fork 方式）fork 出的子进程没有父进程运行时的工作线程，第一次用到时另建；macOS 上不建、抛 `RuntimeError`（证书校验与读取系统代理要用的系统框架在多线程进程 fork 出的子进程里不可用，一用就崩溃），要用 spawn 方式；按 `os.register_at_fork` 登记的处理记下 fork 的代次。父进程建立的 `Engine`、`Job` 及等它们的协程在子进程里抛 `RuntimeError`（请求名额可能被父进程的请求永远占着，等结果的后台任务不在子进程里），回收时不销毁里面的值（销毁 tokio 的同步原语要拿它们的锁，fork 时父进程的线程可能正拿着）。任务目录的锁跟着打开的文件走，子进程继承了就会占着它直到退出：core 登记本进程持有的锁文件（`prepare_fork`），子进程里关掉，父进程的锁不受影响；fork 前放开 GIL 等登记表的锁（拿着它的可能是另一个正在 fork、要等 GIL 执行其他 fork 处理的线程）。后台任务不碰解释器，任务的错误在第一次等待时才翻译为异常。解释器退出前（atexit）关闭运行时：丢掉其上的任务，释放 GIL 等正在执行的回调返回（Ctrl+C 放弃等待），之后再没有线程进入解释器。终结开始后再取 GIL 的线程会被 CPython 终止或永远挂起，而 PyO3 只在 3.13 起的构建里先查解释器是否在终结，`abi3-py312` 构建不查。
+- 运行时：每个进程一个 tokio 运行时，第一次用到时建立。经 `os.fork`（含 multiprocessing 的 fork 方式）fork 出的子进程没有父进程运行时的工作线程，第一次用到时另建；macOS 上不建、抛 `RuntimeError`（证书校验与读取系统代理要用的系统框架在多线程进程 fork 出的子进程里不可用，一用就崩溃），要用 spawn 方式；按 `os.register_at_fork` 登记的处理记下 fork 的代次。父进程建立的 `Engine`、`Job` 及等它们的协程在子进程里抛 `RuntimeError`（请求名额可能被父进程的请求永远占着，等结果的后台任务不在子进程里），回收时不销毁里面的值（销毁 tokio 的同步原语要拿它们的锁，fork 时父进程的线程可能正拿着）。任务目录的锁跟着打开的文件走，子进程继承了就会占着它直到退出：core 登记本进程持有的锁文件（`prepare_fork`），子进程里关掉，父进程的锁不受影响；fork 前放开 GIL 等登记表的锁（拿着它的可能是另一个正在 fork、要等 GIL 执行其他 fork 处理的线程）。后台任务里不创建 Python 对象（只在完成时唤醒等待的协程），任务的错误在第一次等待时才翻译为异常。解释器退出前（atexit）关闭运行时：丢掉其上的任务，释放 GIL 等阻塞线程池里正在执行的操作（回调、写文件、合并 MP4）做完（Ctrl+C 放弃等待），之后再没有线程进入解释器；在 atexit 处理里第一次导入本库时登记不上这一步（CPython 不调用 atexit 运行期间新登记的处理）。终结开始后再取 GIL 的线程会被 CPython 终止或永远挂起，而 PyO3 只在 3.13 起的构建里先查解释器是否在终结，`abi3-py312` 构建不查。
 - 回调在 `core` 的阻塞线程池中取得 GIL 后执行，不占用 tokio 工作线程；只调用子类覆盖了的方法，没覆盖的不取 GIL。
 
 ### 7.2 约定
@@ -252,7 +251,7 @@ pub fn remux(streams: &[Streams], groups: &[DiscontinuityGroup], output: &Path) 
 - 路径：入参接受 `str | os.PathLike[str]`，返回的一律是 `pathlib.Path`（绝对路径）。地址是 `str`（传入时解析，返回的是解析后的规范写法），内容是 `bytes`。
 - 时长：`datetime.timedelta`；服务器要求的等待 `retry_after` 是整数秒（可能大到超出 `timedelta` 能表示的范围）。
 - 序列：返回 `tuple[T, ...]`，改不了，也就没有「改了却没生效」；传入接受序列，不接受 `str` 与二进制缓冲区（`bytes`、`bytearray`、`memoryview` 等，它们会被拆成字符或整数）。请求头传入 `Mapping[str, str]` 或 `(名, 值)` 的可迭代对象（同名可以有多个，同样不接受 `str` 与二进制缓冲区），保存为 `tuple[tuple[str, str], ...]`。
-- 校验：请求与选项的值在构造时检查，不合要求时抛 `InvalidInputError`：计数为负、超出范围、该至少为 1 而为 0，时长为负，地址解析不了（`Source`、`Proxy.Url`、`RequestParts`），以及 `core` 公开的校验（`Source::check_url`、`check_preference`、`Proxy::check_url`、`HttpOptions::validate`、`Timeouts::validate`、`LiveOptions::validate`，规则只在 `core` 一份）。输出路径要按开始任务时的当前目录补全，在开始任务时检查。结果与异常类型的构造函数（供 pickle 与测试）只做类型转换，整数为负时是 `OverflowError`。
+- 校验：请求与选项的值在构造时检查，不合要求时抛 `InvalidInputError`：计数为负、超出范围、该至少为 1 而为 0，时长为负，地址解析不了（`Source`、`Proxy.Url`、`RequestParts`），以及 `core` 公开的校验（`Source::check_url`、`check_preference`、`Proxy::check_url`、`HttpOptions::validate`、`Timeouts::validate`、`LiveOptions::validate`，规则只在 `core` 一份）。输出路径要按开始任务时的当前目录补全，在开始任务时检查。结果与异常类型的构造函数（供 pickle 与测试）只做类型转换，整数为负时是 `OverflowError`，地址解析不了时同样抛 `InvalidInputError`。
 - 默认值取 `core` 的（`Default` 实现与常量），绑定层不另写数字；说明里写出的默认数字（如超时 15 秒、并发 16）是照抄的，改 `core` 的默认值时同步改这些说明；可否重试、区间的分片数等也由 `core` 算好、作为字段给出，绑定层不另写规则。
 - 说明：中文，每个类、字段、方法、参数都写。请求头的值、key、代理地址里的口令不进 `__repr__`。
 - 异步方法返回协程，在 asyncio 事件循环里 await（在别处驱动时抛 `RuntimeError`，不开始操作）；协程被取消或丢弃时，所等的操作随之取消。本库内部出错（缺陷）时抛 `pyo3_runtime.PanicException`。
@@ -328,7 +327,6 @@ HsM3u8Error                       retryable: bool、retry_after: int | None、se
 ```
 
 `SelectFailure`、`Mp4Unsupported`、`HlsUnsupported`、`SourceUnsupported`（其中不支持的加密为 `Encrypted(url, line, encryption)`，`Encryption`：`SampleAes()`、`Drm(keyformat)`、`Method(name)`）、`IntegrityFailure`、`StallReason`、`WorkDirProblem` 都是带数据的枚举，取值与字段同 `core` 的对应类型；`HookKind`：`Playlist()`、`Request()`、`Key()`、`Segment()`；`JobType`（`WorkDirProblem.KindMismatch` 用）：`Vod()`、`Live()`。
-
 
 ### 7.4 质量门
 

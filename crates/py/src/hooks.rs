@@ -35,7 +35,7 @@ variants! {
 #[pyclass(module = "hs_m3u8._native", frozen, eq, hash, get_all, from_py_object)]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct RequestParts {
-    /// 请求的地址
+    /// 请求的地址；读到的是解析后的规范写法（主机名小写、补上路径 `/`、百分号编码等），可能与传入的不同
     pub url: Address,
     /// 本次请求的请求头（已含 `HttpOptions.headers`），按顺序，同名的可以有多个
     pub headers: Headers,
@@ -94,8 +94,8 @@ impl Hooks {
         Hooks
     }
 
-    /// 不收参数（签名与构造函数相同，类型检查器与 stubtest 按此核对）：没定义 `__init__` 的子类传了参数时抛
-    /// `TypeError`。
+    // 签名与构造函数相同：类型检查器与 stubtest 按此核对
+    /// 不收参数：没定义 `__init__` 的子类传了参数时抛 `TypeError`。
     #[pyo3(signature = (*args, **kwargs))]
     fn __init__(
         slf: &Bound<'_, Self>,
