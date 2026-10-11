@@ -19,6 +19,7 @@ use std::time::Duration;
 use hs_m3u8_core as core;
 use pyo3::exceptions::{PyOSError, PyRuntimeError};
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::task::JoinError;
 use tokio_util::task::AbortOnDropHandle;
@@ -91,6 +92,18 @@ fn shutdown(py: Python<'_>) -> PyResult<()> {
             Ok(never) => match never {},
         }
     }
+}
+
+/// 有正在运行的 asyncio 事件循环，否则抛 `RuntimeError`。异步方法先查它再开始操作：协程的结果经事件循环送回
+/// （PyO3 的协程只支持 asyncio），在别处驱动（如 trio、手动 `send`）时，不查的话操作已经开始，结果却送不回来。
+pub(crate) fn require_event_loop() -> PyResult<()> {
+    static GET_RUNNING_LOOP: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    Python::attach(|py| {
+        GET_RUNNING_LOOP
+            .import(py, "asyncio", "get_running_loop")?
+            .call0()?;
+        Ok(())
+    })
 }
 
 /// 在运行时上执行 `future`；返回的句柄被丢弃（等它的协程被取消）时中止它。

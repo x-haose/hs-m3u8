@@ -197,6 +197,24 @@ def test_cancelled_jobs_keep_their_segments_and_resume(server: Server, tmp_path:
     assert server.hits("seg0.ts") == 1
 
 
+def test_waiting_outside_asyncio_fails_without_cancelling_the_job(server: Server, tmp_path: Path) -> None:
+    put_media(server, VOD)
+    gate = server.gate("seg1.ts")
+    job = Engine().start(one_at_a_time(server, Target.Mp4(tmp_path / "out.mp4")))
+
+    # 不在事件循环里驱动等待的协程：先报错，不布下「协程被丢弃时取消任务」，丢弃它不影响任务
+    waiting = job.wait()
+    with pytest.raises(RuntimeError):
+        waiting.send(None)
+    del waiting
+    gate.release()
+
+    async def wait() -> Output:
+        return await job.wait()
+
+    assert asyncio.run(wait()).segments == 2
+
+
 def test_cancelling_the_wait_cancels_the_job(server: Server, tmp_path: Path) -> None:
     put_media(server, VOD)
     gate = server.gate("seg1.ts")

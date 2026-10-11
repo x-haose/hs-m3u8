@@ -218,8 +218,9 @@ class Encryption:
 @typing.final
 class Engine:
     r"""
-    下载引擎：所有任务共用一个在途请求上限。异步方法返回协程，在 asyncio 事件循环里 await；协程被取消时，所等的操作
-    随之取消。只能在建立它的进程里使用，fork 出的子进程要另建；fork 时正在运行的任务所用的任务目录，子进程不占着。
+    下载引擎：所有任务共用一个在途请求上限。异步方法返回协程，在 asyncio 事件循环里 await（在别处驱动时抛
+    `RuntimeError`，不开始操作）；协程被取消时，所等的操作随之取消。只能在建立它的进程里使用，fork 出的子进程要
+    另建；fork 时正在运行的任务所用的任务目录，子进程不占着。
     
     `max_requests`：所有任务合计同时在途的 key、分片与点播 init 段请求数，至少 1，默认为每个任务默认并发的四倍。
     播放列表与直播刷新时新出现的 init 段不占名额，以免直播刷新排在其他任务的大批下载之后。
@@ -780,7 +781,8 @@ class InvalidInputError(RequestError):
 class Job:
     r"""
     运行中的任务（`Engine.start`、`Engine.merge_recorded` 返回）。不再被引用、也没有在等它时（被回收）取消任务；已开始
-    写出（`Stage.Writing`）的仍在后台写完。异步方法返回协程，在 asyncio 事件循环里 await。只能在建立它的进程里使用。
+    写出（`Stage.Writing`）的仍在后台写完。异步方法返回协程，在 asyncio 事件循环里 await（在别处驱动时抛
+    `RuntimeError`）。只能在建立它的进程里使用。
     """
     def progress(self) -> Progress:
         r"""

@@ -13,10 +13,11 @@ use tokio::sync::watch;
 
 use crate::error::to_pyerr;
 use crate::report::{Output, Progress};
-use crate::runtime::Owner;
+use crate::runtime::{self, Owner};
 
 /// 运行中的任务（`Engine.start`、`Engine.merge_recorded` 返回）。不再被引用、也没有在等它时（被回收）取消任务；已开始
-/// 写出（`Stage.Writing`）的仍在后台写完。异步方法返回协程，在 asyncio 事件循环里 await。只能在建立它的进程里使用。
+/// 写出（`Stage.Writing`）的仍在后台写完。异步方法返回协程，在 asyncio 事件循环里 await（在别处驱动时抛
+/// `RuntimeError`）。只能在建立它的进程里使用。
 #[gen_stub_pyclass]
 #[pyclass(module = "hs_m3u8._native", frozen)]
 pub struct Job {
@@ -139,6 +140,7 @@ impl Job {
     /// 等待，得到同一结果或同一异常；等待的协程被取消时任务也取消。
     async fn wait(&self) -> PyResult<Output> {
         self.owner.check("Job")?;
+        runtime::require_event_loop()?;
         let mut finished = self.finished.clone();
         let mut cancel_on_drop = CancelOnDrop {
             control: Some(self.control.clone()),
