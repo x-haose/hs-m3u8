@@ -31,7 +31,7 @@ system-configuration = "0.7.0"
 thiserror = "2.0.21"
 tokio = "1.53.2"
 tokio-rustls = "0.26.6"
-tokio-util = "0.7.19"
+tokio-util = "0.7.20"
 url = "2.5.8"
 windows-registry = "0.6.1"
 
