@@ -192,17 +192,17 @@ def test_hook_failures_carry_the_original_exception(server: Server) -> None:
 def test_invalid_hook_results_are_reported_without_a_fabricated_cause(server: Server) -> None:
     server.put("media.m3u8", MEDIA)
 
-    class Unparsable(Hooks):
+    class ToFtp(Hooks):
         def on_request(self, purpose: Purpose, request: RequestParts) -> RequestParts:
             del purpose
-            return RequestParts("不是地址", headers=request.headers)
+            return RequestParts("ftp://example.com/media.m3u8", headers=request.headers)
 
-    with pytest.raises(HookError) as unparsable:
-        probe(Source(server.url("media.m3u8"), hooks=Unparsable()))
+    with pytest.raises(HookError) as unsupported:
+        probe(Source(server.url("media.m3u8"), hooks=ToFtp()))
 
-    assert unparsable.value.hook == HookKind.Request()
-    assert unparsable.value.__cause__ is None
-    assert "无法解析" in str(unparsable.value)
+    assert unsupported.value.hook == HookKind.Request()
+    assert unsupported.value.__cause__ is None
+    assert "http/https" in str(unsupported.value)
     assert server.hits("media.m3u8") == 0
 
 
@@ -263,33 +263,31 @@ def test_malformed_playlists_and_impossible_selections_are_reported(server: Serv
     assert unselectable.value.reason == SelectFailure.VariantIndexOutOfRange(index=5, count=2)
 
 
-def test_invalid_arguments_are_reported_before_any_request(server: Server) -> None:
-    # 为 0、为负、超出范围的计数与为负的时长都是参数错误，不是 OverflowError、ValueError
+def test_invalid_arguments_are_rejected_when_constructed() -> None:
+    # 为 0、为负、超出范围的计数，为负的时长，解析不了的地址：参数错误，不是 OverflowError、ValueError
     with pytest.raises(InvalidInputError):
         Engine(max_requests=0)
     with pytest.raises(InvalidInputError):
-        Engine(max_requests=-1)
-    with pytest.raises(InvalidInputError):
-        RetryPolicy(attempts=0)
+        RetryPolicy(attempts=-1)
     with pytest.raises(InvalidInputError):
         RetryPolicy(attempts=2**40)
     with pytest.raises(InvalidInputError):
         VariantChoice.Index(-1)
     with pytest.raises(InvalidInputError):
-        Timeouts(connect=timedelta(seconds=-1))
-    with pytest.raises(InvalidInputError):
         LiveOptions(stall_timeout=timedelta(seconds=-1))
-    url = server.url("a.m3u8")
-    unusable = [
-        Source("ftp://example.com/a.m3u8"),
-        Source("不是地址"),
-        Source(url, http=HttpOptions(proxy=Proxy.Url("sock5://127.0.0.1:9"))),
-        Source(url, http=HttpOptions(proxy=Proxy.Url("不是地址"))),
-    ]
-    for source in unusable:
-        with pytest.raises(InvalidInputError):
-            probe(source)
-    assert server.hits("a.m3u8") == 0
+    with pytest.raises(InvalidInputError):
+        Source("不是地址")
+    # 按 core 的规则检查的，也在构造时报
+    with pytest.raises(InvalidInputError):
+        Source("ftp://example.com/a.m3u8")
+    with pytest.raises(InvalidInputError):
+        Preference(audio=AudioChoice.Language("en\n"))
+    with pytest.raises(InvalidInputError):
+        Timeouts(connect=timedelta(0))
+    with pytest.raises(InvalidInputError):
+        HttpOptions(proxy=Proxy.Url("sock5://127.0.0.1:9"))
+    with pytest.raises(InvalidInputError):
+        LiveOptions(max_duration=timedelta(0))
 
 
 # 在子进程里跑：系统代理的环境变量只影响这个进程。直连照常探测；按系统设置时经代理，失败时退出码为 3

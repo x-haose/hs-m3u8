@@ -7,8 +7,8 @@ use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use tokio::task::JoinError;
 
-use crate::convert::{Count, PyPath, Seq};
-use crate::error::{invalid_input, to_pyerr};
+use crate::convert::{Positive, PyPath, Seq};
+use crate::error::to_pyerr;
 use crate::info::Probe;
 use crate::job::Job;
 use crate::report::Leftover;
@@ -35,7 +35,7 @@ pyo3_stub_gen::inventory::submit! {
 
         class Engine:
             def __new__(cls, *, max_requests: builtins.int = ...) -> Engine:
-                """`max_requests` 见类的说明；为 0 时抛 `InvalidInputError`。"""
+                """`max_requests` 见类的说明；小于 1 时抛 `InvalidInputError`。"""
         "#
     }
 }
@@ -45,14 +45,12 @@ pyo3_stub_gen::inventory::submit! {
 impl Engine {
     #[new]
     #[gen_stub(skip)]
-    #[pyo3(signature = (*, max_requests = Count(core::Engine::DEFAULT_MAX_REQUESTS.get())))]
-    fn new(py: Python<'_>, max_requests: Count<usize>) -> PyResult<Self> {
-        let max_requests = NonZeroUsize::new(max_requests.0)
-            .ok_or_else(|| invalid_input(py, "max_requests 至少为 1".to_owned()))?;
-        Ok(Engine {
-            inner: core::Engine::new(max_requests),
+    #[pyo3(signature = (*, max_requests = Positive(core::Engine::DEFAULT_MAX_REQUESTS)))]
+    fn new(max_requests: Positive<NonZeroUsize>) -> Self {
+        Engine {
+            inner: core::Engine::new(max_requests.0),
             owner: Owner::current(),
-        })
+        }
     }
 
     /// 拉取来源并按偏好选轨，不下载分片、不碰任务目录；请求与回调同下载。用于开始下载前列出可选的清晰度与音轨、

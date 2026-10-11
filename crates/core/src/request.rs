@@ -34,20 +34,33 @@ impl Source {
         }
     }
 
-    pub(crate) fn validate(&self) -> Result<(), Error> {
-        if !matches!(self.url.scheme(), "http" | "https") {
+    /// 校验地址（[`Source::check_url`]）、选轨偏好（[`Source::check_preference`]）与 `http`
+    /// （[`HttpOptions::validate`]），不合要求时报 [`Error::InvalidInput`]。探测与开始任务时也会校验。
+    pub fn validate(&self) -> Result<(), Error> {
+        Self::check_url(&self.url)?;
+        Self::check_preference(&self.preference)?;
+        self.http.validate()
+    }
+
+    /// 来源地址只支持 http/https。
+    pub fn check_url(url: &Url) -> Result<(), Error> {
+        if !matches!(url.scheme(), "http" | "https") {
             return Err(Error::InvalidInput(format!(
                 "只支持 http/https 地址：{}",
-                bare_url(&self.url)
+                bare_url(url)
             )));
         }
-        // 播放列表里的语言不会有换行；来源摘要按行编码
-        if let hls::AudioChoice::Language(language) = &self.preference.audio
+        Ok(())
+    }
+
+    /// 音频语言不能有换行：来源摘要按行编码，播放列表里的语言也不会有换行。
+    pub fn check_preference(preference: &hls::Preference) -> Result<(), Error> {
+        if let hls::AudioChoice::Language(language) = &preference.audio
             && language.contains(['\n', '\r'])
         {
             return Err(Error::InvalidInput(format!("音频语言不合法：{language:?}")));
         }
-        self.http.validate()
+        Ok(())
     }
 }
 
@@ -64,14 +77,12 @@ pub struct HttpOptions {
 }
 
 impl HttpOptions {
-    fn validate(&self) -> Result<(), Error> {
+    /// 校验请求头、超时（[`Timeouts::validate`]）与代理，不合要求时报 [`Error::InvalidInput`]。
+    pub fn validate(&self) -> Result<(), Error> {
         for (name, value) in &self.headers {
             check_header(name, value).map_err(Error::InvalidInput)?;
         }
-        let t = self.timeouts;
-        if t.connect.is_zero() || t.read_idle.is_zero() || t.request.is_zero() {
-            return Err(Error::InvalidInput("超时不能为 0".into()));
-        }
+        self.timeouts.validate()?;
         if let Proxy::Url(proxy) = &self.proxy {
             check_proxy(proxy)?;
         }
@@ -157,14 +168,8 @@ impl JobRequest {
     /// 校验请求，返回补全为绝对路径的输出配置（见 [`OutputOptions::resolve`]）。
     pub(crate) fn validate(&self) -> Result<ResolvedOutput, Error> {
         self.source.validate()?;
-        let invalid = |message: String| Err(Error::InvalidInput(message));
         if let Some(live) = self.live {
-            if live.stall_timeout.is_zero() {
-                return invalid("直播的 stall_timeout 不能为 0".into());
-            }
-            if live.max_duration.is_some_and(|d| d.is_zero()) {
-                return invalid("直播的 max_duration 不能为 0".into());
-            }
+            live.validate()?;
         }
         self.output.resolve()
     }
@@ -212,6 +217,19 @@ pub struct LiveOptions {
 /// 默认 stall_timeout：直播结束时播放列表多半直接 404 或不再更新，等一分钟足以排除临时故障。
 const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
+impl LiveOptions {
+    /// `stall_timeout` 与 `max_duration` 不能为 0，否则报 [`Error::InvalidInput`]。
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.stall_timeout.is_zero() {
+            return Err(Error::InvalidInput("直播的 stall_timeout 不能为 0".into()));
+        }
+        if self.max_duration.is_some_and(|d| d.is_zero()) {
+            return Err(Error::InvalidInput("直播的 max_duration 不能为 0".into()));
+        }
+        Ok(())
+    }
+}
+
 impl Default for LiveOptions {
     fn default() -> Self {
         LiveOptions {
@@ -254,6 +272,16 @@ pub struct Timeouts {
     pub read_idle: Duration,
     /// 单次尝试从发出到读完的上限；默认 600 秒，几 MB 的分片在几十 KB/s 时仍能读完
     pub request: Duration,
+}
+
+impl Timeouts {
+    /// 都不能为 0，否则报 [`Error::InvalidInput`]。
+    pub fn validate(&self) -> Result<(), Error> {
+        if self.connect.is_zero() || self.read_idle.is_zero() || self.request.is_zero() {
+            return Err(Error::InvalidInput("超时不能为 0".into()));
+        }
+        Ok(())
+    }
 }
 
 impl Default for Timeouts {

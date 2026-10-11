@@ -1,5 +1,6 @@
-//! Python 与 core 之间换手的值：路径、序列、请求头、计数、时长与地址。传入时在这里校验，存根的写法也在这里定。
+//! Python 与 core 之间转换的值：路径、序列、请求头、计数、时长与地址。传入时在这里校验，存根的写法也在这里定。
 
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -204,33 +205,86 @@ impl Headers {
     }
 }
 
-/// 传入的计数与下标：负数或超出范围时抛 `InvalidInputError`，与「该至少为 1 而为 0」同类，不是 PyO3 默认的
-/// `OverflowError`。
+/// 传入的计数与下标：负数或超出范围时抛 `InvalidInputError`，不是 PyO3 默认的 `OverflowError`。
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Count<T>(pub T);
+pub(crate) struct Count<T>(pub(crate) T);
 
-macro_rules! count {
-    ($($ty:ty),*) => {$(
-        impl FromPyObject<'_, '_> for Count<$ty> {
-            type Error = PyErr;
+/// 传入的至少为 1 的计数：为 0、为负或超出范围时抛 `InvalidInputError`。
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct Positive<T>(pub(crate) T);
 
-            fn extract(object: Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
-                match object.extract::<$ty>() {
-                    Ok(value) => Ok(Count(value)),
+/// 「应为 `min` 到 `max` 的整数」的 `InvalidInputError`。
+fn out_of_range(object: Borrowed<'_, '_, PyAny>, min: u8, max: impl std::fmt::Display) -> PyErr {
+    match object.repr() {
+        Ok(repr) => invalid_input(object.py(), format!("应为 {min} 到 {max} 的整数：{repr}")),
+        Err(failure) => failure,
+    }
+}
+
+macro_rules! counts {
+    ($($raw:ty => $nonzero:ty),*) => {$(
+        impl Count<$raw> {
+            /// 取不小于 `min` 的整数。
+            fn at_least(object: Borrowed<'_, '_, PyAny>, min: u8) -> PyResult<$raw> {
+                match object.extract::<$raw>() {
+                    Ok(value) if value >= <$raw>::from(min) => Ok(value),
+                    Ok(_) => Err(out_of_range(object, min, <$raw>::MAX)),
                     Err(failure) if failure.is_instance_of::<PyOverflowError>(object.py()) => {
-                        Err(invalid_input(
-                            object.py(),
-                            format!("应为 0 到 {} 的整数：{}", <$ty>::MAX, object.repr()?),
-                        ))
+                        Err(out_of_range(object, min, <$raw>::MAX))
                     }
                     Err(failure) => Err(failure),
                 }
             }
         }
+
+        impl FromPyObject<'_, '_> for Count<$raw> {
+            type Error = PyErr;
+
+            fn extract(object: Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
+                Self::at_least(object, 0).map(Count)
+            }
+        }
+
+        impl FromPyObject<'_, '_> for Positive<$nonzero> {
+            type Error = PyErr;
+
+            fn extract(object: Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
+                let value = Count::<$raw>::at_least(object, 1)?;
+                <$nonzero>::new(value)
+                    .map(Positive)
+                    .ok_or_else(|| out_of_range(object, 1, <$raw>::MAX))
+            }
+        }
+
+        impl<'py> IntoPyObject<'py> for Positive<$nonzero> {
+            type Target = PyAny;
+            type Output = Bound<'py, PyAny>;
+            type Error = PyErr;
+
+            fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
+                Ok(self.0.get().into_pyobject(py)?.into_any())
+            }
+        }
+
+        impl<'py> IntoPyObject<'py> for &Positive<$nonzero> {
+            type Target = PyAny;
+            type Output = Bound<'py, PyAny>;
+            type Error = PyErr;
+
+            fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
+                (*self).into_pyobject(py)
+            }
+        }
+
+        impl PyStubType for Positive<$nonzero> {
+            fn type_output() -> TypeInfo {
+                <$raw>::type_output()
+            }
+        }
     )*};
 }
 
-count!(u32, usize);
+counts!(u32 => NonZeroU32, usize => NonZeroUsize);
 
 impl<'py, T: IntoPyObject<'py>> IntoPyObject<'py> for Count<T> {
     type Target = T::Target;
@@ -286,10 +340,51 @@ impl PyStubType for Span {
     }
 }
 
-/// 地址只到路径（见 `core::bare_url`）；解析不了时整个隐去。
-pub(crate) fn bare_url(url: &str) -> String {
-    match Url::parse(url) {
-        Ok(url) => core::bare_url(&url),
-        Err(_) => "<无法解析的地址>".to_owned(),
+/// 地址：传入时解析，解析不了抛 `InvalidInputError`（说明里不带原文：解析不了就没法只显示到路径，原样带上可能泄露
+/// 令牌）；交给 Python 的是 `str`。
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct Address(pub(crate) Url);
+
+impl Address {
+    /// 只到路径（见 `core::bare_url`），`repr` 用它：地址常带令牌。
+    pub(crate) fn bare(&self) -> String {
+        core::bare_url(&self.0)
+    }
+}
+
+impl FromPyObject<'_, '_> for Address {
+    type Error = PyErr;
+
+    fn extract(object: Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
+        let text = object.extract::<String>()?;
+        Url::parse(&text)
+            .map(Address)
+            .map_err(|cause| invalid_input(object.py(), format!("地址无法解析（{cause}）")))
+    }
+}
+
+impl<'py> IntoPyObject<'py> for &Address {
+    type Target = PyString;
+    type Output = Bound<'py, PyString>;
+    type Error = std::convert::Infallible;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        Ok(PyString::new(py, self.0.as_str()))
+    }
+}
+
+impl<'py> IntoPyObject<'py> for Address {
+    type Target = PyString;
+    type Output = Bound<'py, PyString>;
+    type Error = std::convert::Infallible;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        (&self).into_pyobject(py)
+    }
+}
+
+impl PyStubType for Address {
+    fn type_output() -> TypeInfo {
+        String::type_output()
     }
 }

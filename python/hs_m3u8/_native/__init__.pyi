@@ -226,7 +226,7 @@ class Engine:
     """
     def __new__(cls, *, max_requests: builtins.int = ...) -> Engine:
         r"""
-        `max_requests` 见类的说明；为 0 时抛 `InvalidInputError`。
+        `max_requests` 见类的说明；小于 1 时抛 `InvalidInputError`。
         """
     async def probe(self, source: Source) -> Probe:
         r"""
@@ -337,7 +337,7 @@ class HlsUnsupportedError(RequestError):
 class HookError(HsM3u8Error):
     r"""
     回调出错，任务失败、不重试。回调抛出了异常、或返回值的类型不对时，`__cause__` 为那个异常（类型不对时是
-    `TypeError`）；返回的地址或请求头不合法时为 None，原因在说明里。
+    `TypeError`）；返回的地址不是 http/https、或请求头不合法时为 None，原因在说明里。
     """
     @property
     def hook(self) -> HookKind.Playlist | HookKind.Request | HookKind.Key | HookKind.Segment:
@@ -655,7 +655,7 @@ class HttpOptions:
     def __new__(cls, *, headers: typing.Optional[collections.abc.Mapping[builtins.str, builtins.str] | collections.abc.Iterable[tuple[builtins.str, builtins.str]]] = None, proxy: Proxy = ..., insecure: builtins.bool = False, timeouts: Timeouts = ..., retry: RetryPolicy = ...) -> HttpOptions:
         r"""
         `headers` 为 None 时没有附加的请求头；`proxy`、`timeouts`、`retry` 默认取 `Proxy.System()`、`Timeouts()`、
-        `RetryPolicy()`。
+        `RetryPolicy()`。请求头的名或值放不进 HTTP 请求、代理的协议不支持或主机名不合法时抛 `InvalidInputError`。
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -834,7 +834,7 @@ class JobRequest:
     @property
     def concurrency(self) -> builtins.int:
         r"""
-        本任务同时下载的分片数，默认 16；站点限流时调低
+        本任务同时下载的分片数，至少 1，默认 16；站点限流时调低
         """
     @property
     def live(self) -> typing.Optional[LiveOptions]:
@@ -845,7 +845,7 @@ class JobRequest:
     def __hash__(self) -> builtins.int: ...
     def __new__(cls, source: Source, output: OutputOptions, *, key: typing.Optional[KeyOverride] = None, concurrency: builtins.int = ..., live: typing.Optional[LiveOptions] = ...) -> JobRequest:
         r"""
-        `concurrency` 默认 16，为 0 时抛 `InvalidInputError`；`live` 默认 `LiveOptions()`。
+        `concurrency` 默认 16，小于 1 时抛 `InvalidInputError`；`live` 默认 `LiveOptions()`。
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -1127,7 +1127,7 @@ class LiveOptions:
     def __repr__(self) -> builtins.str: ...
     def __new__(cls, *, max_duration: typing.Optional[datetime.timedelta] = None, stall_timeout: datetime.timedelta = ...) -> LiveOptions:
         r"""
-        各项的默认值见同名属性。
+        各项的默认值见同名属性；为负或为 0 时抛 `InvalidInputError`。
         """
 
 @typing.final
@@ -1759,7 +1759,8 @@ class Preference:
     def __repr__(self) -> builtins.str: ...
     def __new__(cls, *, variant: VariantChoice = ..., audio: AudioChoice = ...) -> Preference:
         r"""
-        `variant` 默认 `VariantChoice.Best()`，`audio` 默认 `AudioChoice.Default()`。
+        `variant` 默认 `VariantChoice.Best()`，`audio` 默认 `AudioChoice.Default()`；音频语言含换行时抛
+        `InvalidInputError`。
         """
 
 @typing.final
@@ -2054,7 +2055,7 @@ class RequestParts:
     def __hash__(self) -> builtins.int: ...
     def __new__(cls, url: builtins.str, *, headers: collections.abc.Mapping[builtins.str, builtins.str] | collections.abc.Iterable[tuple[builtins.str, builtins.str]]) -> RequestParts:
         r"""
-        各参数即同名属性。
+        各参数即同名属性；`url` 解析不了时抛 `InvalidInputError`。
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -2108,7 +2109,7 @@ class RetryPolicy:
     def __repr__(self) -> builtins.str: ...
     def __new__(cls, *, attempts: builtins.int = ..., base_delay: datetime.timedelta = ..., max_delay: datetime.timedelta = ...) -> RetryPolicy:
         r"""
-        各项的默认值见类的说明；`attempts` 为 0 时抛 `InvalidInputError`。
+        各项的默认值见类的说明；`attempts` 小于 1、时长为负时抛 `InvalidInputError`。
         """
 
 @typing.final
@@ -2356,7 +2357,8 @@ class Source:
     def __hash__(self) -> builtins.int: ...
     def __new__(cls, url: builtins.str, *, preference: Preference = ..., http: HttpOptions = ..., hooks: typing.Optional[Hooks] = None) -> Source:
         r"""
-        `preference`、`http` 默认取 `Preference()`、`HttpOptions()`。
+        `preference`、`http` 默认取 `Preference()`、`HttpOptions()`；`url` 解析不了或不是 http/https 时抛
+        `InvalidInputError`。
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -2749,7 +2751,7 @@ class Timeouts:
     def __repr__(self) -> builtins.str: ...
     def __new__(cls, *, connect: datetime.timedelta = ..., read_idle: datetime.timedelta = ..., request: datetime.timedelta = ...) -> Timeouts:
         r"""
-        各项的默认值见同名属性。
+        各项的默认值见同名属性；为负或为 0 时抛 `InvalidInputError`。
         """
 
 @typing.final

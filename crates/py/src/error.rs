@@ -13,7 +13,7 @@ use pyo3::types::PyTuple;
 use pyo3::{PyClass, PyClassInitializer};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use crate::convert::{PyPath, Seq};
+use crate::convert::{Address, PyPath, Seq};
 use crate::hooks::PyHookError;
 use crate::record::{partial, record, variants};
 use crate::report::{
@@ -28,7 +28,7 @@ record! {
         /// 媒体序号
         pub sequence: u64,
         /// 分片地址（播放列表里写的，可能带令牌；异常的说明里只显示到路径）
-        pub url: String,
+        pub url: Address,
     }
 }
 
@@ -115,17 +115,17 @@ variants! {
         /// 播放列表没有分片
         EmptyPlaylist {
             /// 播放列表的地址
-            url: String,
+            url: Address,
         },
         /// 直播播放列表既没有 EXT-X-TARGETDURATION 也没有分片，无法确定刷新间隔
         NoTargetDuration {
             /// 播放列表的地址
-            url: String,
+            url: Address,
         },
         /// EXT-X-KEY 用了本库解不了的加密
         Encrypted {
             /// 播放列表的地址
-            url: String,
+            url: Address,
             /// EXT-X-KEY 所在的行，从 1 起
             line: usize,
             /// 加密方式
@@ -350,7 +350,7 @@ pub struct HsM3u8Error {
     pub segment: Option<SegmentRef>,
     /// 取 key 的请求或回调出错时，key 的地址（播放列表里写的）；其余为 None（key 长度不对时地址在
     /// `KeyLengthError.url`）
-    pub key_url: Option<String>,
+    pub key_url: Option<Address>,
     /// 失败后收拾也没做完而留下的东西；都做完时为空
     pub leftovers: Seq<Leftover>,
 }
@@ -383,7 +383,7 @@ impl HsM3u8Error {
         retryable: bool,
         retry_after: Option<u64>,
         segment: Option<SegmentRef>,
-        key_url: Option<String>,
+        key_url: Option<Address>,
         leftovers: Option<Seq<Leftover>>,
     ) -> Self {
         // 说明由 __init__ 放进 args
@@ -413,7 +413,7 @@ impl HsM3u8Error {
         retryable: bool,
         retry_after: Option<u64>,
         segment: Option<SegmentRef>,
-        key_url: Option<String>,
+        key_url: Option<Address>,
         leftovers: Option<Seq<Leftover>>,
     ) -> PyResult<()> {
         // 其余参数已由构造函数用过；收同样的参数，签名才与构造函数一致
@@ -528,7 +528,7 @@ macro_rules! exception {
                 retryable: bool,
                 retry_after: Option<u64>,
                 segment: Option<SegmentRef>,
-                key_url: Option<String>,
+                key_url: Option<Address>,
                 leftovers: Option<Seq<Leftover>>,
             ) -> PyClassInitializer<Self> {
                 let base = HsM3u8Error::new(message, retryable, retry_after, segment, key_url, leftovers);
@@ -553,7 +553,7 @@ macro_rules! exception {
                 retryable: bool,
                 retry_after: Option<u64>,
                 segment: Option<SegmentRef>,
-                key_url: Option<String>,
+                key_url: Option<Address>,
                 leftovers: Option<Seq<Leftover>>,
             ) -> PyResult<()> {
                 // 其余参数已由构造函数用过；收同样的参数，签名才与构造函数一致
@@ -636,7 +636,7 @@ exception! {
     /// 内容不是合法的播放列表；用了不支持的加密是 `SourceUnsupportedError`。
     pub struct PlaylistError extends SourceError {
         /// 播放列表的地址（重定向之后的）
-        pub url: String,
+        pub url: Address,
         /// 不合法的原因
         pub reason: Malformed,
     }
@@ -646,7 +646,7 @@ exception! {
     /// 应为媒体播放列表的地址（变体、音频 rendition）返回了主播放列表。
     pub struct NotMediaPlaylistError extends SourceError {
         /// 这个地址
-        pub url: String,
+        pub url: Address,
     }
 }
 
@@ -662,7 +662,7 @@ exception! {
     /// 数据校验失败（解密后的内容不对）。
     pub struct IntegrityError extends SourceError {
         /// 出错的分片或 init 段的地址
-        pub url: String,
+        pub url: Address,
         /// 失败的原因
         pub reason: IntegrityFailure,
     }
@@ -672,7 +672,7 @@ exception! {
     /// key 不是 16 字节。
     pub struct KeyLengthError extends SourceError {
         /// key 的地址
-        pub url: String,
+        pub url: Address,
         /// 实际的字节数
         pub length: usize,
     }
@@ -682,7 +682,7 @@ exception! {
     /// 请求失败；在分片、key 的请求里出错时，`segment`、`key_url` 指出是哪个。
     pub struct HttpError extends HsM3u8Error {
         /// 请求的地址（可能带令牌；异常的说明里只显示到路径）
-        pub url: String,
+        pub url: Address,
         /// 失败的原因
         pub kind: HttpErrorKind,
     }
@@ -739,7 +739,7 @@ exception! {
 
 exception! {
     /// 回调出错，任务失败、不重试。回调抛出了异常、或返回值的类型不对时，`__cause__` 为那个异常（类型不对时是
-    /// `TypeError`）；返回的地址或请求头不合法时为 None，原因在说明里。
+    /// `TypeError`）；返回的地址不是 http/https、或请求头不合法时为 None，原因在说明里。
     pub struct HookError extends HsM3u8Error {
         /// 哪个回调
         pub hook: HookKind,
@@ -787,12 +787,12 @@ fn exception(
             base.segment = Some(SegmentRef {
                 track,
                 sequence,
-                url: url.to_string(),
+                url: Address(*url),
             });
             return exception(py, *cause, base, message);
         }
         E::Key { url, cause } => {
-            base.key_url = Some(url.to_string());
+            base.key_url = Some(Address(*url));
             return exception(py, *cause, base, message);
         }
         E::Cleanup { failure, leftovers } => {
@@ -858,18 +858,14 @@ fn exception(
                     ),
                 )?,
                 U::EmptyPlaylist(url) => {
-                    let reason = SourceUnsupported::EmptyPlaylist {
-                        url: url.to_string(),
-                    };
+                    let reason = SourceUnsupported::EmptyPlaylist { url: Address(*url) };
                     instance(
                         py,
                         SourceError::initializer(base, unsupported_source(reason)),
                     )?
                 }
                 U::NoTargetDuration(url) => {
-                    let reason = SourceUnsupported::NoTargetDuration {
-                        url: url.to_string(),
-                    };
+                    let reason = SourceUnsupported::NoTargetDuration { url: Address(*url) };
                     instance(
                         py,
                         SourceError::initializer(base, unsupported_source(reason)),
@@ -877,7 +873,7 @@ fn exception(
                 }
                 U::Encryption { url, line, what } => {
                     let reason = SourceUnsupported::Encrypted {
-                        url: url.to_string(),
+                        url: Address(*url),
                         line,
                         encryption: what.into(),
                     };
@@ -921,26 +917,21 @@ fn exception(
             SourceError::initializer(
                 base,
                 PlaylistError {
-                    url: url.to_string(),
+                    url: Address(*url),
                     reason: (*cause).into(),
                 },
             ),
         )?,
         E::NotMediaPlaylist { url } => instance(
             py,
-            SourceError::initializer(
-                base,
-                NotMediaPlaylistError {
-                    url: url.to_string(),
-                },
-            ),
+            SourceError::initializer(base, NotMediaPlaylistError { url: Address(*url) }),
         )?,
         E::Integrity { url, kind } => instance(
             py,
             SourceError::initializer(
                 base,
                 IntegrityError {
-                    url: url.to_string(),
+                    url: Address(*url),
                     reason: kind.into(),
                 },
             ),
@@ -950,7 +941,7 @@ fn exception(
             SourceError::initializer(
                 base,
                 KeyLengthError {
-                    url: url.to_string(),
+                    url: Address(*url),
                     length,
                 },
             ),
@@ -960,7 +951,7 @@ fn exception(
             HsM3u8Error::initializer(
                 base,
                 HttpError {
-                    url: url.to_string(),
+                    url: Address(*url),
                     kind: kind.into(),
                 },
             ),

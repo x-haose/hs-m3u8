@@ -9,7 +9,7 @@ use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyString, PyTuple};
 use pyo3_stub_gen::TypeInfo;
 
-use crate::convert::bare_url;
+use crate::convert::Address;
 
 /// 数据类：字段只读（同名属性）。构造函数各参数只能按关键字传、都必须给；要默认值或校验的写 `@custom_new`，自己定义
 /// 构造函数。
@@ -152,7 +152,7 @@ pub(crate) fn fields_repr(
     for field in fields {
         let value = object.getattr(*field)?;
         let shown = if *field == "url" {
-            PyString::new(object.py(), &bare_url(&value.extract::<String>()?)).repr()?
+            PyString::new(object.py(), &value.extract::<Address>()?.bare()).repr()?
         } else {
             value.repr()?
         };

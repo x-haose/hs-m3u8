@@ -10,7 +10,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyString, PyTuple};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use crate::convert::{Headers, bare_url};
+use crate::convert::{Address, Headers};
 use crate::record::{reduce, variants};
 
 variants! {
@@ -34,7 +34,7 @@ variants! {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct RequestParts {
     /// 请求的地址
-    pub url: String,
+    pub url: Address,
     /// 本次请求的请求头（已含 `HttpOptions.headers`），按顺序，同名的可以有多个
     pub headers: Headers,
 }
@@ -42,17 +42,17 @@ pub struct RequestParts {
 #[gen_stub_pymethods]
 #[pymethods]
 impl RequestParts {
-    /// 各参数即同名属性。
+    /// 各参数即同名属性；`url` 解析不了时抛 `InvalidInputError`。
     #[new]
     #[pyo3(signature = (url, *, headers))]
-    fn new(url: String, headers: Headers) -> Self {
+    fn new(url: Address, headers: Headers) -> Self {
         RequestParts { url, headers }
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(format!(
             "RequestParts(url={}, headers={})",
-            PyString::new(py, &bare_url(&self.url)).repr()?,
+            PyString::new(py, &self.url.bare()).repr()?,
             PyTuple::new(py, self.headers.names())?.repr()?,
         ))
     }
@@ -139,18 +139,6 @@ fn hook_error(failure: PyErr) -> core::HookError {
     Box::new(PyHookError(failure))
 }
 
-/// 回调返回的内容不合法；回调本身没有抛异常，`HookError` 没有 `__cause__`。
-#[derive(Debug)]
-struct InvalidReturn(String);
-
-impl fmt::Display for InvalidReturn {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for InvalidReturn {}
-
 /// core 的回调：只调用 Python 子类覆盖了的方法。
 struct PyHooks {
     object: Py<Hooks>,
@@ -209,7 +197,7 @@ impl core::Hooks for PyHooks {
             return Ok(());
         }
         let parts = RequestParts {
-            url: request.url.to_string(),
+            url: Address(request.url.clone()),
             headers: Headers(request.headers.clone()),
         };
         let changed = Python::attach(|py| -> PyResult<RequestParts> {
@@ -219,14 +207,8 @@ impl core::Hooks for PyHooks {
             Ok(result.extract::<RequestParts>(py)?)
         })
         .map_err(hook_error)?;
-        // 解析不了的地址没法只显示到路径，说明里不带它
-        let url = Url::parse(&changed.url).map_err(|cause| -> core::HookError {
-            Box::new(InvalidReturn(format!(
-                "on_request 返回的地址无法解析（{cause}）"
-            )))
-        })?;
         *request = core::RequestParts {
-            url,
+            url: changed.url.0,
             headers: changed.headers.0,
         };
         Ok(())

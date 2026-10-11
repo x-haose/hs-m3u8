@@ -1,5 +1,5 @@
-//! 请求：来源、选轨偏好、发请求的方式、输出与任务的配置。构造时只检查 core 的类型表示不了的值（负数、超出范围、
-//! 该至少为 1 的计数为 0、地址解析不了），其余由 core 在探测、开始任务时检查。
+//! 请求：来源、选轨偏好、发请求的方式、输出与任务的配置。构造时按 core 的规则检查各值，不合要求时抛
+//! `InvalidInputError`；只有输出路径（相对路径按开始任务时的当前目录补全）在开始任务时检查。
 
 use std::hash::{Hash, Hasher};
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -7,12 +7,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hs_m3u8_core as core;
-use hs_m3u8_core::Url;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString, PyTuple};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use crate::convert::{Count, Headers, PyPath, Span, bare_url};
+use crate::convert::{Address, Count, Headers, Positive, PyPath, Span};
 use crate::error::{invalid_input, to_pyerr};
 use crate::hooks::{self, Hooks};
 use crate::record::{record, reduce, variants};
@@ -63,15 +62,19 @@ record! {
 #[gen_stub_pymethods]
 #[pymethods]
 impl Preference {
-    /// `variant` 默认 `VariantChoice.Best()`，`audio` 默认 `AudioChoice.Default()`。
+    /// `variant` 默认 `VariantChoice.Best()`，`audio` 默认 `AudioChoice.Default()`；音频语言含换行时抛
+    /// `InvalidInputError`。
     #[new]
     #[pyo3(signature = (
         *,
         variant = Preference::from(core::hls::Preference::default()).variant,
         audio = Preference::from(core::hls::Preference::default()).audio,
     ))]
-    fn new(variant: VariantChoice, audio: AudioChoice) -> Self {
-        Preference { variant, audio }
+    fn new(py: Python<'_>, variant: VariantChoice, audio: AudioChoice) -> PyResult<Self> {
+        let preference = Preference { variant, audio };
+        core::Source::check_preference(&preference.to_core())
+            .map_err(|error| to_pyerr(py, error))?;
+        Ok(preference)
     }
 }
 
@@ -102,7 +105,7 @@ pyo3_stub_gen::inventory::submit! {
                 read_idle: datetime.timedelta = ...,
                 request: datetime.timedelta = ...,
             ) -> Timeouts:
-                """各项的默认值见同名属性。"""
+                """各项的默认值见同名属性；为负或为 0 时抛 `InvalidInputError`。"""
         "#
     }
 }
@@ -118,12 +121,14 @@ impl Timeouts {
         read_idle = Span(core::Timeouts::default().read_idle),
         request = Span(core::Timeouts::default().request),
     ))]
-    fn new(connect: Span, read_idle: Span, request: Span) -> Self {
-        Timeouts {
+    fn new(py: Python<'_>, connect: Span, read_idle: Span, request: Span) -> PyResult<Self> {
+        let timeouts = core::Timeouts {
             connect: connect.0,
             read_idle: read_idle.0,
             request: request.0,
-        }
+        };
+        timeouts.validate().map_err(|error| to_pyerr(py, error))?;
+        Ok(timeouts.into())
     }
 }
 
@@ -133,7 +138,7 @@ record! {
     /// 上限 15 秒：重试前的等待合计约 45 秒，足以越过常见的短时故障。
     pub struct RetryPolicy {
         /// 总尝试次数（含首次），至少 1
-        pub attempts: u32,
+        pub attempts: Positive<NonZeroU32>,
         /// 第 n 次重试前等待 base_delay × 2^(n-1)
         pub base_delay: Duration,
         /// 指数等待的上限；实际等待再乘以 [0.75, 1.25) 的随机抖动。服务器在 429/503 中要求（Retry-After）的等待超过
@@ -157,7 +162,7 @@ pyo3_stub_gen::inventory::submit! {
                 base_delay: datetime.timedelta = ...,
                 max_delay: datetime.timedelta = ...,
             ) -> RetryPolicy:
-                """各项的默认值见类的说明；`attempts` 为 0 时抛 `InvalidInputError`。"""
+                """各项的默认值见类的说明；`attempts` 小于 1、时长为负时抛 `InvalidInputError`。"""
         "#
     }
 }
@@ -169,24 +174,16 @@ impl RetryPolicy {
     #[gen_stub(skip)]
     #[pyo3(signature = (
         *,
-        attempts = Count(core::RetryPolicy::default().attempts.get()),
+        attempts = Positive(core::RetryPolicy::default().attempts),
         base_delay = Span(core::RetryPolicy::default().base_delay),
         max_delay = Span(core::RetryPolicy::default().max_delay),
     ))]
-    fn new(
-        py: Python<'_>,
-        attempts: Count<u32>,
-        base_delay: Span,
-        max_delay: Span,
-    ) -> PyResult<Self> {
-        if attempts.0 == 0 {
-            return Err(invalid_input(py, "attempts 至少为 1".to_owned()));
-        }
-        Ok(RetryPolicy {
-            attempts: attempts.0,
+    fn new(attempts: Positive<NonZeroU32>, base_delay: Span, max_delay: Span) -> Self {
+        RetryPolicy {
+            attempts,
             base_delay: base_delay.0,
             max_delay: max_delay.0,
-        })
+        }
     }
 }
 
@@ -200,7 +197,7 @@ variants! {
         /// 经这个 HTTP 或 SOCKS 代理
         Url {
             /// 代理的地址，协议为 http、https、socks4、socks4a、socks5、socks5h；`repr` 只显示到路径，不含用户名与口令
-            url: String,
+            url: Address,
         },
     }
 }
@@ -226,7 +223,7 @@ pub struct HttpOptions {
 #[pymethods]
 impl HttpOptions {
     /// `headers` 为 None 时没有附加的请求头；`proxy`、`timeouts`、`retry` 默认取 `Proxy.System()`、`Timeouts()`、
-    /// `RetryPolicy()`。
+    /// `RetryPolicy()`。请求头的名或值放不进 HTTP 请求、代理的协议不支持或主机名不合法时抛 `InvalidInputError`。
     #[new]
     #[pyo3(signature = (
         *,
@@ -237,19 +234,25 @@ impl HttpOptions {
         retry = RetryPolicy::from(core::RetryPolicy::default()),
     ))]
     fn new(
+        py: Python<'_>,
         headers: Option<Headers>,
         proxy: Proxy,
         insecure: bool,
         timeouts: Timeouts,
         retry: RetryPolicy,
-    ) -> Self {
-        HttpOptions {
+    ) -> PyResult<Self> {
+        let options = HttpOptions {
             headers: headers.unwrap_or_default(),
             proxy,
             insecure,
             timeouts,
             retry,
-        }
+        };
+        options
+            .to_core()
+            .validate()
+            .map_err(|error| to_pyerr(py, error))?;
+        Ok(options)
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -281,7 +284,7 @@ pub struct Source {
     /// 主播放列表或媒体播放列表的地址，只支持 http/https。它去掉用户名、密码、查询串与片段后，连同
     /// `preference`，称为来源：任务目录记录的来源不同即是另一个任务；来源相同而完整地址不同（如换了令牌）时，
     /// 直播按 `LiveOptions` 的规则续录
-    pub url: String,
+    pub url: Address,
     /// 选轨偏好
     pub preference: Preference,
     /// 发请求的方式
@@ -320,7 +323,8 @@ impl Hash for Source {
 #[gen_stub_pymethods]
 #[pymethods]
 impl Source {
-    /// `preference`、`http` 默认取 `Preference()`、`HttpOptions()`。
+    /// `preference`、`http` 默认取 `Preference()`、`HttpOptions()`；`url` 解析不了或不是 http/https 时抛
+    /// `InvalidInputError`。
     #[new]
     #[pyo3(signature = (
         url,
@@ -330,17 +334,19 @@ impl Source {
         hooks = None,
     ))]
     fn new(
-        url: String,
+        py: Python<'_>,
+        url: Address,
         preference: Preference,
         http: HttpOptions,
         hooks: Option<Py<Hooks>>,
-    ) -> Self {
-        Source {
+    ) -> PyResult<Self> {
+        core::Source::check_url(&url.0).map_err(|error| to_pyerr(py, error))?;
+        Ok(Source {
             url,
             preference,
             http,
             hooks,
-        }
+        })
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -350,7 +356,7 @@ impl Source {
         };
         Ok(format!(
             "Source(url={}, preference={}, http={}, hooks={hooks})",
-            PyString::new(py, &bare_url(&self.url)).repr()?,
+            PyString::new(py, &self.url.bare()).repr()?,
             Bound::new(py, self.preference.clone())?.repr()?,
             Bound::new(py, self.http.clone())?.repr()?,
         ))
@@ -539,7 +545,7 @@ pyo3_stub_gen::inventory::submit! {
                 max_duration: typing.Optional[datetime.timedelta] = None,
                 stall_timeout: datetime.timedelta = ...,
             ) -> LiveOptions:
-                """各项的默认值见同名属性。"""
+                """各项的默认值见同名属性；为负或为 0 时抛 `InvalidInputError`。"""
         "#
     }
 }
@@ -550,11 +556,13 @@ impl LiveOptions {
     #[new]
     #[gen_stub(skip)]
     #[pyo3(signature = (*, max_duration = None, stall_timeout = Span(core::LiveOptions::default().stall_timeout)))]
-    fn new(max_duration: Option<Span>, stall_timeout: Span) -> Self {
-        LiveOptions {
+    fn new(py: Python<'_>, max_duration: Option<Span>, stall_timeout: Span) -> PyResult<Self> {
+        let live = core::LiveOptions {
             max_duration: max_duration.map(|span| span.0),
             stall_timeout: stall_timeout.0,
-        }
+        };
+        live.validate().map_err(|error| to_pyerr(py, error))?;
+        Ok(live.into())
     }
 }
 
@@ -568,8 +576,8 @@ pub struct JobRequest {
     pub output: OutputOptions,
     /// 自定义 key；None 时按播放列表取 key
     pub key: Option<KeyOverride>,
-    /// 本任务同时下载的分片数，默认 16；站点限流时调低
-    pub concurrency: usize,
+    /// 本任务同时下载的分片数，至少 1，默认 16；站点限流时调低
+    pub concurrency: Positive<NonZeroUsize>,
     /// 直播的录制方式；None 时遇到直播抛 `LiveNotEnabledError`
     pub live: Option<LiveOptions>,
 }
@@ -613,7 +621,7 @@ pyo3_stub_gen::inventory::submit! {
                 concurrency: builtins.int = ...,
                 live: typing.Optional[LiveOptions] = ...,
             ) -> JobRequest:
-                """`concurrency` 默认 16，为 0 时抛 `InvalidInputError`；`live` 默认 `LiveOptions()`。"""
+                """`concurrency` 默认 16，小于 1 时抛 `InvalidInputError`；`live` 默认 `LiveOptions()`。"""
         "#
     }
 }
@@ -628,28 +636,23 @@ impl JobRequest {
         output,
         *,
         key = None,
-        concurrency = Count(core::JobRequest::DEFAULT_CONCURRENCY.get()),
+        concurrency = Positive(core::JobRequest::DEFAULT_CONCURRENCY),
         live = Some(LiveOptions::from(core::LiveOptions::default())),
     ))]
     fn new(
-        py: Python<'_>,
         source: Py<Source>,
         output: OutputOptions,
         key: Option<KeyOverride>,
-        concurrency: Count<usize>,
+        concurrency: Positive<NonZeroUsize>,
         live: Option<LiveOptions>,
-    ) -> PyResult<Self> {
-        let Count(concurrency) = concurrency;
-        if concurrency == 0 {
-            return Err(invalid_input(py, "concurrency 至少为 1".to_owned()));
-        }
-        Ok(JobRequest {
+    ) -> Self {
+        JobRequest {
             source,
             output,
             key,
             concurrency,
             live,
-        })
+        }
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -659,7 +662,7 @@ impl JobRequest {
         let live = self.live.clone().into_pyobject(py)?.repr()?;
         Ok(format!(
             "JobRequest(source={source}, output={output}, key={key}, concurrency={}, live={live})",
-            self.concurrency
+            self.concurrency.0
         ))
     }
 
@@ -687,34 +690,30 @@ variants! {
 }
 
 impl Source {
-    /// 换成 core 的来源；地址解析不了时抛 `InvalidInputError`。
+    /// 换成 core 的来源；接上回调时读取它的属性，出错时抛那个异常。
     pub(crate) fn to_core(&self, py: Python<'_>) -> PyResult<core::Source> {
-        let url = parse_url(py, "来源地址", &self.url)?;
         let hooks: Arc<dyn core::Hooks> = match &self.hooks {
             Some(hooks) => hooks::to_core(hooks.bind(py))?,
             None => Arc::new(core::NoHooks),
         };
         Ok(core::Source {
-            url,
-            preference: self.preference.clone().into(),
-            http: self.http.to_core(py)?,
+            url: self.url.0.clone(),
+            preference: self.preference.to_core(),
+            http: self.http.to_core(),
             hooks,
         })
     }
 }
 
 impl HttpOptions {
-    fn to_core(&self, py: Python<'_>) -> PyResult<core::HttpOptions> {
-        let proxy = match &self.proxy {
-            Proxy::System {} => core::Proxy::System,
-            Proxy::Direct {} => core::Proxy::Direct,
-            Proxy::Url { url } => core::Proxy::Url(parse_url(py, "代理地址", url)?),
-        };
-        let attempts =
-            NonZeroU32::new(self.retry.attempts).expect("构造 RetryPolicy 时已检查至少为 1");
-        Ok(core::HttpOptions {
+    fn to_core(&self) -> core::HttpOptions {
+        core::HttpOptions {
             headers: self.headers.0.clone(),
-            proxy,
+            proxy: match &self.proxy {
+                Proxy::System {} => core::Proxy::System,
+                Proxy::Direct {} => core::Proxy::Direct,
+                Proxy::Url { url } => core::Proxy::Url(url.0.clone()),
+            },
             insecure: self.insecure,
             timeouts: core::Timeouts {
                 connect: self.timeouts.connect,
@@ -722,18 +721,12 @@ impl HttpOptions {
                 request: self.timeouts.request,
             },
             retry: core::RetryPolicy {
-                attempts,
+                attempts: self.retry.attempts.0,
                 base_delay: self.retry.base_delay,
                 max_delay: self.retry.max_delay,
             },
-        })
+        }
     }
-}
-
-/// 解析 `what`（如「来源地址」）；解析不了时抛 `InvalidInputError`。说明里不带地址：解析不了就没法只显示到路径，
-/// 原样带上可能泄露令牌。
-fn parse_url(py: Python<'_>, what: &str, url: &str) -> PyResult<Url> {
-    Url::parse(url).map_err(|cause| invalid_input(py, format!("{what}无法解析（{cause}）")))
 }
 
 impl Target {
@@ -760,7 +753,7 @@ impl OutputOptions {
 }
 
 impl JobRequest {
-    /// 换成 core 的请求；来源地址解析不了时抛 `InvalidInputError`。
+    /// 换成 core 的请求；接上回调时读取它的属性，出错时抛那个异常。
     pub(crate) fn to_core(&self, py: Python<'_>) -> PyResult<core::JobRequest> {
         let mut request =
             core::JobRequest::new(self.source.get().to_core(py)?, self.output.to_core());
@@ -768,8 +761,7 @@ impl JobRequest {
             key: key.key,
             iv: key.iv,
         });
-        request.concurrency =
-            NonZeroUsize::new(self.concurrency).expect("构造 JobRequest 时已检查至少为 1");
+        request.concurrency = self.concurrency.0;
         request.live = self.live.as_ref().map(|live| core::LiveOptions {
             max_duration: live.max_duration,
             stall_timeout: live.stall_timeout,
@@ -809,7 +801,7 @@ impl From<core::Timeouts> for Timeouts {
 impl From<core::RetryPolicy> for RetryPolicy {
     fn from(r: core::RetryPolicy) -> Self {
         RetryPolicy {
-            attempts: r.attempts.get(),
+            attempts: Positive(r.attempts),
             base_delay: r.base_delay,
             max_delay: r.max_delay,
         }
@@ -823,7 +815,7 @@ impl From<core::HttpOptions> for HttpOptions {
             proxy: match h.proxy {
                 core::Proxy::System => Proxy::System {},
                 core::Proxy::Direct => Proxy::Direct {},
-                core::Proxy::Url(url) => Proxy::Url { url: url.into() },
+                core::Proxy::Url(url) => Proxy::Url { url: Address(url) },
             },
             insecure: h.insecure,
             timeouts: h.timeouts.into(),
@@ -852,16 +844,18 @@ impl From<core::hls::Preference> for Preference {
     }
 }
 
-impl From<Preference> for core::hls::Preference {
-    fn from(p: Preference) -> Self {
+impl Preference {
+    fn to_core(&self) -> core::hls::Preference {
         core::hls::Preference {
-            variant: match p.variant {
+            variant: match &self.variant {
                 VariantChoice::Best {} => core::hls::VariantChoice::Best,
                 VariantChoice::Index { index } => core::hls::VariantChoice::Index(index.0),
             },
-            audio: match p.audio {
+            audio: match &self.audio {
                 AudioChoice::Default {} => core::hls::AudioChoice::Default,
-                AudioChoice::Language { language } => core::hls::AudioChoice::Language(language),
+                AudioChoice::Language { language } => {
+                    core::hls::AudioChoice::Language(language.clone())
+                }
                 AudioChoice::Index { index } => core::hls::AudioChoice::Index(index.0),
             },
         }
