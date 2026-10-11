@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use hs_m3u8_core as core;
 use hs_m3u8_core::Url;
-use pyo3::exceptions::PyTypeError;
+use pyo3::exceptions::{PyBaseException, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyDict, PyString, PyTuple};
@@ -152,20 +152,20 @@ impl Hooks {
 }
 
 /// 回调抛出的 Python 异常（或返回值的类型不对时提取出错的异常），原样放进 core 的 `Error::Hook`，翻译为 `HookError`
-/// 时取回作 `__cause__`。
+/// 时取回作 `__cause__`。存异常对象而不是 `PyErr`：垃圾回收器要经 `Job.__traverse__` 找到它。
 #[derive(Debug)]
-pub(crate) struct PyHookError(pub(crate) PyErr);
+pub(crate) struct PyHookError(pub(crate) Py<PyBaseException>);
 
 impl fmt::Display for PyHookError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
+        Python::attach(|py| fmt::Display::fmt(self.0.bind(py), f))
     }
 }
 
 impl std::error::Error for PyHookError {}
 
-fn hook_error(failure: PyErr) -> core::HookError {
-    Box::new(PyHookError(failure))
+fn hook_error(py: Python<'_>, failure: PyErr) -> core::HookError {
+    Box::new(PyHookError(failure.into_value(py)))
 }
 
 /// 回调返回的内容不合要求；回调本身没有抛异常，`HookError` 没有 `__cause__`。
@@ -219,12 +219,11 @@ impl PyHooks {
         take: impl FnOnce(&Bound<'_, PyAny>) -> PyResult<T>,
     ) -> Result<T, core::HookError> {
         Python::attach(|py| {
-            let result =
-                self.object
-                    .call_method1(py, method, (url.as_str(), PyBytes::new(py, data)))?;
-            take(result.bind(py))
+            self.object
+                .call_method1(py, method, (url.as_str(), PyBytes::new(py, data)))
+                .and_then(|result| take(result.bind(py)))
+                .map_err(|failure| hook_error(py, failure))
         })
-        .map_err(hook_error)
     }
 
     /// 调用 `method(url, data)`，返回的须是 `bytes`。
@@ -258,13 +257,12 @@ impl core::Hooks for PyHooks {
             url: Address(request.url.clone()),
             headers: Headers(request.headers.clone()),
         };
-        let changed = Python::attach(|py| -> PyResult<RequestParts> {
-            let result =
-                self.object
-                    .call_method1(py, "on_request", (Purpose::from(purpose), parts))?;
-            Ok(result.extract::<RequestParts>(py)?)
-        })
-        .map_err(hook_error)?;
+        let changed = Python::attach(|py| {
+            self.object
+                .call_method1(py, "on_request", (Purpose::from(purpose), parts))
+                .and_then(|result| Ok(result.extract::<RequestParts>(py)?))
+                .map_err(|failure| hook_error(py, failure))
+        })?;
         *request = core::RequestParts {
             url: changed.url.0,
             headers: changed.headers.0,

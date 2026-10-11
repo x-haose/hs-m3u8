@@ -1,12 +1,13 @@
 //! 运行中的任务：等结果、取消、停止、读进度。
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use hs_m3u8_core as core;
 use pyo3::exceptions::PyBaseException;
 use pyo3::panic::PanicException;
 use pyo3::prelude::*;
-use pyo3::sync::PyOnceLock;
+use pyo3::sync::MutexExt;
+use pyo3::{PyTraverseError, PyVisit};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use tokio::runtime::Handle;
 use tokio::sync::watch;
@@ -41,23 +42,55 @@ enum Finished {
 /// 任务的错误。翻译为异常要取得 GIL，放到第一次等待时做：后台任务不碰解释器。
 /// 各次等待抛同一个异常对象。
 struct Failure {
-    /// 翻译前的错误；翻译时取走
+    /// 翻译前的错误；翻译时取走，翻译期间拿着锁
     error: Mutex<Option<core::Error>>,
-    exception: PyOnceLock<Py<PyBaseException>>,
+    /// 翻译后的异常；`OnceLock` 不要 GIL 凭证就能读，`__traverse__` 里要读它
+    exception: OnceLock<Py<PyBaseException>>,
 }
 
 impl Failure {
+    fn new(error: core::Error) -> Self {
+        Failure {
+            error: Mutex::new(Some(error)),
+            exception: OnceLock::new(),
+        }
+    }
+
     /// 要抛出的异常。清掉上次抛出时附上的回溯，以免多次等待时回溯越接越长。
     fn raise(&self, py: Python<'_>) -> PyErr {
-        let exception = self.exception.get_or_init(py, || {
-            let error = self.error.lock().expect("持锁期间不会 panic").take();
-            to_pyerr(py, error.expect("错误只在初始化异常时取走一次")).into_value(py)
-        });
+        let exception = match self.exception.get() {
+            Some(exception) => exception,
+            None => {
+                // 翻译要调用解释器，期间可能放开 GIL：别的等待放开 GIL 等这把锁，拿到时异常已设好
+                let mut error = self.error.lock_py_attached(py).expect("持锁期间不会 panic");
+                if let Some(error) = error.take() {
+                    let exception = to_pyerr(py, error).into_value(py);
+                    self.exception
+                        .set(exception)
+                        .expect("只有拿着锁取走错误的一方设置");
+                }
+                self.exception.get().expect("取走错误的一方已设好")
+            }
+        };
         let exception = exception.bind(py);
         match exception.setattr("__traceback__", py.None()) {
             Ok(()) => PyErr::from_value(exception.clone().into_any()),
             Err(failure) => failure,
         }
+    }
+
+    /// 向垃圾回收器报出持有的异常：翻译后的，或翻译前回调抛出的。
+    fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        if let Some(exception) = self.exception.get() {
+            visit.call(exception)?;
+        }
+        // 正在翻译时不等：这次少报的引用只会使相关对象这一轮不被回收
+        if let Ok(error) = self.error.try_lock()
+            && let Some(error) = &*error
+        {
+            crate::error::traverse(error, visit)?;
+        }
+        Ok(())
     }
 }
 
@@ -72,10 +105,7 @@ impl Job {
         runtime.spawn(async move {
             let finished = match waiting.await {
                 Ok(Ok(output)) => Finished::Done(output.into()),
-                Ok(Err(error)) => Finished::Failed(Failure {
-                    error: Mutex::new(Some(error)),
-                    exception: PyOnceLock::new(),
-                }),
+                Ok(Err(error)) => Finished::Failed(Failure::new(error)),
                 Err(failure) => Finished::Panicked(match failure.try_into_panic() {
                     Ok(payload) => runtime::panic_message(payload),
                     Err(failure) => failure.to_string(),
@@ -162,6 +192,20 @@ impl Job {
             Finished::Failed(failure) => Err(Python::attach(|py| failure.raise(py))),
             Finished::Panicked(message) => Err(PanicException::new_err(message.clone())),
         }
+    }
+
+    /// 失败的任务持有异常，异常的回溯里常有引用这个任务的帧（`job = engine.start(...); await job.wait()`），回调
+    /// 抛出的异常还经回调的帧引用回调对象：引用环要靠垃圾回收器经这里找到。
+    #[gen_stub(skip)]
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        let Some(running) = self.running.here() else {
+            return Ok(());
+        };
+        let finished = running.finished.borrow();
+        if let Some(Finished::Failed(failure)) = finished.as_deref() {
+            failure.traverse(&visit)?;
+        }
+        Ok(())
     }
 }
 

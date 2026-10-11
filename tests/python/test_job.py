@@ -9,6 +9,7 @@ import pickle
 import subprocess
 import sys
 import threading
+import weakref
 from datetime import timedelta
 from pathlib import Path
 
@@ -261,6 +262,33 @@ def test_jobs_no_longer_referenced_are_cancelled(server: Server, tmp_path: Path)
 
     assert gate.abandoned.wait(ARRIVAL)
     assert not (tmp_path / "out.mp4").exists()
+
+
+def test_failed_jobs_and_their_exceptions_are_collected(server: Server, tmp_path: Path) -> None:
+    # 任务 → 异常 → 回溯里等它的帧 → 任务；回调抛出的异常还经回调的帧引用回调对象。任务要向垃圾回收器报出异常
+    put_media(server, VOD)
+
+    class Broken(Hooks):
+        def on_playlist(self, url: str, body: bytes) -> str:
+            del url, body
+            message = "站点改版了"
+            raise ValueError(message)
+
+    hooks = Broken()
+    collected = weakref.ref(hooks)
+    request = JobRequest(Source(server.url("index.m3u8"), hooks=hooks), OutputOptions(Target.Mp4(tmp_path / "a.mp4")))
+    del hooks
+
+    async def main(request: JobRequest) -> None:
+        job = Engine().start(request)
+        with pytest.raises(HookError):
+            await job.wait()
+
+    asyncio.run(main(request))
+    del request
+    gc.collect()
+
+    assert collected() is None
 
 
 def test_failed_segments_say_which_and_the_task_can_be_discarded(server: Server, tmp_path: Path) -> None:

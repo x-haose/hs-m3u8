@@ -10,7 +10,7 @@ use hs_m3u8_core as core;
 use pyo3::exceptions::{PyException, PyOSError};
 use pyo3::prelude::*;
 use pyo3::types::PyTuple;
-use pyo3::{PyClass, PyClassInitializer};
+use pyo3::{PyClass, PyClassInitializer, PyTraverseError, PyVisit};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 mod reason;
@@ -428,6 +428,21 @@ exception! {
     pub struct JobCancelledError extends HsM3u8Error {}
 }
 
+/// 向垃圾回收器报出 `error` 里（含包着的原因）回调抛出的异常。
+pub(crate) fn traverse(error: &core::Error, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+    match error {
+        core::Error::Hook { cause, .. } => match cause.downcast_ref::<PyHookError>() {
+            Some(PyHookError(exception)) => visit.call(exception),
+            None => Ok(()),
+        },
+        core::Error::Segment { cause, .. } | core::Error::Key { cause, .. } => {
+            traverse(cause, visit)
+        }
+        core::Error::Cleanup { failure, .. } => traverse(failure, visit),
+        _ => Ok(()),
+    }
+}
+
 /// 把 core 的错误翻译为 Python 异常；翻译本身出错时（如内存不足）抛那个错误。
 pub(crate) fn to_pyerr(py: Python<'_>, error: core::Error) -> PyErr {
     let base = HsM3u8Error::plain(
@@ -483,7 +498,10 @@ fn exception(
             )?;
             let error = raised(object, message)?;
             if let Some(PyHookError(original)) = cause.downcast_ref::<PyHookError>() {
-                error.set_cause(py, Some(original.clone_ref(py)));
+                error.set_cause(
+                    py,
+                    Some(PyErr::from_value(original.bind(py).clone().into_any())),
+                );
             }
             return Ok(error);
         }
