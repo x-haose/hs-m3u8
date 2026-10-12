@@ -1524,6 +1524,29 @@ class Mp4Unsupported:
         def __new__(cls, *, group: builtins.int, track: builtins.int, kind: StreamKind, first: Shape, found: Shape) -> Mp4Unsupported.ParamsChanged: ...
     
     @typing.final
+    class ParamsChangedInGroup(Mp4Unsupported):
+        r"""
+        这一组里中途换了编码参数（采样率、声道、画面宽高等），只出在参数随帧携带的 TS 与打包音频里
+        """
+        __match_args__ = ("group", "track", "kind",)
+        @property
+        def group(self) -> builtins.int:
+            r"""
+            第几个不连续段组
+            """
+        @property
+        def track(self) -> builtins.int:
+            r"""
+            第几条轨
+            """
+        @property
+        def kind(self) -> StreamKind.Video | StreamKind.Audio:
+            r"""
+            流的种类
+            """
+        def __new__(cls, *, group: builtins.int, track: builtins.int, kind: StreamKind) -> Mp4Unsupported.ParamsChangedInGroup: ...
+    
+    @typing.final
     class DtsNotIncreasing(Mp4Unsupported):
         r"""
         解码时间戳不递增：往回跳多为来源在时间戳重新开始处漏标了 EXT-X-DISCONTINUITY，重复多为相邻分片首尾
@@ -1580,7 +1603,7 @@ class Mp4UnsupportedError(RequestError):
     内容放不进 MP4；可只输出本地 HLS（`Target.Hls`）。
     """
     @property
-    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
+    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
         r"""
         放不进的原因
         """

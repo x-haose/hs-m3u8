@@ -26,6 +26,15 @@ pub(crate) fn shape(stream: &Stream<'_>, kind: StreamKind) -> Shape {
     }
 }
 
+/// 解复用器给这路流用的解析器最近从参数集得出的画面宽高；没有解析器或还没读到参数集时为 None。
+pub(crate) fn parsed_size(stream: &Stream<'_>) -> Option<(u32, u32)> {
+    // SAFETY: 流指针在 stream 存活期间有效；av_stream_get_parser 只读流的内部字段，返回的解析器为空或归所属输入上下文
+    // 所有，在 stream 存活期间有效；此处只读。
+    let parser = unsafe { ffmpeg::ffi::av_stream_get_parser(stream.as_ptr()).as_ref() }?;
+    let positive = |value: i32| u32::try_from(value).ok().filter(|&v| v > 0);
+    Some((positive(parser.width)?, positive(parser.height)?))
+}
+
 /// HEVC 标 `hvc1`（QuickTime/Safari 不播 `hev1`）；其余置 0，由 MP4 封装器按编码选择。
 pub(crate) fn set_codec_tag(ost: &mut StreamMut<'_>, id: codec::Id) {
     let tag = if id == codec::Id::HEVC {

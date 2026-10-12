@@ -94,6 +94,15 @@ repeat_enc=(-c:v libx264 -preset veryfast -bf 0 -g 10 -an -f mpegts)
 "${ff[@]}" "${repeat[@]}" -t 1 "${repeat_enc[@]}" "$DIR/ts_repeat/seg0.ts"
 "${ff[@]}" "${repeat[@]}" -ss 0.9 -t 1 -output_ts_offset 0.9 "${repeat_enc[@]}" "$DIR/ts_repeat/seg1.ts"
 
+# 组内换参数：两个时间戳相接（第二个晚 0.1 秒开始）、没有 B 帧的分片，第二个的分辨率与采样率都不同
+rm -rf -- "${DIR:?}/ts_param_change"
+mkdir -p "$DIR/ts_param_change"
+change_enc=(-c:v libx264 -preset veryfast -bf 0 -g 10 -b:v 150k "${aac[@]}" -f mpegts)
+"${ff[@]}" -f lavfi -i testsrc2=size=320x180:rate=10 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 1 \
+  "${change_enc[@]}" "$DIR/ts_param_change/seg0.ts"
+"${ff[@]}" -f lavfi -i testsrc2=size=160x90:rate=10 -f lavfi -i sine=frequency=440:sample_rate=44100 -t 1 \
+  -output_ts_offset 1.1 "${change_enc[@]}" "$DIR/ts_param_change/seg1.ts"
+
 # 回绕点前：一个纯视频分片，第一个时间戳比 33 位回绕点前 60 秒早 0.05 秒（mpegts 封装器另加 1.4 秒的起始延迟）
 rm -rf -- "${DIR:?}/ts_wrap"
 mkdir -p "$DIR/ts_wrap"

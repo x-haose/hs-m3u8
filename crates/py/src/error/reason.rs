@@ -216,6 +216,16 @@ variants! {
             /// 这一组的参数
             found: Shape,
         },
+        /// 这一组里中途换了编码参数（采样率、声道、画面宽高等），只出在参数随帧携带的 TS 与打包音频里
+        #[pyo3(constructor = (*, group, track, kind))]
+        ParamsChangedInGroup {
+            /// 第几个不连续段组
+            group: usize,
+            /// 第几条轨
+            track: usize,
+            /// 流的种类
+            kind: StreamKind,
+        },
         /// 解码时间戳不递增：往回跳多为来源在时间戳重新开始处漏标了 EXT-X-DISCONTINUITY，重复多为相邻分片首尾
         /// 重复了一帧
         #[pyo3(constructor = (*, group, track, kind))]
@@ -444,6 +454,13 @@ impl From<core::Mp4Unsupported> for Mp4Unsupported {
                 first: first.into(),
                 found: found.into(),
             },
+            U::ParamsChangedInGroup { group, track, kind } => {
+                Mp4Unsupported::ParamsChangedInGroup {
+                    group,
+                    track,
+                    kind: kind.into(),
+                }
+            }
             U::DtsNotIncreasing { group, track, kind } => Mp4Unsupported::DtsNotIncreasing {
                 group,
                 track,

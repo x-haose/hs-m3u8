@@ -7,7 +7,8 @@
 //!   各组首尾相接，下一组从上一组所有流的最晚结束时刻之后开始。
 //! - 每条轨按调用方指定的 [`Streams`] 贡献第一路视频和（或）第一路音频，没有这类流的轨不贡献（各轨合起来至少
 //!   一路），未指定种类的流不进输出、不检查编码；同一类流只能来自一条轨；后续组的流布局与编码参数必须与第一组
-//!   一致，每路流的解码时间戳必须严格递增（组内不能往回跳或重复）。
+//!   一致，参数随帧携带的（TS 与打包音频）在组内也不能变；每路流的解码时间戳必须严格递增（组内不能往回跳或
+//!   重复）。
 //! - 只接受 H.264、HEVC 视频与 AAC、AC-3、E-AC-3、MP3 音频，与 FFmpeg 构建启用的组件一致；MP3 的采样率须不低于
 //!   16 kHz（MP4 封装器不收更低的）。简化：E-AC-3 每帧不足 6 块时 MP4 封装器把相邻几帧并成一个样本，回读的包数与
 //!   写入的对不上，按核对失败报错；遇到这样的来源再改为按块数核对。
@@ -17,6 +18,7 @@
 
 mod chain;
 mod ffi;
+mod inband;
 mod packed;
 
 use std::collections::VecDeque;
@@ -30,6 +32,7 @@ use ffmpeg::{Dictionary, Packet, Rational, Rescale, Rounding, codec, encoder, fo
 use ffmpeg_next as ffmpeg;
 
 use crate::chain::{SegmentChain, ffmpeg_path};
+use crate::inband::Inband;
 pub use crate::packed::id3_len;
 
 /// 时间戳在组间换算时使用的公共时间基（微秒）。
@@ -235,8 +238,8 @@ pub enum Error {
     },
 }
 
-/// 内容放不进 MP4：编码不受支持；后续组与第 0 组的流种类、编码参数不同，或组内解码时间戳不递增（同一条 MP4 轨的
-/// 内容须前后一致、时间戳严格递增）；打包音频没有时间戳而要与其他轨对齐；或各轨都没有要取的流。
+/// 内容放不进 MP4：编码不受支持；后续组与第 0 组的流种类、编码参数不同，组内编码参数变了，或组内解码时间戳不递增
+/// （同一条 MP4 轨的内容须前后一致、时间戳严格递增）；打包音频没有时间戳而要与其他轨对齐；或各轨都没有要取的流。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unsupported {
     #[error(
@@ -259,6 +262,14 @@ pub enum Unsupported {
         kind: StreamKind,
         first: Shape,
         found: Shape,
+    },
+    /// 参数随帧携带的分片（TS 与打包音频）里，这路流在组内中途换了编码参数（采样率、声道、画面宽高等），或有音频帧
+    /// 读不出参数：MP4 的一条轨只有一个样本描述
+    #[error("第 {group} 组第 {track} 条轨的{kind}编码参数在组内变了，无法放进同一条 MP4 轨")]
+    ParamsChangedInGroup {
+        group: usize,
+        track: usize,
+        kind: StreamKind,
     },
     /// 往回跳多为来源在时间戳重新开始处漏标了 `EXT-X-DISCONTINUITY`，重复多为相邻分片首尾重复了一帧
     #[error(
@@ -365,7 +376,11 @@ fn open_track(segments: &TrackSegments, group: usize, track: usize) -> Result<In
         .map(|path| (path.clone(), 0))
         .collect();
     let (ictx, failure) = open_files(files, group, track)?;
-    Ok(Input::Chain { ictx, failure })
+    Ok(Input::Chain {
+        ictx,
+        failure,
+        init: segments.init.is_some(),
+    })
 }
 
 /// 把 `files`（路径与开头不读的字节数）当作一个连续的输入打开。返回输入与记录文件错误的位置。
@@ -408,6 +423,8 @@ enum Input {
         ictx: format::context::Input,
         /// 读分片文件出错时的路径与原因
         failure: chain::Failure,
+        /// 有 init 段（fMP4）：编码参数都在 init 段里，不随帧携带
+        init: bool,
     },
     Packed(Packed),
 }
@@ -425,7 +442,7 @@ impl Input {
     /// 读到末尾，并静默跳过 `InvalidData` 的包。
     fn read(&mut self, packet: &mut Packet, group: usize, track: usize) -> Result<bool, Error> {
         match self {
-            Input::Chain { ictx, failure } => match packet.read(ictx) {
+            Input::Chain { ictx, failure, .. } => match packet.read(ictx) {
                 Ok(()) => Ok(true),
                 Err(ffmpeg::Error::Eof) => Ok(false),
                 Err(cause) => Err(read_failure(failure).unwrap_or(Error::Read {
@@ -440,6 +457,11 @@ impl Input {
 
     fn is_packed(&self) -> bool {
         matches!(self, Input::Packed(_))
+    }
+
+    /// 编码参数随帧携带（TS 与打包音频），要逐包核对（见 [`inband`]）。
+    fn inband(&self) -> bool {
+        !matches!(self, Input::Chain { init: true, .. })
     }
 
     /// 打包音频，而这一组有分片没有时间戳。
@@ -639,6 +661,8 @@ struct Source {
     input: Input,
     /// 按输入流下标；None 表示该流不进输出
     map: Vec<Option<Mapping>>,
+    /// 按输入流下标；进输出、参数随帧携带且读得出的流为 Some
+    inband: Vec<Option<Inband>>,
     /// 已读出、待写入的包及其映射；包一定带 DTS
     queue: VecDeque<(Packet, Mapping)>,
     finished: bool,
@@ -653,24 +677,31 @@ impl Source {
         selected: &[Selected],
         outputs: &[usize],
     ) -> Self {
-        let mut map = vec![None; input.context().nb_streams() as usize];
+        let streams = input.context().nb_streams() as usize;
+        let mut map = vec![None; streams];
+        let mut inband = vec![None; streams];
         for (s, &output) in selected.iter().zip(outputs) {
             map[s.index] = Some(Mapping {
                 output,
                 time_base: s.time_base,
             });
+            if input.inband() {
+                inband[s.index] = Inband::of(s.id);
+            }
         }
         Source {
             group,
             track,
             input,
             map,
+            inband,
             queue: VecDeque::new(),
             finished: false,
         }
     }
 
-    /// 读下一个要写出的包。跳过未映射流的包；没有 DTS 的包计入该输出流的 `skipped`。读到末尾返回 `None`。
+    /// 读下一个要写出的包。跳过未映射流的包；没有 DTS 的包计入该输出流的 `skipped`；参数随帧携带的包核对参数。读到
+    /// 末尾返回 `None`。
     fn read_next(&mut self, outs: &mut [OutStream]) -> Result<Option<(Packet, Mapping)>, Error> {
         loop {
             let mut packet = Packet::empty();
@@ -684,6 +715,20 @@ impl Source {
             if packet.dts().is_none() {
                 outs[mapping.output].skipped += 1;
                 continue;
+            }
+            if let Some(check) = self.inband[packet.stream()].as_mut() {
+                let stream = self
+                    .input
+                    .context()
+                    .stream(packet.stream())
+                    .expect("包所属的流存在");
+                if !check.check(packet.data().unwrap_or_default(), &stream) {
+                    return Err(Error::Unsupported(Unsupported::ParamsChangedInGroup {
+                        group: self.group,
+                        track: self.track,
+                        kind: outs[mapping.output].shape.kind(),
+                    }));
+                }
             }
             return Ok(Some((packet, mapping)));
         }

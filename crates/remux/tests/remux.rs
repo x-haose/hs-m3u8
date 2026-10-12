@@ -544,6 +544,48 @@ fn resolution_change_between_groups_is_rejected() {
     );
 }
 
+/// 组内中途换了编码参数：TS 的画面宽高与采样率、打包音频的编码都在第二个分片变了，MP4 的一条轨只有一个样本描述。
+#[test]
+fn parameter_changes_within_a_group_are_rejected() {
+    let dir = work_dir("params_in_group");
+    let output = dir.join("out.mp4");
+    let changed = track("ts_param_change");
+    for (streams, kind) in [
+        (Streams::Video, StreamKind::Video),
+        (Streams::Audio, StreamKind::Audio),
+    ] {
+        let err = remux(&[streams], &[group([changed.clone()])], &output).unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                Error::Unsupported(Unsupported::ParamsChangedInGroup { group: 0, track: 0, kind: found })
+                    if *found == kind
+            ),
+            "{kind}：实际 {err:?}"
+        );
+    }
+
+    let (aac, ac3) = (packed_fixture("aac"), packed_fixture("ac3"));
+    let audio = TrackSegments {
+        init: None,
+        segments: vec![
+            packed_segment(&dir, &aac[0].0, Some(900_000)),
+            packed_segment(&dir, &ac3[1].0, Some(900_000 + aac[0].1)),
+        ],
+    };
+    let err = remux(&[Streams::Audio], &[group([audio])], &output).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::ParamsChangedInGroup {
+                kind: StreamKind::Audio,
+                ..
+            })
+        ),
+        "实际 {err:?}"
+    );
+}
+
 /// MP2 音频，以及采样率低于 16 kHz 的 MP3（MP4 封装器不收）放不进 MP4。
 #[test]
 fn mp2_and_low_rate_mp3_audio_are_rejected() {
