@@ -649,12 +649,6 @@ fn open_selected(
     Ok((input, selected))
 }
 
-/// 一条轨在第 0 组确定的一路输出流。
-struct TrackOutput {
-    shape: Shape,
-    out: usize,
-}
-
 /// 一路输入流对应的输出流。
 #[derive(Clone, Copy)]
 struct Mapping {
@@ -793,18 +787,21 @@ fn write_verified(
     groups: &[DiscontinuityGroup],
     part: &Path,
 ) -> Result<Report, Error> {
+    let first = open_group(streams, groups, 0, None)?;
+    let layout = layout_of(&first)?;
     let mut octx = format::output_as(part, "mp4").map_err(|cause| Error::OpenOutput {
         path: part.to_path_buf(),
         cause: cause.into(),
     })?;
-    let (layout, first_sources) = create_outputs(streams, &groups[0], &mut octx)?;
+    add_streams(&mut octx, &first)?;
     write_header(&mut octx)?;
     let mut outs: Vec<OutStream> = layout
         .iter()
         .flatten()
-        .map(|t| OutStream {
-            shape: t.shape,
-            time_base: octx.stream(t.out).expect("输出流已创建").time_base(),
+        .enumerate()
+        .map(|(out, &shape)| OutStream {
+            shape,
+            time_base: octx.stream(out).expect("输出流已创建").time_base(),
             written: 0,
             skipped: 0,
             start_us: None,
@@ -821,9 +818,11 @@ fn write_verified(
         .max()
         .expect("第 0 组至少有一路输出流");
 
-    write_group(0, first_sources, &mut octx, &mut outs, margin_us)?;
+    let sources = into_sources(0, first, &layout);
+    write_group(0, sources, &mut octx, &mut outs, margin_us)?;
     for group in 1..groups.len() {
-        let sources = open_group(streams, groups, group, &layout)?;
+        let opened = open_group(streams, groups, group, Some(&layout))?;
+        let sources = into_sources(group, opened, &layout);
         write_group(group, sources, &mut octx, &mut outs, margin_us)?;
     }
     octx.write_trailer().map_err(|e| Error::Mux(e.into()))?;
@@ -846,23 +845,111 @@ fn write_verified(
     })
 }
 
-/// 按第 0 组建立输出流（创建顺序即输出流下标），返回各轨的输出流与第 0 组已打开的输入。
-fn create_outputs(
+/// 一条轨在一组里打开的输入与选中的流。
+struct OpenTrack {
+    track: usize,
+    input: Input,
+    selected: Vec<Selected>,
+}
+
+/// 打开第 `group` 组的各轨并选流（见 [`open_selected`]）。`layout` 为第 0 组各轨选中的流参数（见 [`layout_of`]），
+/// 其余组的流种类与参数须与它相同；打开第 0 组时为 None。
+fn open_group(
     streams: &[Streams],
-    first: &DiscontinuityGroup,
-    octx: &mut format::context::Output,
-) -> Result<(Vec<Vec<TrackOutput>>, Vec<Source>), Error> {
-    let mut layout: Vec<Vec<TrackOutput>> = Vec::new();
-    let mut sources = Vec::new();
-    for (track, segments) in first.tracks.iter().enumerate() {
-        let (input, selected) = open_selected(segments, streams[track], 0, track)?;
-        let mut outputs = Vec::new();
-        for s in &selected {
-            let kind = s.shape.kind();
-            if layout.iter().flatten().any(|o| o.shape.kind() == kind) {
-                return Err(Error::DuplicateKind { track, kind });
-            }
-            let stream = input
+    groups: &[DiscontinuityGroup],
+    group: usize,
+    layout: Option<&[Vec<Shape>]>,
+) -> Result<Vec<OpenTrack>, Error> {
+    let mut opened = Vec::new();
+    for (track, segments) in groups[group].tracks.iter().enumerate() {
+        let (input, selected) = open_selected(segments, streams[track], group, track)?;
+        if let Some(layout) = layout {
+            same_shapes(&selected, &layout[track], group, track)?;
+        }
+        opened.push(OpenTrack {
+            track,
+            input,
+            selected,
+        });
+    }
+    check_timed(group, &opened)?;
+    Ok(opened)
+}
+
+/// 一条轨这一组选中的流与第 0 组的 `first` 种类、参数都相同。
+fn same_shapes(
+    selected: &[Selected],
+    first: &[Shape],
+    group: usize,
+    track: usize,
+) -> Result<(), Error> {
+    if selected.len() != first.len()
+        || selected
+            .iter()
+            .zip(first)
+            .any(|(s, f)| s.shape.kind() != f.kind())
+    {
+        return Err(Error::Unsupported(Unsupported::LayoutChanged {
+            group,
+            track,
+        }));
+    }
+    match selected.iter().zip(first).find(|(s, f)| s.shape != **f) {
+        Some((s, f)) => Err(Error::Unsupported(Unsupported::ParamsChanged {
+            group,
+            track,
+            kind: s.shape.kind(),
+            first: *f,
+            found: s.shape,
+        })),
+        None => Ok(()),
+    }
+}
+
+/// 一组里有打包音频的轨没有时间戳时，只有它一条轨贡献流才能定时。
+fn check_timed(group: usize, opened: &[OpenTrack]) -> Result<(), Error> {
+    let contributing: Vec<&OpenTrack> = opened.iter().filter(|t| !t.selected.is_empty()).collect();
+    match contributing.iter().find(|t| t.input.untimed()) {
+        Some(untimed) if contributing.len() > 1 => {
+            Err(Error::Unsupported(Unsupported::UntimedPackedAudio {
+                group,
+                track: untimed.track,
+            }))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// 第 0 组各轨选中的流参数，下标为轨道号；依次排开即各路输出流。同一类流只能来自一条轨，各轨合起来至少一路。
+fn layout_of(first: &[OpenTrack]) -> Result<Vec<Vec<Shape>>, Error> {
+    let mut layout: Vec<Vec<Shape>> = Vec::new();
+    for t in first {
+        let duplicate = t.selected.iter().find(|s| {
+            layout
+                .iter()
+                .flatten()
+                .any(|shape| shape.kind() == s.shape.kind())
+        });
+        if let Some(s) = duplicate {
+            return Err(Error::DuplicateKind {
+                track: t.track,
+                kind: s.shape.kind(),
+            });
+        }
+        layout.push(t.selected.iter().map(|s| s.shape).collect());
+    }
+    if layout.iter().all(Vec::is_empty) {
+        return Err(Error::Unsupported(Unsupported::NoStreams));
+    }
+    Ok(layout)
+}
+
+/// 按第 0 组建立输出流，创建顺序即输出流下标（见 [`layout_of`]）。
+fn add_streams(octx: &mut format::context::Output, first: &[OpenTrack]) -> Result<(), Error> {
+    for t in first {
+        for s in &t.selected {
+            let stream = t
+                .input
                 .context()
                 .stream(s.index)
                 .expect("open_selected 返回的下标有效");
@@ -871,36 +958,23 @@ fn create_outputs(
                 .map_err(|e| Error::Mux(e.into()))?;
             ost.set_parameters(stream.parameters());
             ffi::set_codec_tag(&mut ost, s.id);
-            outputs.push(TrackOutput {
-                shape: s.shape,
-                out: ost.index(),
-            });
         }
-        // 没有要取的流的轨什么也不贡献，不读它的包
-        if !outputs.is_empty() {
-            let indices: Vec<usize> = outputs.iter().map(|o| o.out).collect();
-            sources.push(Source::new(0, track, input, &selected, &indices));
-        }
-        layout.push(outputs);
     }
-    if layout.iter().all(Vec::is_empty) {
-        return Err(Error::Unsupported(Unsupported::NoStreams));
-    }
-    check_timed(0, &sources)?;
-    Ok((layout, sources))
+    Ok(())
 }
 
-/// 一组里有打包音频的轨没有时间戳时，只有它一条轨才能定时。
-fn check_timed(group: usize, sources: &[Source]) -> Result<(), Error> {
-    match sources.iter().find(|s| s.input.untimed()) {
-        Some(untimed) if sources.len() > 1 => {
-            Err(Error::Unsupported(Unsupported::UntimedPackedAudio {
-                group,
-                track: untimed.track,
-            }))
+/// 一组打开的各轨换成读包的输入：各轨选中的流按 `layout` 依次对应输出流；没有要取的流的轨不贡献，不读它的包。
+fn into_sources(group: usize, opened: Vec<OpenTrack>, layout: &[Vec<Shape>]) -> Vec<Source> {
+    let mut next = 0;
+    let mut sources = Vec::new();
+    for t in opened {
+        let outputs: Vec<usize> = (next..next + t.selected.len()).collect();
+        next += layout[t.track].len();
+        if !t.selected.is_empty() {
+            sources.push(Source::new(group, t.track, t.input, &t.selected, &outputs));
         }
-        _ => Ok(()),
     }
+    sources
 }
 
 /// 写 MP4 头（moov 前置）；封装器不认识的选项视为错误。
@@ -918,48 +992,6 @@ fn write_header(octx: &mut format::context::Output) -> Result<(), Error> {
     } else {
         Err(Error::RejectedOptions(rejected))
     }
-}
-
-/// 打开第 `group` 组的全部轨，按 `layout` 建立流映射并检查与第 0 组一致。
-fn open_group(
-    streams: &[Streams],
-    groups: &[DiscontinuityGroup],
-    group: usize,
-    layout: &[Vec<TrackOutput>],
-) -> Result<Vec<Source>, Error> {
-    let mut sources = Vec::new();
-    for (track, segments) in groups[group].tracks.iter().enumerate() {
-        let (input, selected) = open_selected(segments, streams[track], group, track)?;
-        let expected = &layout[track];
-        if selected.len() != expected.len()
-            || selected
-                .iter()
-                .zip(expected)
-                .any(|(s, e)| s.shape.kind() != e.shape.kind())
-        {
-            return Err(Error::Unsupported(Unsupported::LayoutChanged {
-                group,
-                track,
-            }));
-        }
-        for (s, e) in selected.iter().zip(expected) {
-            if s.shape != e.shape {
-                return Err(Error::Unsupported(Unsupported::ParamsChanged {
-                    group,
-                    track,
-                    kind: s.shape.kind(),
-                    first: e.shape,
-                    found: s.shape,
-                }));
-            }
-        }
-        if !expected.is_empty() {
-            let indices: Vec<usize> = expected.iter().map(|e| e.out).collect();
-            sources.push(Source::new(group, track, input, &selected, &indices));
-        }
-    }
-    check_timed(group, &sources)?;
-    Ok(sources)
 }
 
 /// 写出一组：按全组共用的偏移平移时间戳，各输入按 DTS 交错写出。
