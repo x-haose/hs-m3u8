@@ -234,12 +234,15 @@ pub(super) fn unrecognized_segment(work_dir: &Path, path: &Path) -> Error {
     }
 }
 
-/// 合并任务目录里的分片时 remux 的错误：认不出的分片为任务目录损坏，与写本地 HLS 时相同（见
-/// [`unrecognized_segment`]）。
+/// 合并或核对任务目录里的分片时 remux 的错误：放不进 MP4 的为 [`crate::Unsupported::Mp4`]；认不出的分片为任务目录
+/// 损坏，与写本地 HLS 时相同（见 [`unrecognized_segment`]）；其余为 [`Error::Remux`]。
 fn remux_error(error: hs_m3u8_remux::Error, work_dir: &Path) -> Error {
     match error {
+        hs_m3u8_remux::Error::Unsupported(unsupported) => {
+            Error::Unsupported(crate::Unsupported::Mp4(unsupported))
+        }
         hs_m3u8_remux::Error::Unrecognized(path) => unrecognized_segment(work_dir, &path),
-        other => other.into(),
+        other => Error::Remux(Box::new(other)),
     }
 }
 
