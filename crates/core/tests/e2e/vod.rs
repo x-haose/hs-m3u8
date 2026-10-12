@@ -607,6 +607,53 @@ async fn wrong_key_fails_integrity() {
     assert_eq!(written, 0, "校验失败的分片不应写盘");
 }
 
+/// 加密的 TS 分片没写完（密文不足整块，整块部分解出的是 TS）：重新取，取到完整的照常合并。源站对分片返回错误页面时
+/// 长度同样不是 16 的整数倍，而整块部分认不出，报密文长度不对，不重试。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_truncated_encrypted_segment_is_fetched_again() {
+    let dir = test_dir("truncated_encrypted");
+    let server = Server::start().await;
+    let (key, iv) = ([0x01; 16], [0u8; 16]);
+    server.put("key", key);
+    let [seg0, seg1] = TS_A.map(|name| encrypt(&fixture(&format!("ts_a/{name}")), &key, &iv));
+    // 密文是 16 的整数倍，截到一半再多 5 字节必不是
+    let truncated = seg0[..seg0.len() / 2 + 5].to_vec();
+    server.put_sequence("seg0.ts", vec![truncated, seg0]);
+    server.put("seg1.ts", seg1);
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n\
+         #EXT-X-KEY:METHOD=AES-128,URI=\"key\",IV=0x00000000000000000000000000000000\n\
+         #EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n#EXT-X-ENDLIST\n",
+    );
+
+    let output = run(request(server.url("index.m3u8"), &dir)).await.unwrap();
+    assert_output(&output, &expected_ts_a(&dir));
+    assert_eq!(server.hits("seg0.ts"), 2);
+
+    std::fs::remove_file(dir.join("out.mp4")).unwrap();
+    let page = b"<html>not found</html>";
+    server.put("seg0.ts", page.to_vec());
+    let err = run(request(server.url("index.m3u8"), &dir))
+        .await
+        .unwrap_err();
+    assert!(!err.retryable(), "{err}");
+    match err {
+        Error::Segment { cause, .. } => assert!(
+            matches!(
+                *cause,
+                Error::Integrity {
+                    kind: Integrity::CipherLength(len),
+                    ..
+                } if len == page.len()
+            ),
+            "{cause}"
+        ),
+        other => panic!("{other}"),
+    }
+    assert_eq!(server.hits("seg0.ts"), 2 + 1);
+}
+
 /// 源站给出没写完的 fMP4 分片（mdat 截断，Content-Length 与截断后的长度一致）：重新取，取到完整的照常合并；一直没写完
 /// 时按重试策略取完次数后失败（可重试），不写盘，不合并出把下一个分片的字节读成这一片样本的 MP4。
 #[tokio::test(flavor = "multi_thread")]

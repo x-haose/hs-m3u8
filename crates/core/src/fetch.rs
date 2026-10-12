@@ -18,9 +18,9 @@ use crate::crypto::decrypt;
 use crate::hooks::{HookKind, Hooks, Purpose, run_hook};
 use crate::http::{Http, Permit};
 use crate::request::KeyOverride;
-use crate::verify::{check_fmp4, check_standalone_segment};
+use crate::verify::{ContentError, check_fmp4, check_standalone_segment, decrypt_failure};
 use crate::workdir::{self, SegmentName};
-use crate::{Error, Integrity, Progress};
+use crate::{Error, Progress};
 
 /// 一项下载：第 `track` 条轨的分片，`name` 为它在任务目录中的名字，`path` 为由名字得出的写入位置。
 pub(crate) struct Item {
@@ -224,8 +224,8 @@ pub(crate) async fn fetch_init(
     .await
 }
 
-/// 拉取分片，经 `on_segment` 回调后解密并校验内容（fMP4 见 [`check_fmp4`]）；有自定义 key 时用它解密。请求、回调、
-/// 解密与校验作为一次尝试，没写完的 fMP4 与请求的临时故障一起重试。
+/// 拉取分片，经 `on_segment` 回调后解密并校验内容（fMP4 见 [`check_fmp4`]，解密失败见 [`decrypt_failure`]）；有自定义
+/// key 时用它解密。请求、回调、解密与校验作为一次尝试，没写完的与请求的临时故障一起重试。
 async fn fetch_segment(
     ctx: &Ctx,
     segment: &Segment,
@@ -254,18 +254,18 @@ async fn fetch_segment(
                 hooks.on_segment(&url, body)
             })
             .await?;
-            let integrity = |kind: Integrity| Error::Integrity {
-                url: Box::new(segment.uri.clone()),
-                kind,
-            };
+            let fmp4 = segment.init.is_some();
             let mut data = match key {
-                Some((key, iv)) => decrypt(data, &key, &iv).map_err(integrity)?,
+                Some((key, iv)) => decrypt(data, &key, &iv)
+                    .map_err(|e| decrypt_failure(e, fmp4).at(&segment.uri))?,
                 None => data,
             };
-            match segment.init {
-                Some(_) => check_fmp4(&mut data).map_err(|e| e.at(&segment.uri))?,
-                None => check_standalone_segment(&data).map_err(integrity)?,
+            if fmp4 {
+                check_fmp4(&mut data)
+            } else {
+                check_standalone_segment(&data).map_err(ContentError::Invalid)
             }
+            .map_err(|e| e.at(&segment.uri))?;
             Ok(data)
         })
         .await

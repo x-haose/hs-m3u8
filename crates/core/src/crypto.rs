@@ -1,24 +1,38 @@
 //! AES-128-CBC 解密。
 
 use aes::Aes128;
-use aes::cipher::block_padding::Pkcs7;
+use aes::cipher::block_padding::{NoPadding, Pkcs7};
 use aes::cipher::{BlockModeDecrypt, KeyIvInit};
 
-use crate::Integrity;
+/// 解密失败的原因。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DecryptError {
+    /// 填充不合法：key 不对时几乎必然如此；IV 只影响第一个 16 字节块，而填充在最后一块，IV 不对发现不了
+    Padding,
+    /// 密文 `len` 字节，不是 16 的整数倍；`whole` 为整块部分解出的明文（不去填充），供调用方判断是不是没写完
+    Unaligned { len: usize, whole: Vec<u8> },
+}
 
-/// 原地解密并去掉 PKCS#7 填充。key 不对时填充几乎必然不合法；IV 只影响第一个 16 字节块，而填充在最后一块，
-/// IV 不对发现不了。
+/// 原地解密并去掉 PKCS#7 填充。
 pub(crate) fn decrypt(
     mut data: Vec<u8>,
     key: &[u8; 16],
     iv: &[u8; 16],
-) -> Result<Vec<u8>, Integrity> {
-    if !data.len().is_multiple_of(16) {
-        return Err(Integrity::CipherLength(data.len()));
+) -> Result<Vec<u8>, DecryptError> {
+    let cipher = cbc::Decryptor::<Aes128>::new(key.into(), iv.into());
+    let len = data.len();
+    if !len.is_multiple_of(16) {
+        data.truncate(len - len % 16);
+        if !data.is_empty() {
+            cipher
+                .decrypt_padded::<NoPadding>(&mut data)
+                .expect("整块且非空的密文不去填充时不会失败");
+        }
+        return Err(DecryptError::Unaligned { len, whole: data });
     }
-    let plain_len = cbc::Decryptor::<Aes128>::new(key.into(), iv.into())
+    let plain_len = cipher
         .decrypt_padded::<Pkcs7>(&mut data)
-        .map_err(|_| Integrity::Padding)?
+        .map_err(|_| DecryptError::Padding)?
         .len();
     data.truncate(plain_len);
     Ok(data)
@@ -51,13 +65,26 @@ mod tests {
     }
 
     #[test]
-    fn wrong_key_and_bad_length_are_rejected() {
+    fn wrong_key_and_unaligned_ciphertext_are_rejected() {
         let (key, iv) = ([7u8; 16], [9u8; 16]);
         let cipher = encrypt(b"0123456789abcdef0123", &key, &iv);
-        assert_eq!(decrypt(cipher, &[8u8; 16], &iv), Err(Integrity::Padding));
+        assert_eq!(decrypt(cipher, &[8u8; 16], &iv), Err(DecryptError::Padding));
+        // 不足整块时解出整块部分
+        let plain: Vec<u8> = (0..40).collect();
+        let cipher = encrypt(&plain, &key, &iv);
+        assert_eq!(
+            decrypt(cipher[..40].to_vec(), &key, &iv),
+            Err(DecryptError::Unaligned {
+                len: 40,
+                whole: plain[..32].to_vec()
+            })
+        );
         assert_eq!(
             decrypt(vec![0; 15], &key, &iv),
-            Err(Integrity::CipherLength(15))
+            Err(DecryptError::Unaligned {
+                len: 15,
+                whole: Vec::new()
+            })
         );
     }
 }

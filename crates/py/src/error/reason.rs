@@ -153,7 +153,8 @@ variants! {
     pub enum IntegrityFailure {
         /// 解密后填充不合法：多为 key 不对（IV 不对不会这样），或数据损坏
         Padding {},
-        /// 密文长度不是 16 的整数倍
+        /// 密文长度不是 16 的整数倍，整块部分解出的内容也认不出（如源站返回的是错误页面）；认得出的报
+        /// `HttpErrorKind.Incomplete`
         CipherLength {
             /// 密文字节数
             length: usize,

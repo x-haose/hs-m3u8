@@ -613,7 +613,8 @@ class HttpErrorKind:
     @typing.final
     class Incomplete(HttpErrorKind):
         r"""
-        内容没有写完：fMP4 的顶层 box 超出了数据，或末尾的字节凑不成 box 头，多为源站还在写这个文件
+        内容没有写完：fMP4 的顶层 box 超出了数据或末尾的字节凑不成 box 头，或加密分片的密文不足整块而整块部分解出
+        的内容认得出，多为源站还在写这个文件
         """
         __match_args__ = ()
         def __new__(cls) -> HttpErrorKind.Incomplete: ...
@@ -728,7 +729,8 @@ class IntegrityFailure:
     @typing.final
     class CipherLength(IntegrityFailure):
         r"""
-        密文长度不是 16 的整数倍
+        密文长度不是 16 的整数倍，整块部分解出的内容也认不出（如源站返回的是错误页面）；认得出的报
+        `HttpErrorKind.Incomplete`
         """
         __match_args__ = ("length",)
         @property
@@ -2374,7 +2376,7 @@ class Resolution:
 @typing.final
 class RetryPolicy:
     r"""
-    单个请求的重试策略：可重试的失败（超时、连接与传输错误，fMP4 内容没有写完，408、429 与 5xx）按指数退避重试。
+    单个请求的重试策略：可重试的失败（超时、连接与传输错误，内容没有写完，408、429 与 5xx）按指数退避重试。
     默认 8 次、0.5 秒起、上限 15 秒：重试前的等待合计约 45 秒，足以越过常见的短时故障。
     """
     @property

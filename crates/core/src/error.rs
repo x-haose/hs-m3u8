@@ -316,8 +316,9 @@ pub enum HttpError {
     /// 读取响应体等其他传输错误
     #[error("{0}")]
     Transport(String),
-    /// 内容没有写完：fMP4 的顶层 box 超出了数据，或末尾的字节凑不成 box 头，多为源站还在写这个文件
-    #[error("内容没有写完（fMP4 的 box 超出了数据）")]
+    /// 内容没有写完：fMP4 的顶层 box 超出了数据或末尾的字节凑不成 box 头，或加密分片的密文不足整块而整块部分解出的
+    /// 内容认得出，多为源站还在写这个文件
+    #[error("内容没有写完（fMP4 的 box 超出了数据，或密文不足整块）")]
     Incomplete,
 }
 
@@ -342,6 +343,7 @@ pub enum Integrity {
     /// 多为 key 不对；IV 不对不会使填充不合法
     #[error("解密后填充不合法（key 不对或数据损坏）")]
     Padding,
+    /// 整块部分解出的内容也认不出（如源站返回的是错误页面）；认得出的报 [`HttpError::Incomplete`]
     #[error("密文长度 {0} 不是 16 的整数倍")]
     CipherLength(usize),
     #[error("字节范围应为 {expected} 字节，实际 {found}")]
