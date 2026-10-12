@@ -1,6 +1,6 @@
 //! 裸音频帧的帧头：ADTS（AAC）、AC-3 与 E-AC-3、MPEG 音频。读出编码参数（逐包核对用，见 [`crate::inband`]）与整帧的
 //! 字节数（打包音频按它切帧，见 [`crate::packed`]）。合法性的判定与 FFmpeg 9.0.2 的帧头解析一致，帧头不合法时为 None；
-//! 从字节里认格式另要求 ADTS 的 layer 为 0（见 [`crate::standalone::read_head`]）。另读 MP4 里 AAC 解码配置的编码类型。
+//! 从字节里认 ADTS 另有要求（见 [`is_adts`]）。另读 MP4 里 AAC 解码配置的编码类型。
 
 /// ADTS 帧头里 MP4 的 AudioSpecificConfig 由之写成的三项（ISO/IEC 14496-3 1.A.2.2）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,10 +12,21 @@ pub(crate) struct Adts {
 
 /// 一个 ADTS 帧的帧头与整帧的字节数（含帧头）。
 pub(crate) fn adts(data: &[u8]) -> Option<(Adts, usize)> {
+    adts_with_layer(data).map(|(adts, _, len)| (adts, len))
+}
+
+/// 从字节里认格式时 `data` 开头是不是 ADTS 帧头：另要求 layer 为 0（与 FFmpeg 9.0.2 探测 AAC 的 adts_aac_probe 一致），
+/// 否则与 MPEG 音频的同步字分不开。
+pub(crate) fn is_adts(data: &[u8]) -> bool {
+    adts_with_layer(data).is_some_and(|(_, layer, _)| layer == 0)
+}
+
+/// [`adts`] 另带帧头里的 layer：FFmpeg 解析帧头时不查它。
+fn adts_with_layer(data: &[u8]) -> Option<(Adts, u32, usize)> {
     let mut b = Bits::new(data);
     b.expect(12, 0xFFF)?;
     b.read(1)?; // ID
-    b.read(2)?; // layer：FFmpeg 解析帧头时不查
+    let layer = b.read(2)?;
     b.read(1)?; // protection_absent
     let profile = b.read(2)?;
     let sampling_index = b.read(4)?;
@@ -30,6 +41,7 @@ pub(crate) fn adts(data: &[u8]) -> Option<(Adts, usize)> {
             sampling_index,
             channel_config,
         },
+        layer,
         len,
     ))
 }
@@ -389,7 +401,8 @@ mod tests {
                 300
             ))
         );
-        // 采样率下标 13 为保留值；帧长短于帧头；帧头不完整；layer 不为 0 时照读
+        assert!(is_adts(&adts_frame(1, 3, 2, 300)));
+        // 采样率下标 13 为保留值；帧头不完整；帧长短于帧头；layer 不为 0 时照读，认格式时不认
         assert_eq!(adts(&adts_frame(1, 13, 2, 300)), None);
         assert_eq!(adts(&adts_frame(1, 3, 2, 300)[..5]), None);
         let mut short = adts_frame(1, 3, 2, 300);
@@ -400,6 +413,7 @@ mod tests {
         let mut layer = adts_frame(1, 3, 2, 300);
         layer[1] |= 0b10;
         assert_eq!(adts(&layer).map(|(_, len)| len), Some(300));
+        assert!(!is_adts(&layer));
     }
 
     #[test]

@@ -74,9 +74,8 @@ pub fn read_head(reader: &mut (impl Read + Seek)) -> io::Result<Option<Head>> {
                 timestamp: None,
             }));
         }
-        // 打包音频：开头是合法的帧头（判定见 crate::frame）。ADTS 另要求 layer 为 0（FFmpeg 探测 AAC 时同样要求），
-        // 否则与 MPEG 音频的同步字分不开
-        let format = if data.get(1).is_some_and(|b| b & 0x06 == 0) && frame::adts(data).is_some() {
+        // 打包音频：开头是合法的帧头（判定见 crate::frame）
+        let format = if frame::is_adts(data) {
             Format::Aac
         } else if frame::mpeg_audio(data).is_some() {
             Format::Mp3
@@ -299,13 +298,16 @@ mod tests {
                 })
             );
         }
-        // ID3 之后不是音频、标签超出数据、长度字段最高位为 1、bsid 超出 AC-3 与 E-AC-3 的范围、空
-        assert_eq!(format(&[tag(0, &[], 0), b"<html>".to_vec()].concat()), None);
-        // 同步字对、帧头不合法：ADTS 的采样率下标 13，MPEG 音频的版本位为保留值 01
+        // 同步字对、帧头不合法：ADTS 的采样率下标 13，MPEG 音频的版本位为保留值 01；ADTS 的 layer 不为 0 不认作 AAC
         let mut reserved_rate = ADTS;
         reserved_rate[2] = reserved_rate[2] & 0xC3 | 13 << 2;
         assert_eq!(format(&reserved_rate), None);
         assert_eq!(format(&[0xFF, 0xEB, 0x90, 0x64]), None);
+        let mut layer = ADTS;
+        layer[1] |= 0b10;
+        assert_ne!(format(&layer), Some(Aac));
+        // ID3 之后不是音频、标签超出数据、长度字段最高位为 1、bsid 超出 AC-3 与 E-AC-3 的范围、空
+        assert_eq!(format(&[tag(0, &[], 0), b"<html>".to_vec()].concat()), None);
         assert_eq!(format(&tag(0, &[], 20)[..15]), None);
         assert_eq!(format(b"ID3\x04\x00\x00\x00\x00\x00\x80\xFF\xF1"), None);
         assert_eq!(format(&[0x0B, 0x77, 0, 0, 0, 20 << 3]), None);
