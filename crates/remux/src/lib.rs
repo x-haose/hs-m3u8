@@ -438,9 +438,13 @@ impl Input {
         }
     }
 
+    fn is_packed(&self) -> bool {
+        matches!(self, Input::Packed(_))
+    }
+
     /// 打包音频，而这一组的第一个分片没有时间戳。
     fn untimed(&self) -> bool {
-        matches!(self, Input::Packed(packed) if packed.first.is_none())
+        matches!(self, Input::Packed(packed) if packed.start.is_none())
     }
 }
 
@@ -452,14 +456,15 @@ struct Packed {
     ictx: format::context::Input,
     /// 读当前分片出错时的路径与原因
     failure: chain::Failure,
-    /// 当前分片的时间戳（90 kHz，已展开）；它没有、或这一组按样本数计时时为 None
+    /// 当前分片的时间戳（90 kHz，未展开）；没有时为 None
     timestamp: Option<i64>,
     /// 当前分片的音频包要加的偏移，以 `audio` 的时间基为单位；读到它第一个带 DTS 的音频包时确定
     shift: Option<i64>,
     /// 还没打开的分片
     rest: VecDeque<PathBuf>,
-    /// 这一组第一个分片的时间戳（90 kHz，未展开），展开其余各片的时间戳时作参照；为 None 时整组按样本数计时
-    first: Option<i64>,
+    /// 这一组第一个分片的时间戳（90 kHz，已展开），各片的时间戳按它展开（见 [`packed::unwrap_pts`]）；为 None 时
+    /// 整组按样本数计时
+    start: Option<i64>,
     /// 第一个分片里音频流的下标与时间基，各片的音频包都换到这个时间基；没有音频流时为 None
     audio: Option<(usize, Rational)>,
     /// 已读出的音频包最晚的结束时刻，以 `audio` 的时间基为单位
@@ -471,7 +476,7 @@ impl Packed {
     fn open(segments: &[PathBuf], group: usize, track: usize) -> Result<Packed, Error> {
         let mut rest: VecDeque<PathBuf> = segments.iter().cloned().collect();
         let path = rest.pop_front().expect("validate 保证每条轨至少一个分片");
-        let (ictx, failure, first) = open_packed_segment(path, group, track)?;
+        let (ictx, failure, timestamp) = open_packed_segment(path, group, track)?;
         let audio = ictx
             .streams()
             .find(|s| s.parameters().medium() == media::Type::Audio)
@@ -479,13 +484,20 @@ impl Packed {
         Ok(Packed {
             ictx,
             failure,
-            timestamp: first.map(|first| packed::unwrap_pts(first, first)),
+            timestamp,
             shift: None,
             rest,
-            first,
+            start: timestamp,
             audio,
             end: None,
         })
+    }
+
+    /// 把时间线对到同组其他轨上：`anchor` 为它们读出的第一个时间戳（90 kHz）。不调用时第一个分片的时间戳原样作起点。
+    /// 只能在读包之前调用。
+    fn align(&mut self, anchor: i64) {
+        assert!(self.end.is_none(), "打包音频须在读包之前对齐");
+        self.start = self.start.map(|start| packed::nearest(start, anchor));
     }
 
     /// 读下一个包，音频包平移到所在分片的时间戳处、换到第一个分片的时间基；读完最后一片返回 false。
@@ -500,10 +512,7 @@ impl Packed {
                     let (ictx, failure, timestamp) = open_packed_segment(path, group, track)?;
                     self.ictx = ictx;
                     self.failure = failure;
-                    self.timestamp = self
-                        .first
-                        .zip(timestamp)
-                        .map(|(first, timestamp)| packed::unwrap_pts(timestamp, first));
+                    self.timestamp = timestamp;
                     self.shift = None;
                 }
                 Err(cause) => {
@@ -530,8 +539,10 @@ impl Packed {
         let shift = match self.shift {
             Some(shift) => shift,
             None => {
-                let start = match self.timestamp {
-                    Some(timestamp) => timestamp.rescale(CLOCK_90K, time_base),
+                let start = match self.start.zip(self.timestamp) {
+                    Some((start, timestamp)) => {
+                        packed::unwrap_pts(timestamp, start).rescale(CLOCK_90K, time_base)
+                    }
                     None => self.end.unwrap_or(dts),
                 };
                 *self.shift.insert(start - dts)
@@ -698,9 +709,18 @@ impl Source {
     }
 
     fn front_dts_us(&self) -> Option<i64> {
+        self.front_dts(MICROS)
+    }
+
+    fn front_dts_90k(&self) -> Option<i64> {
+        self.front_dts(CLOCK_90K)
+    }
+
+    /// 队首的包的 DTS，换到时间基 `to`。
+    fn front_dts(&self, to: Rational) -> Option<i64> {
         let (packet, mapping) = self.queue.front()?;
         let dts = packet.dts().expect("队列中的包都带 DTS");
-        Some(dts.rescale(mapping.time_base, MICROS))
+        Some(dts.rescale(mapping.time_base, to))
     }
 }
 
@@ -900,9 +920,7 @@ fn write_group(
     outs: &mut [OutStream],
     margin_us: i64,
 ) -> Result<(), Error> {
-    for source in &mut sources {
-        source.prime(outs)?;
-    }
+    prime(&mut sources, outs)?;
     // 本组各输出流的首个 DTS 与全组最早的 PTS（输入时间线，微秒）；队列内同一路流按解码顺序排列
     let mut first_dts_us: Vec<Option<i64>> = vec![None; outs.len()];
     let mut min_pts_us: Option<i64> = None;
@@ -965,6 +983,25 @@ fn write_group(
             .write_interleaved(octx)
             .map_err(|e| Error::Mux(e.into()))?;
         o.written += 1;
+    }
+    Ok(())
+}
+
+/// 读出一组各输入开头的包（见 [`Source::prime`]）。打包音频的时间戳只有模 2^33 的值，按同组其他轨读出的时间线展开
+/// （FFmpeg 读 TS 时自行展开），所以先读其他轨。
+fn prime(sources: &mut [Source], outs: &mut [OutStream]) -> Result<(), Error> {
+    for source in sources.iter_mut().filter(|s| !s.input.is_packed()) {
+        source.prime(outs)?;
+    }
+    let anchor = sources
+        .iter()
+        .filter(|s| !s.input.is_packed())
+        .find_map(Source::front_dts_90k);
+    for source in sources.iter_mut().filter(|s| s.input.is_packed()) {
+        if let (Input::Packed(packed), Some(anchor)) = (&mut source.input, anchor) {
+            packed.align(anchor);
+        }
+        source.prime(outs)?;
     }
     Ok(())
 }

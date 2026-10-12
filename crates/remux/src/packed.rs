@@ -111,20 +111,19 @@ fn timestamp(tag: &[u8]) -> Option<i64> {
     None
 }
 
-/// 33 位的 PTS（90 kHz）按 FFmpeg 读 TS 时的规则展开，同组的 TS 轨按同样的规则读出，两边才对得上：以 `first`
-/// （本轨在这一组的第一个时间戳）前 60 秒为参照；`first` 不在回绕点前 60 秒内时，比参照小的加 2^33，在时，不比参照
-/// 小的减 2^33。
-pub(crate) fn unwrap_pts(pts: i64, first: i64) -> i64 {
-    const WRAP: i64 = 1 << 33;
-    const MARGIN: i64 = 60 * 90_000;
-    let reference = first - MARGIN;
-    if first < WRAP - MARGIN {
-        if pts < reference { pts + WRAP } else { pts }
-    } else if pts >= reference {
-        pts - WRAP
-    } else {
-        pts
-    }
+/// 33 位时间戳的回绕周期（90 kHz 时约 26.5 小时）。
+const WRAP: i64 = 1 << 33;
+
+/// 与 `pts` 模 2^33 同余、离 `anchor` 最近的值：同一时钟上两条轨的起点相距远小于 2^33。
+pub(crate) fn nearest(pts: i64, anchor: i64) -> i64 {
+    anchor + (pts - anchor + WRAP / 2).rem_euclid(WRAP) - WRAP / 2
+}
+
+/// 一条轨的 33 位时间戳按它已展开的起点 `start` 展开：取与它模 2^33 同余、落在 [start − 60 秒, start − 60 秒 + 2^33)
+/// 里的值。FFmpeg 读 TS 时同样以第一个时间戳前 60 秒为界展开（demux.c 的 update_wrap_reference）。
+pub(crate) fn unwrap_pts(pts: i64, start: i64) -> i64 {
+    let low = start - 60 * 90_000;
+    low + (pts - low).rem_euclid(WRAP)
 }
 
 #[cfg(test)]
@@ -246,22 +245,33 @@ mod tests {
     }
 
     #[test]
-    fn timestamps_unwrap_like_ffmpeg_reads_ts() {
-        const WRAP: i64 = 1 << 33;
+    fn timestamps_unwrap_from_the_start_of_the_track() {
         const MINUTE: i64 = 60 * 90_000;
-        // 一般情况：回绕之后的值加 2^33，参照前后 60 秒内的不动
-        let first = 1_000 * 90_000;
-        assert_eq!(unwrap_pts(first + 5, first), first + 5);
-        assert_eq!(unwrap_pts(first - MINUTE, first), first - MINUTE);
+        let start = 1_000 * 90_000;
+        assert_eq!(unwrap_pts(start + 5, start), start + 5);
+        // 比起点早 60 秒以内的不动，再早的当作回绕之后
+        assert_eq!(unwrap_pts(start - MINUTE, start), start - MINUTE);
         assert_eq!(
-            unwrap_pts(first - MINUTE - 1, first),
-            first - MINUTE - 1 + WRAP
+            unwrap_pts(start - MINUTE - 1, start),
+            start - MINUTE - 1 + WRAP
         );
-        // 开头离回绕点不到 60 秒：回绕之前的值减 2^33，之后的不动
+        // 起点在回绕点前：回绕之后的值接着往后排
         let late = WRAP - MINUTE / 2;
-        assert_eq!(unwrap_pts(late, late), late - WRAP);
-        assert_eq!(unwrap_pts(5, late), 5);
-        // 开头刚过回绕点：参照为负，都不动
-        assert_eq!(unwrap_pts(WRAP - 1, 10), WRAP - 1);
+        assert_eq!(unwrap_pts(5, late), WRAP + 5);
+        // 起点展开成了负数（在回绕点之前）
+        assert_eq!(unwrap_pts(WRAP - 10, -5), -10);
+        assert_eq!(unwrap_pts(3, -5), 3);
+    }
+
+    #[test]
+    fn the_nearest_value_crosses_the_wrap_point_either_way() {
+        let anchor = 900_000;
+        assert_eq!(nearest(anchor + 9_000, anchor), anchor + 9_000);
+        assert_eq!(nearest(WRAP - 9_000, 0), -9_000);
+        assert_eq!(nearest(9_000, WRAP - 1), WRAP + 9_000);
+        // 两条轨的起点跨在回绕点前 60 秒两侧（FFmpeg 读 TS 时对两边展开的方向不同）
+        let edge = WRAP - 60 * 90_000;
+        assert_eq!(nearest(edge + 10, edge - 10), edge + 10);
+        assert_eq!(nearest(edge - 10, edge - WRAP + 10), edge - 10 - WRAP);
     }
 }

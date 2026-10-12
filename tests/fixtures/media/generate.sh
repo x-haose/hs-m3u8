@@ -94,4 +94,9 @@ repeat_enc=(-c:v libx264 -preset veryfast -bf 0 -g 10 -an -f mpegts)
 "${ff[@]}" "${repeat[@]}" -t 1 "${repeat_enc[@]}" "$DIR/ts_repeat/seg0.ts"
 "${ff[@]}" "${repeat[@]}" -ss 0.9 -t 1 -output_ts_offset 0.9 "${repeat_enc[@]}" "$DIR/ts_repeat/seg1.ts"
 
+# 回绕点前：一个纯视频分片，第一个时间戳比 33 位回绕点前 60 秒早 0.05 秒（mpegts 封装器另加 1.4 秒的起始延迟）
+rm -rf -- "${DIR:?}/ts_wrap"
+mkdir -p "$DIR/ts_wrap"
+"${ff[@]}" "${repeat[@]}" -t 1 -output_ts_offset 95382.26768 "${repeat_enc[@]}" "$DIR/ts_wrap/seg0.ts"
+
 find "$DIR" -type f ! -name generate.sh | sort | xargs ls -l

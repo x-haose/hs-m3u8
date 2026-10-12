@@ -688,6 +688,38 @@ fn packed_audio_timestamps_wrap_around() {
     );
 }
 
+/// 两条轨的起点跨在回绕点前 60 秒两侧（FFmpeg 读 TS 时对两边展开的方向不同）：打包音频仍按 TS 视频读出的时间线对齐。
+#[test]
+fn packed_audio_aligns_with_ts_across_the_wrap_edge() {
+    let dir = work_dir("packed_wrap_edge");
+    let output = dir.join("out.mp4");
+    let video = track("ts_wrap");
+    let v_in = timelines(&concat_track(&video, &dir, "v.ts")).0;
+    let video_start = (earliest(&v_in) * 90_000.0).round() as u64;
+    let start = video_start + 9_000;
+    let edge = (1u64 << 33) - 60 * 90_000;
+    assert!(video_start < edge && start >= edge, "样本应跨在界线两侧");
+    let segments = packed_fixture("aac");
+    let audio = TrackSegments {
+        init: None,
+        segments: vec![packed_segment(&dir, &segments[0].0, Some(start))],
+    };
+
+    remux(
+        &[Streams::Video, Streams::Audio],
+        &[group([video, audio])],
+        &output,
+    )
+    .unwrap();
+
+    let (v_out, a_out) = timelines(&output);
+    let lead = a_out[0].0 - earliest(&v_out);
+    assert!(
+        (lead - 0.1).abs() < 0.001,
+        "音频应比视频晚 0.1 秒开始，实际 {lead}"
+    );
+}
+
 /// 打包音频没有 ID3 时间戳：与别的轨同组时不知道怎样对齐，放不进 MP4；只有它一条轨时按样本数从头计时。
 #[test]
 fn untimed_packed_audio_is_used_only_alone() {
