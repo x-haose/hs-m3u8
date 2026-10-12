@@ -2,7 +2,7 @@
 //!
 //! 输入按不连续段组（两个 `EXT-X-DISCONTINUITY` 之间）组织，每组里每条轨一份分片列表，fMP4 另带 init 段。
 //! - 组内：一条轨的分片按字节顺序当作一个连续的输入读取，同一时刻只打开一个文件，不先拼成大文件；打包音频（RFC
-//!   8216 3.4，没有 init 段、不以 TS 的同步字节开头）跳过各片开头的 ID3 标签，按其中的时间戳定时。TS 与打包音频的
+//!   8216 3.4，没有 init 段、不以 TS 的同步字节开头）只读各片里的音频帧，按开头 ID3 标签里的时间戳定时。TS 与打包音频的
 //!   时间戳在 33 位的 90 kHz 时钟上，各输入的起点跨在回绕点附近两侧时按回绕对齐。
 //! - 组间：整组使用同一个时间偏移，保留组内各轨（如视频与独立音频 rendition）原有的相对时序；
 //!   各组首尾相接，下一组从上一组所有流的最晚结束时刻之后开始。
@@ -19,6 +19,7 @@
 
 mod chain;
 mod ffi;
+mod frame;
 mod inband;
 mod input;
 mod packed;
@@ -281,6 +282,17 @@ pub enum Unsupported {
         "第 {group} 组第 {track} 条轨的分片格式在组内变了（TS 与打包音频，或打包音频的格式之间），无法放进同一条 MP4 轨"
     )]
     FormatChangedInGroup { group: usize, track: usize },
+    /// 打包音频的第 `segment` 个分片（下标）在字节 `offset` 处读不出音频帧：既不是音频帧也不是 ID3 标签、帧或标签
+    /// 不完整，或是自由格式（帧头不给码率）的 MP3
+    #[error(
+        "第 {group} 组第 {track} 条轨（打包音频）第 {segment} 个分片在字节 {offset} 处读不出音频帧（不是音频帧或 ID3 标签、帧不完整，或是自由格式的 MP3）"
+    )]
+    UnreadablePackedAudio {
+        group: usize,
+        track: usize,
+        segment: usize,
+        offset: u64,
+    },
     /// TS 或打包音频里的 E-AC-3 每帧不足 6 块：MP4 封装器把几帧并成一个 6 块（1536 个采样点）的样本，末尾凑不满的
     /// 帧不写出
     #[error("第 {group} 组第 {track} 条轨的 E-AC-3 每帧不足 6 块，放不进 MP4")]

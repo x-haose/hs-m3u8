@@ -3,6 +3,7 @@
 
 use std::fs::File;
 use std::io;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use ffmpeg::format::context::StreamIo;
@@ -50,12 +51,17 @@ impl Input {
                 return Packed::open(&segments.segments, &heads, group, track).map(Input::Packed);
             }
         }
-        let files = segments
-            .init
-            .iter()
-            .chain(&segments.segments)
-            .map(|path| (path.clone(), 0))
-            .collect();
+        let mut files = Vec::with_capacity(segments.segments.len() + 1);
+        for path in segments.init.iter().chain(&segments.segments) {
+            let len = std::fs::metadata(path)
+                .map_err(|cause| Error::Io {
+                    action: "读取",
+                    path: path.clone(),
+                    cause,
+                })?
+                .len();
+            files.push((path.clone(), 0..len));
+        }
         let (chain, failure) = new_chain(files)?;
         let ictx = open_chain(chain, &failure, group, track)?;
         Ok(Input::Chain {
@@ -115,11 +121,11 @@ pub(crate) fn segment_head(path: &Path) -> Result<standalone::Head, Error> {
     })
 }
 
-/// 把 `files`（路径与开头不读的字节数）串成一个分片链，并返回记录文件错误的位置。
+/// 把 `pieces`（文件与其中要读的字节区间）串成一个分片链，并返回记录文件错误的位置。
 pub(crate) fn new_chain(
-    files: Vec<(PathBuf, u64)>,
+    pieces: Vec<(PathBuf, Range<u64>)>,
 ) -> Result<(SegmentChain, chain::Failure), Error> {
-    SegmentChain::new(files).map_err(|(path, cause)| Error::Io {
+    SegmentChain::new(pieces).map_err(|(path, cause)| Error::Io {
         action: "读取",
         path,
         cause,

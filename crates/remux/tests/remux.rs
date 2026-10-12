@@ -927,6 +927,145 @@ fn packed_audio_with_very_short_segments_is_read() {
 }
 
 /// 两个 TS 输入的起点跨在回绕点前 60 秒两侧：FFmpeg 读两个输入时展开的方向不同，读出的起点差 2^33，合并时对齐回来。
+/// 不带时间戳 PRIV 帧的 ID3v2.4 标签（如定时元数据），约 640 字节。
+fn metadata_tag() -> Vec<u8> {
+    let data = [b"com.example.metadata\0".as_slice(), &[0x5A; 600]].concat();
+    let syncsafe =
+        |size: usize| [size >> 21, size >> 14, size >> 7, size].map(|b| (b & 0x7F) as u8);
+    let frame = [b"PRIV".as_slice(), &syncsafe(data.len()), &[0, 0], &data].concat();
+    [
+        b"ID3\x04\x00\x00".as_slice(),
+        &syncsafe(frame.len()),
+        &frame,
+    ]
+    .concat()
+}
+
+/// 帧之间夹着 ID3 标签的打包音频：标签不进输出，下一个分片（相接或隔着缺失的一片）从它自己的时间戳处开始。
+#[test]
+fn packed_audio_with_id3_tags_between_frames_keeps_its_timing() {
+    let dir = work_dir("packed_inline_id3");
+    let output = dir.join("out.mp4");
+    for name in ["aac", "ac3", "eac3", "mp3"] {
+        let segments = packed_fixture(name);
+        let frames: Vec<usize> = segments
+            .iter()
+            .map(|(path, _)| timelines(path).1.len())
+            .collect();
+        // 第一个分片是样本的前两片，中间夹一个标签
+        let first = dir.join(format!("{name}-first"));
+        let data = [
+            std::fs::read(packed_segment(&dir, &segments[0].0, Some(900_000))).unwrap(),
+            metadata_tag(),
+            std::fs::read(&segments[1].0).unwrap(),
+        ]
+        .concat();
+        std::fs::write(&first, data).unwrap();
+        for gap in [0, 90_000] {
+            let second_start = 900_000 + segments[0].1 + segments[1].1 + gap;
+            let audio = TrackSegments {
+                init: None,
+                segments: vec![
+                    first.clone(),
+                    packed_segment(&dir, &segments[2].0, Some(second_start)),
+                ],
+            };
+
+            let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
+
+            assert_eq!(
+                report.streams[0].packets,
+                frames.iter().sum::<usize>() as u64,
+                "{name} 空档 {gap}"
+            );
+            let a_out = timelines(&output).1;
+            let second = frames[0] + frames[1];
+            let expected = (second_start - 900_000) as f64 / 90_000.0;
+            let found = a_out[second].0 - a_out[0].0;
+            assert!(
+                (found - expected).abs() < 0.001,
+                "{name} 空档 {gap}：第二个分片应从 {expected} 秒处开始，实际 {found}"
+            );
+            assert!(
+                a_out[second - 1].0 - a_out[0].0 < expected - 0.01,
+                "{name} 空档 {gap}：第一个分片的帧不应排到第二个分片的位置"
+            );
+        }
+    }
+}
+
+/// 每片开头带 Info 帧、末尾带 ID3v1 标签的打包 MP3：两者都不进输出，各片照常接续。
+#[test]
+fn packed_mp3_info_frames_and_id3v1_tags_are_skipped() {
+    let dir = work_dir("packed_mp3_info");
+    let output = dir.join("out.mp4");
+    let segments = packed_fixture("mp3_info");
+    let id3v1 = [b"TAG".as_slice(), &[0x20; 125]].concat();
+    let mut start = 900_000;
+    let mut tagged = Vec::new();
+    for (path, ticks) in &segments {
+        let segment = packed_segment(&dir, path, Some(start));
+        let data = [std::fs::read(&segment).unwrap(), id3v1.clone()].concat();
+        std::fs::write(&segment, data).unwrap();
+        tagged.push(segment);
+        start += ticks;
+    }
+    let frames: usize = segments
+        .iter()
+        .map(|(path, _)| timelines(path).1.len())
+        .sum();
+    let audio = TrackSegments {
+        init: None,
+        segments: tagged,
+    };
+
+    let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
+
+    assert_eq!(report.streams[0].packets, frames as u64);
+    let expected = (start - 900_000) as f64 / 90_000.0;
+    let span = span(&timelines(&output).1);
+    assert!(
+        (span - expected).abs() < 0.03,
+        "输出应长 {expected} 秒，实际 {span}"
+    );
+}
+
+/// 打包音频的帧之间有既不是帧也不是标签的字节：报出分片与偏移，不跳过。
+#[test]
+fn junk_in_packed_audio_is_reported_with_its_offset() {
+    let dir = work_dir("packed_junk");
+    let output = dir.join("out.mp4");
+    let segments = packed_fixture("aac");
+    let tagged = std::fs::read(packed_segment(&dir, &segments[1].0, Some(990_000))).unwrap();
+    let junk = dir.join("junk");
+    let data = [
+        tagged.clone(),
+        b"junk".to_vec(),
+        std::fs::read(&segments[2].0).unwrap(),
+    ]
+    .concat();
+    std::fs::write(&junk, data).unwrap();
+    let audio = TrackSegments {
+        init: None,
+        segments: vec![packed_segment(&dir, &segments[0].0, Some(900_000)), junk],
+    };
+
+    let err = remux(&[Streams::Audio], &[group([audio])], &output).unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::UnreadablePackedAudio {
+                group: 0,
+                track: 0,
+                segment: 1,
+                offset,
+            }) if offset == tagged.len() as u64
+        ),
+        "实际 {err:?}"
+    );
+}
+
 #[test]
 fn ts_inputs_across_the_wrap_edge_stay_aligned() {
     let dir = work_dir("ts_wrap_edge");

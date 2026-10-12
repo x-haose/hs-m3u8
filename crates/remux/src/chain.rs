@@ -1,10 +1,11 @@
-//! 分片链：把一条轨在一组里的多个文件当作一个连续的字节流读取，同一时刻只打开一个文件。
+//! 分片链：把一条轨在一组里的多个文件（或其中的几段）当作一个连续的字节流读取，同一时刻只打开一个文件。
 //!
 //! FFmpeg 的 concat 协议在打开时就打开全部文件并持有到关闭，一组几百个分片就会超过进程的文件描述符
 //! 上限（macOS 图形程序默认 256）；这里按偏移定位，读到哪个文件才打开哪个。
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -12,46 +13,42 @@ use std::sync::{Arc, Mutex};
 pub(crate) type Failure = Arc<Mutex<Option<(PathBuf, io::Error)>>>;
 
 pub(crate) struct SegmentChain {
+    /// 各段所在的文件
     paths: Vec<PathBuf>,
-    /// 各文件开头不读的字节数
-    skips: Vec<u64>,
-    /// 各文件在整个流中的起始偏移；`starts[i + 1] - starts[i]` 为第 i 个文件读的长度，末项为总长
+    /// 各段在文件里的字节区间
+    ranges: Vec<Range<u64>>,
+    /// 各段在整个流中的起始偏移；`starts[i + 1] - starts[i]` 为第 i 段的长度，末项为总长
     starts: Vec<u64>,
     position: u64,
-    /// 当前打开的文件：(下标, 文件, 跳过开头之后的读写位置)
+    /// 当前打开的文件：(段的下标, 文件, 在段内的读写位置)
     open: Option<(usize, File, u64)>,
     failure: Failure,
 }
 
 impl SegmentChain {
-    /// 按顺序串起各文件，每项为路径与开头不读的字节数；只读取各文件的长度，不打开文件。
-    pub(crate) fn new(files: Vec<(PathBuf, u64)>) -> Result<(Self, Failure), (PathBuf, io::Error)> {
-        let (paths, skips): (Vec<PathBuf>, Vec<u64>) = files.into_iter().unzip();
+    /// 按顺序串起各段，每段为文件与其中要读的字节区间；不打开文件。各段长度之和超出 64 位整数范围时报那一段的文件。
+    pub(crate) fn new(
+        pieces: Vec<(PathBuf, Range<u64>)>,
+    ) -> Result<(Self, Failure), (PathBuf, io::Error)> {
+        let (paths, ranges): (Vec<PathBuf>, Vec<Range<u64>>) = pieces.into_iter().unzip();
         let mut starts = Vec::with_capacity(paths.len() + 1);
         let mut total = 0u64;
-        for (path, &skip) in paths.iter().zip(&skips) {
+        for (path, range) in paths.iter().zip(&ranges) {
             starts.push(total);
-            let len = std::fs::metadata(path)
-                .map_err(|e| (path.clone(), e))?
-                .len()
-                .checked_sub(skip)
+            total = total
+                .checked_add(range.end.saturating_sub(range.start))
                 .ok_or_else(|| {
-                    let short =
-                        io::Error::new(io::ErrorKind::InvalidData, "文件比要跳过的开头还短");
-                    (path.clone(), short)
+                    (
+                        path.clone(),
+                        io::Error::other("各分片长度之和超出 64 位整数范围"),
+                    )
                 })?;
-            total = total.checked_add(len).ok_or_else(|| {
-                (
-                    path.clone(),
-                    io::Error::other("各分片长度之和超出 64 位整数范围"),
-                )
-            })?;
         }
         starts.push(total);
         let failure = Failure::default();
         let chain = SegmentChain {
             paths,
-            skips,
+            ranges,
             starts,
             position: 0,
             open: None,
@@ -60,16 +57,11 @@ impl SegmentChain {
         Ok((chain, failure))
     }
 
-    /// 各文件在整个流中的起始偏移，按文件顺序。
-    pub(crate) fn starts(&self) -> &[u64] {
-        &self.starts[..self.starts.len() - 1]
-    }
-
     fn total(&self) -> u64 {
         *self.starts.last().expect("starts 至少有总长一项")
     }
 
-    /// 含 `position` 的文件下标；长度为 0 的文件不会被选中；读到末尾时为 None。
+    /// 含 `position` 的段的下标；长度为 0 的段不会被选中；读到末尾时为 None。
     fn index_at(&self, position: u64) -> Option<usize> {
         if position >= self.total() {
             return None;
@@ -87,7 +79,7 @@ impl SegmentChain {
         error
     }
 
-    /// 打开（或复用）第 `index` 个文件并定位到流位置 `self.position`。
+    /// 打开（或复用）第 `index` 段的文件并定位到流位置 `self.position`。
     fn file_at(&mut self, index: usize) -> io::Result<&mut File> {
         let offset = self.position - self.starts[index];
         let reusable = matches!(&self.open, Some((i, _, at)) if *i == index && *at == offset);
@@ -95,7 +87,7 @@ impl SegmentChain {
             // 先关掉上一个文件，保证同一时刻只占一个文件描述符
             self.open = None;
             let mut file = File::open(&self.paths[index]).map_err(|e| self.fail(index, e))?;
-            file.seek(SeekFrom::Start(self.skips[index] + offset))
+            file.seek(SeekFrom::Start(self.ranges[index].start + offset))
                 .map_err(|e| self.fail(index, e))?;
             self.open = Some((index, file, offset));
         }
@@ -150,20 +142,30 @@ pub(crate) fn ffmpeg_path(path: &Path) -> Option<&str> {
 mod tests {
     use super::*;
 
-    fn chain_of(name: &str, parts: &[&[u8]]) -> SegmentChain {
+    /// 把 `parts` 各写成一个文件，返回各文件的路径。
+    fn files(name: &str, parts: &[&[u8]]) -> Vec<PathBuf> {
         let dir = std::env::temp_dir().join(format!("hs-m3u8-chain-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let paths = parts
+        parts
             .iter()
             .enumerate()
             .map(|(i, data)| {
                 let path = dir.join(i.to_string());
                 std::fs::write(&path, data).unwrap();
-                (path, 0)
+                path
             })
+            .collect()
+    }
+
+    /// 各文件整个相连的分片链。
+    fn chain_of(name: &str, parts: &[&[u8]]) -> SegmentChain {
+        let pieces = files(name, parts)
+            .into_iter()
+            .zip(parts)
+            .map(|(path, data)| (path, 0..data.len() as u64))
             .collect();
-        SegmentChain::new(paths).unwrap().0
+        SegmentChain::new(pieces).unwrap().0
     }
 
     #[test]
@@ -194,23 +196,22 @@ mod tests {
     }
 
     #[test]
-    fn skipped_beginnings_are_not_read() {
-        let mut chain = chain_of("skip", &[b"abc", b"de"]);
-        let paths = chain.paths.clone();
-        chain = SegmentChain::new(vec![(paths[0].clone(), 1), (paths[1].clone(), 2)])
-            .unwrap()
-            .0;
+    fn only_the_given_ranges_are_read() {
+        let paths = files("ranges", &[b"abcdef", b"gh"]);
+        let mut chain = SegmentChain::new(vec![
+            (paths[0].clone(), 1..3),
+            (paths[0].clone(), 4..6),
+            (paths[1].clone(), 1..2),
+        ])
+        .unwrap()
+        .0;
         let mut all = Vec::new();
         chain.read_to_end(&mut all).unwrap();
-        assert_eq!(all, b"bc");
-        assert_eq!(chain.seek(SeekFrom::Start(1)).unwrap(), 1);
+        assert_eq!(all, b"bcefh");
+        assert_eq!(chain.seek(SeekFrom::Start(3)).unwrap(), 3);
         let mut rest = Vec::new();
         chain.read_to_end(&mut rest).unwrap();
-        assert_eq!(rest, b"c");
-        let err = SegmentChain::new(vec![(paths[1].clone(), 3)])
-            .err()
-            .unwrap();
-        assert_eq!(err.1.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(rest, b"fh");
     }
 
     #[test]

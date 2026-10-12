@@ -101,6 +101,8 @@ packed aac aac "${aac[@]}" -segment_format adts
 packed ac3 ac3 -c:a ac3 -ac 6 -b:a 384k -segment_format ac3
 packed eac3 ec3 -c:a eac3 -ac 6 -b:a 384k -segment_format eac3
 packed mp3 mp3 -c:a libmp3lame -b:a 64k -segment_format mp3 -segment_format_options id3v2_version=0:write_xing=0
+# 每片开头带 Info 帧（MP3 封装器默认写出，不含音频）
+packed mp3_info mp3 -c:a libmp3lame -b:a 64k -segment_format mp3 -segment_format_options id3v2_version=0
 
 # 直播录制：4 秒、时间戳连续的节目，用于逐段放出、窗口滑动与缺失的分片
 read -r -a long_src <<< "$(source_args testsrc2 160x90 440 4)"

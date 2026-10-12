@@ -1589,6 +1589,35 @@ class Mp4Unsupported:
         def __new__(cls, *, group: builtins.int, track: builtins.int) -> Mp4Unsupported.FormatChangedInGroup: ...
     
     @typing.final
+    class UnreadablePackedAudio(Mp4Unsupported):
+        r"""
+        打包音频的一个分片里读不出音频帧：既不是音频帧也不是 ID3 标签、帧或标签不完整，或是自由格式（帧头不给
+        码率）的 MP3
+        """
+        __match_args__ = ("group", "track", "segment", "offset",)
+        @property
+        def group(self) -> builtins.int:
+            r"""
+            第几个不连续段组
+            """
+        @property
+        def track(self) -> builtins.int:
+            r"""
+            第几条轨
+            """
+        @property
+        def segment(self) -> builtins.int:
+            r"""
+            这一组这条轨的第几个分片
+            """
+        @property
+        def offset(self) -> builtins.int:
+            r"""
+            读不出的位置，字节
+            """
+        def __new__(cls, *, group: builtins.int, track: builtins.int, segment: builtins.int, offset: builtins.int) -> Mp4Unsupported.UnreadablePackedAudio: ...
+    
+    @typing.final
     class Eac3ShortFrames(Mp4Unsupported):
         r"""
         E-AC-3 每帧不足 6 块（只出在 TS 与打包音频里）：MP4 封装器把几帧并成一个样本，末尾凑不满的帧不写出
@@ -1682,7 +1711,7 @@ class Mp4UnsupportedError(RequestError):
     第一个分片时就核对，组内的变化要合并时读到才报。
     """
     @property
-    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.Mp3SampleRate | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.FormatChangedInGroup | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
+    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.Mp3SampleRate | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.FormatChangedInGroup | Mp4Unsupported.UnreadablePackedAudio | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
         r"""
         放不进的原因
         """

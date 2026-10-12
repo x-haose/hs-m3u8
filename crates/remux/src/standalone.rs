@@ -93,6 +93,11 @@ pub fn read_head(reader: &mut (impl Read + Seek)) -> io::Result<Option<Head>> {
     }
 }
 
+/// `data` 开头的 ID3v2 标签的总长，字节；不是标签或标签头不完整、长度字段不合法时为 None。
+pub(crate) fn tag_len(data: &[u8]) -> Option<u64> {
+    TagHeader::parse(data).map(|tag| tag.len())
+}
+
 /// 读满 `buf` 或读到末尾，返回读到的字节数。
 fn read_up_to(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
     let mut filled = 0;
