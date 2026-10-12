@@ -2,7 +2,8 @@
 //!
 //! 输入按不连续段组（两个 `EXT-X-DISCONTINUITY` 之间）组织，每组里每条轨一份分片列表，fMP4 另带 init 段。
 //! - 组内：TS 与 fMP4 的分片按字节顺序当作一个连续的输入读取，同一时刻只打开一个文件，不先拼成大文件；打包音频
-//!   （RFC 8216 3.4，没有 init 段、不以 TS 的同步字节开头）逐个分片打开，按各片 ID3 标签里的时间戳定时。
+//!   （RFC 8216 3.4，没有 init 段、不以 TS 的同步字节开头）逐个分片打开，按各片 ID3 标签里的时间戳定时。TS 与打包
+//!   音频的时间戳在 33 位的 90 kHz 时钟上，各输入的起点跨在回绕点附近两侧时按回绕对齐。
 //! - 组间：整组使用同一个时间偏移，保留组内各轨（如视频与独立音频 rendition）原有的相对时序；
 //!   各组首尾相接，下一组从上一组所有流的最晚结束时刻之后开始。
 //! - 每条轨按调用方指定的 [`Streams`] 贡献第一路视频和（或）第一路音频，没有这类流的轨不贡献（各轨合起来至少
@@ -476,12 +477,9 @@ impl Input {
         }
     }
 
-    fn is_packed(&self) -> bool {
-        matches!(self, Input::Packed(_))
-    }
-
-    /// 编码参数随帧携带（TS 与打包音频），要逐包核对（见 [`inband`]）。
-    fn inband(&self) -> bool {
+    /// 没有 init 段的分片（TS 与打包音频）：编码参数随帧携带，要逐包核对（见 [`inband`]）；时间戳在 33 位的 90 kHz
+    /// 时钟上，会回绕（见 [`align_wraps`]）。
+    fn standalone(&self) -> bool {
         !matches!(self, Input::Chain { init: true, .. })
     }
 
@@ -505,8 +503,8 @@ struct Packed {
     shift: Option<i64>,
     /// 还没打开的分片与各自开头的信息
     rest: VecDeque<(PathBuf, packed::Head)>,
-    /// 这一组第一个分片的时间戳（90 kHz，已展开），各片的时间戳按它展开（见 [`packed::unwrap_pts`]）；整组按样本数
-    /// 接续时为 None
+    /// 这一组第一个分片的时间戳（90 kHz），各片的时间戳按它展开（见 [`packed::unwrap_pts`]）；整组按样本数接续时为
+    /// None
     start: Option<i64>,
     /// 第一个分片里音频流的下标与时间基，各片的音频包都换到这个时间基；没有音频流时为 None
     audio: Option<(usize, Rational)>,
@@ -547,13 +545,6 @@ impl Packed {
             audio,
             end: None,
         })
-    }
-
-    /// 把时间线对到同组其他轨上：`anchor` 为它们读出的第一个时间戳（90 kHz）。不调用时第一个分片的时间戳原样作起点。
-    /// 只能在读包之前调用。
-    fn align(&mut self, anchor: i64) {
-        assert!(self.end.is_none(), "打包音频须在读包之前对齐");
-        self.start = self.start.map(|start| packed::nearest(start, anchor));
     }
 
     /// 读下一个包，音频包平移到所在分片的时间戳处、换到第一个分片的时间基；读完最后一片返回 false。
@@ -681,6 +672,8 @@ struct Source {
     /// 已读出、待写入的包及其映射；包一定带 DTS
     queue: VecDeque<(Packet, Mapping)>,
     finished: bool,
+    /// 按回绕对齐时加到这个输入所有时间戳上的量，微秒（见 [`align_wraps`]）
+    wrap_us: i64,
 }
 
 impl Source {
@@ -700,7 +693,7 @@ impl Source {
                 output,
                 time_base: s.time_base,
             });
-            if input.inband() {
+            if input.standalone() {
                 inband[s.index] = Inband::of(s.id);
             }
         }
@@ -712,6 +705,7 @@ impl Source {
             inband,
             queue: VecDeque::new(),
             finished: false,
+            wrap_us: 0,
         }
     }
 
@@ -765,19 +759,11 @@ impl Source {
         Ok(())
     }
 
+    /// 队首的包对齐回绕后的 DTS，微秒。
     fn front_dts_us(&self) -> Option<i64> {
-        self.front_dts(MICROS)
-    }
-
-    fn front_dts_90k(&self) -> Option<i64> {
-        self.front_dts(CLOCK_90K)
-    }
-
-    /// 队首的包的 DTS，换到时间基 `to`。
-    fn front_dts(&self, to: Rational) -> Option<i64> {
         let (packet, mapping) = self.queue.front()?;
         let dts = packet.dts().expect("队列中的包都带 DTS");
-        Some(dts.rescale(mapping.time_base, to))
+        Some(dts.rescale(mapping.time_base, MICROS) + self.wrap_us)
     }
 }
 
@@ -1007,7 +993,7 @@ fn write_header(octx: &mut format::context::Output) -> Result<(), Error> {
     }
 }
 
-/// 写出一组：按全组共用的偏移平移时间戳，各输入按 DTS 交错写出。
+/// 写出一组：各输入按回绕对齐（见 [`align_wraps`]），再按全组共用的偏移平移时间戳，按 DTS 交错写出。
 fn write_group(
     group: usize,
     mut sources: Vec<Source>,
@@ -1015,18 +1001,19 @@ fn write_group(
     outs: &mut [OutStream],
     margin_us: i64,
 ) -> Result<(), Error> {
-    prime(&mut sources, outs)?;
+    for source in &mut sources {
+        source.prime(outs)?;
+    }
+    align_wraps(&mut sources);
     // 本组各输出流的首个 DTS 与全组最早的 PTS（输入时间线，微秒）；队列内同一路流按解码顺序排列
     let mut first_dts_us: Vec<Option<i64>> = vec![None; outs.len()];
     let mut min_pts_us: Option<i64> = None;
     for source in &sources {
         for (packet, mapping) in &source.queue {
             let tb = mapping.time_base;
-            let dts = packet
-                .dts()
-                .expect("队列中的包都带 DTS")
-                .rescale(tb, MICROS);
-            let pts = packet.pts().map_or(dts, |pts| pts.rescale(tb, MICROS));
+            let us = |ts: i64| ts.rescale(tb, MICROS) + source.wrap_us;
+            let dts = us(packet.dts().expect("队列中的包都带 DTS"));
+            let pts = packet.pts().map_or(dts, us);
             first_dts_us[mapping.output].get_or_insert(dts);
             min_pts_us = Some(min_pts_us.map_or(pts, |m| m.min(pts)));
         }
@@ -1045,7 +1032,7 @@ fn write_group(
                 }
             }
         }
-        // 同组各输入共用一个偏移，直接按原始 DTS 交错写出
+        // 同组各输入共用一个偏移，按对齐回绕后的 DTS 交错写出
         let next = sources
             .iter()
             .enumerate()
@@ -1057,7 +1044,12 @@ fn write_group(
         let (mut packet, mapping) = source.queue.pop_front().expect("next 只指向有待写包的输入");
         let out = mapping.output;
         let o = &mut outs[out];
-        let t = retime(&mut packet, mapping.time_base, o.time_base, offset_us);
+        let t = retime(
+            &mut packet,
+            mapping.time_base,
+            o.time_base,
+            offset_us + source.wrap_us,
+        );
         // 每路流的 DTS 在输出时间基下须严格递增（同一条 MP4 轨不能有两个样本同时解码）。FFmpeg 的封装器遇到不递增的
         // 只报「参数不合法」，上一个为 0 时还不查，这里一律拦下；组间的偏移保证跨组递增，不递增只会出在组内
         let dts = packet.dts().expect("retime 设了 DTS");
@@ -1082,23 +1074,32 @@ fn write_group(
     Ok(())
 }
 
-/// 读出一组各输入开头的包（见 [`Source::prime`]）。打包音频的时间戳只有模 2^33 的值，按同组其他轨读出的时间线展开
-/// （FFmpeg 读 TS 时自行展开），所以先读其他轨。
-fn prime(sources: &mut [Source], outs: &mut [OutStream]) -> Result<(), Error> {
-    for source in sources.iter_mut().filter(|s| !s.input.is_packed()) {
-        source.prime(outs)?;
-    }
-    let anchor = sources
+/// 同一组的 TS 与打包音频在同一个 33 位的 90 kHz 时钟上，但各输入按自己的第一个时间戳展开回绕（FFmpeg 读每个 TS
+/// 输入、本库读打包音频都如此），起点跨在回绕点附近两侧的两个输入会差 2^33（约 26.5 小时）。以第一个读出包的这类
+/// 输入为准，其余这类输入的第一个 DTS 离它超过半个回绕周期时，整个输入平移整数个周期：同一组各轨的起点实际相距远
+/// 小于半个周期。fMP4 的时间戳不回绕，不参与。
+fn align_wraps(sources: &mut [Source]) {
+    let firsts: Vec<Option<i64>> = sources
         .iter()
-        .filter(|s| !s.input.is_packed())
-        .find_map(Source::front_dts_90k);
-    for source in sources.iter_mut().filter(|s| s.input.is_packed()) {
-        if let (Input::Packed(packed), Some(anchor)) = (&mut source.input, anchor) {
-            packed.align(anchor);
+        .map(|s| s.front_dts_us().filter(|_| s.input.standalone()))
+        .collect();
+    let Some(&base) = firsts.iter().flatten().next() else {
+        return;
+    };
+    for (source, first) in sources.iter_mut().zip(firsts) {
+        if let Some(first) = first {
+            source.wrap_us = wrap_shift_us(first - base);
         }
-        source.prime(outs)?;
     }
-    Ok(())
+}
+
+/// 相距 `distance_us` 的两个时刻要相距不超过半个回绕周期，后者要加的整数个 33 位回绕周期（90 kHz），微秒。
+fn wrap_shift_us(distance_us: i64) -> i64 {
+    // 周期 2^33 / 90000 秒，即 2^33 × 100 / 9 微秒，按分数算：周期数四舍五入，平移量四舍五入到微秒
+    let (num, den) = (i128::from(1i64 << 33) * 100, 9i128);
+    let periods = (2 * i128::from(distance_us) * den + num).div_euclid(2 * num);
+    let shift = (2 * periods * num + den).div_euclid(2 * den);
+    i64::try_from(-shift).expect("i64 的时刻差不到 2^63 微秒，周期数有限")
 }
 
 /// 回读输出，核对每路流的包数与写入的一致。
@@ -1189,5 +1190,23 @@ fn count_packets(path: &Path) -> Result<Vec<u64>, Error> {
             Err(ffmpeg::Error::Eof) => return Ok(counts),
             Err(cause) => return Err(reread(cause)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inputs_further_apart_than_half_a_wrap_are_shifted_by_whole_wraps() {
+        // 回绕周期 2^33 / 90000 秒，约 95443717688.9 微秒
+        let wrap = 95_443_717_689;
+        assert_eq!(wrap_shift_us(0), 0);
+        assert_eq!(wrap_shift_us(-75_000_000), 0);
+        assert_eq!(wrap_shift_us(wrap / 2 - 1), 0);
+        // 视频在回绕点前、音频在回绕点后：音频的起点读成了早约一个周期
+        assert_eq!(wrap_shift_us(75_000_000 - wrap), wrap);
+        assert_eq!(wrap_shift_us(wrap - 75_000_000), -wrap);
+        assert_eq!(wrap_shift_us(2 * wrap), -2 * wrap);
     }
 }

@@ -114,12 +114,7 @@ fn timestamp(tag: &[u8]) -> Option<i64> {
 /// 33 位时间戳的回绕周期（90 kHz 时约 26.5 小时）。
 const WRAP: i64 = 1 << 33;
 
-/// 与 `pts` 模 2^33 同余、离 `anchor` 最近的值：同一时钟上两条轨的起点相距远小于 2^33。
-pub(crate) fn nearest(pts: i64, anchor: i64) -> i64 {
-    anchor + (pts - anchor + WRAP / 2).rem_euclid(WRAP) - WRAP / 2
-}
-
-/// 一条轨的 33 位时间戳按它已展开的起点 `start` 展开：取与它模 2^33 同余、落在 [start − 60 秒, start − 60 秒 + 2^33)
+/// 一条轨的 33 位时间戳按这条轨的起点 `start` 展开：取与它模 2^33 同余、落在 [start − 60 秒, start − 60 秒 + 2^33)
 /// 里的值。FFmpeg 读 TS 时同样以第一个时间戳前 60 秒为界展开（demux.c 的 update_wrap_reference）。
 pub(crate) fn unwrap_pts(pts: i64, start: i64) -> i64 {
     let low = start - 60 * 90_000;
@@ -258,20 +253,5 @@ mod tests {
         // 起点在回绕点前：回绕之后的值接着往后排
         let late = WRAP - MINUTE / 2;
         assert_eq!(unwrap_pts(5, late), WRAP + 5);
-        // 起点展开成了负数（在回绕点之前）
-        assert_eq!(unwrap_pts(WRAP - 10, -5), -10);
-        assert_eq!(unwrap_pts(3, -5), 3);
-    }
-
-    #[test]
-    fn the_nearest_value_crosses_the_wrap_point_either_way() {
-        let anchor = 900_000;
-        assert_eq!(nearest(anchor + 9_000, anchor), anchor + 9_000);
-        assert_eq!(nearest(WRAP - 9_000, 0), -9_000);
-        assert_eq!(nearest(9_000, WRAP - 1), WRAP + 9_000);
-        // 两条轨的起点跨在回绕点前 60 秒两侧（FFmpeg 读 TS 时对两边展开的方向不同）
-        let edge = WRAP - 60 * 90_000;
-        assert_eq!(nearest(edge + 10, edge - 10), edge + 10);
-        assert_eq!(nearest(edge - 10, edge - WRAP + 10), edge - 10 - WRAP);
     }
 }

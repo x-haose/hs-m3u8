@@ -809,7 +809,35 @@ fn packed_audio_timestamps_wrap_around() {
     );
 }
 
-/// 两条轨的起点跨在回绕点前 60 秒两侧（FFmpeg 读 TS 时对两边展开的方向不同）：打包音频仍按 TS 视频读出的时间线对齐。
+/// 两个 TS 输入的起点跨在回绕点前 60 秒两侧：FFmpeg 读两个输入时展开的方向不同，读出的起点差 2^33，合并时对齐回来。
+#[test]
+fn ts_inputs_across_the_wrap_edge_stay_aligned() {
+    let dir = work_dir("ts_wrap_edge");
+    let output = dir.join("out.mp4");
+    let (video, audio) = (track("ts_wrap"), track("ts_wrap_audio"));
+    // 输入各自读出的起点（秒）：音频按回绕后的值读成负数
+    let v_start = earliest(&timelines(&concat_track(&video, &dir, "v.ts")).0);
+    let a_start = earliest(&timelines(&concat_track(&audio, &dir, "a.ts")).1);
+    let wrap = (1u64 << 33) as f64 / 90_000.0;
+    assert!(a_start < 0.0 && v_start > wrap / 2.0, "样本应跨在界线两侧");
+    let expected = a_start + wrap - v_start;
+
+    remux(
+        &[Streams::Video, Streams::Audio],
+        &[group([video, audio])],
+        &output,
+    )
+    .unwrap();
+
+    let (v_out, a_out) = timelines(&output);
+    let lead = earliest(&a_out) - earliest(&v_out);
+    assert!(
+        (lead - expected).abs() < 0.001,
+        "音频应比视频晚 {expected} 秒开始，实际 {lead}"
+    );
+}
+
+/// 两条轨的起点跨在回绕点前 60 秒两侧：打包音频按 ID3 时间戳展开，与 TS 视频读出的起点差 2^33，合并时对齐回来。
 #[test]
 fn packed_audio_aligns_with_ts_across_the_wrap_edge() {
     let dir = work_dir("packed_wrap_edge");

@@ -126,5 +126,10 @@ change_enc=(-c:v libx264 -preset veryfast -bf 0 -g 10 -b:v 150k "${aac[@]}" -f m
 rm -rf -- "${DIR:?}/ts_wrap"
 mkdir -p "$DIR/ts_wrap"
 "${ff[@]}" "${repeat[@]}" -t 1 -output_ts_offset 95382.26768 "${repeat_enc[@]}" "$DIR/ts_wrap/seg0.ts"
+# 回绕点前 60 秒之后：一个纯音频分片，第一个时间戳比那条界线晚约 0.03 秒，与 ts_wrap 跨在界线两侧
+rm -rf -- "${DIR:?}/ts_wrap_audio"
+mkdir -p "$DIR/ts_wrap_audio"
+"${ff[@]}" -f lavfi -i sine=frequency=440:sample_rate=48000 -t 1 "${aac[@]}" -output_ts_offset 95382.36768 \
+  -f mpegts "$DIR/ts_wrap_audio/seg0.ts"
 
 find "$DIR" -type f ! -name generate.sh | sort | xargs ls -l
