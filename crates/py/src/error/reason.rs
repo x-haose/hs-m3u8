@@ -227,6 +227,22 @@ variants! {
             /// 流的种类
             kind: StreamKind,
         },
+        /// E-AC-3 每帧不足 6 块（只出在 TS 与打包音频里）：MP4 封装器把几帧并成一个样本，末尾凑不满的帧不写出
+        #[pyo3(constructor = (*, group, track))]
+        Eac3ShortFrames {
+            /// 第几个不连续段组
+            group: usize,
+            /// 第几条轨
+            track: usize,
+        },
+        /// E-AC-3 有多个独立子流（只出在 TS 与打包音频里）：MP4 封装器不支持
+        #[pyo3(constructor = (*, group, track))]
+        Eac3Substreams {
+            /// 第几个不连续段组
+            group: usize,
+            /// 第几条轨
+            track: usize,
+        },
         /// 解码时间戳不递增：往回跳多为来源在时间戳重新开始处漏标了 EXT-X-DISCONTINUITY，重复多为相邻分片首尾
         /// 重复了一帧
         #[pyo3(constructor = (*, group, track, kind))]
@@ -462,6 +478,8 @@ impl From<core::Mp4Unsupported> for Mp4Unsupported {
                     kind: kind.into(),
                 }
             }
+            U::Eac3ShortFrames { group, track } => Mp4Unsupported::Eac3ShortFrames { group, track },
+            U::Eac3Substreams { group, track } => Mp4Unsupported::Eac3Substreams { group, track },
             U::DtsNotIncreasing { group, track, kind } => Mp4Unsupported::DtsNotIncreasing {
                 group,
                 track,

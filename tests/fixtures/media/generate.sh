@@ -113,6 +113,12 @@ repeat_enc=(-c:v libx264 -preset veryfast -bf 0 -g 10 -an -f mpegts)
 "${ff[@]}" "${repeat[@]}" -t 1 "${repeat_enc[@]}" "$DIR/ts_repeat/seg0.ts"
 "${ff[@]}" "${repeat[@]}" -ss 0.9 -t 1 -output_ts_offset 0.9 "${repeat_enc[@]}" "$DIR/ts_repeat/seg1.ts"
 
+# E-AC-3 每帧 3 块（码率高于 1.024 Mbps 时 FFmpeg 的编码器这样编），合并应报放不进 MP4
+rm -rf -- "${DIR:?}/ts_eac3_short"
+mkdir -p "$DIR/ts_eac3_short"
+"${ff[@]}" -f lavfi -i sine=frequency=440:sample_rate=48000 -t 0.5 -ac 6 -c:a eac3 -b:a 1500k -f mpegts \
+  "$DIR/ts_eac3_short/seg0.ts"
+
 # 组内换参数：两个时间戳相接（第二个晚 0.1 秒开始）、没有 B 帧的分片，第二个的分辨率与采样率都不同
 rm -rf -- "${DIR:?}/ts_param_change"
 mkdir -p "$DIR/ts_param_change"

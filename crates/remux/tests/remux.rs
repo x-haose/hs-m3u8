@@ -678,6 +678,26 @@ fn check_finds_what_cannot_go_into_an_mp4_from_the_first_segments() {
     );
 }
 
+/// TS 里每帧 3 块的 E-AC-3：MP4 封装器会把几帧并成一个样本、丢掉末尾凑不满的，放不进 MP4。
+#[test]
+fn eac3_with_fewer_than_six_blocks_per_frame_is_rejected() {
+    let dir = work_dir("eac3_short");
+    let output = dir.join("out.mp4");
+    let err = remux(
+        &[Streams::Audio],
+        &[group([track("ts_eac3_short")])],
+        &output,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::Eac3ShortFrames { group: 0, track: 0 })
+        ),
+        "实际 {err:?}"
+    );
+}
+
 /// MP2 音频，以及采样率低于 16 kHz 的 MP3（MP4 封装器不收）放不进 MP4。
 #[test]
 fn mp2_and_low_rate_mp3_audio_are_rejected() {

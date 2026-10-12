@@ -11,8 +11,7 @@
 //!   一致，参数随帧携带的（TS 与打包音频）在组内也不能变；每路流的解码时间戳必须严格递增（组内不能往回跳或
 //!   重复）。
 //! - 只接受 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、MP3、FLAC、Opus、ALAC 音频，与 FFmpeg 构建启用的组件
-//!   一致；MP3 的采样率须不低于 16 kHz（MP4 封装器不收更低的）。简化：E-AC-3 每帧不足 6 块时 MP4 封装器把相邻几帧并成一个样本，回读的包数与
-//!   写入的对不上，按核对失败报错；遇到这样的来源再改为按块数核对。
+//!   一致；MP3 的采样率须不低于 16 kHz，TS 与打包音频里的 E-AC-3 每帧须为 6 块、只有一个独立子流（MP4 封装器的限制）。
 //!
 //! 输出写完回读核对每路流的包数并落盘；失败时输出上可能留有写了一半的文件。输出要么完整、要么不存在由调用方
 //! 写到临时路径、成功后改名、失败时删除来保证。错误信息已包含原因，不经 `source()` 重复给出。
@@ -34,7 +33,7 @@ use ffmpeg::{Dictionary, Packet, Rational, Rescale, Rounding, codec, encoder, fo
 use ffmpeg_next as ffmpeg;
 
 use crate::chain::ffmpeg_path;
-use crate::inband::Inband;
+use crate::inband::{Inband, Mismatch};
 use crate::input::Input;
 
 /// 时间戳在组间换算时使用的公共时间基（微秒）。
@@ -283,6 +282,13 @@ pub enum Unsupported {
         track: usize,
         kind: StreamKind,
     },
+    /// TS 或打包音频里的 E-AC-3 每帧不足 6 块：MP4 封装器把几帧并成一个 6 块（1536 个采样点）的样本，末尾凑不满的
+    /// 帧不写出
+    #[error("第 {group} 组第 {track} 条轨的 E-AC-3 每帧不足 6 块，放不进 MP4")]
+    Eac3ShortFrames { group: usize, track: usize },
+    /// TS 或打包音频里的 E-AC-3 有多个独立子流：MP4 封装器不支持
+    #[error("第 {group} 组第 {track} 条轨的 E-AC-3 有多个独立子流，放不进 MP4")]
+    Eac3Substreams { group: usize, track: usize },
     /// 往回跳多为来源在时间戳重新开始处漏标了 `EXT-X-DISCONTINUITY`，重复多为相邻分片首尾重复了一帧
     #[error(
         "第 {group} 组第 {track} 条轨的{kind}解码时间戳不递增（往回跳或重复），无法放进同一条 MP4 轨"
@@ -508,11 +514,16 @@ impl Source {
                     .context()
                     .stream(packet.stream())
                     .expect("包所属的流存在");
-                if !check.check(packet.data().unwrap_or_default(), &stream) {
-                    return Err(Error::Unsupported(Unsupported::ParamsChangedInGroup {
-                        group: self.group,
-                        track: self.track,
-                        kind: outs[mapping.output].shape.kind(),
+                if let Err(mismatch) = check.check(packet.data().unwrap_or_default(), &stream) {
+                    let (group, track) = (self.group, self.track);
+                    return Err(Error::Unsupported(match mismatch {
+                        Mismatch::Changed => Unsupported::ParamsChangedInGroup {
+                            group,
+                            track,
+                            kind: outs[mapping.output].shape.kind(),
+                        },
+                        Mismatch::Eac3ShortFrames => Unsupported::Eac3ShortFrames { group, track },
+                        Mismatch::Eac3Substreams => Unsupported::Eac3Substreams { group, track },
                     }));
                 }
             }

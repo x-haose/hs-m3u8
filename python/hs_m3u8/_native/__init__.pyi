@@ -1548,6 +1548,42 @@ class Mp4Unsupported:
         def __new__(cls, *, group: builtins.int, track: builtins.int, kind: StreamKind) -> Mp4Unsupported.ParamsChangedInGroup: ...
     
     @typing.final
+    class Eac3ShortFrames(Mp4Unsupported):
+        r"""
+        E-AC-3 每帧不足 6 块（只出在 TS 与打包音频里）：MP4 封装器把几帧并成一个样本，末尾凑不满的帧不写出
+        """
+        __match_args__ = ("group", "track",)
+        @property
+        def group(self) -> builtins.int:
+            r"""
+            第几个不连续段组
+            """
+        @property
+        def track(self) -> builtins.int:
+            r"""
+            第几条轨
+            """
+        def __new__(cls, *, group: builtins.int, track: builtins.int) -> Mp4Unsupported.Eac3ShortFrames: ...
+    
+    @typing.final
+    class Eac3Substreams(Mp4Unsupported):
+        r"""
+        E-AC-3 有多个独立子流（只出在 TS 与打包音频里）：MP4 封装器不支持
+        """
+        __match_args__ = ("group", "track",)
+        @property
+        def group(self) -> builtins.int:
+            r"""
+            第几个不连续段组
+            """
+        @property
+        def track(self) -> builtins.int:
+            r"""
+            第几条轨
+            """
+        def __new__(cls, *, group: builtins.int, track: builtins.int) -> Mp4Unsupported.Eac3Substreams: ...
+    
+    @typing.final
     class DtsNotIncreasing(Mp4Unsupported):
         r"""
         解码时间戳不递增：往回跳多为来源在时间戳重新开始处漏标了 EXT-X-DISCONTINUITY，重复多为相邻分片首尾
@@ -1605,7 +1641,7 @@ class Mp4UnsupportedError(RequestError):
     第一个分片时就核对，组内的变化要合并时读到才报。
     """
     @property
-    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
+    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
         r"""
         放不进的原因
         """
