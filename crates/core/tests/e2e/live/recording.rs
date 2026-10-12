@@ -48,19 +48,36 @@ async fn records_until_endlist() {
     );
 }
 
-/// 编码放不进 MP4（MP2 音频）：录到第一个分片、核对出来就报错，不等直播结束。
+/// 编码放不进 MP4（MP2 音频）：录到第一个分片就在进度里报出原因，录制照常进行（之后的分片照样录）；直播结束后合并
+/// MP4 时以同一个原因失败。
 #[tokio::test(flavor = "multi_thread")]
-async fn unsupported_codecs_fail_once_the_first_segment_is_recorded() {
+async fn unsupported_codecs_show_in_progress_while_recording_goes_on() {
     let dir = test_dir("live_unsupported_codec");
     let server = Server::start().await;
     server.put("seg0.ts", fixture("ts_mp2/seg0.ts"));
+    server.put("seg1.ts", fixture("ts_mp2/seg0.ts"));
     server.put("live.m3u8", playlist(&[0], false));
 
-    let req = live_request(server.url("live.m3u8"), &dir, Duration::MAX);
-    let failed = tokio::time::timeout(Duration::from_secs(10), run(req))
-        .await
-        .expect("直播还没结束就应报错");
+    let job = engine()
+        .start(live_request(server.url("live.m3u8"), &dir, Duration::MAX))
+        .unwrap();
+    let mut progress = job.control().progress();
+    let reason = tokio::time::timeout(
+        Duration::from_secs(10),
+        progress.wait_for(|p| p.mp4_unsupported.is_some()),
+    )
+    .await
+    .expect("录到第一个分片就应在进度里报出")
+    .unwrap()
+    .mp4_unsupported
+    .clone();
+    assert!(
+        matches!(reason, Some(Mp4Unsupported::Codec { codec: "mp2", .. })),
+        "{reason:?}"
+    );
 
+    server.put("live.m3u8", playlist(&[0, 1], true));
+    let failed = job.wait().await;
     assert!(
         matches!(
             failed,
@@ -70,6 +87,7 @@ async fn unsupported_codecs_fail_once_the_first_segment_is_recorded() {
         ),
         "{failed:?}"
     );
+    assert_eq!(server.hits("seg1.ts"), 1, "报出原因之后照常录");
 }
 
 /// 进入录制阶段时进度里各轨就有一项（还没有刷新失败）：这里 init 段还没取到，会话还没开始录。

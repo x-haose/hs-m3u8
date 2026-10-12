@@ -13,7 +13,7 @@ pub(crate) use self::plan::Plan;
 use crate::fetch::{Fetcher, Item, ItemInfo, count_done, fetch_init};
 use crate::http::{Http, Permit};
 use crate::ident::Fingerprint;
-use crate::output::{self, GroupSegment, GroupTrack};
+use crate::output::{self, GroupTrack};
 use crate::workdir::{self, Layout, SegmentName, SessionStart};
 use crate::{Error, Progress, Stage, blocking};
 
@@ -67,7 +67,11 @@ pub(crate) async fn download(
             .filter_map(|(track, range)| items[track][range.start].take())
             .collect();
         fetch(fetcher, heads, progress).await?;
-        let groups = group_input(plan, &names, layout, |range| range.start..range.start + 1);
+        let groups: Vec<(usize, Vec<GroupTrack>)> =
+            group_input(plan, &names, layout, |range| range.start..range.start + 1)
+                .into_iter()
+                .enumerate()
+                .collect();
         let streams = streams.to_vec();
         blocking(move || output::check_mp4(&streams, &groups)).await??;
     }
@@ -187,19 +191,7 @@ fn group_input(
             ranges
                 .iter()
                 .enumerate()
-                .map(|(t, range)| {
-                    let names = &names[t][pick(range)];
-                    GroupTrack {
-                        init: names[0].init.map(|f| layout.init(t, f)),
-                        segments: names
-                            .iter()
-                            .map(|n| GroupSegment {
-                                path: layout.segment(t, n),
-                                duration_us: n.duration_us,
-                            })
-                            .collect(),
-                    }
-                })
+                .map(|(t, range)| GroupTrack::of(layout, t, &names[t][pick(range)]))
                 .collect()
         })
         .collect()

@@ -364,11 +364,12 @@ pub fn remux(
     output: &Path,
 ) -> Result<Report, Error> {
     init()?;
-    validate(streams, groups)?;
+    let groups: Vec<Numbered<'_>> = groups.iter().enumerate().collect();
+    validate(streams, &groups)?;
     if ffmpeg_path(output).is_none() {
         return Err(Error::NonUtf8Path(output.to_path_buf()));
     }
-    let report = write_verified(streams, groups, output)?;
+    let report = write_verified(streams, &groups, output)?;
     sync(output)?;
     Ok(report)
 }
@@ -380,22 +381,28 @@ pub fn remux(
 /// 只靠开头的分片判断不了的不报，留给合并：FFmpeg 打不开（如只有一两帧的 MP3）或探测不出参数（如开头没有这路流的包）
 /// 的组跳过，第 0 组判断不了时整个跳过。通过不保证合并成功：组内中途的变化、后面的分片缺时间戳、时间戳不递增等要读到
 /// 才知道。
-pub fn check(streams: &[Streams], groups: &[DiscontinuityGroup]) -> Result<(), Error> {
+///
+/// `groups` 的各项为报错时用的组号（合并时这一组的下标）与这一组，按合并的顺序，第一项为第 0 组：可以只核对其中几组，
+/// 如直播录制中拿第 0 组与新录到的一组核对。
+pub fn check(streams: &[Streams], groups: &[(usize, &DiscontinuityGroup)]) -> Result<(), Error> {
     init()?;
     validate(streams, groups)?;
-    let Some(first) = judgeable(open_group(streams, groups, 0, None))? else {
+    let Some(first) = judgeable(open_group(streams, groups[0], None))? else {
         return Ok(());
     };
     let layout = layout_of(&first)?;
     let outputs = layout.iter().map(Vec::len).sum();
-    let references = references_of(&primed(0, first, &layout, &[])?, outputs);
-    for group in 1..groups.len() {
-        if let Some(opened) = judgeable(open_group(streams, groups, group, Some(&layout)))? {
-            primed(group, opened, &layout, &references)?;
+    let references = references_of(&primed(groups[0].0, first, &layout, &[])?, outputs);
+    for &numbered in &groups[1..] {
+        if let Some(opened) = judgeable(open_group(streams, numbered, Some(&layout)))? {
+            primed(numbered.0, opened, &layout, &references)?;
         }
     }
     Ok(())
 }
+
+/// 一个不连续段组与报错时用的组号。
+type Numbered<'a> = (usize, &'a DiscontinuityGroup);
 
 /// 只给开头的分片时判断不了的结果当作没有结果（见 [`check`]）：合并时有整组的数据，同样的问题照常报出。
 fn judgeable<T>(result: Result<T, Error>) -> Result<Option<T>, Error> {
@@ -433,15 +440,15 @@ fn init() -> Result<(), Error> {
     .map_err(Error::Init)
 }
 
-fn validate(streams: &[Streams], groups: &[DiscontinuityGroup]) -> Result<(), Error> {
-    let first = groups.first().ok_or(Error::NoGroups)?;
+fn validate(streams: &[Streams], groups: &[Numbered<'_>]) -> Result<(), Error> {
+    let (_, first) = groups.first().ok_or(Error::NoGroups)?;
     if streams.len() != first.tracks.len() {
         return Err(Error::StreamsCount {
             expected: first.tracks.len(),
             found: streams.len(),
         });
     }
-    for (group, g) in groups.iter().enumerate() {
+    for &(group, g) in groups {
         if g.tracks.len() != first.tracks.len() {
             return Err(Error::TrackCount {
                 group,
@@ -777,10 +784,10 @@ struct OutStream {
 
 fn write_verified(
     streams: &[Streams],
-    groups: &[DiscontinuityGroup],
+    groups: &[Numbered<'_>],
     part: &Path,
 ) -> Result<Report, Error> {
-    let first = open_group(streams, groups, 0, None)?;
+    let first = open_group(streams, groups[0], None)?;
     let layout = layout_of(&first)?;
     let mut octx = format::output_as(part, "mp4").map_err(|cause| Error::OpenOutput {
         path: part.to_path_buf(),
@@ -811,13 +818,13 @@ fn write_verified(
         .max()
         .expect("第 0 组至少有一路输出流");
 
-    let sources = primed(0, first, &layout, &[])?;
+    let sources = primed(groups[0].0, first, &layout, &[])?;
     let references = references_of(&sources, outs.len());
-    write_group(0, sources, &mut octx, &mut outs, margin_us)?;
-    for group in 1..groups.len() {
-        let opened = open_group(streams, groups, group, Some(&layout))?;
-        let sources = primed(group, opened, &layout, &references)?;
-        write_group(group, sources, &mut octx, &mut outs, margin_us)?;
+    write_group(groups[0].0, sources, &mut octx, &mut outs, margin_us)?;
+    for &numbered in &groups[1..] {
+        let opened = open_group(streams, numbered, Some(&layout))?;
+        let sources = primed(numbered.0, opened, &layout, &references)?;
+        write_group(numbered.0, sources, &mut octx, &mut outs, margin_us)?;
     }
     octx.write_trailer().map_err(|e| Error::Mux(e.into()))?;
     drop(octx);
@@ -851,12 +858,11 @@ struct OpenTrack {
 /// 的流种类、参数与解码配置须与它相同；打开第 0 组时为 None。
 fn open_group(
     streams: &[Streams],
-    groups: &[DiscontinuityGroup],
-    group: usize,
+    (group, tracks): Numbered<'_>,
     layout: Option<&[Vec<Desc>]>,
 ) -> Result<Vec<OpenTrack>, Error> {
     let mut opened = Vec::new();
-    for (track, segments) in groups[group].tracks.iter().enumerate() {
+    for (track, segments) in tracks.tracks.iter().enumerate() {
         let (input, selected) = open_selected(segments, streams[track], group, track)?;
         if let Some(layout) = layout {
             same_streams(&selected, &layout[track], group, track)?;

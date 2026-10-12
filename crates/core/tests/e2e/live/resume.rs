@@ -4,9 +4,10 @@ use std::time::Duration;
 
 use hs_m3u8_core::hls::AudioChoice;
 use hs_m3u8_core::{
-    Error, JobType, LiveEnd, LiveOptions, LiveReport, MissReason, Stage, Url, WorkDirProblem,
+    Error, JobType, LiveEnd, LiveOptions, LiveReport, MissReason, Mp4Unsupported, Stage,
+    Unsupported, Url, WorkDirProblem,
 };
-use hs_m3u8_remux::{DiscontinuityGroup, Streams};
+use hs_m3u8_remux::{DiscontinuityGroup, StreamKind, Streams};
 
 use super::{
     STALL, expected_split_long, interrupt, live_request, missed, playlist, playlist_in, put_long,
@@ -31,6 +32,52 @@ async fn disjoint_window_starts_a_new_session() {
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[2, 2]));
     assert_eq!(output.live, report(LiveEnd::EndList, 2, vec![]));
+}
+
+/// 续录另起的会话换了分辨率（之前录的 160x90，之后 320x180）：录制中以合并时的第 0 组（之前运行录的）为准核对，进度
+/// 里报出 ParamsChanged，组号与合并时的相同；录完合并 MP4 时以同一个原因失败。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_session_is_checked_against_the_group_recorded_before() {
+    let dir = test_dir("resume_mp4_check");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1]);
+    server.put("seg2.ts", fixture("ts_a/seg0.ts"));
+    server.put("seg3.ts", fixture("ts_a/seg1.ts"));
+    server.put("live.m3u8", playlist(&[0, 1], false));
+    let req = live_request(server.url("live.m3u8"), &dir, STALL);
+    interrupt(&req, |p| p.segments_done == 2).await;
+
+    server.put("live.m3u8", playlist(&[2, 3], false));
+    let job = engine().start(req).unwrap();
+    let mut progress = job.control().progress();
+    let reason = tokio::time::timeout(
+        Duration::from_secs(10),
+        progress.wait_for(|p| p.mp4_unsupported.is_some()),
+    )
+    .await
+    .expect("录到新会话的第一组就应在进度里报出")
+    .unwrap()
+    .mp4_unsupported
+    .clone();
+    server.put("live.m3u8", playlist(&[2, 3], true));
+    let failed = job.wait().await;
+
+    let changed = |reason: &Mp4Unsupported| {
+        matches!(
+            reason,
+            Mp4Unsupported::ParamsChanged {
+                group: 1,
+                track: 0,
+                kind: StreamKind::Video,
+                ..
+            }
+        )
+    };
+    assert!(reason.as_ref().is_some_and(changed), "{reason:?}");
+    assert!(
+        matches!(&failed, Err(Error::Unsupported(Unsupported::Mp4(reason))) if changed(reason)),
+        "{failed:?}"
+    );
 }
 
 /// 窗口仍含已录的分片：接着原会话录，重叠部分不重录，时间线连续成一组。

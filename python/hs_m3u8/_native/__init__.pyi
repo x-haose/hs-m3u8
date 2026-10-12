@@ -1441,7 +1441,8 @@ class Mp4Output:
 
 class Mp4Unsupported:
     r"""
-    内容放不进 MP4 的原因；可只输出本地 HLS（`Target.Hls`），它原样保留分片，不受这些限制。
+    内容放不进 MP4 的原因；可只输出本地 HLS（`Target.Hls`），它原样保留分片，不受这些限制。各取值的 `group` 为合并
+    时的组号：点播即播放列表里第几个不连续段组，直播为各轨都录到的组按会话、不连续段排列的下标。
     """
     def __repr__(self) -> builtins.str: ...
     @typing.final
@@ -2079,9 +2080,16 @@ class Progress:
         直播：各轨（下标为轨道编号）最近一次刷新失败的原因。这条轨之后刷新成功、不再刷新或录制结束即为 None；
         一直失败到停滞时任务以 `LiveStalledError` 结束。点播与录制开始前为空
         """
+    @property
+    def mp4_unsupported(self) -> typing.Optional[Mp4Unsupported.Codec | Mp4Unsupported.Mp3SampleRate | Mp4Unsupported.ParamsUnknown | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ConfigChanged | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.FormatChangedInGroup | Mp4Unsupported.UnreadablePackedAudio | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams]:
+        r"""
+        直播且输出含 MP4：录到的内容放不进 MP4 的原因，在每个（会话, 不连续段）组各轨都录到分片时核对（定下结束
+        之后才下完的不核对）。录制照常进行，停不停由调用方定（直播错过的内容录不回来）；合并 MP4 时照样以 `Mp4UnsupportedError` 失败，可改为只
+        输出本地 HLS 再合并。点播（下载各组的第一个分片后核对，放不进时任务直接失败）与不输出 MP4 时为 None
+        """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, stage: Stage, selected: typing.Optional[Selected], segments_done: builtins.int, segments_total: builtins.int, segments_failed: builtins.int, segments_expired: builtins.int, duration: datetime.timedelta, bytes: builtins.int, received: builtins.int, refresh_errors: collections.abc.Sequence[typing.Optional[RefreshCause]]) -> Progress:
+    def __new__(cls, *, stage: Stage, selected: typing.Optional[Selected], segments_done: builtins.int, segments_total: builtins.int, segments_failed: builtins.int, segments_expired: builtins.int, duration: datetime.timedelta, bytes: builtins.int, received: builtins.int, refresh_errors: collections.abc.Sequence[typing.Optional[RefreshCause]], mp4_unsupported: typing.Optional[Mp4Unsupported]) -> Progress:
         r"""
         各参数即同名属性。
         """

@@ -4,8 +4,8 @@
 //! 组内保留原时间戳（缺失的分片处时间线留空），组与组首尾相接。中断后再次运行时先判定接着上一个会话录还是
 //! 另起一个（见 [`deciding`]），再开始录。
 //!
-//! 一个事件循环驱动整个录制：刷新、拉 init 段、核对内容都是后台任务（见 [`tasks`]），完成后作为事件交回，
-//! 循环从不等某一个网络请求。拉到的播放列表先暂存在各轨，会话定下后逐份拉好 init 段、按顺序处理。
+//! 一个事件循环驱动整个录制：刷新、拉 init 段、核对续录的内容都是后台任务（见 [`tasks`]），完成后作为事件交回，
+//! 循环从不等某一个网络请求；核对能否放进 MP4（见 [`Mp4Check`]）只读本地文件，在循环里做完。拉到的播放列表先暂存在各轨，会话定下后逐份拉好 init 段、按顺序处理。
 //! 定下结束原因后不再刷新，把暂存的处理完才结束；停止（[`crate::JobControl::stop`]）也是如此，但会话定下之前停止
 //! 立即结束，不录新的分片。
 //!
@@ -102,12 +102,12 @@ struct Recorder<'a> {
     phase: Phase,
     /// 定下的结束原因：不再刷新，处理完暂存的播放列表即结束
     ending: Option<LiveEnd>,
-    /// 要合并 MP4 时录制中的核对；不输出 MP4 时为 None
+    /// 输出含 MP4 时录制中的核对；不输出 MP4 时为 None
     mp4: Option<Mp4Check>,
 }
 
 /// 录制：定下会话，从首次拉到的播放列表开始，直到满足结束条件，并等已列出的分片下完。要合并 MP4 时 `mp4` 为各轨的
-/// 取流方式，录制中核对能否放进 MP4（见 [`Mp4Check`]），放不进时录制失败。
+/// 取流方式，录制中核对能否放进 MP4（见 [`Mp4Check`]），放不进的原因放进进度，录制照常进行。
 ///
 /// 目录里记录的完整来源地址与本次的不同时（见 [`WorkDir::url_changed`]），处理见 [`session::NewUrl`]。
 pub(crate) async fn record(
@@ -129,6 +129,13 @@ pub(crate) async fn record(
         Some(verdicts) => Phase::Deciding(verdicts),
         None => Phase::Decided { session: 0 },
     };
+    let mp4 = match mp4 {
+        Some(streams) => Some(Mp4Check::new(
+            streams,
+            &merge_plan(&stored.segments, dir.layout())?,
+        )),
+        None => None,
+    };
     let mut recorder = Recorder {
         http: ctx.http,
         hooks: ctx.hooks,
@@ -141,7 +148,7 @@ pub(crate) async fn record(
         direct: ctx.fetcher.direct(),
         phase,
         ending: None,
-        mp4: mp4.map(Mp4Check::new),
+        mp4,
     };
     let refresh_errors = recorder.refresh_errors(true);
     progress.send_modify(|p| {
@@ -226,8 +233,11 @@ impl Recorder<'_> {
                 Event::Downloaded((id, result)) => {
                     let recorded = result.is_ok();
                     self.on_finished(id, result)?;
-                    if let (true, Some(check)) = (recorded, &mut self.mp4) {
-                        check.recorded(id, self.dir.layout()).await?;
+                    if let (true, Some(check)) = (recorded, &mut self.mp4)
+                        && let Some(reason) = check.recorded(id, self.dir.layout()).await?
+                    {
+                        self.progress
+                            .send_modify(|p| p.mp4_unsupported = Some(reason));
                     }
                 }
             }

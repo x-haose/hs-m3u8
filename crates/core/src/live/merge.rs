@@ -3,14 +3,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::output::{GroupSegment, GroupTrack};
-use crate::workdir::{Layout, SegmentFile};
+use crate::output::GroupTrack;
+use crate::workdir::{GroupKey, Layout, SegmentFile};
 use crate::{Error, MissReason, Missed, WorkDirProblem};
 
 /// 合并计划。
 pub(crate) struct MergePlan {
-    /// 各组各轨的分片
+    /// 各组各轨的分片，按组的键排列
     pub groups: Vec<Vec<GroupTrack>>,
+    /// 各组的键，与 `groups` 一一对应
+    pub keys: Vec<GroupKey>,
     /// 合并进输出的分片数，各轨合计
     pub segments: usize,
     /// 合并进输出的会话数
@@ -21,16 +23,13 @@ pub(crate) struct MergePlan {
     pub holes: Vec<Missed>,
 }
 
-/// 分组的键：（会话, 不连续段）。
-type Key = (u32, u64);
-
 /// 一条轨的分片按组归类。
-type ByGroup<'a> = BTreeMap<Key, Vec<&'a SegmentFile>>;
+type ByGroup<'a> = BTreeMap<GroupKey, Vec<&'a SegmentFile>>;
 
 /// 由任务目录中的分片（各轨按（会话, 序号）排列）得出合并计划。
 pub(crate) fn merge_plan(files: &[Vec<SegmentFile>], layout: &Layout) -> Result<MergePlan, Error> {
     let by_group: Vec<ByGroup<'_>> = files.iter().map(|track| group_files(track)).collect();
-    let common: BTreeSet<Key> = by_group
+    let common: BTreeSet<GroupKey> = by_group
         .first()
         .map(|first| {
             first
@@ -58,13 +57,14 @@ pub(crate) fn merge_plan(files: &[Vec<SegmentFile>], layout: &Layout) -> Result<
             .collect::<BTreeSet<_>>()
             .len(),
         groups,
+        keys: common.into_iter().collect(),
         unmergeable,
         holes,
     })
 }
 
 /// 所在组不是每条轨都有（不在 `common` 里）的分片。
-fn unmergeable(by_group: &[ByGroup<'_>], common: &BTreeSet<Key>) -> Vec<Missed> {
+fn unmergeable(by_group: &[ByGroup<'_>], common: &BTreeSet<GroupKey>) -> Vec<Missed> {
     let mut missed = Vec::new();
     for (track, groups) in by_group.iter().enumerate() {
         for (key, files) in groups {
@@ -84,17 +84,14 @@ fn unmergeable(by_group: &[ByGroup<'_>], common: &BTreeSet<Key>) -> Vec<Missed> 
 fn group_files(files: &[SegmentFile]) -> ByGroup<'_> {
     let mut groups = ByGroup::new();
     for file in files {
-        groups
-            .entry((file.name.session, file.name.discontinuity))
-            .or_default()
-            .push(file);
+        groups.entry(file.name.group()).or_default().push(file);
     }
     groups
 }
 
 /// 各轨都有的一组换成合并输入；组内的分片引用了不同的 init 段时目录内容矛盾。
 fn merge_group(
-    key: Key,
+    key: GroupKey,
     by_group: &[ByGroup<'_>],
     layout: &Layout,
 ) -> Result<Vec<GroupTrack>, Error> {
@@ -111,16 +108,7 @@ fn merge_group(
                 )),
             });
         }
-        tracks.push(GroupTrack {
-            init: init.map(|f| layout.init(track, f)),
-            segments: files
-                .iter()
-                .map(|f| GroupSegment {
-                    path: f.path.clone(),
-                    duration_us: f.name.duration_us,
-                })
-                .collect(),
-        });
+        tracks.push(GroupTrack::of(layout, track, files.iter().map(|f| &f.name)));
     }
     Ok(tracks)
 }

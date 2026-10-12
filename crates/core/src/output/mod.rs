@@ -16,7 +16,7 @@ pub(crate) use self::options::{ResolvedOutput, absolute_path};
 use self::commit::{Commit, Occupant};
 use crate::error::io_error;
 use crate::selection::SelectionKey;
-use crate::workdir::{OutputKind, WorkDir};
+use crate::workdir::{Layout, OutputKind, SegmentName, WorkDir};
 use crate::{Error, Leftover, LiveReport, Mp4Output, Output, blocking};
 
 /// 交给输出的内容。
@@ -39,6 +39,32 @@ pub(crate) struct GroupTrack {
     pub init: Option<PathBuf>,
     /// 按播放顺序
     pub segments: Vec<GroupSegment>,
+}
+
+impl GroupTrack {
+    /// 第 `track` 条轨在一组里的分片 `names`（按播放顺序，至少一个）在任务目录 `layout` 里的文件；init 段为第一个
+    /// 分片引用的。
+    pub(crate) fn of<'a>(
+        layout: &Layout,
+        track: usize,
+        names: impl IntoIterator<Item = &'a SegmentName>,
+    ) -> GroupTrack {
+        let mut init = None;
+        let segments = names
+            .into_iter()
+            .map(|name| {
+                init.get_or_insert(name.init);
+                GroupSegment {
+                    path: layout.segment(track, name),
+                    duration_us: name.duration_us,
+                }
+            })
+            .collect();
+        GroupTrack {
+            init: init.flatten().map(|f| layout.init(track, f)),
+            segments,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -182,26 +208,30 @@ fn write_mp4(
     streams: &[Streams],
     groups: &[Vec<GroupTrack>],
 ) -> Result<Report, Error> {
-    Ok(hs_m3u8_remux::remux(streams, &remux_groups(groups), temp)?)
+    let groups: Vec<DiscontinuityGroup> = groups.iter().map(|g| remux_group(g)).collect();
+    Ok(hs_m3u8_remux::remux(streams, &groups, temp)?)
 }
 
-/// 下载完之前核对各组能否合并进 MP4（见 [`hs_m3u8_remux::check`]），各轨只需开头的分片。要读文件，在阻塞线程池中
-/// 调用。
-pub(crate) fn check_mp4(streams: &[Streams], groups: &[Vec<GroupTrack>]) -> Result<(), Error> {
-    Ok(hs_m3u8_remux::check(streams, &remux_groups(groups))?)
+/// 下载完之前核对能否合并进 MP4（见 [`hs_m3u8_remux::check`]），各轨只需开头的分片。`groups` 的各项为合并时的组号与
+/// 这一组，第一项为第 0 组。要读文件，在阻塞线程池中调用。
+pub(crate) fn check_mp4(
+    streams: &[Streams],
+    groups: &[(usize, Vec<GroupTrack>)],
+) -> Result<(), Error> {
+    let remux: Vec<(usize, DiscontinuityGroup)> =
+        groups.iter().map(|(n, g)| (*n, remux_group(g))).collect();
+    let numbered: Vec<(usize, &DiscontinuityGroup)> = remux.iter().map(|(n, g)| (*n, g)).collect();
+    Ok(hs_m3u8_remux::check(streams, &numbered)?)
 }
 
-fn remux_groups(groups: &[Vec<GroupTrack>]) -> Vec<DiscontinuityGroup> {
-    groups
-        .iter()
-        .map(|tracks| DiscontinuityGroup {
-            tracks: tracks
-                .iter()
-                .map(|t| TrackSegments {
-                    init: t.init.clone(),
-                    segments: t.segments.iter().map(|s| s.path.clone()).collect(),
-                })
-                .collect(),
-        })
-        .collect()
+fn remux_group(tracks: &[GroupTrack]) -> DiscontinuityGroup {
+    DiscontinuityGroup {
+        tracks: tracks
+            .iter()
+            .map(|t| TrackSegments {
+                init: t.init.clone(),
+                segments: t.segments.iter().map(|s| s.path.clone()).collect(),
+            })
+            .collect(),
+    }
 }

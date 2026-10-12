@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::info::Selected;
 use crate::remux::Report;
-use crate::{HttpError, HttpFailure, hls};
+use crate::{HttpError, HttpFailure, Mp4Unsupported, hls};
 
 /// 任务进度快照。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -34,6 +34,11 @@ pub struct Progress {
     /// 直播：各轨（下标为轨道编号）最近一次刷新失败的原因。这条轨之后刷新成功、不再刷新或录制结束即清空；
     /// 一直失败到停滞时任务以 [`crate::Error::LiveStalled`] 结束。点播与录制开始前为空
     pub refresh_errors: Vec<Option<RefreshCause>>,
+    /// 直播且输出含 MP4：录到的内容放不进 MP4 的原因，在每个（会话, 不连续段）组各轨都录到分片时核对（定下结束之后
+    /// 才下完的不核对）。录制照常进行，停不停由调用方定（直播错过的内容录不回来）；合并 MP4 时照样以
+    /// [`crate::Unsupported::Mp4`] 失败，可改为只输出本地 HLS 再合并。点播（下载各组的第一个分片后核对，放不进时任务
+    /// 直接失败）与不输出 MP4 时为 None
+    pub mp4_unsupported: Option<Mp4Unsupported>,
 }
 
 impl Progress {

@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LockResult, Mutex, MutexGuard};
 
-pub(crate) use self::names::{SegmentName, SessionStart};
+pub(crate) use self::names::{GroupKey, SegmentName, SessionStart};
 use self::names::{init_file_name, parse_init_name, parse_segment_name, segment_file_name};
 use self::outputs::OUTPUTS_FILE;
 pub(crate) use self::outputs::{

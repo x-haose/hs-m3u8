@@ -15,9 +15,10 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 mod reason;
 
+pub(crate) use self::reason::Mp4Unsupported;
 use self::reason::{
-    HlsUnsupported, HookKind, IntegrityFailure, Malformed, Mp4Unsupported, SegmentRef,
-    SelectFailure, SourceUnsupported, StallReason, WorkDirProblem,
+    HlsUnsupported, HookKind, IntegrityFailure, Malformed, SegmentRef, SelectFailure,
+    SourceUnsupported, StallReason, WorkDirProblem,
 };
 use crate::convert::{Address, PyPath, Seq};
 use crate::hooks::PyHookError;

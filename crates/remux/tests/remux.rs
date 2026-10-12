@@ -43,6 +43,12 @@ fn track(name: &str) -> TrackSegments {
     track_in(&fixtures().join(name))
 }
 
+/// 按顺序核对各组（组号即下标），见 [`hs_m3u8_remux::check`]。
+fn check(streams: &[Streams], groups: &[DiscontinuityGroup]) -> Result<(), Error> {
+    let numbered: Vec<(usize, &DiscontinuityGroup)> = groups.iter().enumerate().collect();
+    hs_m3u8_remux::check(streams, &numbered)
+}
+
 fn group<const N: usize>(tracks: [TrackSegments; N]) -> DiscontinuityGroup {
     DiscontinuityGroup {
         tracks: tracks.into(),
@@ -843,7 +849,7 @@ fn head(name: &str) -> TrackSegments {
 /// 输出。
 #[test]
 fn check_finds_what_cannot_go_into_an_mp4_from_the_first_segments() {
-    hs_m3u8_remux::check(
+    check(
         &[Streams::Video, Streams::Audio],
         &[
             group([head("fmp4_a/video"), head("fmp4_a/audio")]),
@@ -852,7 +858,7 @@ fn check_finds_what_cannot_go_into_an_mp4_from_the_first_segments() {
     )
     .unwrap();
 
-    let err = hs_m3u8_remux::check(&[Streams::All], &[group([head("ts_mp2")])]).unwrap_err();
+    let err = check(&[Streams::All], &[group([head("ts_mp2")])]).unwrap_err();
     assert!(
         matches!(
             err,
@@ -860,7 +866,7 @@ fn check_finds_what_cannot_go_into_an_mp4_from_the_first_segments() {
         ),
         "实际 {err:?}"
     );
-    let err = hs_m3u8_remux::check(
+    let err = check(
         &[Streams::All],
         &[group([head("ts_a")]), group([head("ts_small")])],
     )
@@ -872,7 +878,7 @@ fn check_finds_what_cannot_go_into_an_mp4_from_the_first_segments() {
         ),
         "实际 {err:?}"
     );
-    let err = hs_m3u8_remux::check(
+    let err = check(
         &[Streams::All],
         &[group([head("ts_aac_stereo")]), group([head("ts_he_aac")])],
     )
@@ -884,8 +890,7 @@ fn check_finds_what_cannot_go_into_an_mp4_from_the_first_segments() {
         ),
         "实际 {err:?}"
     );
-    let err =
-        hs_m3u8_remux::check(&[Streams::Audio], &[group([head("ts_eac3_short")])]).unwrap_err();
+    let err = check(&[Streams::Audio], &[group([head("ts_eac3_short")])]).unwrap_err();
     assert!(
         matches!(
             err,
@@ -902,7 +907,7 @@ fn check_leaves_what_the_first_segment_cannot_tell_to_the_merge() {
     let dir = work_dir("check_undecided");
     let output = dir.join("out.mp4");
     let late = track("ts_late_audio");
-    hs_m3u8_remux::check(&[Streams::All], &[group([head("ts_late_audio")])]).unwrap();
+    check(&[Streams::All], &[group([head("ts_late_audio")])]).unwrap();
     remux(&[Streams::All], &[group([late])], &output).unwrap();
     let err = remux(&[Streams::All], &[group([head("ts_late_audio")])], &output).unwrap_err();
     assert!(
@@ -927,7 +932,7 @@ fn check_leaves_what_the_first_segment_cannot_tell_to_the_merge() {
         init: None,
         segments: vec![first.clone()],
     };
-    hs_m3u8_remux::check(&[Streams::Audio], &[group([head])]).unwrap();
+    check(&[Streams::Audio], &[group([head])]).unwrap();
     let whole = TrackSegments {
         init: None,
         segments: vec![first, rest],

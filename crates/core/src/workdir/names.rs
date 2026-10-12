@@ -28,6 +28,16 @@ pub(crate) struct SegmentName {
     pub id: Fingerprint,
 }
 
+/// 合并时的分组：（会话, 会话内的不连续段编号）。
+pub(crate) type GroupKey = (u32, u64);
+
+impl SegmentName {
+    /// 合并时所在的组。
+    pub(crate) fn group(&self) -> GroupKey {
+        (self.session, self.discontinuity)
+    }
+}
+
 /// `<会话>-<起点>-<序号>-<不连续段>-<init 指纹|none>-<时长>-<身份>.seg`，起点写作 `fresh` 或 `after<序号>`。
 pub(super) fn segment_file_name(name: &SegmentName) -> String {
     let start = match name.start {
