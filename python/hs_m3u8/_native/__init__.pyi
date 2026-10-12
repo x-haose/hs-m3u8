@@ -2915,8 +2915,8 @@ class StreamReport:
     @property
     def discarded_corrupt(self) -> builtins.int:
         r"""
-        TS 里损坏而没有写入的音频包数：解复用器标为损坏（来源丢了 TS 包，或 PES 不完整，如直播缺片处）或读不出
-        帧头的。损坏的视频包照常写入，由解码器做错误隐藏
+        TS 里损坏而没有写入的音频包数：读不出帧头或帧长与包长对不上的（来源丢了 TS 包，或缺片处 PES 不完整，拼出
+        的包）。视频包照常写入，由解码器做错误隐藏
         """
     @property
     def duration(self) -> datetime.timedelta:

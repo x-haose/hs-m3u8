@@ -102,7 +102,7 @@ pub(crate) enum Mismatch {
     Changed,
     /// 这一组第一个读得出的包与第 0 组的编码或参数不同
     Config,
-    /// 音频包读不出帧头：数据损坏而解复用器没有标出（如前一个损坏的 PES 剩下的字节被解析器拼进下一个包）
+    /// 音频包读不出帧头或帧长与包长对不上：数据损坏（如缺片处前一个 PES 剩下的字节被解析器拼进下一个包）
     Unreadable,
     /// E-AC-3 每帧不足 6 块：MP4 封装器把几帧并成一个 6 块（1536 个采样点）的样本，末尾凑不满的帧不写出
     Eac3ShortFrames,
@@ -134,9 +134,10 @@ pub(crate) enum AudioParams {
     Mpeg(frame::Mpeg),
 }
 
-/// 包开头的 ADTS 帧头。
+/// 包里的 ADTS 帧头；帧长与包长对不上时为 None。
 fn adts(data: &[u8]) -> Option<AudioParams> {
-    frame::adts(data).map(|(header, _)| AudioParams::Adts(header))
+    let (header, len) = frame::adts(data)?;
+    (len == data.len()).then_some(AudioParams::Adts(header))
 }
 
 /// 包里各个 AC-3 或 E-AC-3 同步帧；包不是由整帧组成时为 None。
@@ -151,9 +152,10 @@ fn ac3(data: &[u8]) -> Option<AudioParams> {
     (!frames.is_empty()).then_some(AudioParams::Ac3(frames))
 }
 
-/// 包开头的 MPEG 音频帧头。
+/// 包里的 MPEG 音频帧头；帧长与包长对不上时为 None。
 fn mpeg_audio(data: &[u8]) -> Option<AudioParams> {
-    frame::mpeg_audio(data).map(|(header, _)| AudioParams::Mpeg(header))
+    let (header, len) = frame::mpeg_audio(data)?;
+    (len == data.len()).then_some(AudioParams::Mpeg(header))
 }
 
 #[cfg(test)]

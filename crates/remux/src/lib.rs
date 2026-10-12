@@ -152,8 +152,9 @@ pub struct StreamReport {
     pub packets: u64,
     /// 输入中没有 DTS、因而未写入的包数
     pub skipped_without_dts: u64,
-    /// TS 里损坏而没有写入的音频包数：解复用器标为损坏（来源丢了 TS 包，或 PES 不完整，如直播缺片处）或读不出帧头
-    /// 的。损坏的视频包照常写入，由解码器做错误隐藏（丢掉一帧视频，后面直到下一个关键帧都解不出）
+    /// TS 里损坏而没有写入的音频包数：读不出帧头或帧长与包长对不上的（来源丢了 TS 包，或缺片处 PES 不完整，拼出的
+    /// 包）。解复用器的损坏标志按整个 PES 打，连续计数器每片重来等不缺数据的写法也会触发，所以不据此丢包。视频包照常
+    /// 写入，由解码器做错误隐藏（丢掉一帧视频，后面直到下一个关键帧都解不出）
     pub discarded_corrupt: u64,
     /// 输出时间线上从最早的呈现时刻到最晚的结束时刻，微秒；含组内时间戳间断（如缺失的分片）留下的空档
     pub duration_us: u64,
@@ -628,7 +629,7 @@ struct Mapping {
 struct Dropped {
     /// 没有 DTS
     without_dts: u64,
-    /// 解复用器标为损坏的音频包
+    /// 读不出帧头或帧长与包长对不上的音频包
     corrupt: u64,
 }
 
@@ -688,7 +689,7 @@ impl Source {
         }
     }
 
-    /// 读下一个要写出的包。跳过未映射流的包；损坏（解复用器标出或读不出帧头）的音频包与没有 DTS 的包记入
+    /// 读下一个要写出的包。跳过未映射流的包；没有 DTS 的包与损坏（读不出帧头或帧长与包长对不上）的音频包记入
     /// `dropped`；参数随帧携带的包核对参数。读到末尾返回 `None`。
     fn read_next(&mut self) -> Result<Option<(Packet, Mapping)>, Error> {
         loop {
@@ -700,13 +701,8 @@ impl Source {
             let Some(mapping) = self.map.get(packet.stream()).copied().flatten() else {
                 continue;
             };
-            let dropped = &mut self.dropped[packet.stream()];
-            if packet.is_corrupt() && mapping.kind == StreamKind::Audio {
-                dropped.corrupt += 1;
-                continue;
-            }
             if packet.dts().is_none() {
-                dropped.without_dts += 1;
+                self.dropped[packet.stream()].without_dts += 1;
                 continue;
             }
             if let Some(check) = self.inband[packet.stream()].as_mut() {
