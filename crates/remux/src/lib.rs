@@ -319,8 +319,8 @@ pub enum Unsupported {
         sample_rate: u32,
     },
     /// 选中的流探测不出编码或编码参数（视频的宽高、音频的采样率与声道数），或与第 0 组比较时没有确定的不同、而有项
-    /// 只有一边探测出（视频的像素格式，fMP4 里配置不同的 AAC 解出一帧后的参数）：这一组里 FFmpeg 探测读的那一段没有
-    /// 能解的数据
+    /// 比不了（视频的像素格式只有一边探测出，fMP4 里配置不同的 AAC 有一边没解出帧）：这一组里 FFmpeg 探测读的那一段
+    /// 没有能解的数据
     #[error(
         "第 {group} 组第 {track} 条轨的{kind}流探测不出编码参数或解码配置（这一组开头一段里没有能解的数据），判断不了能否放进 MP4"
     )]
@@ -543,7 +543,8 @@ struct Desc {
 
 impl Desc {
     /// 与第 0 组同一路流比较，依次为编码参数与解码配置的结果。fMP4 的 AAC：配置字节相同则都相同；不同时比解出一帧后
-    /// 的参数（隐式 SBR、PS 的采样率与声道数也要解出帧才知道），有一边没解出帧时都比不了。
+    /// 的参数（隐式 SBR、PS 的采样率与声道数也要解出帧才知道）；有一边没解出帧时解码配置比不了，采样率与声道数按两边
+    /// 可能的取值比（见 [`aac_outputs`]），一种都对不上才算不同。
     fn compare(&self, first: &Desc) -> (Compared, Compared) {
         match (&self.config, &first.config) {
             (
@@ -561,7 +562,16 @@ impl Desc {
                         self.shape.compare(&first.shape),
                         Compared::of(Some(decoded), Some(first_decoded)),
                     ),
-                    _ => (Compared::Unknown, Compared::Unknown),
+                    _ => {
+                        let found = aac_outputs(&self.shape, decoded.is_some());
+                        let first = aac_outputs(&first.shape, first_decoded.is_some());
+                        let shape = if found.iter().any(|output| first.contains(output)) {
+                            Compared::Unknown
+                        } else {
+                            Compared::Differs
+                        };
+                        (shape, Compared::Unknown)
+                    }
                 }
             }
             (config, first_config) => (
@@ -570,6 +580,27 @@ impl Desc {
             ),
         }
     }
+}
+
+/// fMP4 里 AAC 流（`shape`）解码后可能的采样率与声道数：解出了帧（`decoded`）的就是探测到的；没解出的按配置得出，
+/// 隐式 SBR 解出后采样率加倍、PS 解出后单声道变双声道，都有可能。
+fn aac_outputs(shape: &Shape, decoded: bool) -> Vec<(u32, u32)> {
+    let Shape::Audio {
+        sample_rate,
+        channels,
+        ..
+    } = *shape
+    else {
+        unreachable!("解码配置为 AAC 的是音频流");
+    };
+    if decoded {
+        return vec![(sample_rate, channels)];
+    }
+    let channels: &[u32] = if channels == 1 { &[1, 2] } else { &[channels] };
+    [sample_rate, sample_rate * 2]
+        .into_iter()
+        .flat_map(|rate| channels.iter().map(move |&channels| (rate, channels)))
+        .collect()
 }
 
 /// 一路流的解码配置。
@@ -594,7 +625,8 @@ enum Config {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Compared {
     Same,
-    /// 只有一边探测出；两边都探测不出的项不比，算相同
+    /// 比不了：只有一边探测出，或 fMP4 里配置不同的 AAC 有一边没解出帧（见 [`Desc::compare`]）；其余两边都探测不出的
+    /// 项不比，算相同
     Unknown,
     Differs,
 }

@@ -1113,8 +1113,8 @@ fn check_leaves_what_the_first_segment_cannot_tell_to_the_merge() {
 
 /// fMP4 某一组开头的分片里没有样本（只有 styp）：宽高、采样率与声道数来自 init 段，视频的像素格式与 AAC 解出一帧后的
 /// 参数探测不出，与第 0 组比不了，核对跳过这一组，不报参数或解码配置不同；init 段里的解码配置不同时照样报出。隐式
-/// SBR 的 HE-AAC（配置里只写 LC 与 24 kHz 的核心采样率，解出帧才知道是 48 kHz）同样跳过；整组都给时与显式写法的
-/// 照常合并。
+/// SBR 的 HE-AAC（配置里只写 LC 与 24 kHz 的核心采样率，解出帧才知道是 48 kHz）与单声道的 AAC（解出帧才知道有没有
+/// PS）同样跳过，整组都给时与显式写法的照常合并；配置里的采样率加倍也对不上的照样报出。
 #[test]
 fn check_skips_what_a_head_without_samples_cannot_tell() {
     let dir = work_dir("check_head_without_samples");
@@ -1166,6 +1166,36 @@ fn check_skips_what_a_head_without_samples_cannot_tell() {
             Error::Unsupported(Unsupported::ConfigChanged {
                 group: 1,
                 kind: StreamKind::Video,
+                ..
+            })
+        ),
+        "实际 {err:?}"
+    );
+
+    // 48 kHz 单声道 LC 的配置 11 88 改成 44.1 kHz 的 12 08：加倍是 88.2 kHz，与解出帧的 48 kHz 对不上
+    let other_rate = dir.join("other_rate.mp4");
+    let mut data = std::fs::read(init("fmp4_aac_at")).unwrap();
+    let at = data
+        .windows(7)
+        .position(|w| w == [0x05, 0x80, 0x80, 0x80, 0x02, 0x11, 0x88])
+        .unwrap();
+    data[at + 5..at + 7].copy_from_slice(&[0x12, 0x08]);
+    std::fs::write(&other_rate, data).unwrap();
+    let groups = [
+        group([head("fmp4_a/audio")]),
+        group([without_samples(other_rate)]),
+    ];
+    let err = check(&[Streams::Audio], &groups).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::ParamsChanged {
+                group: 1,
+                kind: StreamKind::Audio,
+                found: Shape::Audio {
+                    sample_rate: 44_100,
+                    ..
+                },
                 ..
             })
         ),
