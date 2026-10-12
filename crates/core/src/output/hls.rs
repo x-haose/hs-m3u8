@@ -13,10 +13,10 @@
 
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Write};
 use std::path::Path;
 
-use hs_m3u8_remux::id3_len;
+use hs_m3u8_remux::standalone::{self, Format};
 
 use super::GroupTrack;
 use super::commit::Occupant;
@@ -24,7 +24,6 @@ use crate::entries::{self, is_canonical_number};
 use crate::error::io_error;
 use crate::ident::Fingerprint;
 use crate::selection::SelectionKey;
-use crate::verify::{Standalone, standalone_format};
 use crate::{Error, HlsUnsupported, Unsupported, WorkDirProblem};
 
 const INDEX: &str = "index.m3u8";
@@ -34,13 +33,13 @@ const FMP4: &str = "m4s";
 
 /// 没有 init 段的分片的扩展名，与 FFmpeg 识别出的格式对应：FFmpeg 读 HLS 时核对分片的扩展名与识别出的格式
 /// （`extension_picky`，默认开启），不一致即拒绝。
-fn extension(format: Standalone) -> &'static str {
+fn extension(format: Format) -> &'static str {
     match format {
-        Standalone::Ts => "ts",
-        Standalone::Aac => "aac",
-        Standalone::Mp3 => "mp3",
-        Standalone::Ac3 => "ac3",
-        Standalone::Eac3 => "eac3",
+        Format::Ts => "ts",
+        Format::Aac => "aac",
+        Format::Mp3 => "mp3",
+        Format::Ac3 => "ac3",
+        Format::Eac3 => "eac3",
     }
 }
 
@@ -220,31 +219,15 @@ fn bits_per_second(len: u64, duration_us: u64) -> Option<u64> {
     (duration > 0).then(|| u64::try_from(bits.div_ceil(duration)).unwrap_or(u64::MAX))
 }
 
-/// 识别格式时每次读取的字节数：够判断 TS 的前两个包（376 字节）与 ID3 标签头。
-const SNIFF_LEN: u64 = 1024;
-
-/// 没有 init 段的分片的格式。打包音频前的 ID3 标签按长度跳过，不整个读进来（带封面图时可以很大）。
-fn sniff(path: &Path, work_dir: &Path) -> Result<Standalone, Error> {
-    let mut file = File::open(path).map_err(io_error("读取", path))?;
-    let mut offset = 0u64;
-    loop {
-        let mut head = Vec::new();
-        file.seek(SeekFrom::Start(offset))
-            .and_then(|_| (&mut file).take(SNIFF_LEN).read_to_end(&mut head))
-            .map_err(io_error("读取", path))?;
-        match id3_len(&head) {
-            Some(len) => offset += len as u64,
-            None => {
-                return standalone_format(&head).ok_or_else(|| Error::WorkDir {
-                    path: work_dir.to_path_buf(),
-                    problem: WorkDirProblem::Corrupt(format!(
-                        "分片内容无法识别：{}",
-                        path.display()
-                    )),
-                });
-            }
-        }
-    }
+/// 没有 init 段的分片的格式（见 [`standalone::read_head`]）。
+fn sniff(path: &Path, work_dir: &Path) -> Result<Format, Error> {
+    let head = File::open(path)
+        .and_then(|mut file| standalone::read_head(&mut file))
+        .map_err(io_error("读取", path))?;
+    head.map(|h| h.format).ok_or_else(|| Error::WorkDir {
+        path: work_dir.to_path_buf(),
+        problem: WorkDirProblem::Corrupt(format!("分片内容无法识别：{}", path.display())),
+    })
 }
 
 /// 把 `src` 放到新文件 `dst`，返回字节数：能硬链接就硬链接，不占额外空间；做不了时（跨文件系统、文件系统不支持）
@@ -391,7 +374,7 @@ fn is_track_file_name(name: &str) -> bool {
     }
     name.split_once('.').is_some_and(|(n, ext)| {
         is_canonical_number(n)
-            && (ext == FMP4 || Standalone::ALL.into_iter().any(|f| extension(f) == ext))
+            && (ext == FMP4 || Format::ALL.into_iter().any(|f| extension(f) == ext))
     })
 }
 

@@ -21,6 +21,7 @@ mod chain;
 mod ffi;
 mod inband;
 mod packed;
+pub mod standalone;
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -34,7 +35,6 @@ use ffmpeg_next as ffmpeg;
 
 use crate::chain::{SegmentChain, ffmpeg_path};
 use crate::inband::Inband;
-pub use crate::packed::id3_len;
 
 /// 时间戳在组间换算时使用的公共时间基（微秒）。
 const MICROS: Rational = Rational(1, 1_000_000);
@@ -381,13 +381,8 @@ fn validate(streams: &[Streams], groups: &[DiscontinuityGroup]) -> Result<(), Er
 
 /// 打开一条轨在一组里的分片：TS 与 fMP4 的全部分片（init 段在前）当作一个连续的输入，打包音频先打开第一个分片。
 fn open_track(segments: &TrackSegments, group: usize, track: usize) -> Result<Input, Error> {
-    let first = &segments.segments[0];
     let packed = segments.init.is_none()
-        && packed::is_packed(first).map_err(|cause| Error::Io {
-            action: "读取",
-            path: first.clone(),
-            cause,
-        })?;
+        && segment_head(&segments.segments[0])?.format != standalone::Format::Ts;
     if packed {
         return Packed::open(&segments.segments, group, track).map(Input::Packed);
     }
@@ -402,6 +397,24 @@ fn open_track(segments: &TrackSegments, group: usize, track: usize) -> Result<In
         ictx,
         failure,
         init: segments.init.is_some(),
+    })
+}
+
+/// 没有 init 段的分片开头的信息（见 [`standalone::read_head`]）；认不出格式时报 `InvalidData`。
+fn segment_head(path: &Path) -> Result<standalone::Head, Error> {
+    let failed = |cause| Error::Io {
+        action: "读取",
+        path: path.to_path_buf(),
+        cause,
+    };
+    let head = std::fs::File::open(path)
+        .and_then(|mut file| standalone::read_head(&mut file))
+        .map_err(failed)?;
+    head.ok_or_else(|| {
+        failed(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "既不是 TS 也不是可识别的打包音频",
+        ))
     })
 }
 
@@ -502,7 +515,7 @@ struct Packed {
     /// 当前分片的音频包要加的偏移，以 `audio` 的时间基为单位；读到它第一个带 DTS 的音频包时确定
     shift: Option<i64>,
     /// 还没打开的分片与各自开头的信息
-    rest: VecDeque<(PathBuf, packed::Head)>,
+    rest: VecDeque<(PathBuf, standalone::Head)>,
     /// 这一组第一个分片的时间戳（90 kHz），各片的时间戳按它展开（见 [`packed::unwrap_pts`]）；整组按样本数接续时为
     /// None
     start: Option<i64>,
@@ -517,15 +530,7 @@ impl Packed {
     fn open(segments: &[PathBuf], group: usize, track: usize) -> Result<Packed, Error> {
         let mut rest = segments
             .iter()
-            .map(|path| {
-                packed::read_head(path)
-                    .map(|head| (path.clone(), head))
-                    .map_err(|cause| Error::Io {
-                        action: "读取",
-                        path: path.clone(),
-                        cause,
-                    })
-            })
+            .map(|path| segment_head(path).map(|head| (path.clone(), head)))
             .collect::<Result<VecDeque<_>, Error>>()?;
         let timed = rest.iter().all(|(_, head)| head.timestamp.is_some());
         let (path, head) = rest.pop_front().expect("validate 保证每条轨至少一个分片");
