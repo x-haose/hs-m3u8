@@ -1103,32 +1103,52 @@ fn check_leaves_what_the_first_segment_cannot_tell_to_the_merge() {
     remux(&[Streams::Audio], &[group([whole])], &output).unwrap();
 }
 
-/// fMP4 某一组开头的分片里没有样本（只有 styp）：宽高、采样率与声道数来自 init 段，视频的像素格式与 AAC 的 profile
-/// 探测不出，与第 0 组比不了，核对跳过这一组，不报参数或解码配置不同；init 段里的解码配置不同时照样报出。
+/// fMP4 某一组开头的分片里没有样本（只有 styp）：宽高、采样率与声道数来自 init 段，视频的像素格式与 AAC 解出一帧后的
+/// 参数探测不出，与第 0 组比不了，核对跳过这一组，不报参数或解码配置不同；init 段里的解码配置不同时照样报出。隐式
+/// SBR 的 HE-AAC（配置里只写 LC 与 24 kHz 的核心采样率，解出帧才知道是 48 kHz）同样跳过；整组都给时与显式写法的
+/// 照常合并。
 #[test]
 fn check_skips_what_a_head_without_samples_cannot_tell() {
     let dir = work_dir("check_head_without_samples");
     let styp_only = dir.join("styp.m4s");
     std::fs::write(&styp_only, b"\0\0\0\x18stypmsdh\0\0\0\0msdhmsix").unwrap();
-    let without_samples = |name: &str| TrackSegments {
-        init: Some(fixtures().join(name).join("init.mp4")),
+    let without_samples = |init: PathBuf| TrackSegments {
+        init: Some(init),
         segments: vec![styp_only.clone()],
         gaps: Vec::new(),
     };
+    let init = |name: &str| fixtures().join(name).join("init.mp4");
+    // 显式 SBR 的配置 13 10 56 e5 98 去掉同步扩展，成为隐式 SBR
+    let implicit = dir.join("implicit_sbr.mp4");
+    let mut data = std::fs::read(init("fmp4_he_aac")).unwrap();
+    let at = data
+        .windows(5)
+        .position(|w| w == [0x13, 0x10, 0x56, 0xe5, 0x98])
+        .unwrap();
+    data[at + 2..at + 5].fill(0);
+    std::fs::write(&implicit, data).unwrap();
     for (streams, first, second) in [
-        (Streams::Video, "fmp4_a/video", "fmp4_b/video"),
-        (Streams::Audio, "fmp4_a/audio", "fmp4_aac_at"),
-        (Streams::Audio, "fmp4_he_aac", "fmp4_he_aac"),
+        (Streams::Video, "fmp4_a/video", init("fmp4_b/video")),
+        (Streams::Audio, "fmp4_a/audio", init("fmp4_aac_at")),
+        (Streams::Audio, "fmp4_he_aac", init("fmp4_he_aac")),
+        (Streams::Audio, "fmp4_he_aac", implicit.clone()),
     ] {
+        let label = format!("{first} 接 {}", second.display());
         let groups = [group([head(first)]), group([without_samples(second)])];
-        check(&[streams], &groups).unwrap_or_else(|e| panic!("{first} 接 {second}：{e:?}"));
+        check(&[streams], &groups).unwrap_or_else(|e| panic!("{label}：{e:?}"));
     }
+    let whole = TrackSegments {
+        init: Some(implicit),
+        ..track("fmp4_he_aac")
+    };
+    let groups = [group([track("fmp4_he_aac")]), group([whole])];
+    remux(&[Streams::Audio], &groups, &dir.join("out.mp4")).unwrap();
 
     let err = check(
         &[Streams::Video],
         &[
             group([head("fmp4_alac")]),
-            group([without_samples("fmp4_baseline")]),
+            group([without_samples(init("fmp4_baseline"))]),
         ],
     )
     .unwrap_err();

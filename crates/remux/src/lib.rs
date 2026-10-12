@@ -307,9 +307,10 @@ pub enum Unsupported {
         sample_rate: u32,
     },
     /// 选中的流探测不出编码或编码参数（视频的宽高、音频的采样率与声道数），或与第 0 组比较时没有确定的不同、而有项
-    /// 只有一边探测出（视频的像素格式、fMP4 里 AAC 的 profile）：这一组里 FFmpeg 探测读的那一段没有能解的数据
+    /// 只有一边探测出（视频的像素格式，fMP4 里配置不同的 AAC 解出一帧后的参数）：这一组里 FFmpeg 探测读的那一段没有
+    /// 能解的数据
     #[error(
-        "第 {group} 组第 {track} 条轨的{kind}流探测不出编码参数（开头一段里没有它的数据），写不出 MP4 的样本描述"
+        "第 {group} 组第 {track} 条轨的{kind}流探测不出编码参数或解码配置（这一组开头一段里没有能解的数据），判断不了能否放进 MP4"
     )]
     ParamsUnknown {
         group: usize,
@@ -528,6 +529,37 @@ struct Desc {
     config: Config,
 }
 
+impl Desc {
+    /// 与第 0 组同一路流比较，依次为编码参数与解码配置的结果。fMP4 的 AAC：配置字节相同则都相同；不同时比解出一帧后
+    /// 的参数（隐式 SBR、PS 的采样率与声道数也要解出帧才知道），有一边没解出帧时都比不了。
+    fn compare(&self, first: &Desc) -> (Compared, Compared) {
+        match (&self.config, &first.config) {
+            (
+                Config::InitAac { config, decoded },
+                Config::InitAac {
+                    config: first_config,
+                    decoded: first_decoded,
+                },
+            ) => {
+                if config == first_config {
+                    return (Compared::Same, Compared::Same);
+                }
+                match (decoded, first_decoded) {
+                    (Some(decoded), Some(first_decoded)) => (
+                        self.shape.compare(&first.shape),
+                        Compared::of(Some(decoded), Some(first_decoded)),
+                    ),
+                    _ => (Compared::Unknown, Compared::Unknown),
+                }
+            }
+            (config, first_config) => (
+                self.shape.compare(&first.shape),
+                Compared::of(Some(config), Some(first_config)),
+            ),
+        }
+    }
+}
+
 /// 一路流的解码配置。
 #[derive(Clone, PartialEq, Eq)]
 enum Config {
@@ -535,23 +567,15 @@ enum Config {
     /// 样本描述配置，FLAC 与 ALAC 的配置里的帧长上限还用来分配缓冲区。USAC 的配置带有 profile 与帧长之外的解码参数，
     /// 也按字节比较
     Init(Vec<u8>),
-    /// fMP4 里 USAC 以外的 AAC：AudioSpecificConfig 有等价的不同写法（如显式写出没有 SBR，或省略），按 FFmpeg 解出
-    /// 一帧后得出的 profile（LC、HE-AAC 等）与每帧的采样点数比较，采样率与声道数在编码参数里；探测时没有解出帧（如
-    /// 开头的分片里没有样本）为 None
-    InitAac(Option<(i32, i32)>),
+    /// fMP4 里 USAC 以外的 AAC：init 段里的 AudioSpecificConfig，与探测时解出一帧后得出的参数（没有解出帧、如开头的
+    /// 分片里没有样本时为 None）。配置有等价的不同写法（如显式写出没有 SBR，或省略），见 [`Desc::compare`]
+    InitAac {
+        config: Vec<u8>,
+        decoded: Option<ffi::DecodedAac>,
+    },
     /// 参数随帧携带（TS 与打包音频）：音频以第 0 组第一个包的帧头为准逐包核对（见 [`Inband`]）；视频的参数集在关键帧
     /// 前重复、解码器按带内的解码，只核对编码参数（宽高与像素格式，见 [`Shape`]）
     Inband,
-}
-
-impl Config {
-    /// 与第 0 组同一路流的解码配置比较。
-    fn compare(&self, first: &Config) -> Compared {
-        match (self, first) {
-            (Config::InitAac(found), Config::InitAac(first)) => Compared::of(*found, *first),
-            (found, first) => Compared::of(Some(found), Some(first)),
-        }
-    }
 }
 
 /// 后续组的一项参数与第 0 组比较的结果。
@@ -603,7 +627,10 @@ fn open_selected(
             let extradata = ffi::extradata(&stream);
             if id == codec::Id::AAC && frame::audio_object_type(&extradata) != Some(frame::AOT_USAC)
             {
-                Config::InitAac(ffi::decoded_aac(&stream))
+                Config::InitAac {
+                    config: extradata,
+                    decoded: ffi::decoded_aac(&stream),
+                }
             } else {
                 Config::Init(extradata)
             }
@@ -1021,7 +1048,7 @@ fn same_streams(
     let mut unknown = None;
     for (s, f) in selected.iter().zip(first) {
         let kind = f.shape.kind();
-        let shape = s.desc.shape.compare(&f.shape);
+        let (shape, config) = s.desc.compare(f);
         if shape == Compared::Differs {
             return Err(Error::Unsupported(Unsupported::ParamsChanged {
                 group,
@@ -1031,7 +1058,6 @@ fn same_streams(
                 found: s.desc.shape,
             }));
         }
-        let config = s.desc.config.compare(&f.config);
         if config == Compared::Differs {
             return Err(Error::Unsupported(Unsupported::ConfigChanged {
                 group,

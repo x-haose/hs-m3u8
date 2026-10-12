@@ -71,14 +71,25 @@ pub(crate) fn in_program(ictx: &format::context::Input, index: usize) -> Option<
     }))
 }
 
-/// fMP4 里的 AAC 流（USAC 以外）探测时解码器解出一帧后得出的 profile 与每帧的采样点数（codecpar 的 profile 与
-/// frame_size）；没有解出帧时为 None：profile 只在解帧时得出，frame_size 此前是 mov 按 AudioSpecificConfig 填的、
+/// fMP4 里的 AAC 流（USAC 以外）探测时解码器解出一帧后得出的参数（codecpar 的 profile 与 frame_size）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DecodedAac {
+    /// FFmpeg 的 AAC profile（AV_PROFILE_AAC_LC 等）
+    pub profile: i32,
+    /// 每帧的采样点数，含 SBR 的加倍
+    pub frame_size: i32,
+}
+
+/// 见 [`DecodedAac`]；没有解出帧时为 None：profile 只在解帧时得出，frame_size 此前是 mov 按 AudioSpecificConfig 填的、
 /// 不含 SBR 加倍的帧长。
-pub(crate) fn decoded_aac(stream: &Stream<'_>) -> Option<(i32, i32)> {
+pub(crate) fn decoded_aac(stream: &Stream<'_>) -> Option<DecodedAac> {
     let params = stream.parameters();
     // SAFETY: 指针指向该流的 codecpar，在 params 存活期间有效且非空；此处只读。
     let p = unsafe { &*params.as_ptr() };
-    (p.profile >= 0).then_some((p.profile, p.frame_size))
+    (p.profile >= 0).then_some(DecodedAac {
+        profile: p.profile,
+        frame_size: p.frame_size,
+    })
 }
 
 /// FFmpeg 的像素格式值 `format`（AVPixelFormat）的名称；不认识（含 AV_PIX_FMT_NONE）时为 None。逐个查像素格式描述
