@@ -13,7 +13,7 @@ ROOT=$(cd "$(dirname "$0")" && pwd)
 PREFIX=${1:-$ROOT/dist}
 # configure 在源码目录里运行，安装目录须为绝对路径
 [[ "$PREFIX" == /* ]] || PREFIX=$PWD/$PREFIX
-# 本脚本装好后在安装目录里放的标记，内容为本脚本的 SHA-256：Makefile 据此发现本地装的是改动前的脚本构建的
+# 本脚本装好后在安装目录里放的标记，即本脚本的副本：Makefile 逐字节比对，发现本地装的是改动前的脚本构建的
 MARKER=.hs-m3u8-ffmpeg
 WORK=$ROOT/build
 TARBALL=$WORK/ffmpeg-$VERSION.tar.xz
@@ -100,5 +100,5 @@ for lib in "${libs[@]}"; do
   fi
 done
 
-sha256_of "$ROOT/build.sh" > "$PREFIX/$MARKER"
+cp "$ROOT/build.sh" "$PREFIX/$MARKER"
 echo "FFmpeg $VERSION 已安装到 $PREFIX"

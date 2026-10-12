@@ -55,14 +55,13 @@ rs_cov: ffmpeg_present
 	cargo llvm-cov -p hs-m3u8-core --fail-under-lines 80 --summary-only
 	cargo llvm-cov -p hs-m3u8-remux --fail-under-lines 80 --summary-only
 
-# 装好的 FFmpeg 须是当前的构建脚本装的（标记文件记着脚本的 SHA-256）：改了组件而本地没重新构建时在这里失败，不让
+# 装好的 FFmpeg 须是当前的构建脚本装的（标记文件是装它的脚本的副本）：改了组件而本地没重新构建时在这里失败，不让
 # 测试以缺组件的样子失败
 FFMPEG_MARKER := $(FFMPEG_DIST)/.hs-m3u8-ffmpeg
-SHA256 := $(shell command -v sha256sum >/dev/null 2>&1 && echo sha256sum || echo shasum -a 256)
 
 ffmpeg_present:
 	@test -d $(FFMPEG_DIST)/include || { echo "缺少 $(FFMPEG_DIST)，先运行 make ffmpeg"; exit 1; }
-	@test "$$(cat $(FFMPEG_MARKER) 2>/dev/null)" = "$$($(SHA256) third_party/ffmpeg/build.sh | cut -d' ' -f1)" || \
+	@cmp -s $(FFMPEG_MARKER) third_party/ffmpeg/build.sh || \
 		{ echo "$(FFMPEG_DIST) 不是当前的 third_party/ffmpeg/build.sh 装的，先运行 make ffmpeg"; exit 1; }
 
 ffmpeg:
