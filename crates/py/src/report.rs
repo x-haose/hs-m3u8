@@ -66,7 +66,7 @@ record! {
 }
 
 variants! {
-    /// 分片或 init 段取不到的原因。
+    /// 分片或 init 段取不到的原因的种类。
     pub enum FetchErrorKind {
         /// 请求取不到：404/410，或重试后仍失败的临时故障
         Http {
@@ -78,15 +78,16 @@ variants! {
     }
 }
 
-record! {
-    /// 取不到的分片或 init 段：原因，与服务器要求的最短等待。
-    pub struct FetchFailure {
-        /// 取不到的原因
-        pub kind: FetchErrorKind,
-        /// 临时故障，重试可能成功：请求的临时故障（见 `HttpFailure.retryable`），或内容没写完
-        pub retryable: bool,
-        /// 服务器在 429/503 中要求（Retry-After）的最短等待，秒；没有要求时为 None
-        pub retry_after: Option<u64>,
+variants! {
+    /// 取不到的分片或 init 段。
+    pub enum FetchFailure {
+        /// 请求取不到：404/410，或重试后仍失败的临时故障
+        Http {
+            /// 失败的请求
+            failure: HttpFailure,
+        },
+        /// 重试后取到的内容仍没写完（见 `IncompleteError`），稍后重试可能成功
+        Incomplete {},
     }
 }
 
@@ -338,12 +339,12 @@ variants! {
         /// 列出了，但取不到：404/410，可重试的错误重试后仍失败，或重试后内容仍没写完
         Failed {
             /// 取不到的原因
-            kind: FetchErrorKind,
+            cause: FetchErrorKind,
         },
         /// 列出了，但它的 init 段取不到（同上）
         InitFailed {
             /// 取不到的原因
-            kind: FetchErrorKind,
+            cause: FetchErrorKind,
         },
         /// 所在不连续段不是每条轨都录到，无法合并
         Unmergeable {},
@@ -430,10 +431,11 @@ impl From<core::FetchError> for FetchErrorKind {
 
 impl From<core::FetchFailure> for FetchFailure {
     fn from(failure: core::FetchFailure) -> Self {
-        FetchFailure {
-            retryable: failure.kind.retryable(),
-            kind: failure.kind.into(),
-            retry_after: failure.retry_after.map(|wait| wait.as_secs()),
+        match failure {
+            core::FetchFailure::Http(failure) => FetchFailure::Http {
+                failure: failure.into(),
+            },
+            core::FetchFailure::Incomplete => FetchFailure::Incomplete {},
         }
     }
 }
@@ -622,8 +624,12 @@ impl From<core::MissReason> for MissReason {
     fn from(reason: core::MissReason) -> Self {
         match reason {
             core::MissReason::Expired => MissReason::Expired {},
-            core::MissReason::Failed(kind) => MissReason::Failed { kind: kind.into() },
-            core::MissReason::InitFailed(kind) => MissReason::InitFailed { kind: kind.into() },
+            core::MissReason::Failed(cause) => MissReason::Failed {
+                cause: cause.into(),
+            },
+            core::MissReason::InitFailed(cause) => MissReason::InitFailed {
+                cause: cause.into(),
+            },
             core::MissReason::Unmergeable => MissReason::Unmergeable {},
             core::MissReason::Unknown => MissReason::Unknown {},
         }

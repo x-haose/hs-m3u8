@@ -382,8 +382,8 @@ variants! {
         RefreshPending {},
         /// 播放列表仍在列出新分片，但一个都没有下载成功
         Unrecordable {
-            /// 最近一次取不到分片或 init 段的原因
-            failure: FetchFailure,
+            /// 最近一次取不到的分片或 init 段
+            cause: FetchFailure,
         },
         /// 这条轨看起来已结束，而其他轨仍在出新分片
         TrackStopped {
@@ -634,7 +634,7 @@ impl From<core::StallError> for StallReason {
             },
             S::RefreshPending => StallReason::RefreshPending {},
             S::Unrecordable(failure) => StallReason::Unrecordable {
-                failure: failure.into(),
+                cause: failure.into(),
             },
             S::TrackStopped(cause) => StallReason::TrackStopped {
                 cause: cause.into(),

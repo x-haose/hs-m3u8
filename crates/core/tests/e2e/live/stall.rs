@@ -203,10 +203,10 @@ async fn a_track_that_records_nothing_fails_the_recording() {
             err,
             Error::LiveStalled {
                 track: 1,
-                cause: StallError::Unrecordable(FetchFailure {
-                    kind: FetchError::Http(HttpError::Status(404)),
+                cause: StallError::Unrecordable(FetchFailure::Http(HttpFailure {
+                    kind: HttpError::Status(404),
                     retry_after: None
-                })
+                }))
             }
         ),
         "{err}"
@@ -240,10 +240,10 @@ async fn segments_that_keep_failing_temporarily_are_retryable() {
             err,
             Error::LiveStalled {
                 track: 0,
-                cause: StallError::Unrecordable(FetchFailure {
-                    kind: FetchError::Http(HttpError::Status(503)),
+                cause: StallError::Unrecordable(FetchFailure::Http(HttpFailure {
+                    kind: HttpError::Status(503),
                     ..
-                })
+                }))
             }
         ),
         "{err}"

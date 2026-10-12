@@ -546,7 +546,7 @@ impl Recorder<'_> {
         let Some(failure) = error.missable() else {
             return Err(error);
         };
-        let reason = MissReason::Failed(failure.kind.clone());
+        let reason = MissReason::Failed(failure.kind());
         self.tracks[id.track].segment_missed(failure);
         self.missed.push(Missed {
             session: self.session(),

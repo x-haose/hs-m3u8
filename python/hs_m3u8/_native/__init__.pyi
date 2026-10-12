@@ -269,7 +269,7 @@ class Engine:
 
 class FetchErrorKind:
     r"""
-    分片或 init 段取不到的原因。
+    分片或 init 段取不到的原因的种类。
     """
     def __repr__(self) -> builtins.str: ...
     @typing.final
@@ -294,33 +294,32 @@ class FetchErrorKind:
         def __new__(cls) -> FetchErrorKind.Incomplete: ...
     
 
-@typing.final
 class FetchFailure:
     r"""
-    取不到的分片或 init 段：原因，与服务器要求的最短等待。
+    取不到的分片或 init 段。
     """
-    @property
-    def kind(self) -> FetchErrorKind.Http | FetchErrorKind.Incomplete:
-        r"""
-        取不到的原因
-        """
-    @property
-    def retryable(self) -> builtins.bool:
-        r"""
-        临时故障，重试可能成功：请求的临时故障（见 `HttpFailure.retryable`），或内容没写完
-        """
-    @property
-    def retry_after(self) -> typing.Optional[builtins.int]:
-        r"""
-        服务器在 429/503 中要求（Retry-After）的最短等待，秒；没有要求时为 None
-        """
-    def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
-    def __hash__(self) -> builtins.int: ...
     def __repr__(self) -> builtins.str: ...
-    def __new__(cls, *, kind: FetchErrorKind, retryable: builtins.bool, retry_after: typing.Optional[builtins.int]) -> FetchFailure:
+    @typing.final
+    class Http(FetchFailure):
         r"""
-        各参数即同名属性。
+        请求取不到：404/410，或重试后仍失败的临时故障
         """
+        __match_args__ = ("failure",)
+        @property
+        def failure(self) -> HttpFailure:
+            r"""
+            失败的请求
+            """
+        def __new__(cls, failure: HttpFailure) -> FetchFailure.Http: ...
+    
+    @typing.final
+    class Incomplete(FetchFailure):
+        r"""
+        重试后取到的内容仍没写完（见 `IncompleteError`），稍后重试可能成功
+        """
+        __match_args__ = ()
+        def __new__(cls) -> FetchFailure.Incomplete: ...
+    
 
 @typing.final
 class FileError(HsM3u8Error):
@@ -1475,26 +1474,26 @@ class MissReason:
         r"""
         列出了，但取不到：404/410，可重试的错误重试后仍失败，或重试后内容仍没写完
         """
-        __match_args__ = ("kind",)
+        __match_args__ = ("cause",)
         @property
-        def kind(self) -> FetchErrorKind.Http | FetchErrorKind.Incomplete:
+        def cause(self) -> FetchErrorKind.Http | FetchErrorKind.Incomplete:
             r"""
             取不到的原因
             """
-        def __new__(cls, kind: FetchErrorKind) -> MissReason.Failed: ...
+        def __new__(cls, cause: FetchErrorKind) -> MissReason.Failed: ...
     
     @typing.final
     class InitFailed(MissReason):
         r"""
         列出了，但它的 init 段取不到（同上）
         """
-        __match_args__ = ("kind",)
+        __match_args__ = ("cause",)
         @property
-        def kind(self) -> FetchErrorKind.Http | FetchErrorKind.Incomplete:
+        def cause(self) -> FetchErrorKind.Http | FetchErrorKind.Incomplete:
             r"""
             取不到的原因
             """
-        def __new__(cls, kind: FetchErrorKind) -> MissReason.InitFailed: ...
+        def __new__(cls, cause: FetchErrorKind) -> MissReason.InitFailed: ...
     
     @typing.final
     class Unmergeable(MissReason):
@@ -3005,13 +3004,13 @@ class StallReason:
         r"""
         播放列表仍在列出新分片，但一个都没有下载成功
         """
-        __match_args__ = ("failure",)
+        __match_args__ = ("cause",)
         @property
-        def failure(self) -> FetchFailure:
+        def cause(self) -> FetchFailure.Http | FetchFailure.Incomplete:
             r"""
-            最近一次取不到分片或 init 段的原因
+            最近一次取不到的分片或 init 段
             """
-        def __new__(cls, failure: FetchFailure) -> StallReason.Unrecordable: ...
+        def __new__(cls, cause: FetchFailure) -> StallReason.Unrecordable: ...
     
     @typing.final
     class TrackStopped(StallReason):

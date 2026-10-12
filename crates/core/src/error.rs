@@ -226,14 +226,8 @@ impl Error {
     pub(crate) fn missable(&self) -> Option<FetchFailure> {
         match self {
             Error::Segment { cause, .. } => cause.missable(),
-            Error::Incomplete { .. } => Some(FetchFailure {
-                kind: FetchError::Incomplete,
-                retry_after: None,
-            }),
-            _ => self.http_failure().map(|failure| FetchFailure {
-                kind: FetchError::Http(failure.kind),
-                retry_after: failure.retry_after,
-            }),
+            Error::Incomplete { .. } => Some(FetchFailure::Incomplete),
+            _ => self.http_failure().map(FetchFailure::Http),
         }
     }
 
@@ -327,15 +321,43 @@ pub struct HttpFailure {
     pub retry_after: Option<Duration>,
 }
 
-/// 取不到的分片或 init 段：原因，与服务器在 429/503 中要求（Retry-After）的最短等待。
+/// 取不到的分片或 init 段。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{kind}")]
-pub struct FetchFailure {
-    pub kind: FetchError,
-    pub retry_after: Option<Duration>,
+pub enum FetchFailure {
+    /// 请求取不到：404/410，或重试后仍失败的临时故障
+    #[error(transparent)]
+    Http(HttpFailure),
+    /// 重试后取到的内容仍没写完（见 [`Error::Incomplete`]）
+    #[error("内容没有写完")]
+    Incomplete,
 }
 
-/// 分片或 init 段取不到的原因。
+impl FetchFailure {
+    /// 失败的种类，不带服务器要求的等待（缺失的原因只记它，见 [`crate::MissReason`]）。
+    pub fn kind(&self) -> FetchError {
+        match self {
+            FetchFailure::Http(failure) => FetchError::Http(failure.kind.clone()),
+            FetchFailure::Incomplete => FetchError::Incomplete,
+        }
+    }
+
+    pub fn retryable(&self) -> bool {
+        match self {
+            FetchFailure::Http(failure) => failure.kind.retryable(),
+            FetchFailure::Incomplete => true,
+        }
+    }
+
+    /// 服务器在 429/503 中要求（Retry-After）的最短等待；没有这样的要求时为 None。
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            FetchFailure::Http(failure) => failure.retry_after,
+            FetchFailure::Incomplete => None,
+        }
+    }
+}
+
+/// 分片或 init 段取不到的原因的种类。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FetchError {
     /// 请求取不到：404/410，或重试后仍失败的临时故障
@@ -344,15 +366,6 @@ pub enum FetchError {
     /// 重试后取到的内容仍没写完（见 [`Error::Incomplete`]）
     #[error("内容没有写完")]
     Incomplete,
-}
-
-impl FetchError {
-    pub fn retryable(&self) -> bool {
-        match self {
-            FetchError::Http(kind) => kind.retryable(),
-            FetchError::Incomplete => true,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -450,7 +463,7 @@ impl StallError {
         match self {
             StallError::RefreshFailed(cause) => cause.retryable(),
             StallError::RefreshPending => true,
-            StallError::Unrecordable(failure) => failure.kind.retryable(),
+            StallError::Unrecordable(failure) => failure.retryable(),
             StallError::TrackStopped(cause) => *cause == StallCause::NoNewSegments,
         }
     }
@@ -458,7 +471,7 @@ impl StallError {
     fn retry_after(&self) -> Option<Duration> {
         match self {
             StallError::RefreshFailed(cause) => cause.retry_after(),
-            StallError::Unrecordable(failure) => failure.retry_after,
+            StallError::Unrecordable(failure) => failure.retry_after(),
             StallError::RefreshPending | StallError::TrackStopped(_) => None,
         }
     }

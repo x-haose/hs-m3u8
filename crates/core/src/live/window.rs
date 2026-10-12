@@ -402,7 +402,7 @@ impl Window {
                     track: scope.track,
                     first: segment.sequence,
                     last: segment.sequence,
-                    reason: MissReason::InitFailed(failure.kind.clone()),
+                    reason: MissReason::InitFailed(failure.kind()),
                 });
                 update.init_failure = Some(failure);
                 return Ok(());

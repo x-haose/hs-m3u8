@@ -20,7 +20,7 @@ use crate::fetch::{self, Direct};
 use crate::hooks::Hooks;
 use crate::http::{Http, Permit};
 use crate::output;
-use crate::{Error, FetchError, FetchFailure, HttpError, blocking, resolve};
+use crate::{Error, FetchFailure, HttpError, HttpFailure, blocking, resolve};
 
 /// 一个后台任务的结果。
 pub(super) enum Done {
@@ -197,10 +197,10 @@ async fn check(
         let data = match direct.fetch(track, &segment, init.as_deref(), cancel).await {
             Ok(data) => data,
             Err(e) => match e.missable() {
-                Some(FetchFailure {
-                    kind: FetchError::Http(HttpError::Status(404 | 410)),
+                Some(FetchFailure::Http(HttpFailure {
+                    kind: HttpError::Status(404 | 410),
                     ..
-                }) => continue,
+                })) => continue,
                 Some(_) => {
                     transient = Some(e);
                     continue;
