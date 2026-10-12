@@ -22,7 +22,7 @@ pub(crate) enum Input {
         /// 有 init 段（fMP4）：编码参数都在 init 段里，不随帧携带
         init: bool,
     },
-    Packed(Packed),
+    Packed(Box<Packed>),
 }
 
 impl Input {
@@ -47,7 +47,8 @@ impl Input {
                 }));
             }
             if heads[0].format != standalone::Format::Ts {
-                return Packed::open(&segments.segments, &heads, group, track).map(Input::Packed);
+                return Packed::open(segments, &heads, group, track)
+                    .map(|packed| Input::Packed(Box::new(packed)));
             }
         }
         let mut files = Vec::with_capacity(segments.segments.len() + 1);

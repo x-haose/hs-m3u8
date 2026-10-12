@@ -3,14 +3,13 @@
 use std::collections::VecDeque;
 use std::io;
 use std::ops::Range;
-use std::path::PathBuf;
 
 use ffmpeg::{Packet, Rational, Rescale, format, media};
 use ffmpeg_next as ffmpeg;
 
 use crate::input::{new_chain, open_chain, read_packet};
 use crate::standalone::{self, Format, Head};
-use crate::{Error, chain, frame};
+use crate::{Error, TrackSegments, chain, frame};
 
 /// 打包音频时间戳的时钟（90 kHz）。
 const CLOCK_90K: Rational = Rational(1, 90_000);
@@ -21,8 +20,8 @@ const ID3V1_LEN: usize = 128;
 /// 打包音频一条轨在一组里的分片。各片按帧头切出音频帧（见 [`cut_frames`]），只把音频帧相连、作为一个输入读：格式
 /// 只在开头识别一次，只有一两帧的分片也读得出，包在输入里的字节位置与分片一一对应。FFmpeg 的裸音频解复用器从 0 起按
 /// 样本数计时，所以按字节位置找到每个包所在的分片，平移到该片的 ID3 时间戳处：与同组的其他轨对齐，缺失的分片处留出
-/// 空档。片内有损坏被跳过时，其后的帧少了被跳过的那段时长，不能再从片头的时间戳往后推：它们按样本数一直接到下一片
-/// 开头，所以用下一片的平移量；没有下一片时定不了时刻，不写出、计入丢弃。有分片没有时间戳时整组按样本数接续，只能
+/// 空档。片内有损坏被跳过时，其后的帧少了被跳过的那段时长，不能再从片头的时间戳往后推，改为让它们结束在下一片的时间戳
+/// 处；这一片是最后一片、或下一片之前缺了分片时定不了时刻，不写出、计入丢弃。有分片没有时间戳时整组按样本数接续，只能
 /// 单独成轨（见 [`crate::Unsupported::UntimedPackedAudio`]）。
 ///
 /// 简化：按样本数计时用的是 FFmpeg 给的包时长，AC-3 与 E-AC-3 的裸音频解复用器以 1/90000 秒为时间基，44.1 kHz
@@ -36,14 +35,16 @@ pub(crate) struct Packed {
     starts: Vec<u64>,
     /// 各分片第一处损坏之后的第一帧在输入里的起点，字节；没有时为 None
     resumes: Vec<Option<u64>>,
+    /// 各分片的下一片在输入里、且与它之间没有缺片
+    followed: Vec<bool>,
     /// 各分片的时间戳（90 kHz，未展开）；整组按样本数接续时为 None
     timestamps: Option<Vec<i64>>,
     /// 音频流的下标；没有音频流时为 None
     audio: Option<usize>,
     /// 当前分片的下标与它的音频包要加的偏移（以音频流的时间基为单位）；读到它第一个带 DTS 的音频包时确定
     current: Option<(usize, i64)>,
-    /// 损坏之后、等下一片的平移量的音频包，按读出的顺序
-    pending: VecDeque<Packet>,
+    /// 一个分片损坏之后的音频包（按读出的顺序，都带 DTS），读完这一片后定时刻
+    pending: Option<(usize, Vec<Packet>)>,
     /// 已定好时刻、待交出的包
     ready: VecDeque<Packet>,
     /// 丢弃的损坏字节数：切帧时跳过的，加上定不了时刻的包
@@ -51,20 +52,21 @@ pub(crate) struct Packed {
 }
 
 impl Packed {
-    /// 切出各片的音频帧，相连打开。`segments` 至少有一个，`heads` 为各片开头的信息，格式相同。
+    /// 切出各片的音频帧，相连打开。`segments` 至少有一个分片，`heads` 为各片开头的信息，格式相同。
     pub(crate) fn open(
-        segments: &[PathBuf],
+        segments: &TrackSegments,
         heads: &[Head],
         group: usize,
         track: usize,
     ) -> Result<Packed, Error> {
+        let count = segments.segments.len();
         let mut pieces = Vec::new();
-        let mut starts = Vec::with_capacity(segments.len());
-        let mut resumes = Vec::with_capacity(segments.len());
+        let mut starts = Vec::with_capacity(count);
+        let mut resumes = Vec::with_capacity(count);
         let mut total = 0;
         let mut discarded = 0;
         let mut reference = None;
-        for (path, head) in segments.iter().zip(heads) {
+        for (path, head) in segments.segments.iter().zip(heads) {
             let read_failed = |cause| Error::Io {
                 action: "读取",
                 path: path.clone(),
@@ -85,8 +87,8 @@ impl Packed {
             discarded += cut.discarded;
             starts.push(total);
             let mut resume = None;
-            for range in cut.ranges {
-                if cut.resume == Some(range.start) {
+            for (index, range) in cut.ranges.into_iter().enumerate() {
+                if cut.resume == Some(index) {
                     resume = Some(total);
                 }
                 total += range.end - range.start;
@@ -94,6 +96,9 @@ impl Packed {
             }
             resumes.push(resume);
         }
+        let followed = (1..=count)
+            .map(|next| next < count && !segments.gaps.contains(&next))
+            .collect();
         let (chain, failure) = new_chain(pieces)?;
         let ictx = open_chain(chain, &failure, group, track)?;
         let audio = ictx
@@ -105,10 +110,11 @@ impl Packed {
             failure,
             starts,
             resumes,
+            followed,
             timestamps: heads.iter().map(|h| h.timestamp).collect(),
             audio,
             current: None,
-            pending: VecDeque::new(),
+            pending: None,
             ready: VecDeque::new(),
             discarded,
         })
@@ -141,9 +147,11 @@ impl Packed {
                 return Ok(true);
             }
             if !read_packet(&mut self.ictx, &self.failure, packet, group, track)? {
-                let undated: usize = self.pending.drain(..).map(|p| p.size()).sum();
-                self.discarded += undated as u64;
-                return Ok(false);
+                if self.pending.is_none() {
+                    return Ok(false);
+                }
+                self.settle_pending();
+                continue;
             }
             let Some(timestamps) = &self.timestamps else {
                 return Ok(true);
@@ -156,34 +164,55 @@ impl Packed {
             // 第一个分片从 0 起，位置总能归到某一片
             let segment = self.starts.partition_point(|&start| start <= position) - 1;
             if self.resumes[segment].is_some_and(|resume| position >= resume) {
+                let taken = std::mem::replace(packet, Packet::empty());
                 self.pending
-                    .push_back(std::mem::replace(packet, Packet::empty()));
+                    .get_or_insert_with(|| (segment, Vec::new()))
+                    .1
+                    .push(taken);
                 continue;
             }
             let shift = match self.current {
                 Some((current, shift)) if current == segment => shift,
                 _ => {
-                    let time_base = self
-                        .ictx
-                        .stream(packet.stream())
-                        .expect("包所属的流存在")
-                        .time_base();
-                    let start = unwrap_pts(timestamps[segment], timestamps[0])
-                        .rescale(CLOCK_90K, time_base);
+                    let start = self.segment_start(timestamps[segment], timestamps[0]);
                     self.current = Some((segment, start - dts));
                     start - dts
                 }
             };
             shifted(packet, shift);
-            if self.pending.is_empty() {
+            if self.pending.is_none() {
                 return Ok(true);
             }
-            for mut earlier in self.pending.drain(..) {
-                shifted(&mut earlier, shift);
-                self.ready.push_back(earlier);
-            }
+            self.settle_pending();
             self.ready
                 .push_back(std::mem::replace(packet, Packet::empty()));
+        }
+    }
+
+    /// 时间戳 `timestamp`（90 kHz）按这条轨的起点 `first` 展开后，以音频流的时间基表示。
+    fn segment_start(&self, timestamp: i64, first: i64) -> i64 {
+        let audio = self.audio.expect("有带 DTS 的音频包才定时刻");
+        let time_base = self.ictx.stream(audio).expect("音频流存在").time_base();
+        unwrap_pts(timestamp, first).rescale(CLOCK_90K, time_base)
+    }
+
+    /// 一个分片损坏之后的包读完了：下一片在输入里且紧接这一片时，平移到最后一包结束在下一片的时间戳处、待交出；否则
+    /// 定不了时刻，计入丢弃。
+    fn settle_pending(&mut self) {
+        let Some((segment, packets)) = self.pending.take() else {
+            return;
+        };
+        if !self.followed[segment] {
+            self.discarded += packets.iter().map(|p| p.size() as u64).sum::<u64>();
+            return;
+        }
+        let timestamps = self.timestamps.as_ref().expect("只有带时间戳的组才暂存");
+        let next = self.segment_start(timestamps[segment + 1], timestamps[0]);
+        let last = packets.last().expect("暂存时至少放进一个包");
+        let end = last.dts().expect("暂存的包都带 DTS") + last.duration();
+        for mut earlier in packets {
+            shifted(&mut earlier, next - end);
+            self.ready.push_back(earlier);
         }
     }
 }
@@ -198,8 +227,8 @@ fn shifted(packet: &mut Packet, shift: i64) {
 struct Cut {
     /// 音频帧所在的字节区间，相接的合成一段
     ranges: Vec<Range<u64>>,
-    /// 第一处损坏之后的第一帧的起点，字节；没有损坏、或损坏之后没有帧时为 None
-    resume: Option<u64>,
+    /// 第一处损坏之后的第一帧起头的那段区间的下标；没有损坏、或损坏之后没有帧时为 None
+    resume: Option<usize>,
     /// 跳过的损坏字节数
     discarded: u64,
 }
@@ -254,12 +283,13 @@ fn cut_frames(data: &[u8], start: usize, format: Format, reference: &mut Option<
         }
         if audio {
             let range = at as u64..(at + len) as u64;
-            if damaged && cut.resume.is_none() {
-                cut.resume = Some(range.start);
-            }
+            let resumes_here = damaged && cut.resume.is_none();
             match cut.ranges.last_mut() {
-                Some(last) if last.end == range.start => last.end = range.end,
+                Some(last) if last.end == range.start && !resumes_here => last.end = range.end,
                 _ => cut.ranges.push(range),
+            }
+            if resumes_here {
+                cut.resume = Some(cut.ranges.len() - 1);
             }
         }
         at += len;
@@ -343,8 +373,9 @@ mod tests {
     use super::*;
     use crate::frame::testing::{ac3_syncframe, adts_frame, mpeg_frame};
 
-    /// [`cut_frames`]（这条轨还没有开头的帧）的结果：区间写成（起点, 终点），损坏之后的第一帧的起点，跳过的字节数。
-    fn spans(data: &[u8], start: usize, format: Format) -> (Vec<(u64, u64)>, Option<u64>, u64) {
+    /// [`cut_frames`]（这条轨还没有开头的帧）的结果：区间写成（起点, 终点），损坏之后的第一帧起头的区间的下标，跳过的
+    /// 字节数。
+    fn spans(data: &[u8], start: usize, format: Format) -> (Vec<(u64, u64)>, Option<usize>, u64) {
         let cut = cut_frames(data, start, format, &mut None);
         let ranges = cut.ranges.iter().map(|r| (r.start, r.end)).collect();
         (ranges, cut.resume, cut.discarded)
@@ -385,7 +416,7 @@ mod tests {
         let junk = [frame.clone(), b"junk".to_vec(), frame.clone()].concat();
         assert_eq!(
             spans(&junk, 0, Format::Aac),
-            (vec![(0, 100), (104, 204)], Some(104), 4)
+            (vec![(0, 100), (104, 204)], Some(1), 4)
         );
         // 末尾不完整的帧与标签：丢到分片末尾
         let truncated = [frame.clone(), frame[..50].to_vec()].concat();
@@ -424,7 +455,7 @@ mod tests {
         .concat();
         assert_eq!(
             spans(&alternating, 0, Format::Aac),
-            (vec![(0, 100), (200, 300), (400, 500)], Some(200), 200)
+            (vec![(0, 100), (200, 300), (400, 500)], Some(1), 200)
         );
         // 杂字节里碰巧像帧头（参数不同：采样率下标 4）的地方不当作同步点
         let lookalike = adts_frame(1, 4, 2, 30);
@@ -438,7 +469,7 @@ mod tests {
         .concat();
         assert_eq!(
             spans(&data, 0, Format::Aac),
-            (vec![(0, 100), (152, 252)], Some(152), 52)
+            (vec![(0, 100), (152, 252)], Some(1), 52)
         );
     }
 

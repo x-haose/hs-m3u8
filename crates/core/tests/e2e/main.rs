@@ -33,6 +33,7 @@ fn track(dir: &str, init: Option<&str>, segments: &[&str]) -> TrackSegments {
     TrackSegments {
         init: init.map(|i| dir.join(i)),
         segments: segments.iter().map(|s| dir.join(s)).collect(),
+        gaps: Vec::new(),
     }
 }
 

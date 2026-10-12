@@ -15,6 +15,7 @@ fn single_group(segments: Vec<PathBuf>) -> Vec<DiscontinuityGroup> {
         tracks: vec![TrackSegments {
             init: None,
             segments,
+            gaps: Vec::new(),
         }],
     }]
 }

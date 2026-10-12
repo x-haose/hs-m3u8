@@ -47,6 +47,9 @@ const MICROS: Rational = Rational(1, 1_000_000);
 pub struct TrackSegments {
     pub init: Option<PathBuf>,
     pub segments: Vec<PathBuf>,
+    /// 与前一个分片之间缺了分片（来源里有、没取到）的分片下标，升序，在 1 到分片数减 1 之间。打包音频片内损坏之后的
+    /// 帧要按下一片的时间戳定时，下一片之前缺了分片时定不了（见 [`StreamReport::discarded_corrupt_bytes`]）
+    pub gaps: Vec<usize>,
 }
 
 /// 一个不连续段组；`tracks` 的顺序在各组之间一致，下标即轨道号。
@@ -177,8 +180,8 @@ pub struct StreamReport {
     /// 输入中没有 DTS、因而未写入的包数
     pub skipped_without_dts: u64,
     /// 损坏而没有写入的音频字节数：TS 里读不出帧头或帧长与包长对不上的包（来源丢了 TS 包，或缺片处 PES 不完整，拼出
-    /// 的包），打包音频里切帧时跳过的不完整的帧或标签、认不出的字节，以及最后一片里损坏之后定不了时刻的帧。视频包照常
-    /// 写入，由解码器做错误隐藏
+    /// 的包），打包音频里切帧时跳过的不完整的帧或标签、认不出的字节，以及片内损坏之后定不了时刻（这一片是最后一片，
+    /// 或下一片之前缺了分片）的帧。视频包照常写入，由解码器做错误隐藏
     pub discarded_corrupt_bytes: u64,
     /// 输出时间线上从最早的呈现时刻到最晚的结束时刻，微秒；含组内时间戳间断（如缺失的分片）留下的空档
     pub duration_us: u64,
@@ -223,6 +226,8 @@ pub enum Error {
     },
     #[error("第 {group} 组第 {track} 条轨没有分片")]
     EmptyTrack { group: usize, track: usize },
+    #[error("第 {group} 组第 {track} 条轨的缺片下标须升序、在 1 到分片数减 1 之间")]
+    InvalidGaps { group: usize, track: usize },
     #[error("第 {group} 组读不出任何视频或音频包")]
     EmptyGroup { group: usize },
     #[error("输出路径无法交给 FFmpeg（不是有效的 UTF-8 或含 NUL 字符）：{}", .0.display())]
@@ -498,6 +503,10 @@ fn validate(streams: &[Streams], groups: &[Numbered<'_>]) -> Result<(), Error> {
         for (track, t) in g.tracks.iter().enumerate() {
             if t.segments.is_empty() {
                 return Err(Error::EmptyTrack { group, track });
+            }
+            let ascending = t.gaps.windows(2).all(|w| w[0] < w[1]);
+            if !ascending || t.gaps.iter().any(|&i| i == 0 || i >= t.segments.len()) {
+                return Err(Error::InvalidGaps { group, track });
             }
         }
     }

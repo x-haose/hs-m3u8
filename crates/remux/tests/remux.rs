@@ -36,6 +36,7 @@ fn track_in(dir: &Path) -> TrackSegments {
     TrackSegments {
         init: init.exists().then_some(init),
         segments: segments.into_iter().map(|(_, p)| p).collect(),
+        gaps: Vec::new(),
     }
 }
 
@@ -634,10 +635,12 @@ fn chroma_changes_are_rejected() {
     let first = TrackSegments {
         init: None,
         segments: changing.segments[..1].to_vec(),
+        gaps: Vec::new(),
     };
     let second = TrackSegments {
         init: None,
         segments: changing.segments[1..].to_vec(),
+        gaps: Vec::new(),
     };
     let err = remux(
         &[Streams::Video],
@@ -855,6 +858,7 @@ fn audio_in_pes_flagged_corrupt_but_intact_is_kept() {
         let rewritten = TrackSegments {
             init: None,
             segments,
+            gaps: Vec::new(),
         };
 
         let report = remux(&[Streams::All], &[group([rewritten])], &output).unwrap();
@@ -961,6 +965,7 @@ fn format_changes_within_a_group_are_rejected() {
         let audio = TrackSegments {
             init: None,
             segments,
+            gaps: Vec::new(),
         };
         let err = remux(&[Streams::Audio], &[group([audio])], &output).unwrap_err();
         assert!(
@@ -979,6 +984,7 @@ fn head(name: &str) -> TrackSegments {
     TrackSegments {
         init: t.init,
         segments: t.segments[..1].to_vec(),
+        gaps: Vec::new(),
     }
 }
 
@@ -1086,11 +1092,13 @@ fn check_leaves_what_the_first_segment_cannot_tell_to_the_merge() {
     let head = TrackSegments {
         init: None,
         segments: vec![first.clone()],
+        gaps: Vec::new(),
     };
     check(&[Streams::Audio], &[group([head])]).unwrap();
     let whole = TrackSegments {
         init: None,
         segments: vec![first, rest],
+        gaps: Vec::new(),
     };
     remux(&[Streams::Audio], &[group([whole])], &output).unwrap();
 }
@@ -1105,6 +1113,7 @@ fn check_skips_what_a_head_without_samples_cannot_tell() {
     let without_samples = |name: &str| TrackSegments {
         init: Some(fixtures().join(name).join("init.mp4")),
         segments: vec![styp_only.clone()],
+        gaps: Vec::new(),
     };
     for (streams, first, second) in [
         (Streams::Video, "fmp4_a/video", "fmp4_b/video"),
@@ -1219,6 +1228,7 @@ fn ac3_eac3_and_mp3_audio_are_copied() {
         let audio = TrackSegments {
             init: None,
             segments: tagged,
+            gaps: Vec::new(),
         };
         let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
         let packets: usize = segments
@@ -1251,6 +1261,7 @@ fn packed_audio_follows_its_id3_timestamps() {
                 Some(start + segments[0].1 + segments[1].1),
             ),
         ],
+        gaps: Vec::new(),
     };
 
     remux(
@@ -1288,6 +1299,7 @@ fn packed_audio_timestamps_wrap_around() {
             packed_segment(&dir, &segments[0].0, Some(wrap - segments[0].1)),
             packed_segment(&dir, &segments[1].0, Some(0)),
         ],
+        gaps: Vec::new(),
     };
 
     let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
@@ -1318,6 +1330,7 @@ fn packed_audio_with_very_short_segments_is_read() {
                     packed_segment(&dir, &first.0, Some(900_000)),
                     packed_segment(&dir, &tail, Some(900_000 + first.1)),
                 ],
+                gaps: Vec::new(),
             };
 
             let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
@@ -1381,6 +1394,7 @@ fn packed_audio_with_id3_tags_between_frames_keeps_its_timing() {
                     first.clone(),
                     packed_segment(&dir, &segments[2].0, Some(second_start)),
                 ],
+                gaps: Vec::new(),
             };
 
             let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
@@ -1429,6 +1443,7 @@ fn packed_mp3_info_frames_and_id3v1_tags_are_skipped() {
     let audio = TrackSegments {
         init: None,
         segments: tagged,
+        gaps: Vec::new(),
     };
 
     let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
@@ -1492,6 +1507,7 @@ fn damage_in_packed_audio_keeps_the_timing_of_later_frames() {
             packed_segment(&dir, &damaged(1, 10, Some(20)), Some(t1)),
             packed_segment(&dir, &damaged(2, 5, None), Some(t2)),
         ],
+        gaps: Vec::new(),
     };
 
     let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
@@ -1514,6 +1530,89 @@ fn damage_in_packed_audio_keeps_the_timing_of_later_frames() {
     );
     // 最后一片从它的时间戳处开始
     assert_eq!(ticks(a_out[n0 + n1 - 1].0), t2 - t0);
+}
+
+/// 打包音频片内损坏之后的帧：下一片之前缺了分片时定不了时刻，不写入、计入丢弃，不挪到缺口之后；下一片在、但一帧也
+/// 切不出（开头的帧头声明 8191 字节，超出分片，之后没有同步点）时，照样结束在它的时间戳处。
+#[test]
+fn damage_before_a_gap_or_a_frameless_segment_in_packed_audio() {
+    let dir = work_dir("packed_damage_gap");
+    let output = dir.join("out.mp4");
+    let segments = packed_fixture("aac");
+    let sizes: Vec<Vec<usize>> = segments
+        .iter()
+        .map(|(path, _)| packet_sizes(path))
+        .collect();
+    // 48 kHz 的 AAC 每帧 1024 个采样点，即 1920 个 90 kHz 的 tick
+    let frame = 1920;
+    let (t0, t1) = (900_000, 900_000 + segments[0].1);
+    let t2 = t1 + segments[1].1;
+    let mut data = std::fs::read(&segments[0].0).unwrap();
+    data[sizes[0][..10].iter().sum::<usize>()] = 0;
+    let damaged = dir.join("damaged0");
+    std::fs::write(&damaged, data).unwrap();
+    let mut frameless = std::fs::read(&segments[1].0).unwrap()[..7].to_vec();
+    frameless[3] |= 0x03;
+    frameless[4] = 0xFF;
+    frameless[5] |= 0xE0;
+    frameless.resize(5000, 0);
+    let frameless_path = dir.join("frameless1");
+    std::fs::write(&frameless_path, frameless).unwrap();
+    let (n0, n2) = (sizes[0].len(), sizes[2].len());
+
+    let gap = TrackSegments {
+        init: None,
+        segments: vec![
+            packed_segment(&dir, &damaged, Some(t0)),
+            packed_segment(&dir, &segments[2].0, Some(t2)),
+        ],
+        gaps: vec![1],
+    };
+    let report = remux(&[Streams::Audio], &[group([gap])], &output).unwrap();
+    assert_eq!(report.streams[0].packets, (10 + n2) as u64);
+    let lost: usize = sizes[0][10..].iter().sum();
+    assert_eq!(report.streams[0].discarded_corrupt_bytes, lost as u64);
+    let a_out = timelines(&output).1;
+    let ticks = |seconds: f64| ((seconds - a_out[0].0) * 90_000.0).round() as u64;
+    assert_eq!(ticks(a_out[10].0), t2 - t0);
+
+    let empty_next = TrackSegments {
+        init: None,
+        segments: vec![
+            packed_segment(&dir, &damaged, Some(t0)),
+            packed_segment(&dir, &frameless_path, Some(t1)),
+            packed_segment(&dir, &segments[2].0, Some(t2)),
+        ],
+        gaps: Vec::new(),
+    };
+    let report = remux(&[Streams::Audio], &[group([empty_next])], &output).unwrap();
+    assert_eq!(report.streams[0].packets, (n0 - 1 + n2) as u64);
+    assert_eq!(
+        report.streams[0].discarded_corrupt_bytes,
+        (sizes[0][10] + 5000) as u64
+    );
+    let a_out = timelines(&output).1;
+    let ticks = |seconds: f64| ((seconds - a_out[0].0) * 90_000.0).round() as u64;
+    // 第 10 帧丢了，第 11 帧起各在原来的时刻；第 2 片从它的时间戳处开始
+    assert_eq!(ticks(a_out[10].0), 11 * frame);
+    assert_eq!(ticks(a_out[n0 - 2].0), (n0 as u64 - 1) * frame);
+    assert_eq!(ticks(a_out[n0 - 1].0), t2 - t0);
+}
+
+/// 缺片下标须升序、在 1 到分片数减 1 之间。
+#[test]
+fn invalid_gaps_are_rejected() {
+    let dir = work_dir("invalid_gaps");
+    let output = dir.join("out.mp4");
+    for gaps in [vec![0], vec![2], vec![1, 1]] {
+        let mut ts = track("ts_a");
+        ts.gaps = gaps;
+        let err = remux(&[Streams::All], &[group([ts])], &output).unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidGaps { group: 0, track: 0 }),
+            "实际 {err:?}"
+        );
+    }
 }
 
 /// 两个 TS 输入的起点跨在回绕点前 60 秒两侧：FFmpeg 读两个输入时展开的方向不同，读出的起点差 2^33，合并时对齐回来。
@@ -1559,6 +1658,7 @@ fn packed_audio_aligns_with_ts_across_the_wrap_edge() {
     let audio = TrackSegments {
         init: None,
         segments: vec![packed_segment(&dir, &segments[0].0, Some(start))],
+        gaps: Vec::new(),
     };
 
     remux(
@@ -1585,6 +1685,7 @@ fn untimed_packed_audio_is_used_only_alone() {
     let untimed = TrackSegments {
         init: None,
         segments: segments.iter().map(|(path, _)| path.clone()).collect(),
+        gaps: Vec::new(),
     };
     // 只有第一片有时间戳，第二片前缺了一片
     let partly = TrackSegments {
@@ -1593,6 +1694,7 @@ fn untimed_packed_audio_is_used_only_alone() {
             packed_segment(&dir, &segments[0].0, Some(900_000)),
             segments[2].0.clone(),
         ],
+        gaps: Vec::new(),
     };
 
     for audio in [&untimed, &partly] {

@@ -39,6 +39,8 @@ pub(crate) struct GroupTrack {
     pub init: Option<PathBuf>,
     /// 按播放顺序
     pub segments: Vec<GroupSegment>,
+    /// 与前一个分片的媒体序号不相接（中间缺了分片）的分片下标，升序
+    pub gaps: Vec<usize>,
 }
 
 impl GroupTrack {
@@ -50,19 +52,24 @@ impl GroupTrack {
         names: impl IntoIterator<Item = &'a SegmentName>,
     ) -> GroupTrack {
         let mut init = None;
-        let segments = names
-            .into_iter()
-            .map(|name| {
-                init.get_or_insert(name.init);
-                GroupSegment {
-                    path: layout.segment(track, name),
-                    duration_us: name.duration_us,
-                }
-            })
-            .collect();
+        let mut segments = Vec::new();
+        let mut gaps = Vec::new();
+        let mut previous: Option<u64> = None;
+        for name in names {
+            init.get_or_insert(name.init);
+            if previous.is_some_and(|p| p.checked_add(1) != Some(name.sequence)) {
+                gaps.push(segments.len());
+            }
+            previous = Some(name.sequence);
+            segments.push(GroupSegment {
+                path: layout.segment(track, name),
+                duration_us: name.duration_us,
+            });
+        }
         GroupTrack {
             init: init.flatten().map(|f| layout.init(track, f)),
             segments,
+            gaps,
         }
     }
 }
@@ -253,6 +260,7 @@ fn remux_group(tracks: &[GroupTrack]) -> DiscontinuityGroup {
             .map(|t| TrackSegments {
                 init: t.init.clone(),
                 segments: t.segments.iter().map(|s| s.path.clone()).collect(),
+                gaps: t.gaps.clone(),
             })
             .collect(),
     }

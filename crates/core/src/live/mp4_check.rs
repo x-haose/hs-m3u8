@@ -46,6 +46,7 @@ impl Mp4Check {
                     .map(|t| GroupTrack {
                         init: t.init.clone(),
                         segments: t.segments[..1].to_vec(),
+                        gaps: Vec::new(),
                     })
                     .collect()
             })

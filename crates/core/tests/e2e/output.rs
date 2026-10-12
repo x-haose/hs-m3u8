@@ -70,6 +70,7 @@ fn media_groups(media: &MediaPlaylist) -> Vec<TrackSegments> {
             groups.push(TrackSegments {
                 init: segment.init.as_ref().map(|i| i.uri.to_file_path().unwrap()),
                 segments: Vec::new(),
+                gaps: Vec::new(),
             });
         }
         let path = segment.uri.to_file_path().unwrap();
