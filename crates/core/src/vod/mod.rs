@@ -54,6 +54,7 @@ pub(crate) async fn download(
                         segment: Box::new(segment.clone()),
                         name: *name,
                         path: layout.segment(track, name),
+                        init: name.init.map(|init| layout.init(track, init)),
                     })
                 })
                 .collect()

@@ -44,10 +44,11 @@ pub(super) enum Done {
     Mp4Checked { result: Result<(), Error> },
 }
 
-/// 核对用的一个重叠分片与它已存的文件。
+/// 核对用的一个重叠分片与它已存的文件，`init` 为它所用的 init 段的文件（见 [`crate::fetch::Item`]）。
 pub(super) struct StoredOverlap {
     pub segment: Segment,
     pub stored: PathBuf,
+    pub init: Option<PathBuf>,
 }
 
 /// 在途的后台任务。
@@ -197,8 +198,13 @@ async fn check(
 ) -> Result<Verdict, Error> {
     // 最近一次重试后仍失败的临时故障
     let mut transient = None;
-    for StoredOverlap { segment, stored } in overlaps {
-        let data = match direct.fetch(track, &segment, cancel).await {
+    for StoredOverlap {
+        segment,
+        stored,
+        init,
+    } in overlaps
+    {
+        let data = match direct.fetch(track, &segment, init.as_deref(), cancel).await {
             Ok(data) => data,
             Err(e) => match e.missable() {
                 Some(FetchFailure {

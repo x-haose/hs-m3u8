@@ -96,11 +96,13 @@ impl Recorder<'_> {
         };
         let found: Vec<StoredOverlap> = overlaps(recorded, playlist)
             .into_iter()
-            .map(|segment| StoredOverlap {
-                stored: dir
-                    .layout()
-                    .segment(track, &recorded.segments()[&segment.sequence]),
-                segment: segment.clone(),
+            .map(|segment| {
+                let name = &recorded.segments()[&segment.sequence];
+                StoredOverlap {
+                    stored: dir.layout().segment(track, name),
+                    init: name.init.map(|init| dir.layout().init(track, init)),
+                    segment: segment.clone(),
+                }
             })
             .collect();
         if found.is_empty() {

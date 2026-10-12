@@ -770,7 +770,7 @@ class IntegrityError(SourceError):
         出错的分片或 init 段的地址
         """
     @property
-    def reason(self) -> IntegrityFailure.Padding | IntegrityFailure.CipherLength | IntegrityFailure.RangeLength | IntegrityFailure.UnrecognizedSegment | IntegrityFailure.NotFmp4 | IntegrityFailure.Fmp4BoxSize | IntegrityFailure.Fmp4BoxTooLarge:
+    def reason(self) -> IntegrityFailure.Padding | IntegrityFailure.CipherLength | IntegrityFailure.RangeLength | IntegrityFailure.UnrecognizedSegment | IntegrityFailure.NotFmp4 | IntegrityFailure.Fmp4BoxTooSmall | IntegrityFailure.Fmp4TrailingBytes | IntegrityFailure.Fmp4BadMoof | IntegrityFailure.Fmp4OpenBoxTooLarge:
         r"""
         失败的原因
         """
@@ -856,7 +856,7 @@ class IntegrityFailure:
         def __new__(cls, head: builtins.str) -> IntegrityFailure.NotFmp4: ...
     
     @typing.final
-    class Fmp4BoxSize(IntegrityFailure):
+    class Fmp4BoxTooSmall(IntegrityFailure):
         r"""
         fMP4 顶层 box 的长度字段小于 box 头的长度（8 字节，64 位长度时 16 字节）；没写完的报 `IncompleteError`
         """
@@ -871,10 +871,41 @@ class IntegrityFailure:
             r"""
             长度字段的值，字节
             """
-        def __new__(cls, *, at: builtins.int, size: builtins.int) -> IntegrityFailure.Fmp4BoxSize: ...
+        def __new__(cls, *, at: builtins.int, size: builtins.int) -> IntegrityFailure.Fmp4BoxTooSmall: ...
     
     @typing.final
-    class Fmp4BoxTooLarge(IntegrityFailure):
+    class Fmp4TrailingBytes(IntegrityFailure):
+        r"""
+        fMP4 末尾多出不足 8 个、凑不成 box 头的字节（如 CDN 加了换行、`Hooks.on_segment` 没去干净）
+        """
+        __match_args__ = ("at", "len",)
+        @property
+        def at(self) -> builtins.int:
+            r"""
+            多出的字节的起点
+            """
+        @property
+        def len(self) -> builtins.int:
+            r"""
+            多出的字节数
+            """
+        def __new__(cls, *, at: builtins.int, len: builtins.int) -> IntegrityFailure.Fmp4TrailingBytes: ...
+    
+    @typing.final
+    class Fmp4BadMoof(IntegrityFailure):
+        r"""
+        fMP4 分片最后一个 mdat 的长度写为 0，核对它时发现前面的 moof 内容不合法（子 box 超出、字段不全）
+        """
+        __match_args__ = ("at",)
+        @property
+        def at(self) -> builtins.int:
+            r"""
+            这个 moof 的起点，字节
+            """
+        def __new__(cls, at: builtins.int) -> IntegrityFailure.Fmp4BadMoof: ...
+    
+    @typing.final
+    class Fmp4OpenBoxTooLarge(IntegrityFailure):
         r"""
         fMP4 最后一个顶层 box 的长度写为 0（到数据末尾），实际长度超过 4 GiB，存盘前改写不成实际长度
         """
@@ -889,7 +920,7 @@ class IntegrityFailure:
             r"""
             这个 box 的实际字节数
             """
-        def __new__(cls, *, at: builtins.int, size: builtins.int) -> IntegrityFailure.Fmp4BoxTooLarge: ...
+        def __new__(cls, *, at: builtins.int, size: builtins.int) -> IntegrityFailure.Fmp4OpenBoxTooLarge: ...
     
 
 @typing.final

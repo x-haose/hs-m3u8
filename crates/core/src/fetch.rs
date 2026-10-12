@@ -5,29 +5,33 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use hs_m3u8_hls::{InitSection, Segment};
+use hs_m3u8_remux::fmp4;
 use tokio::sync::{OnceCell, watch};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::crypto::decrypt;
+use crate::error::io_error;
 use crate::hooks::{HookKind, Hooks, Purpose, run_hook};
 use crate::http::{Http, Permit};
 use crate::request::KeyOverride;
-use crate::verify::{ContentError, check_fmp4, check_standalone_segment, decrypt_failure};
+use crate::verify::{ContentError, Fmp4, check_standalone_segment, decrypt_failure};
 use crate::workdir::{self, SegmentName};
 use crate::{Error, Progress};
 
-/// 一项下载：第 `track` 条轨的分片，`name` 为它在任务目录中的名字，`path` 为由名字得出的写入位置。
+/// 一项下载：第 `track` 条轨的分片，`name` 为它在任务目录中的名字，`path` 为由名字得出的写入位置，`init` 为它所用的
+/// init 段在任务目录里的文件（排入下载之前已落盘；分片没有 init 段时为 None）。
 pub(crate) struct Item {
     pub track: usize,
     pub segment: Box<Segment>,
     pub name: SegmentName,
     pub path: PathBuf,
+    pub init: Option<PathBuf>,
 }
 
 /// 随结果返回的项的信息：哪条轨的哪个分片（序号、声明时长、所在的组等见 `name`）。
@@ -153,14 +157,16 @@ pub(crate) struct Direct {
 }
 
 impl Direct {
-    /// 拉取第 `track` 条轨的一个分片，不写盘。失败同排队下载的分片一样包装为 [`Error::Segment`]（取消除外）。
+    /// 拉取第 `track` 条轨的一个分片，不写盘；`init` 见 [`Item`]。失败同排队下载的分片一样包装为
+    /// [`Error::Segment`]（取消除外）。
     pub(crate) async fn fetch(
         &self,
         track: usize,
         segment: &Segment,
+        init: Option<&Path>,
         cancel: &CancellationToken,
     ) -> Result<Vec<u8>, Error> {
-        fetch_segment(&self.ctx, segment, cancel)
+        fetch_segment(&self.ctx, segment, init, cancel)
             .await
             .map_err(|e| segment_error(track, segment, e))
     }
@@ -190,9 +196,10 @@ async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
         track,
         segment,
         path,
+        init,
         ..
     } = item;
-    let data = fetch_segment(&ctx, &segment, &cancel)
+    let data = fetch_segment(&ctx, &segment, init.as_deref(), &cancel)
         .await
         .map_err(|e| segment_error(track, &segment, e));
     let result = match data {
@@ -205,8 +212,7 @@ async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
     (id, result)
 }
 
-/// 拉取 init 段并校验是 fMP4（见 [`check_fmp4`]，可能改写最后一个 box 的长度字段）；没写完的与请求的临时故障一起
-/// 重试。
+/// 拉取 init 段并核对是 fMP4（见 [`check_fmp4`]）；没写完的与请求的临时故障一起重试。
 pub(crate) async fn fetch_init(
     http: &Http,
     init: &InitSection,
@@ -218,17 +224,19 @@ pub(crate) async fn fetch_init(
             .get_once(Purpose::Init, &init.uri, init.byte_range, permit, cancel)
             .await?
             .body;
-        check_fmp4(&mut data).map_err(|e| e.into_error(&init.uri))?;
+        check_fmp4(&mut data, None, &init.uri).await?;
         Ok(data)
     })
     .await
 }
 
-/// 拉取分片，经 `on_segment` 回调后解密并校验内容（fMP4 见 [`check_fmp4`]，解密失败见 [`decrypt_failure`]）；有自定义
-/// key 时用它解密。请求、回调、解密与校验作为一次尝试，没写完的与请求的临时故障一起重试。
+/// 拉取分片，经 `on_segment` 回调后解密并校验内容（fMP4 见 [`check_fmp4`]，`init` 见 [`Item`]；解密失败见
+/// [`decrypt_failure`]）；有自定义 key 时用它解密。请求、回调、解密与校验作为一次尝试，没写完的与请求的临时故障一起
+/// 重试。
 async fn fetch_segment(
     ctx: &Ctx,
     segment: &Segment,
+    init: Option<&Path>,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>, Error> {
     let key = match (&segment.key, ctx.key_override) {
@@ -261,14 +269,35 @@ async fn fetch_segment(
                 None => data,
             };
             if fmp4 {
-                check_fmp4(&mut data)
+                check_fmp4(&mut data, init, &segment.uri).await?;
             } else {
-                check_standalone_segment(&data).map_err(ContentError::Invalid)
+                check_standalone_segment(&data)
+                    .map_err(|kind| ContentError::Invalid(kind).into_error(&segment.uri))?;
             }
-            .map_err(|e| e.into_error(&segment.uri))?;
             Ok(data)
         })
         .await
+}
+
+/// 核对取自 `url` 的 fMP4 分片或 init 段的结构，并把长度写 0 的最后一个 box 改写成实际长度（见 [`Fmp4`]）。最后一个
+/// box 是长度写 0 的 mdat 时，样本长度可能要用 init 段里 trex 的默认值：`init` 为分片所用的 init 段的文件，这时才读；
+/// 核对的是 init 段本身时为 None。
+async fn check_fmp4(data: &mut [u8], init: Option<&Path>, url: &Url) -> Result<(), Error> {
+    let content = |e: ContentError| e.into_error(url);
+    let fmp4 = Fmp4::of(data).map_err(content)?;
+    if fmp4.open_mdat() {
+        let trex = match init {
+            Some(path) => {
+                let init = tokio::fs::read(path)
+                    .await
+                    .map_err(io_error("读取", path))?;
+                fmp4::trex_sample_sizes(&init)
+            }
+            None => HashMap::new(),
+        };
+        fmp4.check_samples(data, &trex).map_err(content)?;
+    }
+    fmp4.seal(data).map_err(content)
 }
 
 /// 取 key：同一地址只拉取一次。`on_key` 回调不改时拉到的必须是 16 字节。拉取失败不缓存，下次重新拉取。

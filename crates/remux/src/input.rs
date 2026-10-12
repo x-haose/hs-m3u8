@@ -11,7 +11,7 @@ use ffmpeg_next as ffmpeg;
 
 use crate::chain::{self, SegmentChain};
 use crate::packed::Packed;
-use crate::{Error, TrackSegments, Unsupported, standalone};
+use crate::{Error, TrackSegments, Unsupported, fmp4, standalone};
 
 pub(crate) enum Input {
     /// TS 与 fMP4：init 段与分片按字节相连，作为一个输入读
@@ -53,13 +53,11 @@ impl Input {
         }
         let mut files = Vec::with_capacity(segments.segments.len() + 1);
         for path in segments.init.iter().chain(&segments.segments) {
-            let len = std::fs::metadata(path)
-                .map_err(|cause| Error::Io {
-                    action: "读取",
-                    path: path.clone(),
-                    cause,
-                })?
-                .len();
+            let len = if init {
+                fmp4_len(path)?
+            } else {
+                std::fs::metadata(path).map_err(read_error(path))?.len()
+            };
             files.push((path.clone(), 0..len));
         }
         let (chain, failure) = new_chain(files)?;
@@ -111,15 +109,39 @@ impl Input {
     }
 }
 
+/// fMP4 的 init 段或分片 `path` 的字节数：顶层 box 须恰好铺满（否则报 [`Error::Fmp4`]）、最后一个的长度不写 0（否则
+/// 报 [`Error::Fmp4OpenEnded`]）。
+fn fmp4_len(path: &Path) -> Result<u64, Error> {
+    let mut file = File::open(path).map_err(read_error(path))?;
+    let boxes = fmp4::boxes(&mut file)
+        .map_err(read_error(path))?
+        .map_err(|problem| Error::Fmp4 {
+            path: path.to_path_buf(),
+            problem,
+        })?;
+    if let Some(open) = boxes.iter().find(|b| b.to_end) {
+        return Err(Error::Fmp4OpenEnded {
+            path: path.to_path_buf(),
+            at: open.at,
+        });
+    }
+    Ok(boxes.last().map_or(0, |b| b.at + b.size))
+}
+
+/// 读文件 `path` 失败。
+fn read_error(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
+    move |cause| Error::Io {
+        action: "读取",
+        path: path.to_path_buf(),
+        cause,
+    }
+}
+
 /// 没有 init 段的分片开头的信息（见 [`standalone::read_head`]）；认不出格式时报 [`Error::Unrecognized`]。
 pub(crate) fn segment_head(path: &Path) -> Result<standalone::Head, Error> {
     let head = File::open(path)
         .and_then(|mut file| standalone::read_head(&mut file))
-        .map_err(|cause| Error::Io {
-            action: "读取",
-            path: path.to_path_buf(),
-            cause,
-        })?;
+        .map_err(read_error(path))?;
     head.ok_or_else(|| Error::Unrecognized(path.to_path_buf()))
 }
 

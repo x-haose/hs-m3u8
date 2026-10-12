@@ -396,13 +396,20 @@ pub enum Integrity {
     /// fMP4 从第 `at` 字节起的顶层 box 的长度字段 `size` 小于 box 头的长度（8 字节，64 位长度时 16 字节）。没写完的
     /// 报 [`Error::Incomplete`]
     #[error("fMP4 第 {at} 字节起的 box 长度 {size} 小于 box 头")]
-    Fmp4BoxSize { at: u64, size: u64 },
+    Fmp4BoxTooSmall { at: u64, size: u64 },
+    /// fMP4 从第 `at` 字节起末尾的 `len` 个字节（不足 8 个）凑不成 box 头：多为多出的字节（如 CDN 加了换行、回调没去
+    /// 干净），截断恰好落在 box 头里的极少
+    #[error("fMP4 第 {at} 字节起末尾的 {len} 个字节凑不成 box 头")]
+    Fmp4TrailingBytes { at: u64, len: u64 },
+    /// fMP4 分片最后一个 mdat 的长度写为 0，核对它时发现前面从第 `at` 字节起的 moof 内容不合法（子 box 超出、字段不全）
+    #[error("fMP4 第 {at} 字节起的 moof 内容不合法")]
+    Fmp4BadMoof { at: u64 },
     /// fMP4 最后一个顶层 box 的长度写为 0（到数据末尾），实际的 `size` 字节写不进 32 位的长度字段：存盘前要改写成实际
     /// 长度（合并时一条轨的分片接成一个输入读）
     #[error(
         "fMP4 第 {at} 字节起的最后一个 box 长度写为 0，实际 {size} 字节超过 4 GiB，改写不了长度字段"
     )]
-    Fmp4BoxTooLarge { at: u64, size: u64 },
+    Fmp4OpenBoxTooLarge { at: u64, size: u64 },
 }
 
 /// 直播停滞的故障原因。

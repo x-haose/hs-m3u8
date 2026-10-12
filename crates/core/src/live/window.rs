@@ -422,6 +422,7 @@ impl Window {
             track: scope.track,
             segment: Box::new(segment.clone()),
             path: scope.layout.segment(scope.track, &name),
+            init: init.map(|init| scope.layout.init(scope.track, init)),
             name,
         });
         Ok(())

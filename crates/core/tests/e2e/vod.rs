@@ -711,7 +711,8 @@ fn last_box(data: &[u8]) -> usize {
 }
 
 /// 源站把 fMP4 分片与 init 段最后一个 box（mdat、moov）的长度写为 0（到文件末尾）：下载时改写成实际长度，合并出的 MP4
-/// 与原样的样本合并的一致。不改写时合并把后面的分片读成这个 box 的一部分。
+/// 与原样的样本合并的一致。不改写时合并把后面的分片读成这个 box 的一部分。分片第一次取到时还没写完：靠长度看不出，按
+/// moof 里 trun 声明的样本数据看出，重新取。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_last_box_sized_to_the_end_is_rewritten() {
     let dir = test_dir("fmp4_box_to_end");
@@ -722,8 +723,10 @@ async fn a_last_box_sized_to_the_end_is_rewritten() {
         data[last..last + 4].fill(0);
         data
     };
+    let seg0 = to_end("fmp4_a/video/seg0.m4s");
+    let unfinished = seg0[..seg0.len() - 10].to_vec();
     server.put("init.mp4", to_end("fmp4_a/video/init.mp4"));
-    server.put("seg0.m4s", to_end("fmp4_a/video/seg0.m4s"));
+    server.put_sequence("seg0.m4s", vec![unfinished, seg0]);
     server.put("seg1.m4s", fixture("fmp4_a/video/seg1.m4s"));
     server.put(
         "index.m3u8",
@@ -740,6 +743,7 @@ async fn a_last_box_sized_to_the_end_is_rewritten() {
     )];
     let want = expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]);
     assert_output(&output, &want);
+    assert_eq!(server.hits("seg0.m4s"), 2);
 }
 
 /// 自定义 key：分片用它与给定的 IV 解密；播放列表里的 key 地址（这里 404）不请求，分片自己的 IV

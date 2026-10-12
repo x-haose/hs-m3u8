@@ -20,6 +20,7 @@
 
 mod chain;
 mod ffi;
+pub mod fmp4;
 mod frame;
 mod inband;
 mod input;
@@ -235,6 +236,16 @@ pub enum Error {
     /// 没有 init 段的分片开头认不出格式（见 [`standalone::read_head`]）
     #[error("{} 既不是 TS 也不是可识别的打包音频", .0.display())]
     Unrecognized(PathBuf),
+    /// fMP4 的 init 段或分片的顶层结构不对（见 [`fmp4::boxes`]）
+    #[error("{} 的 fMP4 结构不对：{problem}", .path.display())]
+    Fmp4 {
+        path: PathBuf,
+        problem: fmp4::Problem,
+    },
+    /// fMP4 的 init 段或分片从 `at` 起的最后一个 box 长度写为 0（到文件末尾）：接成一个输入读时会越过文件边界（见
+    /// [`fmp4`]）
+    #[error("{} 第 {at} 字节起的最后一个 box 长度写为 0（到文件末尾）", .path.display())]
+    Fmp4OpenEnded { path: PathBuf, at: u64 },
     #[error("打开第 {group} 组第 {track} 条轨失败：{cause}")]
     OpenInput {
         group: usize,
