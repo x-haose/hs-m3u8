@@ -544,6 +544,44 @@ fn resolution_change_between_groups_is_rejected() {
     );
 }
 
+/// fMP4 里的 AV1、VP9 视频与 Opus、FLAC、ALAC 音频原样复制，MP4 里的样本描述带各自的配置 box。
+#[test]
+fn av1_vp9_opus_flac_and_alac_are_copied() {
+    let dir = work_dir("fmp4_codecs");
+    for (name, codecs, boxes) in [
+        ("fmp4_av1_opus", ["av1", "opus"], [b"av1C", b"dOps"]),
+        ("fmp4_vp9_flac", ["vp9", "flac"], [b"vpcC", b"dfLa"]),
+        ("fmp4_alac", ["h264", "alac"], [b"avcC", b"alac"]),
+    ] {
+        let muxed = track(name);
+        let output = dir.join(format!("{name}.mp4"));
+        let report = remux(&[Streams::All], &[group([muxed.clone()])], &output).unwrap();
+
+        let (v_in, a_in) = timelines(&concat_track(&muxed, &dir, "in.mp4"));
+        let found: Vec<(&str, u64)> = report
+            .streams
+            .iter()
+            .map(|s| (s.shape.codec(), s.packets))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (codecs[0], v_in.len() as u64),
+                (codecs[1], a_in.len() as u64)
+            ],
+            "{name}"
+        );
+        let data = std::fs::read(&output).unwrap();
+        for b in boxes {
+            assert!(
+                data.windows(4).any(|w| w == b),
+                "{name} 的输出应有 {}",
+                String::from_utf8_lossy(b)
+            );
+        }
+    }
+}
+
 /// 组内中途换了编码参数：TS 的画面宽高与采样率、打包音频的编码都在第二个分片变了，MP4 的一条轨只有一个样本描述。
 #[test]
 fn parameter_changes_within_a_group_are_rejected() {

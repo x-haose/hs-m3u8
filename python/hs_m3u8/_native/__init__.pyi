@@ -1447,7 +1447,8 @@ class Mp4Unsupported:
     @typing.final
     class Codec(Mp4Unsupported):
         r"""
-        编码放不进 MP4（只支持 H.264、HEVC、AAC、AC-3、E-AC-3 与采样率不低于 16 kHz 的 MP3）
+        编码放不进 MP4（只支持 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、FLAC、Opus、ALAC 及采样率不低于
+        16 kHz 的 MP3 音频）
         """
         __match_args__ = ("group", "track", "kind", "codec",)
         @property

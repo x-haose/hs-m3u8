@@ -58,6 +58,7 @@ tar -xJf "$TARBALL" -C "$WORK"
 
 # --disable-asm：转封装不经过编解码热点路径，汇编优化无收益，关闭后不依赖 nasm
 # --enable-pic：静态库要链接进 Python 扩展模块（共享库）
+# 解码器只在打开输入时解出开头几帧，补全容器里没写的流参数（如 MP4 封装器写 VP9 的 vpcC 要用的像素格式）
 flags=(
   --prefix="$PREFIX"
   --enable-static --disable-shared --disable-programs --disable-doc --disable-autodetect --disable-network
@@ -67,7 +68,7 @@ flags=(
   --enable-demuxer=mpegts,mov,aac,ac3,eac3,mp3
   --enable-muxer=mp4
   --enable-parser=h264,hevc,aac,ac3,mpegaudio
-  --enable-decoder=h264,hevc,aac
+  --enable-decoder=h264,hevc,aac,vp9
   --enable-bsf=aac_adtstoasc,extract_extradata
 )
 if [[ $PLATFORM == windows ]]; then

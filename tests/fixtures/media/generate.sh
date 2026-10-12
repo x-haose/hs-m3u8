@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # 生成 remux 与 core 的测试样本：ffmpeg 合成画面与正弦音，按 1 秒切成 HLS 分片，不含第三方内容。
 # 每个目录是一条轨在一个不连续段组里的分片（fMP4 另带 init.mp4）；各节目的时间戳都从头开始，
-# 前后拼接即构成 EXT-X-DISCONTINUITY。需要带 libx264、libx265、libmp3lame 的 ffmpeg 命令行。
+# 前后拼接即构成 EXT-X-DISCONTINUITY。需要带 libx264、libx265、libmp3lame、libaom、libvpx、libopus 的
+# ffmpeg 命令行。
 # 产物已提交到仓库，仅在需要重建时运行。
 set -euo pipefail
 
@@ -46,6 +47,19 @@ fmp4_split() {
   done
 }
 
+# fMP4 单轨（画面与声音在同一个分片里）：$1 目录名，其余为输入与编码参数；产出 <目录>/init.mp4 与 seg*.m4s
+fmp4_muxed() {
+  local name=$1
+  shift
+  local out=$TMP/$name
+  mkdir -p "$out"
+  "${ff[@]}" "$@" -f hls -hls_segment_type fmp4 -hls_time 1 -hls_playlist_type vod \
+    -hls_fmp4_init_filename init.mp4 -hls_segment_filename "$out/seg%d.m4s" "$out/index.m3u8"
+  rm -rf -- "${DIR:?}/$name"
+  mkdir -p "$DIR/$name"
+  mv "$out/init.mp4" "$out"/seg*.m4s "$DIR/$name/"
+}
+
 # 节目 A：2 秒；节目 B：1 秒，画面与音高不同
 read -r -a a_src <<< "$(source_args testsrc2 320x180 440 2)"
 read -r -a b_src <<< "$(source_args testsrc 320x180 880 1)"
@@ -66,6 +80,11 @@ ts_segments ts_ac3 "${one_src[@]}" "${h264[@]}" -c:a ac3 -b:a 96k
 ts_segments ts_eac3 "${one_src[@]}" "${h264[@]}" -c:a eac3 -b:a 96k
 ts_segments ts_mp2 "${one_src[@]}" "${h264[@]}" -c:a mp2 -b:a 64k
 ts_segments ts_mp3_8k "${one_src[@]}" "${h264[@]}" -c:a libmp3lame -ar 8000 -b:a 16k
+# 只出现在 fMP4 里的编码：AV1 与 Opus、VP9 与 FLAC、H.264 与 ALAC
+read -r -a tiny_src <<< "$(source_args testsrc2 160x90 440 2)"
+fmp4_muxed fmp4_av1_opus "${tiny_src[@]}" -c:v libaom-av1 -cpu-used 8 -g 25 -b:v 100k -c:a libopus -b:a 48k
+fmp4_muxed fmp4_vp9_flac "${tiny_src[@]}" -c:v libvpx-vp9 -deadline realtime -g 25 -b:v 100k -c:a flac
+fmp4_muxed fmp4_alac "${tiny_src[@]}" -c:v libx264 -preset veryfast -g 25 -b:v 100k -c:a alac
 
 # 打包音频（RFC 8216 3.4）：约 3 秒正弦音的裸音频帧按 1 秒切成 3 片，不带 ID3 标签，测试按要的时间戳加上。$1 目录名，
 # $2 扩展名，其余为编码与切分参数

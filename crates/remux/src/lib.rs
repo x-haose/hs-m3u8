@@ -9,8 +9,8 @@
 //!   一路），未指定种类的流不进输出、不检查编码；同一类流只能来自一条轨；后续组的流布局与编码参数必须与第一组
 //!   一致，参数随帧携带的（TS 与打包音频）在组内也不能变；每路流的解码时间戳必须严格递增（组内不能往回跳或
 //!   重复）。
-//! - 只接受 H.264、HEVC 视频与 AAC、AC-3、E-AC-3、MP3 音频，与 FFmpeg 构建启用的组件一致；MP3 的采样率须不低于
-//!   16 kHz（MP4 封装器不收更低的）。简化：E-AC-3 每帧不足 6 块时 MP4 封装器把相邻几帧并成一个样本，回读的包数与
+//! - 只接受 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、MP3、FLAC、Opus、ALAC 音频，与 FFmpeg 构建启用的组件
+//!   一致；MP3 的采样率须不低于 16 kHz（MP4 封装器不收更低的）。简化：E-AC-3 每帧不足 6 块时 MP4 封装器把相邻几帧并成一个样本，回读的包数与
 //!   写入的对不上，按核对失败报错；遇到这样的来源再改为按块数核对。
 //!
 //! 输出写完回读核对每路流的包数并落盘；失败时输出上可能留有写了一半的文件。输出要么完整、要么不存在由调用方
@@ -71,9 +71,17 @@ impl StreamKind {
 
     fn accepts(self, id: codec::Id, shape: &Shape) -> bool {
         match self {
-            StreamKind::Video => matches!(id, codec::Id::H264 | codec::Id::HEVC),
+            StreamKind::Video => matches!(
+                id,
+                codec::Id::H264 | codec::Id::HEVC | codec::Id::AV1 | codec::Id::VP9
+            ),
             StreamKind::Audio => match id {
-                codec::Id::AAC | codec::Id::AC3 | codec::Id::EAC3 => true,
+                codec::Id::AAC
+                | codec::Id::AC3
+                | codec::Id::EAC3
+                | codec::Id::FLAC
+                | codec::Id::OPUS
+                | codec::Id::ALAC => true,
                 codec::Id::MP3 => {
                     matches!(shape, Shape::Audio { sample_rate, .. } if *sample_rate >= 16_000)
                 }
@@ -243,7 +251,7 @@ pub enum Error {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unsupported {
     #[error(
-        "第 {group} 组第 {track} 条轨的{kind}编码 {codec} 放不进 MP4（只支持 H.264、HEVC、AAC、AC-3、E-AC-3 与采样率不低于 16 kHz 的 MP3）"
+        "第 {group} 组第 {track} 条轨的{kind}编码 {codec} 放不进 MP4（只支持 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、FLAC、Opus、ALAC 及采样率不低于 16 kHz 的 MP3 音频）"
     )]
     Codec {
         group: usize,

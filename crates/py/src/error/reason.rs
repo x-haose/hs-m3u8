@@ -182,7 +182,8 @@ variants! {
 variants! {
     /// 内容放不进 MP4 的原因；可只输出本地 HLS（`Target.Hls`），它原样保留分片，不受这些限制。
     pub enum Mp4Unsupported {
-        /// 编码放不进 MP4（只支持 H.264、HEVC、AAC、AC-3、E-AC-3 与采样率不低于 16 kHz 的 MP3）
+        /// 编码放不进 MP4（只支持 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、FLAC、Opus、ALAC 及采样率不低于
+        /// 16 kHz 的 MP3 音频）
         #[pyo3(constructor = (*, group, track, kind, codec))]
         Codec {
             /// 第几个不连续段组
