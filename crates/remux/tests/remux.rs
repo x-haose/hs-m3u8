@@ -1678,6 +1678,72 @@ fn fmp4_structure_is_checked() {
     }
 }
 
+/// 打包音频连着两片损坏，后一片从第一帧起就在损坏之后（开头的帧头声明 8191 字节，超出分片）：前一片损坏之后的帧结束在
+/// 后一片的时间戳处，后一片的帧结束在再下一片的时间戳处；后一片是最后一片时它的帧定不了时刻，不写入、计入丢弃。
+#[test]
+fn consecutive_damaged_segments_in_packed_audio_are_timed_separately() {
+    let dir = work_dir("packed_damage_consecutive");
+    let output = dir.join("out.mp4");
+    let segments = packed_fixture("aac");
+    let sizes: Vec<Vec<usize>> = segments
+        .iter()
+        .map(|(path, _)| packet_sizes(path))
+        .collect();
+    // 48 kHz 的 AAC 每帧 1024 个采样点，即 1920 个 90 kHz 的 tick
+    let frame = 1920;
+    let (t0, t1) = (900_000, 900_000 + segments[0].1);
+    let t2 = t1 + segments[1].1;
+    let mut a = std::fs::read(&segments[0].0).unwrap();
+    a[sizes[0][..10].iter().sum::<usize>()] = 0;
+    let a_path = dir.join("a");
+    std::fs::write(&a_path, a).unwrap();
+    let seg1 = std::fs::read(&segments[1].0).unwrap();
+    let mut oversized = seg1[..7].to_vec();
+    oversized[3] |= 0x03;
+    oversized[4] = 0xFF;
+    oversized[5] |= 0xE0;
+    let twenty: usize = sizes[1][..20].iter().sum();
+    let b_path = dir.join("b");
+    std::fs::write(&b_path, [oversized, seg1[..twenty].to_vec()].concat()).unwrap();
+    let n0 = sizes[0].len();
+    let lost_in_a = sizes[0][10] as u64 + 7;
+
+    let three = TrackSegments {
+        init: None,
+        segments: vec![
+            packed_segment(&dir, &a_path, Some(t0)),
+            packed_segment(&dir, &b_path, Some(t1)),
+            packed_segment(&dir, &segments[2].0, Some(t2)),
+        ],
+        gaps: Vec::new(),
+    };
+    let report = remux(&[Streams::Audio], &[group([three])], &output).unwrap();
+    let n2 = sizes[2].len();
+    assert_eq!(report.streams[0].packets, (n0 - 1 + 20 + n2) as u64);
+    assert_eq!(report.streams[0].discarded_corrupt_bytes, lost_in_a);
+    let a_out = timelines(&output).1;
+    let ticks = |seconds: f64| ((seconds - a_out[0].0) * 90_000.0).round() as u64;
+    assert_eq!(ticks(a_out[10].0), 11 * frame);
+    assert_eq!(ticks(a_out[n0 - 2].0), (n0 as u64 - 1) * frame);
+    assert_eq!(ticks(a_out[n0 - 1].0), t2 - t0 - 20 * frame);
+    assert_eq!(ticks(a_out[n0 - 1 + 20].0), t2 - t0);
+
+    let two = TrackSegments {
+        init: None,
+        segments: vec![
+            packed_segment(&dir, &a_path, Some(t0)),
+            packed_segment(&dir, &b_path, Some(t1)),
+        ],
+        gaps: Vec::new(),
+    };
+    let report = remux(&[Streams::Audio], &[group([two])], &output).unwrap();
+    assert_eq!(report.streams[0].packets, (n0 - 1) as u64);
+    assert_eq!(
+        report.streams[0].discarded_corrupt_bytes,
+        lost_in_a + twenty as u64
+    );
+}
+
 /// 缺片下标须升序、在 1 到分片数减 1 之间。
 #[test]
 fn invalid_gaps_are_rejected() {

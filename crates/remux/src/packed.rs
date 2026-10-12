@@ -43,7 +43,7 @@ pub(crate) struct Packed {
     audio: Option<usize>,
     /// 当前分片的下标与它的音频包要加的偏移（以音频流的时间基为单位）；读到它第一个带 DTS 的音频包时确定
     current: Option<(usize, i64)>,
-    /// 一个分片损坏之后的音频包（按读出的顺序，都带 DTS），读完这一片后定时刻
+    /// 一个分片的下标与它损坏之后的音频包（按读出的顺序，都带 DTS），读完这一片后定时刻（见 [`Packed::settle`]）
     pending: Option<(usize, Vec<Packet>)>,
     /// 已定好时刻、待交出的包
     ready: VecDeque<Packet>,
@@ -147,10 +147,10 @@ impl Packed {
                 return Ok(true);
             }
             if !read_packet(&mut self.ictx, &self.failure, packet, group, track)? {
-                if self.pending.is_none() {
+                let Some((segment, packets)) = self.pending.take() else {
                     return Ok(false);
-                }
-                self.settle_pending();
+                };
+                self.settle(segment, packets);
                 continue;
             }
             let Some(timestamps) = &self.timestamps else {
@@ -164,6 +164,12 @@ impl Packed {
             // 第一个分片从 0 起，位置总能归到某一片
             let segment = self.starts.partition_point(|&start| start <= position) - 1;
             if self.resumes[segment].is_some_and(|resume| position >= resume) {
+                // 上一片损坏之后暂存的包读完了（这一片从开头就在损坏之后时，中间没有不暂存的包）
+                if let Some((earlier, packets)) =
+                    self.pending.take_if(|(pending, _)| *pending != segment)
+                {
+                    self.settle(earlier, packets);
+                }
                 let taken = std::mem::replace(packet, Packet::empty());
                 self.pending
                     .get_or_insert_with(|| (segment, Vec::new()))
@@ -180,10 +186,10 @@ impl Packed {
                 }
             };
             shifted(packet, shift);
-            if self.pending.is_none() {
+            let Some((earlier, packets)) = self.pending.take() else {
                 return Ok(true);
-            }
-            self.settle_pending();
+            };
+            self.settle(earlier, packets);
             self.ready
                 .push_back(std::mem::replace(packet, Packet::empty()));
         }
@@ -196,12 +202,9 @@ impl Packed {
         unwrap_pts(timestamp, first).rescale(CLOCK_90K, time_base)
     }
 
-    /// 一个分片损坏之后的包读完了：下一片在输入里且紧接这一片时，平移到最后一包结束在下一片的时间戳处、待交出；否则
-    /// 定不了时刻，计入丢弃。
-    fn settle_pending(&mut self) {
-        let Some((segment, packets)) = self.pending.take() else {
-            return;
-        };
+    /// 第 `segment` 片损坏之后的包 `packets`（至少一个）读完了：下一片在输入里且紧接这一片时，平移到最后一包结束在下一片
+    /// 的时间戳处、待交出；否则定不了时刻，计入丢弃。
+    fn settle(&mut self, segment: usize, packets: Vec<Packet>) {
         if !self.followed[segment] {
             self.discarded += packets.iter().map(|p| p.size() as u64).sum::<u64>();
             return;
