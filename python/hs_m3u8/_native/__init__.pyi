@@ -492,7 +492,7 @@ class HttpError(HsM3u8Error):
         请求的地址（可能带令牌；异常的说明里只显示到路径）
         """
     @property
-    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
+    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport | HttpErrorKind.Incomplete:
         r"""
         失败的原因
         """
@@ -610,6 +610,14 @@ class HttpErrorKind:
             """
         def __new__(cls, detail: builtins.str) -> HttpErrorKind.Transport: ...
     
+    @typing.final
+    class Incomplete(HttpErrorKind):
+        r"""
+        内容没有写完：fMP4 的顶层 box 超出了数据，或末尾的字节凑不成 box 头，多为源站还在写这个文件
+        """
+        __match_args__ = ()
+        def __new__(cls) -> HttpErrorKind.Incomplete: ...
+    
 
 @typing.final
 class HttpFailure:
@@ -617,14 +625,14 @@ class HttpFailure:
     取不到的请求：失败的原因，与服务器要求的最短等待。
     """
     @property
-    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
+    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport | HttpErrorKind.Incomplete:
         r"""
         失败的原因
         """
     @property
     def retryable(self) -> builtins.bool:
         r"""
-        临时故障，重试可能成功：超时、连接与传输错误，408、429 与 5xx
+        临时故障，重试可能成功：超时、连接与传输错误，内容没有写完，408、429 与 5xx
         """
     @property
     def retry_after(self) -> typing.Optional[builtins.int]:
@@ -690,7 +698,7 @@ class IntegrityError(SourceError):
         出错的分片或 init 段的地址
         """
     @property
-    def reason(self) -> IntegrityFailure.Padding | IntegrityFailure.CipherLength | IntegrityFailure.RangeLength | IntegrityFailure.UnrecognizedSegment | IntegrityFailure.NotFmp4 | IntegrityFailure.Fmp4Boxes | IntegrityFailure.Fmp4BoxTooLarge:
+    def reason(self) -> IntegrityFailure.Padding | IntegrityFailure.CipherLength | IntegrityFailure.RangeLength | IntegrityFailure.UnrecognizedSegment | IntegrityFailure.NotFmp4 | IntegrityFailure.Fmp4BoxSize | IntegrityFailure.Fmp4BoxTooLarge:
         r"""
         失败的原因
         """
@@ -775,27 +783,23 @@ class IntegrityFailure:
         def __new__(cls, head: builtins.str) -> IntegrityFailure.NotFmp4: ...
     
     @typing.final
-    class Fmp4Boxes(IntegrityFailure):
+    class Fmp4BoxSize(IntegrityFailure):
         r"""
-        fMP4 不完整：顶层 box 没有恰好铺满数据（多为源站给出了没写完的文件）
+        fMP4 顶层 box 的长度字段小于 box 头的长度（8 字节，64 位长度时 16 字节）；没写完的报
+        `HttpErrorKind.Incomplete`
         """
-        __match_args__ = ("at", "end", "len",)
+        __match_args__ = ("at", "size",)
         @property
         def at(self) -> builtins.int:
             r"""
-            出问题的 box 的起点，字节
+            这个 box 的起点，字节
             """
         @property
-        def end(self) -> builtins.int:
+        def size(self) -> builtins.int:
             r"""
-            这个 box 应到的位置，字节
+            长度字段的值，字节
             """
-        @property
-        def len(self) -> builtins.int:
-            r"""
-            数据的字节数
-            """
-        def __new__(cls, *, at: builtins.int, end: builtins.int, len: builtins.int) -> IntegrityFailure.Fmp4Boxes: ...
+        def __new__(cls, *, at: builtins.int, size: builtins.int) -> IntegrityFailure.Fmp4BoxSize: ...
     
     @typing.final
     class Fmp4BoxTooLarge(IntegrityFailure):
@@ -1378,7 +1382,7 @@ class MissReason:
         """
         __match_args__ = ("kind",)
         @property
-        def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
+        def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport | HttpErrorKind.Incomplete:
             r"""
             失败的原因
             """
@@ -1391,7 +1395,7 @@ class MissReason:
         """
         __match_args__ = ("kind",)
         @property
-        def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
+        def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport | HttpErrorKind.Incomplete:
             r"""
             失败的原因
             """
@@ -2370,8 +2374,8 @@ class Resolution:
 @typing.final
 class RetryPolicy:
     r"""
-    单个请求的重试策略：可重试的失败（超时、连接与传输错误，408、429 与 5xx）按指数退避重试。默认 8 次、0.5 秒起、
-    上限 15 秒：重试前的等待合计约 45 秒，足以越过常见的短时故障。
+    单个请求的重试策略：可重试的失败（超时、连接与传输错误，fMP4 内容没有写完，408、429 与 5xx）按指数退避重试。
+    默认 8 次、0.5 秒起、上限 15 秒：重试前的等待合计约 45 秒，足以越过常见的短时故障。
     """
     @property
     def attempts(self) -> builtins.int:

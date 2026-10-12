@@ -1,10 +1,11 @@
-//! 分片内容校验：拦下解密错误、伪装页面、错误响应等不是媒体数据的内容，不写盘。
+//! 分片内容校验：拦下解密错误、伪装页面、错误响应等不是媒体数据的内容与没写完的 fMP4，不写盘。
 
 use std::io::Cursor;
 
 use hs_m3u8_remux::standalone;
+use url::Url;
 
-use crate::Integrity;
+use crate::{Error, HttpError, Integrity};
 
 /// 没有 init 段的分片须能识别出格式（见 [`standalone::read_head`]）。
 pub(crate) fn check_standalone_segment(data: &[u8]) -> Result<(), Integrity> {
@@ -14,44 +15,70 @@ pub(crate) fn check_standalone_segment(data: &[u8]) -> Result<(), Integrity> {
     }
 }
 
+/// fMP4 校验失败的原因。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Fmp4Error {
+    /// 没写完：顶层 box 超出了数据，或末尾的字节凑不成 box 头
+    Incomplete,
+    Invalid(Integrity),
+}
+
+impl Fmp4Error {
+    /// 取自 `url` 的数据的失败：没写完的是可重试的请求失败（[`HttpError::Incomplete`]），其余为校验失败。
+    pub(crate) fn at(self, url: &Url) -> Error {
+        let url = Box::new(url.clone());
+        match self {
+            Fmp4Error::Incomplete => Error::Http {
+                url,
+                kind: HttpError::Incomplete,
+                retry_after: None,
+            },
+            Fmp4Error::Invalid(kind) => Error::Integrity { url, kind },
+        }
+    }
+}
+
 /// fMP4 分片或 init 段：以认得的 ISO BMFF box 开头，顶层 box 首尾相接、恰好铺满数据。只看开头时，截断的分片（源站给出
 /// 没写完的文件）能通过，合并时 mov 解复用器按 mdat 声明的长度越过它，读进下一个分片的字节。最后一个 box 的长度写为
 /// 0（到数据末尾）时改写成实际长度：合并时一条轨的 init 段与分片接成一个输入读，到末尾就成了到所有分片的末尾。
-pub(crate) fn check_fmp4(data: &mut [u8]) -> Result<(), Integrity> {
+pub(crate) fn check_fmp4(data: &mut [u8]) -> Result<(), Fmp4Error> {
     const BOXES: [&[u8; 4]; 9] = [
         b"ftyp", b"styp", b"moof", b"moov", b"sidx", b"emsg", b"prft", b"free", b"skip",
     ];
     if !(data.len() >= 8 && BOXES.iter().any(|b| &data[4..8] == *b)) {
-        return Err(Integrity::NotFmp4(head(data)));
+        return Err(Fmp4Error::Invalid(Integrity::NotFmp4(head(data))));
     }
     let len = data.len() as u64;
     let mut at = 0;
     while at < len {
         let rest = &data[at as usize..];
-        let field = |range: std::ops::Range<usize>| rest.get(range);
-        let (header, size) =
-            match field(0..4).map(|b| u32::from_be_bytes(b.try_into().expect("切片长 4"))) {
-                None => (8, 0),
-                Some(0) => (8, len - at),
-                // 长度为 1：真实长度是头之后的 64 位整数
-                Some(1) => match field(8..16) {
-                    Some(b) => (16, u64::from_be_bytes(b.try_into().expect("切片长 8"))),
-                    None => (16, 0),
-                },
-                Some(size) => (8, u64::from(size)),
-            };
-        let to_end = field(0..4) == Some(&[0; 4]);
-        let end = at.saturating_add(size.max(header));
-        if size < header || end > len {
-            return Err(Integrity::Fmp4Boxes { at, end, len });
+        if rest.len() < 8 {
+            return Err(Fmp4Error::Incomplete);
         }
-        if to_end {
+        let field: [u8; 4] = rest[..4].try_into().expect("切片长 4");
+        let (header, size) = match u32::from_be_bytes(field) {
+            0 => (8, len - at),
+            // 长度为 1：真实长度是头之后的 64 位整数
+            1 => {
+                let large = rest.get(8..16).ok_or(Fmp4Error::Incomplete)?;
+                (16, u64::from_be_bytes(large.try_into().expect("切片长 8")))
+            }
+            size => (8, u64::from(size)),
+        };
+        if size < header {
+            return Err(Fmp4Error::Invalid(Integrity::Fmp4BoxSize { at, size }));
+        }
+        if size > len - at {
+            return Err(Fmp4Error::Incomplete);
+        }
+        if field == [0; 4] {
             // 64 位的长度要多 8 字节的头，原地放不下
-            let field = u32::try_from(size).map_err(|_| Integrity::Fmp4BoxTooLarge { at, size })?;
+            let actual = u32::try_from(size)
+                .map_err(|_| Fmp4Error::Invalid(Integrity::Fmp4BoxTooLarge { at, size }))?;
             let at = at as usize;
-            data[at..at + 4].copy_from_slice(&field.to_be_bytes());
+            data[at..at + 4].copy_from_slice(&actual.to_be_bytes());
         }
-        at = end;
+        at += size;
     }
     Ok(())
 }
@@ -121,36 +148,27 @@ mod tests {
         // 第一个 box 认不出
         assert_eq!(
             check(boxed(16, b"mdat", 8)),
-            Err(Integrity::NotFmp4(
+            Err(Fmp4Error::Invalid(Integrity::NotFmp4(
                 "00 00 00 10 6d 64 61 74 00 00 00 00 00 00 00 00".into()
-            ))
+            )))
         );
         assert!(check(boxed(16, b"html", 8)).is_err());
         assert!(check(b"moof".to_vec()).is_err());
-        // mdat 截断、末尾多出凑不成 box 头的字节、长度字段小于头长
+        // 没写完：mdat 截断、末尾多出凑不成 box 头的字节、64 位长度不全
+        let incomplete = Err(Fmp4Error::Incomplete);
+        assert_eq!(check(segment[..segment.len() - 2].to_vec()), incomplete);
+        assert_eq!(check([segment.clone(), vec![0; 3]].concat()), incomplete);
         assert_eq!(
-            check(segment[..segment.len() - 2].to_vec()),
-            Err(Integrity::Fmp4Boxes {
-                at: 16,
-                end: 28,
-                len: 26
-            })
+            check([segment.clone(), boxed(1, b"mdat", 4)].concat()),
+            incomplete
         );
-        assert_eq!(
-            check([segment.clone(), vec![0; 3]].concat()),
-            Err(Integrity::Fmp4Boxes {
-                at: 28,
-                end: 36,
-                len: 31
-            })
-        );
+        // 长度字段小于头长
         assert_eq!(
             check(boxed(7, b"moof", 0)),
-            Err(Integrity::Fmp4Boxes {
+            Err(Fmp4Error::Invalid(Integrity::Fmp4BoxSize {
                 at: 0,
-                end: 8,
-                len: 8
-            })
+                size: 7
+            }))
         );
     }
 }

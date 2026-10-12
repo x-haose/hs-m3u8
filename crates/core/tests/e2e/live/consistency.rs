@@ -48,7 +48,7 @@ async fn renumbered_discontinuities_keep_their_groups() {
                  #EXTINF:1,\nseg1.ts\n#EXTINF:1,\nseg2.ts\n";
     let second = "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MEDIA-SEQUENCE:2\n\
                   #EXTINF:1,\nseg2.ts\n#EXTINF:1,\nseg3.ts\n#EXT-X-ENDLIST\n";
-    server.put_sequence("live.m3u8", vec![first.into(), second.into()]);
+    server.put_sequence("live.m3u8", vec![first, second]);
 
     let output = run(live_request(server.url("live.m3u8"), &dir, STALL))
         .await
@@ -68,7 +68,7 @@ async fn window_jump_with_renumbered_discontinuities_starts_a_new_group() {
                  #EXTINF:1,\nseg1.ts\n";
     let second = "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MEDIA-SEQUENCE:3\n\
                   #EXTINF:1,\nseg3.ts\n#EXT-X-ENDLIST\n";
-    server.put_sequence("live.m3u8", vec![first.into(), second.into()]);
+    server.put_sequence("live.m3u8", vec![first, second]);
 
     let output = run(live_request(server.url("live.m3u8"), &dir, STALL))
         .await
@@ -91,7 +91,7 @@ async fn stale_older_window_is_not_inconsistent() {
                  #EXTINF:1,\nseg1.ts\n#EXTINF:1,\nseg2.ts\n";
     let third = "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MEDIA-SEQUENCE:1\n\
                  #EXTINF:1,\nseg1.ts\n#EXTINF:1,\nseg2.ts\n#EXTINF:1,\nseg3.ts\n#EXT-X-ENDLIST\n";
-    server.put_sequence("live.m3u8", vec![first.into(), stale.into(), third.into()]);
+    server.put_sequence("live.m3u8", vec![first, stale, third]);
 
     let output = run(live_request(server.url("live.m3u8"), &dir, STALL))
         .await

@@ -50,6 +50,8 @@ variants! {
             /// 说明
             detail: String,
         },
+        /// 内容没有写完：fMP4 的顶层 box 超出了数据，或末尾的字节凑不成 box 头，多为源站还在写这个文件
+        Incomplete {},
     }
 }
 
@@ -58,7 +60,7 @@ record! {
     pub struct HttpFailure {
         /// 失败的原因
         pub kind: HttpErrorKind,
-        /// 临时故障，重试可能成功：超时、连接与传输错误，408、429 与 5xx
+        /// 临时故障，重试可能成功：超时、连接与传输错误，内容没有写完，408、429 与 5xx
         pub retryable: bool,
         /// 服务器在 429/503 中要求（Retry-After）的最短等待，秒；没有要求时为 None
         pub retry_after: Option<u64>,
@@ -390,6 +392,7 @@ impl From<core::HttpError> for HttpErrorKind {
             core::HttpError::Connect(detail) => HttpErrorKind::Connect { detail },
             core::HttpError::InvalidRequest(detail) => HttpErrorKind::InvalidRequest { detail },
             core::HttpError::Transport(detail) => HttpErrorKind::Transport { detail },
+            core::HttpError::Incomplete => HttpErrorKind::Incomplete {},
         }
     }
 }

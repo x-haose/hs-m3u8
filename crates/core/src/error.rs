@@ -317,13 +317,19 @@ pub enum HttpError {
     /// 读取响应体等其他传输错误
     #[error("{0}")]
     Transport(String),
+    /// 内容没有写完：fMP4 的顶层 box 超出了数据，或末尾的字节凑不成 box 头，多为源站还在写这个文件
+    #[error("内容没有写完（fMP4 的 box 超出了数据）")]
+    Incomplete,
 }
 
 impl HttpError {
     pub fn retryable(&self) -> bool {
         match self {
             HttpError::Status(code) => matches!(code, 408 | 429 | 500..=599),
-            HttpError::Timeout | HttpError::Connect(_) | HttpError::Transport(_) => true,
+            HttpError::Timeout
+            | HttpError::Connect(_)
+            | HttpError::Transport(_)
+            | HttpError::Incomplete => true,
             HttpError::RangeIgnored(_)
             | HttpError::Certificate(_)
             | HttpError::Redirect(_)
@@ -345,10 +351,10 @@ pub enum Integrity {
     UnrecognizedSegment(String),
     #[error("不是 fMP4（开头 {0}）")]
     NotFmp4(String),
-    /// fMP4 的顶层 box 没有恰好铺满数据：从 `at` 起的 box 应到第 `end` 字节，数据只有 `len` 字节（多为源站给出了没写完
-    /// 的文件），或末尾的字节凑不成 box 头、box 的长度字段小于头长
-    #[error("fMP4 不完整：第 {at} 字节起的 box 应到第 {end} 字节，数据有 {len} 字节")]
-    Fmp4Boxes { at: u64, end: u64, len: u64 },
+    /// fMP4 从第 `at` 字节起的顶层 box 的长度字段 `size` 小于 box 头的长度（8 字节，64 位长度时 16 字节）。没写完的
+    /// 报 [`HttpError::Incomplete`]
+    #[error("fMP4 第 {at} 字节起的 box 长度 {size} 小于 box 头")]
+    Fmp4BoxSize { at: u64, size: u64 },
     /// fMP4 最后一个顶层 box 的长度写为 0（到数据末尾），实际的 `size` 字节写不进 32 位的长度字段：存盘前要改写成实际
     /// 长度（合并时一条轨的分片接成一个输入读）
     #[error(

@@ -607,15 +607,16 @@ async fn wrong_key_fails_integrity() {
     assert_eq!(written, 0, "校验失败的分片不应写盘");
 }
 
-/// 源站给出没写完的 fMP4 分片（mdat 截断，Content-Length 与截断后的长度一致）：下载时校验失败、不写盘，不合并出把下一个
-/// 分片的字节读成这一片样本的 MP4。
+/// 源站给出没写完的 fMP4 分片（mdat 截断，Content-Length 与截断后的长度一致）：重新取，取到完整的照常合并；一直没写完
+/// 时按重试策略取完次数后失败（可重试），不写盘，不合并出把下一个分片的字节读成这一片样本的 MP4。
 #[tokio::test(flavor = "multi_thread")]
-async fn a_truncated_fmp4_segment_fails_integrity() {
+async fn a_truncated_fmp4_segment_is_fetched_again() {
     let dir = test_dir("truncated_fmp4");
     let server = Server::start().await;
     let seg0 = fixture("fmp4_a/video/seg0.m4s");
+    let truncated = seg0[..seg0.len() * 9 / 10].to_vec();
     server.put("init.mp4", fixture("fmp4_a/video/init.mp4"));
-    server.put("seg0.m4s", seg0[..seg0.len() * 9 / 10].to_vec());
+    server.put_sequence("seg0.m4s", vec![truncated.clone(), seg0]);
     server.put("seg1.m4s", fixture("fmp4_a/video/seg1.m4s"));
     server.put(
         "index.m3u8",
@@ -623,15 +624,30 @@ async fn a_truncated_fmp4_segment_fails_integrity() {
          #EXTINF:1,\nseg0.m4s\n#EXTINF:1,\nseg1.m4s\n#EXT-X-ENDLIST\n",
     );
 
+    let output = run(request(server.url("index.m3u8"), &dir)).await.unwrap();
+    let tracks = vec![track(
+        "fmp4_a/video",
+        Some("init.mp4"),
+        &["seg0.m4s", "seg1.m4s"],
+    )];
+    assert_output(
+        &output,
+        &expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]),
+    );
+    assert_eq!(server.hits("seg0.m4s"), 2);
+
+    std::fs::remove_file(dir.join("out.mp4")).unwrap();
+    server.put("seg0.m4s", truncated);
     let err = run(request(server.url("index.m3u8"), &dir))
         .await
         .unwrap_err();
+    assert!(err.retryable(), "{err}");
     match err {
         Error::Segment { cause, .. } => assert!(
             matches!(
                 *cause,
-                Error::Integrity {
-                    kind: Integrity::Fmp4Boxes { .. },
+                Error::Http {
+                    kind: HttpError::Incomplete,
                     ..
                 }
             ),
@@ -639,6 +655,7 @@ async fn a_truncated_fmp4_segment_fails_integrity() {
         ),
         other => panic!("{other}"),
     }
+    assert_eq!(server.hits("seg0.m4s"), 2 + 3);
 }
 
 /// fMP4 数据里最后一个顶层 box 的起点（各 box 的长度都写在 32 位字段里）。

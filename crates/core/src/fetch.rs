@@ -205,25 +205,27 @@ async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
     (id, result)
 }
 
-/// 拉取 init 段并校验是 fMP4（见 [`check_fmp4`]，可能改写最后一个 box 的长度字段）。
+/// 拉取 init 段并校验是 fMP4（见 [`check_fmp4`]，可能改写最后一个 box 的长度字段）；没写完的与请求的临时故障一起
+/// 重试。
 pub(crate) async fn fetch_init(
     http: &Http,
     init: &InitSection,
     permit: Permit,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>, Error> {
-    let mut data = http
-        .get(Purpose::Init, &init.uri, init.byte_range, permit, cancel)
-        .await?
-        .body;
-    check_fmp4(&mut data).map_err(|kind| Error::Integrity {
-        url: Box::new(init.uri.clone()),
-        kind,
-    })?;
-    Ok(data)
+    http.retrying(&init.uri, cancel, || async move {
+        let mut data = http
+            .get_once(Purpose::Init, &init.uri, init.byte_range, permit, cancel)
+            .await?
+            .body;
+        check_fmp4(&mut data).map_err(|e| e.at(&init.uri))?;
+        Ok(data)
+    })
+    .await
 }
 
-/// 拉取分片，经 `on_segment` 回调后解密并校验内容（fMP4 见 [`check_fmp4`]）；有自定义 key 时用它解密。
+/// 拉取分片，经 `on_segment` 回调后解密并校验内容（fMP4 见 [`check_fmp4`]）；有自定义 key 时用它解密。请求、回调、
+/// 解密与校验作为一次尝试，没写完的 fMP4 与请求的临时故障一起重试。
 async fn fetch_segment(
     ctx: &Ctx,
     segment: &Segment,
@@ -234,36 +236,39 @@ async fn fetch_segment(
         (Some(key), Some(given)) => Some((given.key, given.iv.unwrap_or(key.iv))),
         (Some(key), None) => Some((key_for(ctx, &key.uri, cancel).await?, key.iv)),
     };
-    let body = ctx
-        .http
-        .get(
-            Purpose::Segment,
-            &segment.uri,
-            segment.byte_range,
-            Permit::Required,
-            cancel,
-        )
-        .await?
-        .body;
-    let url = segment.uri.clone();
-    let data = run_hook(&ctx.hooks, HookKind::Segment, move |hooks| {
-        hooks.on_segment(&url, body)
-    })
-    .await?;
-    let integrity = |kind: Integrity| Error::Integrity {
-        url: Box::new(segment.uri.clone()),
-        kind,
-    };
-    let mut data = match key {
-        Some((key, iv)) => decrypt(data, &key, &iv).map_err(integrity)?,
-        None => data,
-    };
-    match segment.init {
-        Some(_) => check_fmp4(&mut data),
-        None => check_standalone_segment(&data),
-    }
-    .map_err(integrity)?;
-    Ok(data)
+    ctx.http
+        .retrying(&segment.uri, cancel, || async move {
+            let body = ctx
+                .http
+                .get_once(
+                    Purpose::Segment,
+                    &segment.uri,
+                    segment.byte_range,
+                    Permit::Required,
+                    cancel,
+                )
+                .await?
+                .body;
+            let url = segment.uri.clone();
+            let data = run_hook(&ctx.hooks, HookKind::Segment, move |hooks| {
+                hooks.on_segment(&url, body)
+            })
+            .await?;
+            let integrity = |kind: Integrity| Error::Integrity {
+                url: Box::new(segment.uri.clone()),
+                kind,
+            };
+            let mut data = match key {
+                Some((key, iv)) => decrypt(data, &key, &iv).map_err(integrity)?,
+                None => data,
+            };
+            match segment.init {
+                Some(_) => check_fmp4(&mut data).map_err(|e| e.at(&segment.uri))?,
+                None => check_standalone_segment(&data).map_err(integrity)?,
+            }
+            Ok(data)
+        })
+        .await
 }
 
 /// 取 key：同一地址只拉取一次。`on_key` 回调不改时拉到的必须是 16 字节。拉取失败不缓存，下次重新拉取。

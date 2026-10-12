@@ -251,6 +251,44 @@ async fn unavailable_segments_are_reported_as_missed() {
     );
 }
 
+/// fMP4 分片一直没写完（mdat 截断）：按重试策略取完次数后仍不完整，记为缺失，录制继续。
+#[tokio::test(flavor = "multi_thread")]
+async fn segments_still_incomplete_after_retries_are_missed() {
+    let dir = test_dir("live_incomplete");
+    let server = Server::start().await;
+    for name in ["init.mp4", "seg0.m4s"] {
+        server.put(
+            &format!("video/{name}"),
+            fixture(&format!("fmp4_a/video/{name}")),
+        );
+    }
+    let seg1 = fixture("fmp4_a/video/seg1.m4s");
+    server.put("video/seg1.m4s", seg1[..seg1.len() / 2].to_vec());
+    server.put_sequence(
+        "video.m3u8",
+        vec![
+            signed_fmp4_playlist("video", "0.1", 2, 0, false),
+            signed_fmp4_playlist("video", "0.1", 2, 0, true),
+        ],
+    );
+
+    let output = run(live_request(server.url("video.m3u8"), &dir, STALL))
+        .await
+        .unwrap();
+
+    let tracks = vec![track("fmp4_a/video", Some("init.mp4"), &["seg0.m4s"])];
+    assert_output(
+        &output,
+        &expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]),
+    );
+    let incomplete = MissReason::Failed(HttpError::Incomplete);
+    assert_eq!(
+        output.live,
+        report(LiveEnd::EndList, 1, vec![missed(1, 1, incomplete)])
+    );
+    assert_eq!(server.hits("video/seg1.m4s"), 3);
+}
+
 /// 录到的时长达到 max_duration 即停止。
 #[tokio::test(flavor = "multi_thread")]
 async fn max_duration_limits_recording() {

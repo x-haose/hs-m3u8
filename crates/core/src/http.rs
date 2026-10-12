@@ -101,8 +101,7 @@ impl Http {
         })
     }
 
-    /// GET `url`；`range` 不为空时只取这段字节。可重试的失败按 [`RetryPolicy`] 重试；
-    /// 服务器要求的等待超过 `max_delay` 时不再重试，错误里带上它要求的等待。
+    /// GET `url`；`range` 不为空时只取这段字节。失败按 [`Http::retrying`] 重试。
     pub(crate) async fn get(
         &self,
         purpose: Purpose,
@@ -111,29 +110,47 @@ impl Http {
         permit: Permit,
         cancel: &CancellationToken,
     ) -> Result<Response, Error> {
-        let mut attempt = 1;
+        self.retrying(url, cancel, || {
+            self.get_once(purpose, url, range, permit, cancel)
+        })
+        .await
+    }
+
+    /// 反复做 `attempt` 直到成功：可重试的失败（[`Error::retryable`]）按 [`RetryPolicy`] 退避后再做，`url` 决定退避
+    /// 的抖动；服务器要求的等待超过 `max_delay` 时不再重试，错误里带上它要求的等待。
+    pub(crate) async fn retrying<T, F>(
+        &self,
+        url: &Url,
+        cancel: &CancellationToken,
+        mut attempt: impl FnMut() -> F,
+    ) -> Result<T, Error>
+    where
+        F: Future<Output = Result<T, Error>>,
+    {
+        let mut tried = 1;
         loop {
-            let error = match self.attempt(purpose, url, range, permit, cancel).await {
-                Ok(response) => return Ok(response),
+            let error = match attempt().await {
+                Ok(value) => return Ok(value),
                 Err(error) => error,
             };
             let asked = error.retry_after().unwrap_or_default();
             if !error.retryable()
-                || attempt >= self.retry.attempts.get()
+                || tried >= self.retry.attempts.get()
                 || asked > self.retry.max_delay
             {
                 return Err(error);
             }
-            let delay = self.backoff(url, attempt).max(asked);
+            let delay = self.backoff(url, tried).max(asked);
             tokio::select! {
                 _ = cancel.cancelled() => return Err(Error::Cancelled),
                 _ = tokio::time::sleep(delay) => {}
             }
-            attempt += 1;
+            tried += 1;
         }
     }
 
-    async fn attempt(
+    /// GET `url` 一次，不重试；调用方连同对内容的处理一起交给 [`Http::retrying`]。
+    pub(crate) async fn get_once(
         &self,
         purpose: Purpose,
         url: &Url,

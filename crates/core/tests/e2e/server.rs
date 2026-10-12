@@ -68,8 +68,8 @@ impl Server {
     }
 
     /// 依次返回 `bodies`：放入后的第 n 次请求得到第 n 个，之后一直是最后一个。
-    pub(crate) fn put_sequence(&self, path: &str, bodies: Vec<String>) {
-        let entry = Entry::Sequence(bodies.into_iter().map(String::into_bytes).collect());
+    pub(crate) fn put_sequence(&self, path: &str, bodies: Vec<impl Into<Vec<u8>>>) {
+        let entry = Entry::Sequence(bodies.into_iter().map(Into::into).collect());
         self.insert_counted(path, entry);
     }
 
