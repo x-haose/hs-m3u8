@@ -244,10 +244,10 @@ record! {
         pub packets: u64,
         /// 输入中没有解码时间戳、因而未写入的包数
         pub skipped_without_dts: u64,
-        /// 损坏而没有写入的音频：TS 里为读不出帧头或帧长与包长对不上的包（来源丢了 TS 包，或缺片处 PES 不完整，拼出
-        /// 的包），打包音频里为切帧时跳过的损坏处（不完整的帧或标签、认不出的字节，一处算一个）。视频包照常写入，由
-        /// 解码器做错误隐藏
-        pub discarded_corrupt: u64,
+        /// 损坏而没有写入的音频字节数：TS 里读不出帧头或帧长与包长对不上的包（来源丢了 TS 包，或缺片处 PES 不完整，
+        /// 拼出的包），打包音频里切帧时跳过的不完整的帧或标签、认不出的字节，以及最后一片里损坏之后定不了时刻的帧。
+        /// 视频包照常写入，由解码器做错误隐藏
+        pub discarded_corrupt_bytes: u64,
         /// 输出时间线上从最早的呈现时刻到最晚的结束时刻；含组内时间戳间断（如缺失的分片）留下的空档
         pub duration: Duration,
     }
@@ -534,7 +534,7 @@ impl From<core::remux::StreamReport> for StreamReport {
             shape: s.shape.into(),
             packets: s.packets,
             skipped_without_dts: s.skipped_without_dts,
-            discarded_corrupt: s.discarded_corrupt,
+            discarded_corrupt_bytes: s.discarded_corrupt_bytes,
             duration: Duration::from_micros(s.duration_us),
         }
     }

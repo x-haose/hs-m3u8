@@ -792,14 +792,13 @@ fn audio_damaged_at_a_missing_segment_is_dropped_and_counted() {
         panic!("应有视频与音频两路流：{report:?}");
     };
     assert_eq!(
-        (video.packets, video.discarded_corrupt),
+        (video.packets, video.discarded_corrupt_bytes),
         (v_in.len() as u64, 0)
     );
     // 缺片处前后两段拼成的只有一两个包；解复用器给整个 PES 打的损坏标志不作数
-    assert!((1..=2).contains(&audio.discarded_corrupt), "{audio:?}");
-    assert_eq!(
-        audio.packets + audio.discarded_corrupt,
-        a_in.len() as u64,
+    let lost = a_in.len() as u64 - audio.packets;
+    assert!(
+        (1..=2).contains(&lost) && audio.discarded_corrupt_bytes > 0,
         "{audio:?}"
     );
 }
@@ -862,7 +861,7 @@ fn audio_in_pes_flagged_corrupt_but_intact_is_kept() {
 
         let audio = &report.streams[1];
         assert_eq!(
-            (audio.packets, audio.discarded_corrupt),
+            (audio.packets, audio.discarded_corrupt_bytes),
             (a_in.len() as u64, 0),
             "多报长度 {overstate}"
         );
@@ -1420,37 +1419,78 @@ fn packed_mp3_info_frames_and_id3v1_tags_are_skipped() {
     );
 }
 
-/// 打包音频损坏：帧之间有认不出的字节、最后一帧不完整。跳过损坏处、各算一处，其余的帧照常写入。
+/// 文件里各包的字节数，按读出的顺序（裸音频样本里即各帧）。
+fn packet_sizes(path: &Path) -> Vec<usize> {
+    ffmpeg::init().unwrap();
+    let mut ictx = ffmpeg::format::input(path).unwrap();
+    let mut sizes = Vec::new();
+    loop {
+        let mut packet = ffmpeg::Packet::empty();
+        match packet.read(&mut ictx) {
+            Ok(()) => sizes.push(packet.size()),
+            Err(ffmpeg::Error::Eof) => return sizes,
+            Err(e) => panic!("{e}"),
+        }
+    }
+}
+
+/// 打包音频损坏：中间一片丢了一帧（同步字坏了）、帧之间夹着杂字节，最后一片丢了一帧。中间一片损坏之后的帧照常写入、
+/// 保持原来的时刻（按下一片的时间戳定，不从片头按样本数往后推）；最后一片损坏之后的帧定不了时刻，不写入。丢弃的
+/// 损坏字节都计入。
 #[test]
-fn damage_in_packed_audio_is_skipped_and_counted() {
+fn damage_in_packed_audio_keeps_the_timing_of_later_frames() {
     let dir = work_dir("packed_damage");
     let output = dir.join("out.mp4");
     let segments = packed_fixture("aac");
-    let frames: Vec<usize> = segments
+    let sizes: Vec<Vec<usize>> = segments
         .iter()
-        .map(|(path, _)| timelines(path).1.len())
+        .map(|(path, _)| packet_sizes(path))
         .collect();
-    let damaged = dir.join("damaged");
-    let tail = std::fs::read(&segments[2].0).unwrap();
-    let data = [
-        std::fs::read(packed_segment(&dir, &segments[1].0, Some(990_000))).unwrap(),
-        b"junk".to_vec(),
-        tail[..tail.len() - 10].to_vec(),
-    ]
-    .concat();
-    std::fs::write(&damaged, data).unwrap();
+    // 48 kHz 的 AAC 每帧 1024 个采样点，即 1920 个 90 kHz 的 tick
+    let frame = 1920;
+    let (t0, t1) = (900_000, 900_000 + segments[0].1);
+    let t2 = t1 + segments[1].1;
+    let damaged = |i: usize, lost: usize, junk_after: Option<usize>| {
+        let mut data = std::fs::read(&segments[i].0).unwrap();
+        let at: usize = sizes[i][..lost].iter().sum();
+        data[at] = 0;
+        if let Some(after) = junk_after {
+            let at: usize = sizes[i][..after].iter().sum();
+            data.splice(at..at, *b"junk");
+        }
+        let path = dir.join(format!("damaged{i}"));
+        std::fs::write(&path, data).unwrap();
+        path
+    };
     let audio = TrackSegments {
         init: None,
-        segments: vec![packed_segment(&dir, &segments[0].0, Some(900_000)), damaged],
+        segments: vec![
+            packed_segment(&dir, &segments[0].0, Some(t0)),
+            packed_segment(&dir, &damaged(1, 10, Some(20)), Some(t1)),
+            packed_segment(&dir, &damaged(2, 5, None), Some(t2)),
+        ],
     };
 
     let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
 
     let stream = &report.streams[0];
+    let (n0, n1) = (sizes[0].len(), sizes[1].len());
+    assert_eq!(stream.packets, (n0 + n1 - 1 + 5) as u64);
+    let lost_in_last: usize = sizes[2][5..].iter().sum();
     assert_eq!(
-        (stream.packets, stream.discarded_corrupt),
-        ((frames.iter().sum::<usize>() - 1) as u64, 2)
+        stream.discarded_corrupt_bytes,
+        (sizes[1][10] + 4 + lost_in_last) as u64
     );
+    let a_out = timelines(&output).1;
+    let ticks = |seconds: f64| ((seconds - a_out[0].0) * 90_000.0).round() as u64;
+    // 中间一片：第 10 帧丢了，第 11 帧起各在原来的时刻
+    assert_eq!(ticks(a_out[n0 + 10].0), t1 - t0 + 11 * frame);
+    assert_eq!(
+        ticks(a_out[n0 + n1 - 2].0),
+        t1 - t0 + (n1 as u64 - 1) * frame
+    );
+    // 最后一片从它的时间戳处开始
+    assert_eq!(ticks(a_out[n0 + n1 - 1].0), t2 - t0);
 }
 
 /// 两个 TS 输入的起点跨在回绕点前 60 秒两侧：FFmpeg 读两个输入时展开的方向不同，读出的起点差 2^33，合并时对齐回来。

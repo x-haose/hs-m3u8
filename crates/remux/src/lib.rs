@@ -10,7 +10,7 @@
 //!   一路），未指定种类的流不进输出、不检查编码；同一类流只能来自一条轨；编码参数须探测得出；后续组的流布局、编码
 //!   参数与解码配置必须与第一组一致，参数随帧携带的（TS 与打包音频）在组内也不能变，分片格式与 PID 也不能换；每路流
 //!   的解码时间戳必须严格递增（组内不能往回跳或重复）。TS 里损坏的音频包、打包音频里的损坏处跳过并计数（见
-//!   [`StreamReport::discarded_corrupt`]）。
+//!   [`StreamReport::discarded_corrupt_bytes`]）。
 //! - 只接受 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、MP3、FLAC、Opus、ALAC 音频，与 FFmpeg 构建启用的组件
 //!   一致；TS 与打包音频里只收其中能逐帧读出参数的 H.264、HEVC、AAC、AC-3、E-AC-3、MP3。MP3 的采样率须不低于
 //!   16 kHz，TS 与打包音频里的 E-AC-3 每帧须为 6 块、只有一个独立子流（MP4 封装器的限制）。
@@ -153,11 +153,10 @@ pub struct StreamReport {
     pub packets: u64,
     /// 输入中没有 DTS、因而未写入的包数
     pub skipped_without_dts: u64,
-    /// 损坏而没有写入的音频：TS 里为读不出帧头或帧长与包长对不上的包（来源丢了 TS 包，或缺片处 PES 不完整，拼出的
-    /// 包；解复用器的损坏标志按整个 PES 打，连续计数器每片重来等不缺数据的写法也会触发，所以不据此丢包），打包音频里为
-    /// 切帧时跳过的损坏处（不完整的帧或标签、认不出的字节，一处算一个）。视频包照常写入，由解码器做错误隐藏（丢掉一帧
-    /// 视频，后面直到下一个关键帧都解不出）
-    pub discarded_corrupt: u64,
+    /// 损坏而没有写入的音频字节数：TS 里读不出帧头或帧长与包长对不上的包（来源丢了 TS 包，或缺片处 PES 不完整，拼出
+    /// 的包），打包音频里切帧时跳过的不完整的帧或标签、认不出的字节，以及最后一片里损坏之后定不了时刻的帧。视频包照常
+    /// 写入，由解码器做错误隐藏（丢掉一帧视频，后面直到下一个关键帧都解不出）
+    pub discarded_corrupt_bytes: u64,
     /// 输出时间线上从最早的呈现时刻到最晚的结束时刻，微秒；含组内时间戳间断（如缺失的分片）留下的空档
     pub duration_us: u64,
 }
@@ -651,7 +650,7 @@ struct Mapping {
 struct Dropped {
     /// 没有 DTS
     without_dts: u64,
-    /// 读不出帧头或帧长与包长对不上的音频包，打包音频另加切帧时跳过的损坏处
+    /// 丢弃的损坏音频字节（见 [`StreamReport::discarded_corrupt_bytes`]）
     corrupt: u64,
 }
 
@@ -698,17 +697,13 @@ impl Source {
                 });
             }
         }
-        let mut dropped = vec![Dropped::default(); streams];
-        if let Some((stream, damaged)) = input.damaged() {
-            dropped[stream].corrupt = damaged;
-        }
         Source {
             group,
             track,
             input,
             map,
             inband,
-            dropped,
+            dropped: vec![Dropped::default(); streams],
             queue: VecDeque::new(),
             finished: false,
             wrap_us: 0,
@@ -741,7 +736,7 @@ impl Source {
                 let unsupported = match check.check(packet.data().unwrap_or_default(), &stream) {
                     Ok(()) => None,
                     Err(Mismatch::Unreadable) => {
-                        self.dropped[packet.stream()].corrupt += 1;
+                        self.dropped[packet.stream()].corrupt += packet.size() as u64;
                         continue;
                     }
                     Err(Mismatch::Changed) => Some(Unsupported::ParamsChangedInGroup {
@@ -889,7 +884,7 @@ fn write_verified(
                 shape: o.shape,
                 packets: o.written,
                 skipped_without_dts: o.dropped.without_dts,
-                discarded_corrupt: o.dropped.corrupt,
+                discarded_corrupt_bytes: o.dropped.corrupt,
                 duration_us: match (o.start_us, o.end_us) {
                     (Some(start), Some(end)) => u64::try_from(end - start).unwrap_or(0),
                     _ => 0,
@@ -1176,11 +1171,15 @@ fn write_group(
         o.written += 1;
     }
     for source in &sources {
-        for (mapping, dropped) in source.map.iter().zip(&source.dropped) {
+        let packed = source.input.discarded();
+        for (index, (mapping, dropped)) in source.map.iter().zip(&source.dropped).enumerate() {
             if let Some(mapping) = mapping {
                 let total = &mut outs[mapping.output].dropped;
                 total.without_dts += dropped.without_dts;
                 total.corrupt += dropped.corrupt;
+                if let Some((_, bytes)) = packed.filter(|&(stream, _)| stream == index) {
+                    total.corrupt += bytes;
+                }
             }
         }
     }

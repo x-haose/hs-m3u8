@@ -2933,11 +2933,11 @@ class StreamReport:
         输入中没有解码时间戳、因而未写入的包数
         """
     @property
-    def discarded_corrupt(self) -> builtins.int:
+    def discarded_corrupt_bytes(self) -> builtins.int:
         r"""
-        损坏而没有写入的音频：TS 里为读不出帧头或帧长与包长对不上的包（来源丢了 TS 包，或缺片处 PES 不完整，拼出
-        的包），打包音频里为切帧时跳过的损坏处（不完整的帧或标签、认不出的字节，一处算一个）。视频包照常写入，由
-        解码器做错误隐藏
+        损坏而没有写入的音频字节数：TS 里读不出帧头或帧长与包长对不上的包（来源丢了 TS 包，或缺片处 PES 不完整，
+        拼出的包），打包音频里切帧时跳过的不完整的帧或标签、认不出的字节，以及最后一片里损坏之后定不了时刻的帧。
+        视频包照常写入，由解码器做错误隐藏
         """
     @property
     def duration(self) -> datetime.timedelta:
@@ -2946,7 +2946,7 @@ class StreamReport:
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, shape: Shape, packets: builtins.int, skipped_without_dts: builtins.int, discarded_corrupt: builtins.int, duration: datetime.timedelta) -> StreamReport:
+    def __new__(cls, *, shape: Shape, packets: builtins.int, skipped_without_dts: builtins.int, discarded_corrupt_bytes: builtins.int, duration: datetime.timedelta) -> StreamReport:
         r"""
         各参数即同名属性。
         """

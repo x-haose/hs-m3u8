@@ -96,10 +96,10 @@ impl Input {
         !matches!(self, Input::Chain { init: true, .. })
     }
 
-    /// 打包音频切帧时跳过的损坏处：音频流的下标与处数（见 [`Packed`]）；其余输入为 None。
-    pub(crate) fn damaged(&self) -> Option<(usize, u64)> {
+    /// 打包音频丢弃的损坏字节：音频流的下标与字节数（见 [`Packed`]，读到末尾后才是全部）；其余输入为 None。
+    pub(crate) fn discarded(&self) -> Option<(usize, u64)> {
         match self {
-            Input::Packed(packed) => packed.damaged(),
+            Input::Packed(packed) => packed.discarded(),
             Input::Chain { .. } => None,
         }
     }
