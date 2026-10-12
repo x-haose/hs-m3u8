@@ -334,7 +334,7 @@ fn malformed_input_is_reported_with_its_line() {
     let cut = "#EXTM3U\n#EXTINF:4,\na.ts\n#EXTINF:4,\n第1段.ts\n".as_bytes();
     let cut = &cut[..cut.len() - "段.ts\n".len() + 1];
     match bytes(cut) {
-        Err(Error::Malformed(Malformed::Truncated)) => {}
+        Err(Error::Truncated) => {}
         other => panic!("应报截断：{other:?}"),
     }
     match bytes(&"第".as_bytes()[..1]) {

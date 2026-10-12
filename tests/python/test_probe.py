@@ -20,6 +20,7 @@ from hs_m3u8 import (
     HttpError,
     HttpErrorKind,
     HttpOptions,
+    IncompleteError,
     InvalidInputError,
     JobRequest,
     LiveOptions,
@@ -265,14 +266,20 @@ def test_self_signed_certificates_are_accepted_only_when_insecure(tls_server: Se
 
 def test_malformed_playlists_and_impossible_selections_are_reported(server: Server) -> None:
     server.put("text.m3u8", "hello")
+    # 截在多字节字符中间：服务器还没写完，可重试
+    server.put("cut.m3u8", (MEDIA + "#EXTINF:1,\n第2段.ts\n").encode()[:-6])
     put_master(server)
 
     with pytest.raises(PlaylistError) as malformed:
         probe(Source(server.url("text.m3u8")))
+    with pytest.raises(IncompleteError) as truncated:
+        probe(Source(server.url("cut.m3u8")))
     with pytest.raises(SelectError) as unselectable:
         probe(Source(server.url("master.m3u8"), preference=Preference(variant=VariantChoice.Index(5))))
 
     assert malformed.value.reason == Malformed.NotAPlaylist()
+    assert truncated.value.retryable
+    assert truncated.value.url == server.url("cut.m3u8")
     assert unselectable.value.reason == SelectFailure.VariantIndexOutOfRange(index=5, count=2)
 
 

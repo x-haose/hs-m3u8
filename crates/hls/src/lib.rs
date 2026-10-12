@@ -29,11 +29,15 @@ pub enum Playlist {
     Media(MediaPlaylist),
 }
 
-/// 解析失败：内容不是合法的播放列表，或用了不支持的加密。
+/// 解析失败：内容不是合法的播放列表、结尾截断，或用了不支持的加密。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
     Malformed(#[from] Malformed),
+    /// 首行是 #EXTM3U，结尾截在多字节字符中间（多为服务器还没写完）：最后一行不完整，不解析。别的编码的完整内容，
+    /// 唯一的非 ASCII 字符恰在结尾、又能当 UTF-8 多字节字符的开头时（如 Latin-1 的 `é`），也是这样，分不开
+    #[error("播放列表在结尾的字符中间截断")]
+    Truncated,
     #[error("第 {line} 行的 EXT-X-KEY：{what}")]
     Unsupported { line: usize, what: Encryption },
 }
@@ -49,10 +53,6 @@ pub enum Malformed {
     /// 首行是 #EXTM3U，但不是 UTF-8 文本（RFC 8216 4.1 要求 UTF-8）；站点用了别的编码时须在解析前转码
     #[error("播放列表不是 UTF-8 文本")]
     NotUtf8,
-    /// 首行是 #EXTM3U，结尾截在多字节字符中间（多为服务器还没写完）：最后一行不完整，不解析。别的编码的完整内容，
-    /// 唯一的非 ASCII 字符恰在结尾、又能当 UTF-8 多字节字符的开头时（如 Latin-1 的 `é`），也是这样，分不开
-    #[error("播放列表在结尾的字符中间截断")]
-    Truncated,
     #[error("同时含有主播放列表（EXT-X-STREAM-INF）与媒体播放列表（EXTINF）的标签")]
     Mixed,
     #[error("第 {line} 行：{kind}")]
@@ -109,7 +109,7 @@ pub enum Encryption {
 
 /// 解析拉到的播放列表内容，须为 UTF-8（RFC 8216 4.1）。不是 UTF-8 时先看首行：不是 `#EXTM3U`（如媒体文件、
 /// 图片）报 [`Malformed::NotAPlaylist`] 或 [`Malformed::Empty`]；是的话，只有结尾的字符不完整时报
-/// [`Malformed::Truncated`]，否则报 [`Malformed::NotUtf8`]。带 UTF-16 BOM 的按 UTF-16 看首行。其余同 [`parse`]。
+/// [`Error::Truncated`]，否则报 [`Malformed::NotUtf8`]。带 UTF-16 BOM 的按 UTF-16 看首行。其余同 [`parse`]。
 pub fn parse_bytes(body: &[u8], url: &Url) -> Result<Playlist, Error> {
     let e = match std::str::from_utf8(body) {
         Ok(text) => return parse(text, url),
@@ -118,7 +118,7 @@ pub fn parse_bytes(body: &[u8], url: &Url) -> Result<Playlist, Error> {
     if e.error_len().is_none() {
         // 出错的只有结尾那个字符：第一段即之前的全部
         check_header(body.utf8_chunks().next().map_or("", |chunk| chunk.valid()))?;
-        return Err(Malformed::Truncated.into());
+        return Err(Error::Truncated);
     }
     check_header(
         &decode_utf16(body).unwrap_or_else(|| String::from_utf8_lossy(body).into_owned()),

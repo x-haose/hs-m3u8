@@ -740,14 +740,14 @@ class HttpOptions:
 @typing.final
 class IncompleteError(HsM3u8Error):
     r"""
-    分片或 init 段取到的内容没有写完：fMP4 的顶层 box 超出了数据，或加密分片的密文不足整块而整块部分解出的内容
-    认得出；多为源站还在写这个文件，稍后重试可能成功。下载时已按 `RetryPolicy` 重新取过；分片的失败由 `segment`
-    指出是哪个。
+    取到的内容没有写完，多为源站还在写这个文件，稍后重试可能成功：播放列表结尾截在多字节字符中间；分片或 init 段
+    的响应为空、fMP4 的 box 或样本数据超出了数据，或解密失败而解出的是截断的媒体数据。分片与 init 段在下载时已按
+    `RetryPolicy` 重新取过，分片的失败由 `segment` 指出是哪个。
     """
     @property
     def url(self) -> builtins.str:
         r"""
-        分片或 init 段的地址（可能带令牌；异常的说明里只显示到路径）
+        播放列表、分片或 init 段的地址（可能带令牌；异常的说明里只显示到路径）
         """
     def __new__(cls, message: builtins.str, *, url: builtins.str, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> IncompleteError:
         r"""
@@ -1383,15 +1383,6 @@ class Malformed:
         """
         __match_args__ = ()
         def __new__(cls) -> Malformed.NotUtf8: ...
-    
-    @typing.final
-    class Truncated(Malformed):
-        r"""
-        首行是 #EXTM3U，结尾截在多字节字符中间（多为服务器还没写完）；可以重试。别的编码的完整内容，唯一的非 ASCII
-        字符恰在结尾时也可能报这一种
-        """
-        __match_args__ = ()
-        def __new__(cls) -> Malformed.Truncated: ...
     
     @typing.final
     class Mixed(Malformed):
@@ -2090,7 +2081,7 @@ class OutputOptions:
 @typing.final
 class PlaylistError(SourceError):
     r"""
-    内容不是合法的播放列表；用了不支持的加密是 `SourceUnsupportedError`。
+    内容不是合法的播放列表；用了不支持的加密是 `SourceUnsupportedError`，结尾截断的是 `IncompleteError`。
     """
     @property
     def url(self) -> builtins.str:
@@ -2098,7 +2089,7 @@ class PlaylistError(SourceError):
         播放列表的地址（重定向之后的）
         """
     @property
-    def reason(self) -> Malformed.Empty | Malformed.NotAPlaylist | Malformed.NotUtf8 | Malformed.Truncated | Malformed.Mixed | Malformed.Syntax:
+    def reason(self) -> Malformed.Empty | Malformed.NotAPlaylist | Malformed.NotUtf8 | Malformed.Mixed | Malformed.Syntax:
         r"""
         不合法的原因
         """
@@ -2763,8 +2754,7 @@ class Source:
 
 class SourceError(HsM3u8Error):
     r"""
-    来源本身不行，同样的请求再试也不会成功；播放列表结尾截断（`Malformed.Truncated`）的除外，多为服务器还没写完，
-    `retryable` 为真。
+    来源本身不行，同样的请求再试也不会成功。
     """
     def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> SourceError:
         r"""

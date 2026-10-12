@@ -4,8 +4,8 @@
 //! - 改请求再试：[`Error::InvalidInput`]；[`Error::OutputExists`]（要求覆盖）；[`Error::OutputOccupied`]（换路径）；
 //!   [`Error::Select`]（选轨偏好与来源不符）；[`Error::LiveNotEnabled`]（开启直播录制）；[`Unsupported::Mp4`]、
 //!   [`Unsupported::Hls`]（改用另一种输出）；
-//! - 来源本身不行，同样的请求再试也不会成功：[`Error::Playlist`]（结尾截断的除外，多为服务器还没写完，可重试）、
-//!   [`Error::NotMediaPlaylist`]、[`Error::Unsupported`] 的其余各项、[`Error::Integrity`]、[`Error::KeyLength`]；
+//! - 来源本身不行，同样的请求再试也不会成功：[`Error::Playlist`]、[`Error::NotMediaPlaylist`]、[`Error::Unsupported`]
+//!   的其余各项、[`Error::Integrity`]、[`Error::KeyLength`]；
 //! - 网络：[`Error::Http`]，看 [`HttpError::retryable`]；
 //! - 源站给出没写完的内容：[`Error::Incomplete`]，可重试；
 //! - 说明出在哪里、看包着的原因：[`Error::Segment`]、[`Error::Key`]（哪个分片或 key）、[`Error::LiveStalled`]（直播
@@ -45,7 +45,7 @@ pub enum Error {
         path: PathBuf,
         ancestor: Option<PathBuf>,
     },
-    /// 内容不是合法的播放列表；用了不支持的加密是 [`Unsupported::Encryption`]
+    /// 内容不是合法的播放列表；用了不支持的加密是 [`Unsupported::Encryption`]，结尾截断的是 [`Error::Incomplete`]
     #[error("解析播放列表 {} 失败：{cause}", bare_url(.url))]
     Playlist {
         url: Box<Url>,
@@ -85,9 +85,10 @@ pub enum Error {
     KeyLength { url: Box<Url>, length: usize },
     #[error("数据校验失败（{}）：{kind}", bare_url(.url))]
     Integrity { url: Box<Url>, kind: Integrity },
-    /// 分片或 init 段取到的内容没有写完：fMP4 的顶层 box 超出了数据，或加密分片的密文不足整块而整块部分解出的内容
-    /// 认得出；多为源站还在写这个文件，可重试。下载时已按 [`crate::RetryPolicy`] 重新取过
-    #[error("{} 的内容没有写完（fMP4 的 box 超出了数据，或密文不足整块）", bare_url(.url))]
+    /// 取到的内容没有写完，多为源站还在写这个文件，可重试：播放列表结尾截在多字节字符中间；分片或 init 段的响应
+    /// 为空、fMP4 的 box 或样本数据超出了数据，或解密失败而解出的是截断的媒体数据。分片与 init 段在下载时已按
+    /// [`crate::RetryPolicy`] 重新取过
+    #[error("{} 的内容没有写完", bare_url(.url))]
     Incomplete { url: Box<Url> },
     #[error("任务目录 {} 无法使用：{problem}", .path.display())]
     WorkDir {
@@ -165,6 +166,7 @@ impl fmt::Display for CauseText<'_> {
         match self.cause {
             Error::Http { url, kind, .. } if same(url) => write!(f, "{kind}"),
             Error::Integrity { url, kind } if same(url) => write!(f, "数据校验失败：{kind}"),
+            Error::Incomplete { url } if same(url) => write!(f, "内容没有写完"),
             Error::Unsupported(Unsupported::Fmp4BaseDataOffset { url, at }) if same(url) => {
                 write!(f, "不支持：{}", base_data_offset_text(*at))
             }
@@ -255,7 +257,6 @@ impl Error {
             Error::Segment { cause, .. } | Error::Key { cause, .. } => cause.retryable(),
             Error::Cleanup { failure, .. } => failure.retryable(),
             Error::LiveStalled { cause, .. } => cause.retryable(),
-            Error::Playlist { cause, .. } => **cause == hs_m3u8_hls::Malformed::Truncated,
             _ => false,
         }
     }

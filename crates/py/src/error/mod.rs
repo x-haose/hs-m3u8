@@ -303,13 +303,12 @@ exception! {
 }
 
 exception! {
-    /// 来源本身不行，同样的请求再试也不会成功；播放列表结尾截断（`Malformed.Truncated`）的除外，多为服务器还没写完，
-    /// `retryable` 为真。
+    /// 来源本身不行，同样的请求再试也不会成功。
     pub struct SourceError extends HsM3u8Error, subclass {}
 }
 
 exception! {
-    /// 内容不是合法的播放列表；用了不支持的加密是 `SourceUnsupportedError`。
+    /// 内容不是合法的播放列表；用了不支持的加密是 `SourceUnsupportedError`，结尾截断的是 `IncompleteError`。
     pub struct PlaylistError extends SourceError {
         /// 播放列表的地址（重定向之后的）
         pub url: Address,
@@ -355,11 +354,11 @@ exception! {
 }
 
 exception! {
-    /// 分片或 init 段取到的内容没有写完：fMP4 的顶层 box 超出了数据，或加密分片的密文不足整块而整块部分解出的内容
-    /// 认得出；多为源站还在写这个文件，稍后重试可能成功。下载时已按 `RetryPolicy` 重新取过；分片的失败由 `segment`
-    /// 指出是哪个。
+    /// 取到的内容没有写完，多为源站还在写这个文件，稍后重试可能成功：播放列表结尾截在多字节字符中间；分片或 init 段
+    /// 的响应为空、fMP4 的 box 或样本数据超出了数据，或解密失败而解出的是截断的媒体数据。分片与 init 段在下载时已按
+    /// `RetryPolicy` 重新取过，分片的失败由 `segment` 指出是哪个。
     pub struct IncompleteError extends HsM3u8Error {
-        /// 分片或 init 段的地址（可能带令牌；异常的说明里只显示到路径）
+        /// 播放列表、分片或 init 段的地址（可能带令牌；异常的说明里只显示到路径）
         pub url: Address,
     }
 }

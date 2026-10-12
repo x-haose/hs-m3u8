@@ -145,6 +145,9 @@ async fn load_playlist(
     };
     parsed.map_err(|e| match e {
         hls::Error::Malformed(cause) => malformed(cause),
+        hls::Error::Truncated => Error::Incomplete {
+            url: Box::new(final_url.clone()),
+        },
         hls::Error::Unsupported { line, what } => Error::Unsupported(Unsupported::Encryption {
             url: Box::new(final_url.clone()),
             line,
