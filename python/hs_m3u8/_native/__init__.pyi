@@ -1447,8 +1447,7 @@ class Mp4Unsupported:
     @typing.final
     class Codec(Mp4Unsupported):
         r"""
-        编码放不进 MP4（只支持 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、FLAC、Opus、ALAC 及采样率不低于
-        16 kHz 的 MP3 音频）
+        编码放不进 MP4（只支持 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、MP3、FLAC、Opus、ALAC 音频）
         """
         __match_args__ = ("group", "track", "kind", "codec",)
         @property
@@ -1472,6 +1471,29 @@ class Mp4Unsupported:
             FFmpeg 的编码名
             """
         def __new__(cls, *, group: builtins.int, track: builtins.int, kind: StreamKind, codec: builtins.str) -> Mp4Unsupported.Codec: ...
+    
+    @typing.final
+    class Mp3SampleRate(Mp4Unsupported):
+        r"""
+        MP3 的采样率低于 16 kHz（MPEG-2.5 的 8、11.025、12 kHz）：MP4 封装器不收
+        """
+        __match_args__ = ("group", "track", "sample_rate",)
+        @property
+        def group(self) -> builtins.int:
+            r"""
+            第几个不连续段组
+            """
+        @property
+        def track(self) -> builtins.int:
+            r"""
+            第几条轨
+            """
+        @property
+        def sample_rate(self) -> builtins.int:
+            r"""
+            Hz
+            """
+        def __new__(cls, *, group: builtins.int, track: builtins.int, sample_rate: builtins.int) -> Mp4Unsupported.Mp3SampleRate: ...
     
     @typing.final
     class LayoutChanged(Mp4Unsupported):
@@ -1641,7 +1663,7 @@ class Mp4UnsupportedError(RequestError):
     第一个分片时就核对，组内的变化要合并时读到才报。
     """
     @property
-    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
+    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.Mp3SampleRate | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
         r"""
         放不进的原因
         """

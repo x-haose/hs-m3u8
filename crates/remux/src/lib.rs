@@ -66,27 +66,6 @@ impl StreamKind {
             StreamKind::Audio => media::Type::Audio,
         }
     }
-
-    fn accepts(self, id: codec::Id, shape: &Shape) -> bool {
-        match self {
-            StreamKind::Video => matches!(
-                id,
-                codec::Id::H264 | codec::Id::HEVC | codec::Id::AV1 | codec::Id::VP9
-            ),
-            StreamKind::Audio => match id {
-                codec::Id::AAC
-                | codec::Id::AC3
-                | codec::Id::EAC3
-                | codec::Id::FLAC
-                | codec::Id::OPUS
-                | codec::Id::ALAC => true,
-                codec::Id::MP3 => {
-                    matches!(shape, Shape::Audio { sample_rate, .. } if *sample_rate >= 16_000)
-                }
-                _ => false,
-            },
-        }
-    }
 }
 
 impl fmt::Display for StreamKind {
@@ -254,13 +233,24 @@ pub enum Error {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unsupported {
     #[error(
-        "第 {group} 组第 {track} 条轨的{kind}编码 {codec} 放不进 MP4（只支持 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、FLAC、Opus、ALAC 及采样率不低于 16 kHz 的 MP3 音频）"
+        "第 {group} 组第 {track} 条轨的{kind}编码 {codec} 放不进 MP4（只支持 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、MP3、FLAC、Opus、ALAC 音频）"
     )]
     Codec {
         group: usize,
         track: usize,
         kind: StreamKind,
         codec: &'static str,
+    },
+    /// MP3 的采样率低于 16 kHz（MPEG-2.5 的 8、11.025、12 kHz）：MP4 封装器不收
+    #[error(
+        "第 {group} 组第 {track} 条轨的 MP3 采样率 {sample_rate} Hz 低于 {} Hz，放不进 MP4",
+        MP3_MIN_SAMPLE_RATE
+    )]
+    Mp3SampleRate {
+        group: usize,
+        track: usize,
+        /// Hz
+        sample_rate: u32,
     },
     #[error("第 {group} 组第 {track} 条轨的流种类与第 0 组不同，无法放进同一个 MP4")]
     LayoutChanged { group: usize, track: usize },
@@ -418,14 +408,7 @@ fn open_selected(
         };
         let id = stream.parameters().id();
         let shape = ffi::shape(&stream, kind);
-        if !kind.accepts(id, &shape) {
-            return Err(Error::Unsupported(Unsupported::Codec {
-                group,
-                track,
-                kind,
-                codec: id.name(),
-            }));
-        }
+        check_codec(id, &shape, group, track).map_err(Error::Unsupported)?;
         selected.push(Selected {
             index: stream.index(),
             time_base: stream.time_base(),
@@ -434,6 +417,51 @@ fn open_selected(
         });
     }
     Ok((input, selected))
+}
+
+/// MP4 封装器收的 MP3 最低采样率，Hz（FFmpeg 9.0.2 movenc 的 mov_init）。
+const MP3_MIN_SAMPLE_RATE: u32 = 16_000;
+
+/// 编码能否放进 MP4。
+fn check_codec(
+    id: codec::Id,
+    shape: &Shape,
+    group: usize,
+    track: usize,
+) -> Result<(), Unsupported> {
+    let accepted = match *shape {
+        Shape::Video { .. } => matches!(
+            id,
+            codec::Id::H264 | codec::Id::HEVC | codec::Id::AV1 | codec::Id::VP9
+        ),
+        Shape::Audio { sample_rate, .. } => match id {
+            codec::Id::MP3 if sample_rate < MP3_MIN_SAMPLE_RATE => {
+                return Err(Unsupported::Mp3SampleRate {
+                    group,
+                    track,
+                    sample_rate,
+                });
+            }
+            codec::Id::AAC
+            | codec::Id::AC3
+            | codec::Id::EAC3
+            | codec::Id::MP3
+            | codec::Id::FLAC
+            | codec::Id::OPUS
+            | codec::Id::ALAC => true,
+            _ => false,
+        },
+    };
+    if accepted {
+        Ok(())
+    } else {
+        Err(Unsupported::Codec {
+            group,
+            track,
+            kind: shape.kind(),
+            codec: id.name(),
+        })
+    }
 }
 
 /// 一路输入流对应的输出流。

@@ -182,8 +182,7 @@ variants! {
 variants! {
     /// 内容放不进 MP4 的原因；可只输出本地 HLS（`Target.Hls`），它原样保留分片，不受这些限制。
     pub enum Mp4Unsupported {
-        /// 编码放不进 MP4（只支持 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、FLAC、Opus、ALAC 及采样率不低于
-        /// 16 kHz 的 MP3 音频）
+        /// 编码放不进 MP4（只支持 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、MP3、FLAC、Opus、ALAC 音频）
         #[pyo3(constructor = (*, group, track, kind, codec))]
         Codec {
             /// 第几个不连续段组
@@ -194,6 +193,16 @@ variants! {
             kind: StreamKind,
             /// FFmpeg 的编码名
             codec: String,
+        },
+        /// MP3 的采样率低于 16 kHz（MPEG-2.5 的 8、11.025、12 kHz）：MP4 封装器不收
+        #[pyo3(constructor = (*, group, track, sample_rate))]
+        Mp3SampleRate {
+            /// 第几个不连续段组
+            group: usize,
+            /// 第几条轨
+            track: usize,
+            /// Hz
+            sample_rate: u32,
         },
         /// 流的种类与第 0 组不同
         #[pyo3(constructor = (*, group, track))]
@@ -478,6 +487,15 @@ impl From<core::Mp4Unsupported> for Mp4Unsupported {
                     kind: kind.into(),
                 }
             }
+            U::Mp3SampleRate {
+                group,
+                track,
+                sample_rate,
+            } => Mp4Unsupported::Mp3SampleRate {
+                group,
+                track,
+                sample_rate,
+            },
             U::Eac3ShortFrames { group, track } => Mp4Unsupported::Eac3ShortFrames { group, track },
             U::Eac3Substreams { group, track } => Mp4Unsupported::Eac3Substreams { group, track },
             U::DtsNotIncreasing { group, track, kind } => Mp4Unsupported::DtsNotIncreasing {

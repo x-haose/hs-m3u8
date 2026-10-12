@@ -698,27 +698,35 @@ fn eac3_with_fewer_than_six_blocks_per_frame_is_rejected() {
     );
 }
 
-/// MP2 音频，以及采样率低于 16 kHz 的 MP3（MP4 封装器不收）放不进 MP4。
+/// MP2 音频放不进 MP4；采样率低于 16 kHz 的 MP3 也放不进，报出采样率。
 #[test]
 fn mp2_and_low_rate_mp3_audio_are_rejected() {
     let dir = work_dir("rejected_audio");
     let output = dir.join("out.mp4");
 
-    for (name, codec) in [("ts_mp2", "mp2"), ("ts_mp3_8k", "mp3")] {
-        let err = remux(&[Streams::All], &[group([track(name)])], &output).unwrap_err();
-
-        assert!(
-            matches!(
-                &err,
-                Error::Unsupported(Unsupported::Codec {
-                    kind: StreamKind::Audio,
-                    codec: found,
-                    ..
-                }) if *found == codec
-            ),
-            "{name}：实际 {err:?}"
-        );
-    }
+    let err = remux(&[Streams::All], &[group([track("ts_mp2")])], &output).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::Codec {
+                kind: StreamKind::Audio,
+                codec: "mp2",
+                ..
+            })
+        ),
+        "实际 {err:?}"
+    );
+    let err = remux(&[Streams::All], &[group([track("ts_mp3_8k")])], &output).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::Mp3SampleRate {
+                sample_rate: 8000,
+                ..
+            })
+        ),
+        "实际 {err:?}"
+    );
 }
 
 /// AC-3、E-AC-3、MP3 音频：TS 里的与打包音频都原样复制，MP4 里的样本描述分别带 dac3、dec3 与 esds。
