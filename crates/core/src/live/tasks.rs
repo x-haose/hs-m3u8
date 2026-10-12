@@ -1,6 +1,6 @@
 //! 录制派出的后台任务：刷新播放列表、准备暂存的播放列表（拉它要用的 init 段）、续录时核对内容、续录时核对之前录齐的组
-//! 能否放进 MP4。事件循环不等它们，
-//! 由 [`Tasks`] 持有，完成后作为事件交回；录制结束时取消并等它们退出（协作取消，在途的回调返回后才结束）。
+//! 能否放进 MP4。事件循环不等它们，由 [`Tasks`] 持有，完成后作为事件交回；录制结束时取消并等它们退出（协作取消：在途
+//! 的回调返回、在核对的那一组核完才结束）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -121,18 +121,17 @@ impl Tasks {
         });
     }
 
-    /// 核对之前录齐的组 `groups`（合并时的组号与各轨的第一个分片）能否放进 MP4（见 [`output::check_mp4`]）；`root` 为
-    /// 任务目录。
+    /// 核对之前录齐的组 `groups`（合并时的组号与各轨的第一个分片，第一项为第 0 组）能否放进 MP4（见
+    /// [`output::check_mp4`]）；`root` 为任务目录。
     pub(super) fn check_mp4(
         &mut self,
         streams: Vec<Streams>,
         groups: Vec<(usize, Vec<GroupTrack>)>,
         root: PathBuf,
     ) {
+        let cancel = self.cancel.clone();
         self.set.spawn(async move {
-            let result = blocking(move || output::check_mp4(&streams, &groups, &root))
-                .await
-                .and_then(|checked| checked);
+            let result = check_mp4(streams, groups, root, &cancel).await;
             Done::Mp4Checked { result }
         });
     }
@@ -158,6 +157,33 @@ impl Tasks {
             }
         }
     }
+}
+
+/// 见 [`Tasks::check_mp4`]：逐组与第 0 组一起核对（只有第 0 组时核对它自身），组与组之间看取消信号，取消时返回
+/// [`Error::Cancelled`]。报出的与一次核对全部组的相同：组号最小的那个问题。
+async fn check_mp4(
+    streams: Vec<Streams>,
+    groups: Vec<(usize, Vec<GroupTrack>)>,
+    root: PathBuf,
+    cancel: &CancellationToken,
+) -> Result<(), Error> {
+    let (streams, root) = (Arc::new(streams), Arc::new(root));
+    let mut groups = groups.into_iter();
+    let first = groups.next().expect("调用方只在有录齐的组时派出");
+    let rest: Vec<_> = groups.collect();
+    let batches: Vec<Vec<(usize, Vec<GroupTrack>)>> = if rest.is_empty() {
+        vec![vec![first]]
+    } else {
+        rest.into_iter().map(|g| vec![first.clone(), g]).collect()
+    };
+    for batch in batches {
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let (streams, root) = (streams.clone(), root.clone());
+        blocking(move || output::check_mp4(&streams, &batch, &root)).await??;
+    }
+    Ok(())
 }
 
 /// 重叠的分片从新到旧逐个试，用第一个取得到的重新下载后与已存的比较；取不到的（404/410，或重试后仍失败的临时
