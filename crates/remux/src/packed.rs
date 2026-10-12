@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use ffmpeg::{Packet, Rational, Rescale, format, media};
 use ffmpeg_next as ffmpeg;
 
+use crate::Error;
 use crate::chain;
-use crate::input::{new_chain, open_chain, read_packet, segment_head};
-use crate::{Error, StreamKind, Unsupported};
+use crate::input::{new_chain, open_chain, read_packet};
+use crate::standalone::Head;
 
 /// 打包音频时间戳的时钟（90 kHz）。
 const CLOCK_90K: Rational = Rational(1, 90_000);
@@ -15,7 +16,7 @@ const CLOCK_90K: Rational = Rational(1, 90_000);
 /// 打包音频一条轨在一组里的分片。各片跳过开头的 ID3 标签后按字节相连、作为一个输入读：格式只在开头识别一次，只有
 /// 一两帧的分片也读得出。FFmpeg 的裸音频解复用器从 0 起按样本数计时，所以按字节位置找到每个包所在的分片，平移到该片
 /// 的 ID3 时间戳处：与同组的其他轨对齐，缺失的分片处留出空档。有分片没有时间戳时整组按样本数接续，只能单独成轨（见
-/// [`Unsupported::UntimedPackedAudio`]）。
+/// [`crate::Unsupported::UntimedPackedAudio`]）。
 ///
 /// 简化：按样本数计时用的是 FFmpeg 给的包时长，AC-3 与 E-AC-3 的裸音频解复用器以 1/90000 秒为时间基，44.1 kHz
 /// 等采样率下每帧向下取整：有时间戳时每片重新对齐，误差不累积；按样本数接续时每小时约短 0.8 秒。遇到没有时间戳的
@@ -35,20 +36,13 @@ pub(crate) struct Packed {
 }
 
 impl Packed {
-    /// 读出各分片开头的 ID3 标签，把各片的音频数据相连打开；`segments` 至少有一个。各片格式须相同：裸音频解复用器
-    /// 只认开头识别出的那一种。
-    pub(crate) fn open(segments: &[PathBuf], group: usize, track: usize) -> Result<Packed, Error> {
-        let heads = segments
-            .iter()
-            .map(|path| segment_head(path))
-            .collect::<Result<Vec<_>, Error>>()?;
-        if heads.iter().any(|h| h.format != heads[0].format) {
-            return Err(Error::Unsupported(Unsupported::ParamsChangedInGroup {
-                group,
-                track,
-                kind: StreamKind::Audio,
-            }));
-        }
+    /// 把各片开头的 ID3 标签之后的音频数据相连打开。`segments` 至少有一个，`heads` 为各片开头的信息，格式相同。
+    pub(crate) fn open(
+        segments: &[PathBuf],
+        heads: &[Head],
+        group: usize,
+        track: usize,
+    ) -> Result<Packed, Error> {
         let files = segments
             .iter()
             .cloned()

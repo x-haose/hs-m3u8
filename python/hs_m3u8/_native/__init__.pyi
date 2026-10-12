@@ -1571,6 +1571,24 @@ class Mp4Unsupported:
         def __new__(cls, *, group: builtins.int, track: builtins.int, kind: StreamKind) -> Mp4Unsupported.ParamsChangedInGroup: ...
     
     @typing.final
+    class FormatChangedInGroup(Mp4Unsupported):
+        r"""
+        没有 init 段的一条轨在这一组里换了分片格式（TS 与打包音频，或打包音频的格式之间）
+        """
+        __match_args__ = ("group", "track",)
+        @property
+        def group(self) -> builtins.int:
+            r"""
+            第几个不连续段组
+            """
+        @property
+        def track(self) -> builtins.int:
+            r"""
+            第几条轨
+            """
+        def __new__(cls, *, group: builtins.int, track: builtins.int) -> Mp4Unsupported.FormatChangedInGroup: ...
+    
+    @typing.final
     class Eac3ShortFrames(Mp4Unsupported):
         r"""
         E-AC-3 每帧不足 6 块（只出在 TS 与打包音频里）：MP4 封装器把几帧并成一个样本，末尾凑不满的帧不写出
@@ -1664,7 +1682,7 @@ class Mp4UnsupportedError(RequestError):
     第一个分片时就核对，组内的变化要合并时读到才报。
     """
     @property
-    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.Mp3SampleRate | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
+    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.Mp3SampleRate | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.FormatChangedInGroup | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
         r"""
         放不进的原因
         """

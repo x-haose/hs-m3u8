@@ -11,7 +11,7 @@ use ffmpeg_next as ffmpeg;
 
 use crate::chain::{self, SegmentChain};
 use crate::packed::Packed;
-use crate::{Error, TrackSegments, standalone};
+use crate::{Error, TrackSegments, Unsupported, standalone};
 
 pub(crate) enum Input {
     /// TS 与 fMP4：init 段与分片按字节相连，作为一个输入读
@@ -26,15 +26,29 @@ pub(crate) enum Input {
 }
 
 impl Input {
-    /// 打开一条轨在一组里的分片：没有 init 段且第一个分片不是 TS 的为打包音频。
+    /// 打开一条轨在一组里的分片。没有 init 段的分片须同一格式（见 [`Unsupported::FormatChangedInGroup`]），不是 TS
+    /// 的为打包音频。
     pub(crate) fn open(
         segments: &TrackSegments,
         group: usize,
         track: usize,
     ) -> Result<Input, Error> {
         let init = segments.init.is_some();
-        if !init && segment_head(&segments.segments[0])?.format != standalone::Format::Ts {
-            return Packed::open(&segments.segments, group, track).map(Input::Packed);
+        if !init {
+            let heads = segments
+                .segments
+                .iter()
+                .map(|path| segment_head(path))
+                .collect::<Result<Vec<_>, Error>>()?;
+            if heads.iter().any(|h| h.format != heads[0].format) {
+                return Err(Error::Unsupported(Unsupported::FormatChangedInGroup {
+                    group,
+                    track,
+                }));
+            }
+            if heads[0].format != standalone::Format::Ts {
+                return Packed::open(&segments.segments, &heads, group, track).map(Input::Packed);
+            }
         }
         let files = segments
             .init

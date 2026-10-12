@@ -628,7 +628,7 @@ fn av1_vp9_opus_flac_and_alac_are_copied() {
     }
 }
 
-/// 组内中途换了编码参数：TS 的画面宽高与采样率、打包音频的编码都在第二个分片变了，MP4 的一条轨只有一个样本描述。
+/// 组内中途换了编码参数：TS 的画面宽高与采样率在第二个分片变了，MP4 的一条轨只有一个样本描述。
 #[test]
 fn parameter_changes_within_a_group_are_rejected() {
     let dir = work_dir("params_in_group");
@@ -648,26 +648,38 @@ fn parameter_changes_within_a_group_are_rejected() {
             "{kind}：实际 {err:?}"
         );
     }
+}
 
+/// 没有 init 段的一条轨在组内换了分片格式：打包音频从 AAC 换成 AC-3、TS 与打包音频前后相接，两个方向都报错，不跳过
+/// 后面那种格式的分片。
+#[test]
+fn format_changes_within_a_group_are_rejected() {
+    let dir = work_dir("format_in_group");
+    let output = dir.join("out.mp4");
     let (aac, ac3) = (packed_fixture("aac"), packed_fixture("ac3"));
-    let audio = TrackSegments {
-        init: None,
-        segments: vec![
-            packed_segment(&dir, &aac[0].0, Some(900_000)),
+    let packed_aac = packed_segment(&dir, &aac[0].0, Some(900_000));
+    let ts = track("ts_a").segments[0].clone();
+    for segments in [
+        vec![
+            packed_aac.clone(),
             packed_segment(&dir, &ac3[1].0, Some(900_000 + aac[0].1)),
         ],
-    };
-    let err = remux(&[Streams::Audio], &[group([audio])], &output).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            Error::Unsupported(Unsupported::ParamsChangedInGroup {
-                kind: StreamKind::Audio,
-                ..
-            })
-        ),
-        "实际 {err:?}"
-    );
+        vec![ts.clone(), packed_aac.clone()],
+        vec![packed_aac, ts],
+    ] {
+        let audio = TrackSegments {
+            init: None,
+            segments,
+        };
+        let err = remux(&[Streams::Audio], &[group([audio])], &output).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Unsupported(Unsupported::FormatChangedInGroup { group: 0, track: 0 })
+            ),
+            "实际 {err:?}"
+        );
+    }
 }
 
 /// 只核对：各轨开头的分片就能发现编码不受支持、流参数与第 0 组不同；能合并的通过，不写输出。

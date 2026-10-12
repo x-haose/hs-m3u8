@@ -237,6 +237,14 @@ variants! {
             /// 流的种类
             kind: StreamKind,
         },
+        /// 没有 init 段的一条轨在这一组里换了分片格式（TS 与打包音频，或打包音频的格式之间）
+        #[pyo3(constructor = (*, group, track))]
+        FormatChangedInGroup {
+            /// 第几个不连续段组
+            group: usize,
+            /// 第几条轨
+            track: usize,
+        },
         /// E-AC-3 每帧不足 6 块（只出在 TS 与打包音频里）：MP4 封装器把几帧并成一个样本，末尾凑不满的帧不写出
         #[pyo3(constructor = (*, group, track))]
         Eac3ShortFrames {
@@ -497,6 +505,9 @@ impl From<core::Mp4Unsupported> for Mp4Unsupported {
                 track,
                 sample_rate,
             },
+            U::FormatChangedInGroup { group, track } => {
+                Mp4Unsupported::FormatChangedInGroup { group, track }
+            }
             U::Eac3ShortFrames { group, track } => Mp4Unsupported::Eac3ShortFrames { group, track },
             U::Eac3Substreams { group, track } => Mp4Unsupported::Eac3Substreams { group, track },
             U::DtsNotIncreasing { group, track, kind } => Mp4Unsupported::DtsNotIncreasing {
