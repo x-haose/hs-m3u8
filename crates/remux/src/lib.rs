@@ -131,6 +131,29 @@ impl Shape {
         }
     }
 
+    /// 与第 0 组同一路流的编码参数比较；视频的像素格式可能探测不出，其余各项在打开时已确认探测得出。
+    fn compare(&self, first: &Shape) -> Compared {
+        match (*self, *first) {
+            (
+                Shape::Video {
+                    codec,
+                    width,
+                    height,
+                    pixel_format,
+                },
+                Shape::Video {
+                    codec: first_codec,
+                    width: first_width,
+                    height: first_height,
+                    pixel_format: first_pixel_format,
+                },
+            ) if (codec, width, height) == (first_codec, first_width, first_height) => {
+                Compared::of(pixel_format, first_pixel_format)
+            }
+            (found, first) => Compared::of(Some(found), Some(first)),
+        }
+    }
+
     pub fn kind(&self) -> StreamKind {
         match self {
             Shape::Video { .. } => StreamKind::Video,
@@ -278,8 +301,8 @@ pub enum Unsupported {
         /// Hz
         sample_rate: u32,
     },
-    /// 选中的流探测不出编码或编码参数（视频的宽高、音频的采样率与声道数），或这一组与第 0 组只有一边探测出了视频的
-    /// 像素格式：这一组里 FFmpeg 探测读的那一段没有能解的数据
+    /// 选中的流探测不出编码或编码参数（视频的宽高、音频的采样率与声道数），或与第 0 组比较时没有确定的不同、而有项
+    /// 只有一边探测出（视频的像素格式、fMP4 里 AAC 的 profile）：这一组里 FFmpeg 探测读的那一段没有能解的数据
     #[error(
         "第 {group} 组第 {track} 条轨的{kind}流探测不出编码参数（开头一段里没有它的数据），写不出 MP4 的样本描述"
     )]
@@ -489,8 +512,8 @@ struct Selected {
     desc: Desc,
 }
 
-/// 一路流的编码参数与解码配置；MP4 的样本描述由第 0 组的写成，其余组须相同。
-#[derive(Clone, PartialEq, Eq)]
+/// 一路流的编码参数与解码配置；MP4 的样本描述由第 0 组的写成，其余组须相同（见 [`same_streams`]）。
+#[derive(Clone)]
 struct Desc {
     shape: Shape,
     config: Config,
@@ -500,14 +523,46 @@ struct Desc {
 #[derive(Clone, PartialEq, Eq)]
 enum Config {
     /// 有 init 段（fMP4）：init 段里的解码配置（codecpar 的 extradata，如 avcC），样本里不带，按字节比较：解码器只按
-    /// 样本描述配置，FLAC 与 ALAC 的配置里的帧长上限还用来分配缓冲区
+    /// 样本描述配置，FLAC 与 ALAC 的配置里的帧长上限还用来分配缓冲区。USAC 的配置带有 profile 与帧长之外的解码参数，
+    /// 也按字节比较
     Init(Vec<u8>),
-    /// fMP4 的 AAC：AudioSpecificConfig 有等价的不同写法（如显式写出没有 SBR，或省略），改比 FFmpeg 解出的 profile
-    /// （LC、HE-AAC 等）与每帧的采样点数；采样率与声道数在编码参数里
-    InitAac { profile: i32, frame_size: i32 },
+    /// fMP4 里 USAC 以外的 AAC：AudioSpecificConfig 有等价的不同写法（如显式写出没有 SBR，或省略），按 FFmpeg 解出
+    /// 一帧后得出的 profile（LC、HE-AAC 等）与每帧的采样点数比较，采样率与声道数在编码参数里；探测时没有解出帧（如
+    /// 开头的分片里没有样本）为 None
+    InitAac(Option<(i32, i32)>),
     /// 参数随帧携带（TS 与打包音频）：音频以第 0 组第一个包的帧头为准逐包核对（见 [`Inband`]）；视频的参数集在关键帧
     /// 前重复、解码器按带内的解码，只核对编码参数（宽高与像素格式，见 [`Shape`]）
     Inband,
+}
+
+impl Config {
+    /// 与第 0 组同一路流的解码配置比较。
+    fn compare(&self, first: &Config) -> Compared {
+        match (self, first) {
+            (Config::InitAac(found), Config::InitAac(first)) => Compared::of(*found, *first),
+            (found, first) => Compared::of(Some(found), Some(first)),
+        }
+    }
+}
+
+/// 后续组的一项参数与第 0 组比较的结果。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Compared {
+    Same,
+    /// 只有一边探测出；两边都探测不出的项不比，算相同
+    Unknown,
+    Differs,
+}
+
+impl Compared {
+    /// 两边各自探测不出时为 None 的一项。
+    fn of<T: PartialEq>(found: Option<T>, first: Option<T>) -> Compared {
+        match (found, first) {
+            (Some(found), Some(first)) if found != first => Compared::Differs,
+            (Some(_), None) | (None, Some(_)) => Compared::Unknown,
+            _ => Compared::Same,
+        }
+    }
 }
 
 /// 打开一条轨在一组里的分片，按 `wanted` 选出第一路视频与（或）第一路音频，并检查编码是否受支持。
@@ -535,14 +590,14 @@ fn open_selected(
         check_codec(id, &shape, input.standalone(), group, track).map_err(Error::Unsupported)?;
         let config = if input.standalone() {
             Config::Inband
-        } else if id == codec::Id::AAC {
-            let (profile, frame_size) = ffi::profile_and_frame_size(&stream);
-            Config::InitAac {
-                profile,
-                frame_size,
-            }
         } else {
-            Config::Init(ffi::extradata(&stream))
+            let extradata = ffi::extradata(&stream);
+            if id == codec::Id::AAC && frame::audio_object_type(&extradata) != Some(frame::AOT_USAC)
+            {
+                Config::InitAac(ffi::decoded_aac(&stream))
+            } else {
+                Config::Init(extradata)
+            }
         };
         selected.push(Selected {
             index: stream.index(),
@@ -902,17 +957,21 @@ struct OpenTrack {
 }
 
 /// 打开第 `group` 组的各轨并选流（见 [`open_selected`]）。`layout` 为第 0 组各轨选中的流（见 [`layout_of`]），其余组
-/// 的流种类、参数与解码配置须与它相同；打开第 0 组时为 None。
+/// 的流种类、参数与解码配置须与它相同（见 [`same_streams`]），各轨都没有确定的不同、而有项只有一边探测出时报
+/// [`Unsupported::ParamsUnknown`]；打开第 0 组时为 None。
 fn open_group(
     streams: &[Streams],
     (group, tracks): Numbered<'_>,
     layout: Option<&[Vec<Desc>]>,
 ) -> Result<Vec<OpenTrack>, Error> {
     let mut opened = Vec::new();
+    let mut unknown = None;
     for (track, segments) in tracks.tracks.iter().enumerate() {
         let (input, selected) = open_selected(segments, streams[track], group, track)?;
-        if let Some(layout) = layout {
-            same_streams(&selected, &layout[track], group, track)?;
+        if let Some(layout) = layout
+            && let Some(kind) = same_streams(&selected, &layout[track], group, track)?
+        {
+            unknown.get_or_insert((track, kind));
         }
         opened.push(OpenTrack {
             track,
@@ -921,16 +980,24 @@ fn open_group(
         });
     }
     check_timed(group, &opened)?;
-    Ok(opened)
+    match unknown {
+        Some((track, kind)) => Err(Error::Unsupported(Unsupported::ParamsUnknown {
+            group,
+            track,
+            kind,
+        })),
+        None => Ok(opened),
+    }
 }
 
-/// 一条轨这一组选中的流与第 0 组的 `first` 种类、参数、解码配置都相同。
+/// 一条轨这一组选中的流与第 0 组的 `first` 比较：种类、编码参数或解码配置不同时报错；其余各项相同、有项只有一边
+/// 探测出时返回第一路这样的流的种类。
 fn same_streams(
     selected: &[Selected],
     first: &[Desc],
     group: usize,
     track: usize,
-) -> Result<(), Error> {
+) -> Result<Option<StreamKind>, Error> {
     if selected.len() != first.len()
         || selected
             .iter()
@@ -942,28 +1009,11 @@ fn same_streams(
             track,
         }));
     }
+    let mut unknown = None;
     for (s, f) in selected.iter().zip(first) {
         let kind = f.shape.kind();
-        // 只有一边探测出了像素格式：比不了，不当作参数不同
-        if let (
-            Shape::Video {
-                pixel_format: found,
-                ..
-            },
-            Shape::Video {
-                pixel_format: expected,
-                ..
-            },
-        ) = (s.desc.shape, f.shape)
-            && found.is_some() != expected.is_some()
-        {
-            return Err(Error::Unsupported(Unsupported::ParamsUnknown {
-                group,
-                track,
-                kind,
-            }));
-        }
-        if s.desc.shape != f.shape {
+        let shape = s.desc.shape.compare(&f.shape);
+        if shape == Compared::Differs {
             return Err(Error::Unsupported(Unsupported::ParamsChanged {
                 group,
                 track,
@@ -972,15 +1022,19 @@ fn same_streams(
                 found: s.desc.shape,
             }));
         }
-        if s.desc.config != f.config {
+        let config = s.desc.config.compare(&f.config);
+        if config == Compared::Differs {
             return Err(Error::Unsupported(Unsupported::ConfigChanged {
                 group,
                 track,
                 kind,
             }));
         }
+        if shape == Compared::Unknown || config == Compared::Unknown {
+            unknown.get_or_insert(kind);
+        }
     }
-    Ok(())
+    Ok(unknown)
 }
 
 /// 一组里有打包音频的轨没有时间戳时，只有它一条轨贡献流才能定时。

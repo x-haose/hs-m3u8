@@ -1,6 +1,6 @@
 //! 裸音频帧的帧头：ADTS（AAC）、AC-3 与 E-AC-3、MPEG 音频。读出编码参数（逐包核对用，见 [`crate::inband`]）与整帧的
 //! 字节数（打包音频按它切帧，见 [`crate::packed`]）。合法性的判定与 FFmpeg 9.0.2 的帧头解析一致，帧头不合法时为 None；
-//! 从字节里认格式另要求 ADTS 的 layer 为 0（见 [`crate::standalone::read_head`]）。
+//! 从字节里认格式另要求 ADTS 的 layer 为 0（见 [`crate::standalone::read_head`]）。另读 MP4 里 AAC 解码配置的编码类型。
 
 /// ADTS 帧头里 MP4 的 AudioSpecificConfig 由之写成的三项（ISO/IEC 14496-3 1.A.2.2）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,6 +207,19 @@ pub(crate) fn mpeg_audio(data: &[u8]) -> Option<(Mpeg, Option<usize>)> {
         _ => kbps * 144_000 / (rate << lsf) + padding,
     };
     Some((header, Some(len)))
+}
+
+/// audioObjectType 里 USAC 的值（ISO/IEC 14496-3 表 1.1）。
+pub(crate) const AOT_USAC: u32 = 42;
+
+/// MP4 里 AAC 的解码配置（AudioSpecificConfig）开头的 audioObjectType（ISO/IEC 14496-3 1.6.2.1）：5 位，为 31 时
+/// 取其后 6 位加 32。数据不够时为 None。
+pub(crate) fn audio_object_type(config: &[u8]) -> Option<u32> {
+    let mut b = Bits::new(config);
+    match b.read(5)? {
+        31 => Some(32 + b.read(6)?),
+        aot => Some(aot),
+    }
 }
 
 /// 按位从高到低读字节。
@@ -462,5 +475,17 @@ mod tests {
         let header = |mode| mpeg_audio(&mpeg_frame(3, 1, 9, 0, 0, mode, 4)).unwrap().0;
         assert_eq!(header(0), header(1));
         assert_ne!(header(0), header(3));
+    }
+
+    #[test]
+    fn audio_object_types_read_the_escape() {
+        // LC（2）、显式 SBR（5）；31 之后 6 位为 10，即 USAC；转义的 6 位不完整
+        assert_eq!(audio_object_type(&bits(&[(2, 5), (3, 4)])), Some(2));
+        assert_eq!(audio_object_type(&bits(&[(5, 5), (6, 4)])), Some(5));
+        assert_eq!(
+            audio_object_type(&bits(&[(31, 5), (10, 6)])),
+            Some(AOT_USAC)
+        );
+        assert_eq!(audio_object_type(&[0xF8]), None);
     }
 }

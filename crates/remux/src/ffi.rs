@@ -71,12 +71,14 @@ pub(crate) fn in_program(ictx: &format::context::Input, index: usize) -> Option<
     }))
 }
 
-/// 流的 profile 与每帧的采样点数（codecpar 的 profile 与 frame_size，探测时由解码器得出；不知道时分别为负数与 0）。
-pub(crate) fn profile_and_frame_size(stream: &Stream<'_>) -> (i32, i32) {
+/// fMP4 里的 AAC 流（USAC 以外）探测时解码器解出一帧后得出的 profile 与每帧的采样点数（codecpar 的 profile 与
+/// frame_size）；没有解出帧时为 None：profile 只在解帧时得出，frame_size 此前是 mov 按 AudioSpecificConfig 填的、
+/// 不含 SBR 加倍的帧长。
+pub(crate) fn decoded_aac(stream: &Stream<'_>) -> Option<(i32, i32)> {
     let params = stream.parameters();
     // SAFETY: 指针指向该流的 codecpar，在 params 存活期间有效且非空；此处只读。
     let p = unsafe { &*params.as_ptr() };
-    (p.profile, p.frame_size)
+    (p.profile >= 0).then_some((p.profile, p.frame_size))
 }
 
 /// FFmpeg 的像素格式值 `format`（AVPixelFormat）的名称；不认识（含 AV_PIX_FMT_NONE）时为 None。逐个查像素格式描述

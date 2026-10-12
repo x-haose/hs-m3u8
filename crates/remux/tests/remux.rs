@@ -1095,22 +1095,45 @@ fn check_leaves_what_the_first_segment_cannot_tell_to_the_merge() {
     remux(&[Streams::Audio], &[group([whole])], &output).unwrap();
 }
 
-/// fMP4 某一组开头的分片里没有视频样本（只有 styp）：宽高来自 init 段，像素格式探测不出，与第 0 组比不了，核对跳过
-/// 这一组，不报参数不同。
+/// fMP4 某一组开头的分片里没有样本（只有 styp）：宽高、采样率与声道数来自 init 段，视频的像素格式与 AAC 的 profile
+/// 探测不出，与第 0 组比不了，核对跳过这一组，不报参数或解码配置不同；init 段里的解码配置不同时照样报出。
 #[test]
-fn check_skips_a_group_whose_pixel_format_is_unknown() {
-    let dir = work_dir("check_unknown_pixel_format");
+fn check_skips_what_a_head_without_samples_cannot_tell() {
+    let dir = work_dir("check_head_without_samples");
     let styp_only = dir.join("styp.m4s");
     std::fs::write(&styp_only, b"\0\0\0\x18stypmsdh\0\0\0\0msdhmsix").unwrap();
-    let second = TrackSegments {
-        init: Some(fixtures().join("fmp4_b/video/init.mp4")),
-        segments: vec![styp_only],
+    let without_samples = |name: &str| TrackSegments {
+        init: Some(fixtures().join(name).join("init.mp4")),
+        segments: vec![styp_only.clone()],
     };
-    check(
+    for (streams, first, second) in [
+        (Streams::Video, "fmp4_a/video", "fmp4_b/video"),
+        (Streams::Audio, "fmp4_a/audio", "fmp4_aac_at"),
+        (Streams::Audio, "fmp4_he_aac", "fmp4_he_aac"),
+    ] {
+        let groups = [group([head(first)]), group([without_samples(second)])];
+        check(&[streams], &groups).unwrap_or_else(|e| panic!("{first} 接 {second}：{e:?}"));
+    }
+
+    let err = check(
         &[Streams::Video],
-        &[group([head("fmp4_a/video")]), group([second])],
+        &[
+            group([head("fmp4_alac")]),
+            group([without_samples("fmp4_baseline")]),
+        ],
     )
-    .unwrap();
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::ConfigChanged {
+                group: 1,
+                kind: StreamKind::Video,
+                ..
+            })
+        ),
+        "实际 {err:?}"
+    );
 }
 
 /// TS 里每帧 3 块的 E-AC-3：MP4 封装器会把几帧并成一个样本、丢掉末尾凑不满的，放不进 MP4。
