@@ -69,15 +69,15 @@ ts_segments ts_b "${b_src[@]}" "${h264[@]}" "${aac[@]}"
 fmp4_split fmp4_a "${a_src[@]}"
 fmp4_split fmp4_b "${b_src[@]}"
 
-# 编码与参数：分辨率与前面的组不同（合并应报参数变化）；HEVC、AC-3、E-AC-3、MP3（支持）；MP2 与 8 kHz 的 MP3
-# 音频（不支持）
+# 编码与参数：分辨率与前面的组不同（合并应报参数变化）；HEVC、AC-3、E-AC-3（5.1 声道）、MP3（支持）；MP2 与 8 kHz
+# 的 MP3 音频（不支持）
 read -r -a small_src <<< "$(source_args testsrc2 160x90 440 1)"
 ts_segments ts_small "${small_src[@]}" "${h264[@]}" "${aac[@]}"
 read -r -a one_src <<< "$(source_args testsrc2 320x180 440 1)"
 ts_segments ts_hevc "${one_src[@]}" -c:v libx265 -preset ultrafast -x265-params log-level=error -g 25 -b:v 150k "${aac[@]}"
 ts_segments ts_mp3 "${one_src[@]}" "${h264[@]}" -c:a libmp3lame -b:a 64k
-ts_segments ts_ac3 "${one_src[@]}" "${h264[@]}" -c:a ac3 -b:a 96k
-ts_segments ts_eac3 "${one_src[@]}" "${h264[@]}" -c:a eac3 -b:a 96k
+ts_segments ts_ac3 "${one_src[@]}" "${h264[@]}" -c:a ac3 -ac 6 -b:a 384k
+ts_segments ts_eac3 "${one_src[@]}" "${h264[@]}" -c:a eac3 -ac 6 -b:a 384k
 ts_segments ts_mp2 "${one_src[@]}" "${h264[@]}" -c:a mp2 -b:a 64k
 ts_segments ts_mp3_8k "${one_src[@]}" "${h264[@]}" -c:a libmp3lame -ar 8000 -b:a 16k
 # 只出现在 fMP4 里的编码：AV1 与 Opus、VP9 与 FLAC、H.264 与 ALAC
@@ -97,8 +97,8 @@ packed() {
     -f segment -segment_time 1 "$DIR/packed/$name/seg%d.$ext"
 }
 packed aac aac "${aac[@]}" -segment_format adts
-packed ac3 ac3 -c:a ac3 -b:a 96k -segment_format ac3
-packed eac3 ec3 -c:a eac3 -b:a 96k -segment_format eac3
+packed ac3 ac3 -c:a ac3 -ac 6 -b:a 384k -segment_format ac3
+packed eac3 ec3 -c:a eac3 -ac 6 -b:a 384k -segment_format eac3
 packed mp3 mp3 -c:a libmp3lame -b:a 64k -segment_format mp3 -segment_format_options id3v2_version=0:write_xing=0
 
 # 直播录制：4 秒、时间戳连续的节目，用于逐段放出、窗口滑动与缺失的分片

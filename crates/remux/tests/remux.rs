@@ -161,6 +161,38 @@ fn first_frames(path: &Path, frames: usize) -> Vec<u8> {
     std::fs::read(path).unwrap()[..len].to_vec()
 }
 
+/// 文件里各路流的编码名，按流的顺序。
+fn codecs(path: &Path) -> Vec<&'static str> {
+    ffmpeg::init().unwrap();
+    let ictx = ffmpeg::format::input(path).unwrap();
+    ictx.streams().map(|s| s.parameters().id().name()).collect()
+}
+
+/// MP4 里 AC-3 样本描述（dac3）或 E-AC-3 样本描述（dec3，第一个独立子流）的 acmod 与 lfeon（ETSI TS 102 366
+/// 附录 F）；别的编码为 None。
+fn ac3_layout(path: &Path, codec: &str) -> Option<(u8, bool)> {
+    let data = std::fs::read(path).unwrap();
+    let payload = |name: &[u8; 4]| {
+        let at = data.windows(4).position(|w| w == name).unwrap();
+        data[at + 4..at + 8].to_vec()
+    };
+    match codec {
+        // fscod 2 位、bsid 5 位、bsmod 3 位、acmod 3 位、lfeon 1 位……
+        "ac3" => {
+            let dac3 = payload(b"dac3");
+            let bits = u32::from_be_bytes([0, dac3[0], dac3[1], dac3[2]]);
+            Some(((bits >> 11 & 7) as u8, bits >> 10 & 1 == 1))
+        }
+        // data_rate 13 位、num_ind_sub 3 位，再是第一个独立子流：fscod 2 位、bsid 5 位、保留 1 位、asvc 1 位、
+        // bsmod 3 位、acmod 3 位、lfeon 1 位……
+        "eac3" => {
+            let byte = payload(b"dec3")[3];
+            Some((byte >> 1 & 7, byte & 1 == 1))
+        }
+        _ => None,
+    }
+}
+
 /// 时间线上最早的呈现时刻，秒。
 fn earliest(timeline: &Timeline) -> f64 {
     timeline.iter().map(|p| p.0).fold(f64::INFINITY, f64::min)
@@ -561,7 +593,7 @@ fn resolution_change_between_groups_is_rejected() {
 #[test]
 fn av1_vp9_opus_flac_and_alac_are_copied() {
     let dir = work_dir("fmp4_codecs");
-    for (name, codecs, boxes) in [
+    for (name, expected, boxes) in [
         ("fmp4_av1_opus", ["av1", "opus"], [b"av1C", b"dOps"]),
         ("fmp4_vp9_flac", ["vp9", "flac"], [b"vpcC", b"dfLa"]),
         ("fmp4_alac", ["h264", "alac"], [b"avcC", b"alac"]),
@@ -579,11 +611,12 @@ fn av1_vp9_opus_flac_and_alac_are_copied() {
         assert_eq!(
             found,
             [
-                (codecs[0], v_in.len() as u64),
-                (codecs[1], a_in.len() as u64)
+                (expected[0], v_in.len() as u64),
+                (expected[1], a_in.len() as u64)
             ],
             "{name}"
         );
+        assert_eq!(codecs(&output), expected, "{name}");
         let data = std::fs::read(&output).unwrap();
         for b in boxes {
             assert!(
@@ -729,33 +762,25 @@ fn mp2_and_low_rate_mp3_audio_are_rejected() {
     );
 }
 
-/// AC-3、E-AC-3、MP3 音频：TS 里的与打包音频都原样复制，MP4 里的样本描述分别带 dac3、dec3 与 esds。
+/// AC-3、E-AC-3（5.1 声道）、MP3 音频：TS 里的与打包音频都原样复制。回读输出核对各路流的编码，AC-3 与 E-AC-3 的
+/// 样本描述（dac3、dec3）里是 5.1 声道。
 #[test]
 fn ac3_eac3_and_mp3_audio_are_copied() {
     let dir = work_dir("more_audio");
     let output = dir.join("out.mp4");
+    let five_one = |codec: &str| (codec != "mp3").then_some((7, true));
 
-    for (ts, packed, codec, sample_entry) in [
-        ("ts_ac3", "ac3", "ac3", b"dac3"),
-        ("ts_eac3", "eac3", "eac3", b"dec3"),
-        ("ts_mp3", "mp3", "mp3", b"esds"),
+    for (ts, packed, codec) in [
+        ("ts_ac3", "ac3", "ac3"),
+        ("ts_eac3", "eac3", "eac3"),
+        ("ts_mp3", "mp3", "mp3"),
     ] {
         let muxed = track(ts);
         let report = remux(&[Streams::All], &[group([muxed.clone()])], &output).unwrap();
         let a_in = timelines(&concat_track(&muxed, &dir, "in.ts")).1;
-        assert_eq!(
-            (report.streams[1].shape.codec(), report.streams[1].packets),
-            (codec, a_in.len() as u64),
-            "{ts}"
-        );
-        assert!(
-            std::fs::read(&output)
-                .unwrap()
-                .windows(4)
-                .any(|w| w == sample_entry),
-            "{ts} 的输出应有 {}",
-            String::from_utf8_lossy(sample_entry)
-        );
+        assert_eq!(report.streams[1].packets, a_in.len() as u64, "{ts}");
+        assert_eq!(codecs(&output), ["h264", codec], "{ts}");
+        assert_eq!(ac3_layout(&output, codec), five_one(codec), "{ts}");
 
         let segments = packed_fixture(packed);
         let mut at = 900_000;
@@ -773,11 +798,9 @@ fn ac3_eac3_and_mp3_audio_are_copied() {
             .iter()
             .map(|(path, _)| timelines(path).1.len())
             .sum();
-        assert_eq!(
-            (report.streams[0].shape.codec(), report.streams[0].packets),
-            (codec, packets as u64),
-            "{packed}"
-        );
+        assert_eq!(report.streams[0].packets, packets as u64, "{packed}");
+        assert_eq!(codecs(&output), [codec], "{packed}");
+        assert_eq!(ac3_layout(&output, codec), five_one(codec), "{packed}");
     }
 }
 
