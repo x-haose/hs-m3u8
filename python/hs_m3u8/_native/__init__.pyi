@@ -690,7 +690,7 @@ class IntegrityError(SourceError):
         出错的分片或 init 段的地址
         """
     @property
-    def reason(self) -> IntegrityFailure.Padding | IntegrityFailure.CipherLength | IntegrityFailure.RangeLength | IntegrityFailure.UnrecognizedSegment | IntegrityFailure.NotFmp4:
+    def reason(self) -> IntegrityFailure.Padding | IntegrityFailure.CipherLength | IntegrityFailure.RangeLength | IntegrityFailure.UnrecognizedSegment | IntegrityFailure.NotFmp4 | IntegrityFailure.Fmp4Boxes:
         r"""
         失败的原因
         """
@@ -773,6 +773,29 @@ class IntegrityFailure:
             开头几个字节的十六进制
             """
         def __new__(cls, head: builtins.str) -> IntegrityFailure.NotFmp4: ...
+    
+    @typing.final
+    class Fmp4Boxes(IntegrityFailure):
+        r"""
+        fMP4 不完整：顶层 box 没有恰好铺满数据（多为源站给出了没写完的文件）
+        """
+        __match_args__ = ("at", "end", "len",)
+        @property
+        def at(self) -> builtins.int:
+            r"""
+            出问题的 box 的起点，字节
+            """
+        @property
+        def end(self) -> builtins.int:
+            r"""
+            这个 box 应到的位置，字节
+            """
+        @property
+        def len(self) -> builtins.int:
+            r"""
+            数据的字节数
+            """
+        def __new__(cls, *, at: builtins.int, end: builtins.int, len: builtins.int) -> IntegrityFailure.Fmp4Boxes: ...
     
 
 @typing.final

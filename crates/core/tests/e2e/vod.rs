@@ -607,6 +607,40 @@ async fn wrong_key_fails_integrity() {
     assert_eq!(written, 0, "校验失败的分片不应写盘");
 }
 
+/// 源站给出没写完的 fMP4 分片（mdat 截断，Content-Length 与截断后的长度一致）：下载时校验失败、不写盘，不合并出把下一个
+/// 分片的字节读成这一片样本的 MP4。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_truncated_fmp4_segment_fails_integrity() {
+    let dir = test_dir("truncated_fmp4");
+    let server = Server::start().await;
+    let seg0 = fixture("fmp4_a/video/seg0.m4s");
+    server.put("init.mp4", fixture("fmp4_a/video/init.mp4"));
+    server.put("seg0.m4s", seg0[..seg0.len() * 9 / 10].to_vec());
+    server.put("seg1.m4s", fixture("fmp4_a/video/seg1.m4s"));
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"init.mp4\"\n\
+         #EXTINF:1,\nseg0.m4s\n#EXTINF:1,\nseg1.m4s\n#EXT-X-ENDLIST\n",
+    );
+
+    let err = run(request(server.url("index.m3u8"), &dir))
+        .await
+        .unwrap_err();
+    match err {
+        Error::Segment { cause, .. } => assert!(
+            matches!(
+                *cause,
+                Error::Integrity {
+                    kind: Integrity::Fmp4Boxes { .. },
+                    ..
+                }
+            ),
+            "{cause}"
+        ),
+        other => panic!("{other}"),
+    }
+}
+
 /// 自定义 key：分片用它与给定的 IV 解密；播放列表里的 key 地址（这里 404）不请求，分片自己的 IV
 /// （由媒体序号推出）不用。
 #[tokio::test(flavor = "multi_thread")]

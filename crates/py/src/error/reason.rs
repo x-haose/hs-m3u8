@@ -176,6 +176,16 @@ variants! {
             /// 开头几个字节的十六进制
             head: String,
         },
+        /// fMP4 不完整：顶层 box 没有恰好铺满数据（多为源站给出了没写完的文件）
+        #[pyo3(constructor = (*, at, end, len))]
+        Fmp4Boxes {
+            /// 出问题的 box 的起点，字节
+            at: u64,
+            /// 这个 box 应到的位置，字节
+            end: u64,
+            /// 数据的字节数
+            len: u64,
+        },
     }
 }
 
@@ -479,6 +489,7 @@ impl From<core::Integrity> for IntegrityFailure {
             I::RangeLength { expected, found } => IntegrityFailure::RangeLength { expected, found },
             I::UnrecognizedSegment(head) => IntegrityFailure::UnrecognizedSegment { head },
             I::NotFmp4(head) => IntegrityFailure::NotFmp4 { head },
+            I::Fmp4Boxes { at, end, len } => IntegrityFailure::Fmp4Boxes { at, end, len },
         }
     }
 }

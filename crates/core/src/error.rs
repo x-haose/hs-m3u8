@@ -356,6 +356,10 @@ pub enum Integrity {
     UnrecognizedSegment(String),
     #[error("不是 fMP4（开头 {0}）")]
     NotFmp4(String),
+    /// fMP4 的顶层 box 没有恰好铺满数据：从 `at` 起的 box 应到第 `end` 字节，数据只有 `len` 字节（多为源站给出了没写完
+    /// 的文件），或末尾的字节凑不成 box 头、box 的长度字段小于头长
+    #[error("fMP4 不完整：第 {at} 字节起的 box 应到第 {end} 字节，数据有 {len} 字节")]
+    Fmp4Boxes { at: u64, end: u64, len: u64 },
 }
 
 /// 直播停滞的故障原因。
