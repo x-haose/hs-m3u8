@@ -690,7 +690,7 @@ class IntegrityError(SourceError):
         出错的分片或 init 段的地址
         """
     @property
-    def reason(self) -> IntegrityFailure.Padding | IntegrityFailure.CipherLength | IntegrityFailure.RangeLength | IntegrityFailure.UnrecognizedSegment | IntegrityFailure.NotFmp4 | IntegrityFailure.Fmp4Boxes:
+    def reason(self) -> IntegrityFailure.Padding | IntegrityFailure.CipherLength | IntegrityFailure.RangeLength | IntegrityFailure.UnrecognizedSegment | IntegrityFailure.NotFmp4 | IntegrityFailure.Fmp4Boxes | IntegrityFailure.Fmp4BoxTooLarge:
         r"""
         失败的原因
         """
@@ -796,6 +796,24 @@ class IntegrityFailure:
             数据的字节数
             """
         def __new__(cls, *, at: builtins.int, end: builtins.int, len: builtins.int) -> IntegrityFailure.Fmp4Boxes: ...
+    
+    @typing.final
+    class Fmp4BoxTooLarge(IntegrityFailure):
+        r"""
+        fMP4 最后一个顶层 box 的长度写为 0（到数据末尾），实际长度超过 4 GiB，存盘前改写不成实际长度
+        """
+        __match_args__ = ("at", "size",)
+        @property
+        def at(self) -> builtins.int:
+            r"""
+            这个 box 的起点，字节
+            """
+        @property
+        def size(self) -> builtins.int:
+            r"""
+            这个 box 的实际字节数
+            """
+        def __new__(cls, *, at: builtins.int, size: builtins.int) -> IntegrityFailure.Fmp4BoxTooLarge: ...
     
 
 @typing.final

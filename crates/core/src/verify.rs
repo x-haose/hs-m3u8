@@ -15,8 +15,9 @@ pub(crate) fn check_standalone_segment(data: &[u8]) -> Result<(), Integrity> {
 }
 
 /// fMP4 分片或 init 段：以认得的 ISO BMFF box 开头，顶层 box 首尾相接、恰好铺满数据。只看开头时，截断的分片（源站给出
-/// 没写完的文件）能通过，合并时 mov 解复用器按 mdat 声明的长度越过它，读进下一个分片的字节。
-pub(crate) fn check_fmp4(data: &[u8]) -> Result<(), Integrity> {
+/// 没写完的文件）能通过，合并时 mov 解复用器按 mdat 声明的长度越过它，读进下一个分片的字节。最后一个 box 的长度写为
+/// 0（到数据末尾）时改写成实际长度：合并时一条轨的 init 段与分片接成一个输入读，到末尾就成了到所有分片的末尾。
+pub(crate) fn check_fmp4(data: &mut [u8]) -> Result<(), Integrity> {
     const BOXES: [&[u8; 4]; 9] = [
         b"ftyp", b"styp", b"moof", b"moov", b"sidx", b"emsg", b"prft", b"free", b"skip",
     ];
@@ -31,7 +32,6 @@ pub(crate) fn check_fmp4(data: &[u8]) -> Result<(), Integrity> {
         let (header, size) =
             match field(0..4).map(|b| u32::from_be_bytes(b.try_into().expect("切片长 4"))) {
                 None => (8, 0),
-                // 长度为 0：到数据末尾
                 Some(0) => (8, len - at),
                 // 长度为 1：真实长度是头之后的 64 位整数
                 Some(1) => match field(8..16) {
@@ -40,9 +40,16 @@ pub(crate) fn check_fmp4(data: &[u8]) -> Result<(), Integrity> {
                 },
                 Some(size) => (8, u64::from(size)),
             };
+        let to_end = field(0..4) == Some(&[0; 4]);
         let end = at.saturating_add(size.max(header));
         if size < header || end > len {
             return Err(Integrity::Fmp4Boxes { at, end, len });
+        }
+        if to_end {
+            // 64 位的长度要多 8 字节的头，原地放不下
+            let field = u32::try_from(size).map_err(|_| Integrity::Fmp4BoxTooLarge { at, size })?;
+            let at = at as usize;
+            data[at..at + 4].copy_from_slice(&field.to_be_bytes());
         }
         at = end;
     }
@@ -93,10 +100,11 @@ mod tests {
         let boxed = |size: u32, kind: &[u8; 4], payload: usize| {
             [&size.to_be_bytes()[..], kind, &vec![0; payload]].concat()
         };
+        let check = |mut data: Vec<u8>| check_fmp4(&mut data).map(|()| data);
         let segment = [boxed(16, b"moof", 8), boxed(12, b"mdat", 4)].concat();
-        assert_eq!(check_fmp4(&segment), Ok(()));
-        assert_eq!(check_fmp4(&boxed(24, b"ftyp", 16)), Ok(()));
-        // 长度为 1 时后跟 64 位长度；为 0 时到末尾
+        assert_eq!(check(segment.clone()), Ok(segment.clone()));
+        assert!(check(boxed(24, b"ftyp", 16)).is_ok());
+        // 长度为 1 时后跟 64 位长度
         let large = [
             &1u32.to_be_bytes()[..],
             b"styp",
@@ -104,31 +112,32 @@ mod tests {
             &[0; 4],
         ]
         .concat();
-        assert_eq!(check_fmp4(&large), Ok(()));
-        let to_end = [boxed(8, b"styp", 0), boxed(0, b"mdat", 30)].concat();
-        assert_eq!(check_fmp4(&to_end), Ok(()));
+        assert!(check(large).is_ok());
+        // 长度为 0 时到末尾，改写成实际长度
+        assert_eq!(
+            check([boxed(8, b"styp", 0), boxed(0, b"mdat", 30)].concat()),
+            Ok([boxed(8, b"styp", 0), boxed(38, b"mdat", 30)].concat())
+        );
         // 第一个 box 认不出
         assert_eq!(
-            check_fmp4(&boxed(16, b"mdat", 8)),
+            check(boxed(16, b"mdat", 8)),
             Err(Integrity::NotFmp4(
                 "00 00 00 10 6d 64 61 74 00 00 00 00 00 00 00 00".into()
             ))
         );
-        assert!(check_fmp4(&boxed(16, b"html", 8)).is_err());
-        assert!(check_fmp4(b"moof").is_err());
+        assert!(check(boxed(16, b"html", 8)).is_err());
+        assert!(check(b"moof".to_vec()).is_err());
         // mdat 截断、末尾多出凑不成 box 头的字节、长度字段小于头长
-        let truncated = &segment[..segment.len() - 2];
         assert_eq!(
-            check_fmp4(truncated),
+            check(segment[..segment.len() - 2].to_vec()),
             Err(Integrity::Fmp4Boxes {
                 at: 16,
                 end: 28,
                 len: 26
             })
         );
-        let trailing = [segment.clone(), vec![0; 3]].concat();
         assert_eq!(
-            check_fmp4(&trailing),
+            check([segment.clone(), vec![0; 3]].concat()),
             Err(Integrity::Fmp4Boxes {
                 at: 28,
                 end: 36,
@@ -136,7 +145,7 @@ mod tests {
             })
         );
         assert_eq!(
-            check_fmp4(&boxed(7, b"moof", 0)),
+            check(boxed(7, b"moof", 0)),
             Err(Integrity::Fmp4Boxes {
                 at: 0,
                 end: 8,

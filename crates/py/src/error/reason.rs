@@ -186,6 +186,14 @@ variants! {
             /// 数据的字节数
             len: u64,
         },
+        /// fMP4 最后一个顶层 box 的长度写为 0（到数据末尾），实际长度超过 4 GiB，存盘前改写不成实际长度
+        #[pyo3(constructor = (*, at, size))]
+        Fmp4BoxTooLarge {
+            /// 这个 box 的起点，字节
+            at: u64,
+            /// 这个 box 的实际字节数
+            size: u64,
+        },
     }
 }
 
@@ -500,6 +508,7 @@ impl From<core::Integrity> for IntegrityFailure {
             I::UnrecognizedSegment(head) => IntegrityFailure::UnrecognizedSegment { head },
             I::NotFmp4(head) => IntegrityFailure::NotFmp4 { head },
             I::Fmp4Boxes { at, end, len } => IntegrityFailure::Fmp4Boxes { at, end, len },
+            I::Fmp4BoxTooLarge { at, size } => IntegrityFailure::Fmp4BoxTooLarge { at, size },
         }
     }
 }

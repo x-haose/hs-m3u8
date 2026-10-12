@@ -205,25 +205,25 @@ async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
     (id, result)
 }
 
-/// 拉取 init 段并校验是 fMP4。
+/// 拉取 init 段并校验是 fMP4（见 [`check_fmp4`]，可能改写最后一个 box 的长度字段）。
 pub(crate) async fn fetch_init(
     http: &Http,
     init: &InitSection,
     permit: Permit,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>, Error> {
-    let data = http
+    let mut data = http
         .get(Purpose::Init, &init.uri, init.byte_range, permit, cancel)
         .await?
         .body;
-    check_fmp4(&data).map_err(|kind| Error::Integrity {
+    check_fmp4(&mut data).map_err(|kind| Error::Integrity {
         url: Box::new(init.uri.clone()),
         kind,
     })?;
     Ok(data)
 }
 
-/// 拉取分片，经 `on_segment` 回调后解密并校验内容；有自定义 key 时用它解密。
+/// 拉取分片，经 `on_segment` 回调后解密并校验内容（fMP4 见 [`check_fmp4`]）；有自定义 key 时用它解密。
 async fn fetch_segment(
     ctx: &Ctx,
     segment: &Segment,
@@ -254,12 +254,12 @@ async fn fetch_segment(
         url: Box::new(segment.uri.clone()),
         kind,
     };
-    let data = match key {
+    let mut data = match key {
         Some((key, iv)) => decrypt(data, &key, &iv).map_err(integrity)?,
         None => data,
     };
     match segment.init {
-        Some(_) => check_fmp4(&data),
+        Some(_) => check_fmp4(&mut data),
         None => check_standalone_segment(&data),
     }
     .map_err(integrity)?;

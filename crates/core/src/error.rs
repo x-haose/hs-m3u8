@@ -349,6 +349,12 @@ pub enum Integrity {
     /// 的文件），或末尾的字节凑不成 box 头、box 的长度字段小于头长
     #[error("fMP4 不完整：第 {at} 字节起的 box 应到第 {end} 字节，数据有 {len} 字节")]
     Fmp4Boxes { at: u64, end: u64, len: u64 },
+    /// fMP4 最后一个顶层 box 的长度写为 0（到数据末尾），实际的 `size` 字节写不进 32 位的长度字段：存盘前要改写成实际
+    /// 长度（合并时一条轨的分片接成一个输入读）
+    #[error(
+        "fMP4 第 {at} 字节起的最后一个 box 长度写为 0，实际 {size} 字节超过 4 GiB，改写不了长度字段"
+    )]
+    Fmp4BoxTooLarge { at: u64, size: u64 },
 }
 
 /// 直播停滞的故障原因。

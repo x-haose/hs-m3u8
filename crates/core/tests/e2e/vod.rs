@@ -641,6 +641,50 @@ async fn a_truncated_fmp4_segment_fails_integrity() {
     }
 }
 
+/// fMP4 数据里最后一个顶层 box 的起点（各 box 的长度都写在 32 位字段里）。
+fn last_box(data: &[u8]) -> usize {
+    let mut at = 0;
+    loop {
+        let size = u32::from_be_bytes(data[at..at + 4].try_into().unwrap()) as usize;
+        if at + size == data.len() {
+            return at;
+        }
+        at += size;
+    }
+}
+
+/// 源站把 fMP4 分片与 init 段最后一个 box（mdat、moov）的长度写为 0（到文件末尾）：下载时改写成实际长度，合并出的 MP4
+/// 与原样的样本合并的一致。不改写时合并把后面的分片读成这个 box 的一部分。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_last_box_sized_to_the_end_is_rewritten() {
+    let dir = test_dir("fmp4_box_to_end");
+    let server = Server::start().await;
+    let to_end = |path: &str| {
+        let mut data = fixture(path);
+        let last = last_box(&data);
+        data[last..last + 4].fill(0);
+        data
+    };
+    server.put("init.mp4", to_end("fmp4_a/video/init.mp4"));
+    server.put("seg0.m4s", to_end("fmp4_a/video/seg0.m4s"));
+    server.put("seg1.m4s", fixture("fmp4_a/video/seg1.m4s"));
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"init.mp4\"\n\
+         #EXTINF:1,\nseg0.m4s\n#EXTINF:1,\nseg1.m4s\n#EXT-X-ENDLIST\n",
+    );
+
+    let output = run(request(server.url("index.m3u8"), &dir)).await.unwrap();
+
+    let tracks = vec![track(
+        "fmp4_a/video",
+        Some("init.mp4"),
+        &["seg0.m4s", "seg1.m4s"],
+    )];
+    let want = expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]);
+    assert_output(&output, &want);
+}
+
 /// 自定义 key：分片用它与给定的 IV 解密；播放列表里的 key 地址（这里 404）不请求，分片自己的 IV
 /// （由媒体序号推出）不用。
 #[tokio::test(flavor = "multi_thread")]
