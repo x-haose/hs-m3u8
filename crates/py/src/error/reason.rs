@@ -227,7 +227,7 @@ variants! {
             /// 流的种类
             kind: StreamKind,
         },
-        /// 这条轨是打包音频，这一组的第一个分片没有 ID3 时间戳，而这一组还有别的轨：不知道怎样与它们对齐
+        /// 这条轨是打包音频，这一组有分片没有 ID3 时间戳，而这一组还有别的轨：不知道怎样与它们对齐
         #[pyo3(constructor = (*, group, track))]
         UntimedPackedAudio {
             /// 第几个不连续段组

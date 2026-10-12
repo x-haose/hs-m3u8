@@ -720,35 +720,53 @@ fn packed_audio_aligns_with_ts_across_the_wrap_edge() {
     );
 }
 
-/// 打包音频没有 ID3 时间戳：与别的轨同组时不知道怎样对齐，放不进 MP4；只有它一条轨时按样本数从头计时。
+/// 打包音频有分片没有 ID3 时间戳：与别的轨同组时不知道怎样对齐，放不进 MP4；只有它一条轨时按样本数从头接续。
 #[test]
 fn untimed_packed_audio_is_used_only_alone() {
     let dir = work_dir("packed_untimed");
     let output = dir.join("out.mp4");
     let segments = packed_fixture("aac");
-    let audio = TrackSegments {
+    let untimed = TrackSegments {
         init: None,
         segments: segments.iter().map(|(path, _)| path.clone()).collect(),
     };
+    // 只有第一片有时间戳，第二片前缺了一片
+    let partly = TrackSegments {
+        init: None,
+        segments: vec![
+            packed_segment(&dir, &segments[0].0, Some(900_000)),
+            segments[2].0.clone(),
+        ],
+    };
 
-    let err = remux(
-        &[Streams::Video, Streams::Audio],
-        &[group([track("ts_a"), audio.clone()])],
-        &output,
-    )
-    .unwrap_err();
-    assert!(
-        matches!(
-            err,
-            Error::Unsupported(Unsupported::UntimedPackedAudio { group: 0, track: 1 })
-        ),
-        "实际 {err:?}"
-    );
+    for audio in [&untimed, &partly] {
+        let err = remux(
+            &[Streams::Video, Streams::Audio],
+            &[group([track("ts_a"), audio.clone()])],
+            &output,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Unsupported(Unsupported::UntimedPackedAudio { group: 0, track: 1 })
+            ),
+            "实际 {err:?}"
+        );
+    }
 
-    let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
+    let report = remux(&[Streams::Audio], &[group([untimed])], &output).unwrap();
     let packets: usize = segments
         .iter()
         .map(|(path, _)| timelines(path).1.len())
         .sum();
     assert_eq!(report.streams[0].packets, packets as u64);
+    // 有时间戳的那片也按样本数接续：缺的那片不留空档
+    let report = remux(&[Streams::Audio], &[group([partly])], &output).unwrap();
+    let expected = (segments[0].1 + segments[2].1) as f64 / 90_000.0;
+    let duration = report.streams[0].duration_us as f64 / 1e6;
+    assert!(
+        (duration - expected).abs() < 0.001,
+        "应连续 {expected} 秒，实际 {duration}"
+    );
 }

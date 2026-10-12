@@ -269,10 +269,10 @@ pub enum Unsupported {
         track: usize,
         kind: StreamKind,
     },
-    /// 第 `track` 条轨是打包音频，这一组的第一个分片没有 ID3 时间戳（RFC 8216 3.4 要求有），而这一组还有别的轨：
-    /// 不知道它与别的轨怎样对齐。只有它一条轨时按样本数从头计时
+    /// 第 `track` 条轨是打包音频，这一组有分片没有 ID3 时间戳（RFC 8216 3.4 要求每片都有），而这一组还有别的轨：
+    /// 不知道它与别的轨怎样对齐。只有它一条轨时按样本数从头接续
     #[error(
-        "第 {group} 组第 {track} 条轨是打包音频，这一组的第一个分片没有 ID3 时间戳，无法与其他轨对齐"
+        "第 {group} 组第 {track} 条轨是打包音频，这一组有分片没有 ID3 时间戳，无法与其他轨对齐"
     )]
     UntimedPackedAudio { group: usize, track: usize },
     #[error("各轨都没有要取的视频或音频流，写不出 MP4")]
@@ -442,28 +442,28 @@ impl Input {
         matches!(self, Input::Packed(_))
     }
 
-    /// 打包音频，而这一组的第一个分片没有时间戳。
+    /// 打包音频，而这一组有分片没有时间戳。
     fn untimed(&self) -> bool {
         matches!(self, Input::Packed(packed) if packed.start.is_none())
     }
 }
 
 /// 打包音频一条轨在一组里的分片。FFmpeg 只从 0 起按样本数计时，所以逐个分片打开，把各片的音频包平移到它的 ID3
-/// 时间戳处：与同组的其他轨对齐，缺失的分片处留出空档。没有时间戳的分片接在上一片之后；这一组的第一个分片就没有
-/// 时间戳时，整组按样本数接续。
+/// 时间戳处：与同组的其他轨对齐，缺失的分片处留出空档。有分片没有时间戳时整组按样本数接续，只能单独成轨（见
+/// [`Unsupported::UntimedPackedAudio`]）。
 struct Packed {
     /// 当前分片的输入
     ictx: format::context::Input,
     /// 读当前分片出错时的路径与原因
     failure: chain::Failure,
-    /// 当前分片的时间戳（90 kHz，未展开）；没有时为 None
+    /// 当前分片的时间戳（90 kHz，未展开）；整组按样本数接续时为 None
     timestamp: Option<i64>,
     /// 当前分片的音频包要加的偏移，以 `audio` 的时间基为单位；读到它第一个带 DTS 的音频包时确定
     shift: Option<i64>,
-    /// 还没打开的分片
-    rest: VecDeque<PathBuf>,
-    /// 这一组第一个分片的时间戳（90 kHz，已展开），各片的时间戳按它展开（见 [`packed::unwrap_pts`]）；为 None 时
-    /// 整组按样本数计时
+    /// 还没打开的分片与各自开头的信息
+    rest: VecDeque<(PathBuf, packed::Head)>,
+    /// 这一组第一个分片的时间戳（90 kHz，已展开），各片的时间戳按它展开（见 [`packed::unwrap_pts`]）；整组按样本数
+    /// 接续时为 None
     start: Option<i64>,
     /// 第一个分片里音频流的下标与时间基，各片的音频包都换到这个时间基；没有音频流时为 None
     audio: Option<(usize, Rational)>,
@@ -472,11 +472,24 @@ struct Packed {
 }
 
 impl Packed {
-    /// 打开第一个分片；`segments` 至少有一个。
+    /// 读出各分片开头的 ID3 标签，打开第一个分片；`segments` 至少有一个。
     fn open(segments: &[PathBuf], group: usize, track: usize) -> Result<Packed, Error> {
-        let mut rest: VecDeque<PathBuf> = segments.iter().cloned().collect();
-        let path = rest.pop_front().expect("validate 保证每条轨至少一个分片");
-        let (ictx, failure, timestamp) = open_packed_segment(path, group, track)?;
+        let mut rest = segments
+            .iter()
+            .map(|path| {
+                packed::read_head(path)
+                    .map(|head| (path.clone(), head))
+                    .map_err(|cause| Error::Io {
+                        action: "读取",
+                        path: path.clone(),
+                        cause,
+                    })
+            })
+            .collect::<Result<VecDeque<_>, Error>>()?;
+        let timed = rest.iter().all(|(_, head)| head.timestamp.is_some());
+        let (path, head) = rest.pop_front().expect("validate 保证每条轨至少一个分片");
+        let (ictx, failure) = open_files(vec![(path, head.data_start)], group, track)?;
+        let timestamp = head.timestamp.filter(|_| timed);
         let audio = ictx
             .streams()
             .find(|s| s.parameters().medium() == media::Type::Audio)
@@ -506,13 +519,12 @@ impl Packed {
             match packet.read(&mut self.ictx) {
                 Ok(()) => break,
                 Err(ffmpeg::Error::Eof) => {
-                    let Some(path) = self.rest.pop_front() else {
+                    let Some((path, head)) = self.rest.pop_front() else {
                         return Ok(false);
                     };
-                    let (ictx, failure, timestamp) = open_packed_segment(path, group, track)?;
-                    self.ictx = ictx;
-                    self.failure = failure;
-                    self.timestamp = timestamp;
+                    (self.ictx, self.failure) =
+                        open_files(vec![(path, head.data_start)], group, track)?;
+                    self.timestamp = head.timestamp.filter(|_| self.start.is_some());
                     self.shift = None;
                 }
                 Err(cause) => {
@@ -557,21 +569,6 @@ impl Packed {
         self.end = Some(self.end.map_or(end, |e| e.max(end)));
         Ok(true)
     }
-}
-
-/// 打开打包音频的一个分片，跳过开头的 ID3 标签。返回输入、记录文件错误的位置与分片的时间戳（90 kHz，未展开）。
-fn open_packed_segment(
-    path: PathBuf,
-    group: usize,
-    track: usize,
-) -> Result<(format::context::Input, chain::Failure, Option<i64>), Error> {
-    let head = packed::read_head(&path).map_err(|cause| Error::Io {
-        action: "读取",
-        path: path.clone(),
-        cause,
-    })?;
-    let (ictx, failure) = open_files(vec![(path, head.data_start)], group, track)?;
-    Ok((ictx, failure, head.timestamp))
 }
 
 /// 一条轨在某组中被选中的一路流。

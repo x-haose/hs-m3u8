@@ -1550,7 +1550,7 @@ class Mp4Unsupported:
     @typing.final
     class UntimedPackedAudio(Mp4Unsupported):
         r"""
-        这条轨是打包音频，这一组的第一个分片没有 ID3 时间戳，而这一组还有别的轨：不知道怎样与它们对齐
+        这条轨是打包音频，这一组有分片没有 ID3 时间戳，而这一组还有别的轨：不知道怎样与它们对齐
         """
         __match_args__ = ("group", "track",)
         @property
