@@ -1500,7 +1500,8 @@ class Mp4Unsupported:
     @typing.final
     class ParamsUnknown(Mp4Unsupported):
         r"""
-        选中的流探测不出编码或编码参数（视频的宽高、音频的采样率与声道数）：这一组开头一段里没有它的数据
+        选中的流探测不出编码或编码参数（视频的宽高、音频的采样率与声道数），或这一组与第 0 组只有一边探测出了视频的
+        像素格式：这一组开头一段里没有能解的数据
         """
         __match_args__ = ("group", "track", "kind",)
         @property

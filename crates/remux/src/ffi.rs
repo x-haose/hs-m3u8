@@ -44,6 +44,14 @@ pub(crate) fn extradata(stream: &Stream<'_>) -> Vec<u8> {
     }
 }
 
+/// 流的 profile 与每帧的采样点数（codecpar 的 profile 与 frame_size，探测时由解码器得出；不知道时分别为负数与 0）。
+pub(crate) fn profile_and_frame_size(stream: &Stream<'_>) -> (i32, i32) {
+    let params = stream.parameters();
+    // SAFETY: 指针指向该流的 codecpar，在 params 存活期间有效且非空；此处只读。
+    let p = unsafe { &*params.as_ptr() };
+    (p.profile, p.frame_size)
+}
+
 /// FFmpeg 的像素格式值 `format`（AVPixelFormat）的名称；不认识（含 AV_PIX_FMT_NONE）时为 None。逐个查像素格式描述
 /// 表，不把整数转成枚举：越界的枚举值是未定义行为。
 fn pixel_format_name(format: i32) -> Option<&'static str> {

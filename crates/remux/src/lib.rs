@@ -278,7 +278,8 @@ pub enum Unsupported {
         /// Hz
         sample_rate: u32,
     },
-    /// 选中的流探测不出编码或编码参数（视频的宽高、音频的采样率与声道数）：这一组里 FFmpeg 探测读的那一段没有它的数据
+    /// 选中的流探测不出编码或编码参数（视频的宽高、音频的采样率与声道数），或这一组与第 0 组只有一边探测出了视频的
+    /// 像素格式：这一组里 FFmpeg 探测读的那一段没有能解的数据
     #[error(
         "第 {group} 组第 {track} 条轨的{kind}流探测不出编码参数（开头一段里没有它的数据），写不出 MP4 的样本描述"
     )]
@@ -477,9 +478,12 @@ struct Desc {
 /// 一路流的解码配置。
 #[derive(Clone, PartialEq, Eq)]
 enum Config {
-    /// 有 init 段（fMP4）：init 段里的解码配置（codecpar 的 extradata，如 avcC、esds 里的 AudioSpecificConfig），样本里
-    /// 不带，按字节比较
+    /// 有 init 段（fMP4）：init 段里的解码配置（codecpar 的 extradata，如 avcC），样本里不带，按字节比较：解码器只按
+    /// 样本描述配置，FLAC 与 ALAC 的配置里的帧长上限还用来分配缓冲区
     Init(Vec<u8>),
+    /// fMP4 的 AAC：AudioSpecificConfig 有等价的不同写法（如显式写出没有 SBR，或省略），改比 FFmpeg 解出的 profile
+    /// （LC、HE-AAC 等）与每帧的采样点数；采样率与声道数在编码参数里
+    InitAac { profile: i32, frame_size: i32 },
     /// 参数随帧携带（TS 与打包音频）：音频以第 0 组第一个包的帧头为准逐包核对（见 [`Inband`]）；视频的参数集在关键帧
     /// 前重复、解码器按带内的解码，只核对编码参数（宽高与像素格式，见 [`Shape`]）
     Inband,
@@ -510,6 +514,12 @@ fn open_selected(
         check_codec(id, &shape, input.standalone(), group, track).map_err(Error::Unsupported)?;
         let config = if input.standalone() {
             Config::Inband
+        } else if id == codec::Id::AAC {
+            let (profile, frame_size) = ffi::profile_and_frame_size(&stream);
+            Config::InitAac {
+                profile,
+                frame_size,
+            }
         } else {
             Config::Init(ffi::extradata(&stream))
         };
@@ -890,6 +900,25 @@ fn same_streams(
     }
     for (s, f) in selected.iter().zip(first) {
         let kind = f.shape.kind();
+        // 只有一边探测出了像素格式：比不了，不当作参数不同
+        if let (
+            Shape::Video {
+                pixel_format: found,
+                ..
+            },
+            Shape::Video {
+                pixel_format: expected,
+                ..
+            },
+        ) = (s.desc.shape, f.shape)
+            && found.is_some() != expected.is_some()
+        {
+            return Err(Error::Unsupported(Unsupported::ParamsUnknown {
+                group,
+                track,
+                kind,
+            }));
+        }
         if s.desc.shape != f.shape {
             return Err(Error::Unsupported(Unsupported::ParamsChanged {
                 group,

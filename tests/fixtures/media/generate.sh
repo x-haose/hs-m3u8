@@ -96,6 +96,12 @@ fmp4_muxed fmp4_alac "${tiny_src[@]}" -c:v libx264 -preset veryfast -g 25 -b:v 1
 fmp4_muxed fmp4_baseline "${tiny_src[@]}" -c:v libx264 -preset veryfast -profile:v baseline -g 25 -b:v 100k "${aac[@]}"
 ts_segments ts_aac_stereo "${one_src[@]}" "${h264[@]}" -c:a aac -ac 2 -b:a 64k
 ts_segments ts_he_aac "${one_src[@]}" "${h264[@]}" -c:a aac_at -profile:a 4 -ac 2 -b:a 48k
+# 纯音频 fMP4：AudioToolbox 编的 LC 单声道（AudioSpecificConfig 省略「没有 SBR」，与 fmp4_a 的等价）、FFmpeg 编的 LC
+# 双声道与 AudioToolbox 编的 HE-AAC 双声道（解码都是 48 kHz 双声道，profile 不同）
+read -r -a tone_src <<< "-f lavfi -i sine=frequency=440:sample_rate=48000 -t 2"
+fmp4_muxed fmp4_aac_at "${tone_src[@]}" -c:a aac_at -ac 1 -b:a 64k
+fmp4_muxed fmp4_aac_stereo "${tone_src[@]}" -c:a aac -ac 2 -b:a 64k
+fmp4_muxed fmp4_he_aac "${tone_src[@]}" -c:a aac_at -profile:a 4 -ac 2 -b:a 48k
 
 # 打包音频（RFC 8216 3.4）：约 3 秒正弦音的裸音频帧按 1 秒切成 3 片，不带 ID3 标签，测试按要的时间戳加上。$1 目录名，
 # $2 扩展名，其余为编码与切分参数

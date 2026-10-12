@@ -596,6 +596,22 @@ fn resolution_change_between_groups_is_rejected() {
 }
 
 /// fMP4 里的 AV1、VP9 视频与 Opus、FLAC、ALAC 音频原样复制，MP4 里的样本描述带各自的配置 box。
+/// fMP4 的 AAC：AudioSpecificConfig 写法不同而等价（FFmpeg 的编码器显式写出没有 SBR，AudioToolbox 的省略），两种
+/// 顺序都照常合并。
+#[test]
+fn equivalent_aac_configs_from_two_encoders_merge() {
+    let dir = work_dir("equivalent_aac");
+    let output = dir.join("out.mp4");
+    for (first, second) in [
+        ("fmp4_a/audio", "fmp4_aac_at"),
+        ("fmp4_aac_at", "fmp4_a/audio"),
+    ] {
+        let groups = [group([track(first)]), group([track(second)])];
+        check(&[Streams::Audio], &groups).unwrap();
+        remux(&[Streams::Audio], &groups, &output).unwrap();
+    }
+}
+
 /// 视频的色度采样变了（4:2:0 与 4:4:4，宽高相同）：跨组与组内都报出。TS 的参数集随帧携带，FFmpeg 按带内的解得出，
 /// 只认样本描述的解码器（如 AVFoundation）解不出。
 #[test]
@@ -676,6 +692,12 @@ fn decoder_configs_differing_between_groups_are_rejected() {
             StreamKind::Audio,
         ),
         (Streams::Audio, "fmp4_a/audio", "ts_a", StreamKind::Audio),
+        (
+            Streams::Audio,
+            "fmp4_aac_stereo",
+            "fmp4_he_aac",
+            StreamKind::Audio,
+        ),
     ];
     for (streams, first, second, kind) in cases {
         let err = remux(
@@ -1004,6 +1026,24 @@ fn check_leaves_what_the_first_segment_cannot_tell_to_the_merge() {
         segments: vec![first, rest],
     };
     remux(&[Streams::Audio], &[group([whole])], &output).unwrap();
+}
+
+/// fMP4 某一组开头的分片里没有视频样本（只有 styp）：宽高来自 init 段，像素格式探测不出，与第 0 组比不了，核对跳过
+/// 这一组，不报参数不同。
+#[test]
+fn check_skips_a_group_whose_pixel_format_is_unknown() {
+    let dir = work_dir("check_unknown_pixel_format");
+    let styp_only = dir.join("styp.m4s");
+    std::fs::write(&styp_only, b"\0\0\0\x18stypmsdh\0\0\0\0msdhmsix").unwrap();
+    let second = TrackSegments {
+        init: Some(fixtures().join("fmp4_b/video/init.mp4")),
+        segments: vec![styp_only],
+    };
+    check(
+        &[Streams::Video],
+        &[group([head("fmp4_a/video")]), group([second])],
+    )
+    .unwrap();
 }
 
 /// TS 里每帧 3 块的 E-AC-3：MP4 封装器会把几帧并成一个样本、丢掉末尾凑不满的，放不进 MP4。
