@@ -267,19 +267,6 @@ variants! {
             /// 第几条轨
             track: usize,
         },
-        /// 打包音频的一个分片里读不出音频帧：既不是音频帧也不是 ID3 标签、帧或标签不完整，或是自由格式（帧头不给
-        /// 码率）的 MP3
-        #[pyo3(constructor = (*, group, track, segment, offset))]
-        UnreadablePackedAudio {
-            /// 第几个不连续段组
-            group: usize,
-            /// 第几条轨
-            track: usize,
-            /// 这一组这条轨的第几个分片
-            segment: usize,
-            /// 读不出的位置，字节
-            offset: u64,
-        },
         /// E-AC-3 每帧不足 6 块（只出在 TS 与打包音频里）：MP4 封装器把几帧并成一个样本，末尾凑不满的帧不写出
         #[pyo3(constructor = (*, group, track))]
         Eac3ShortFrames {
@@ -553,17 +540,6 @@ impl From<core::Mp4Unsupported> for Mp4Unsupported {
             U::FormatChangedInGroup { group, track } => {
                 Mp4Unsupported::FormatChangedInGroup { group, track }
             }
-            U::UnreadablePackedAudio {
-                group,
-                track,
-                segment,
-                offset,
-            } => Mp4Unsupported::UnreadablePackedAudio {
-                group,
-                track,
-                segment,
-                offset,
-            },
             U::Eac3ShortFrames { group, track } => Mp4Unsupported::Eac3ShortFrames { group, track },
             U::Eac3Substreams { group, track } => Mp4Unsupported::Eac3Substreams { group, track },
             U::DtsNotIncreasing { group, track, kind } => Mp4Unsupported::DtsNotIncreasing {

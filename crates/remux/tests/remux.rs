@@ -1313,39 +1313,36 @@ fn packed_mp3_info_frames_and_id3v1_tags_are_skipped() {
     );
 }
 
-/// 打包音频的帧之间有既不是帧也不是标签的字节：报出分片与偏移，不跳过。
+/// 打包音频损坏：帧之间有认不出的字节、最后一帧不完整。跳过损坏处、各算一处，其余的帧照常写入。
 #[test]
-fn junk_in_packed_audio_is_reported_with_its_offset() {
-    let dir = work_dir("packed_junk");
+fn damage_in_packed_audio_is_skipped_and_counted() {
+    let dir = work_dir("packed_damage");
     let output = dir.join("out.mp4");
     let segments = packed_fixture("aac");
-    let tagged = std::fs::read(packed_segment(&dir, &segments[1].0, Some(990_000))).unwrap();
-    let junk = dir.join("junk");
+    let frames: Vec<usize> = segments
+        .iter()
+        .map(|(path, _)| timelines(path).1.len())
+        .collect();
+    let damaged = dir.join("damaged");
+    let tail = std::fs::read(&segments[2].0).unwrap();
     let data = [
-        tagged.clone(),
+        std::fs::read(packed_segment(&dir, &segments[1].0, Some(990_000))).unwrap(),
         b"junk".to_vec(),
-        std::fs::read(&segments[2].0).unwrap(),
+        tail[..tail.len() - 10].to_vec(),
     ]
     .concat();
-    std::fs::write(&junk, data).unwrap();
+    std::fs::write(&damaged, data).unwrap();
     let audio = TrackSegments {
         init: None,
-        segments: vec![packed_segment(&dir, &segments[0].0, Some(900_000)), junk],
+        segments: vec![packed_segment(&dir, &segments[0].0, Some(900_000)), damaged],
     };
 
-    let err = remux(&[Streams::Audio], &[group([audio])], &output).unwrap_err();
+    let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
 
-    assert!(
-        matches!(
-            err,
-            Error::Unsupported(Unsupported::UnreadablePackedAudio {
-                group: 0,
-                track: 0,
-                segment: 1,
-                offset,
-            }) if offset == tagged.len() as u64
-        ),
-        "实际 {err:?}"
+    let stream = &report.streams[0];
+    assert_eq!(
+        (stream.packets, stream.discarded_corrupt),
+        ((frames.iter().sum::<usize>() - 1) as u64, 2)
     );
 }
 

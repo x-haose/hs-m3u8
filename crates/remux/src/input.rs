@@ -96,6 +96,14 @@ impl Input {
         !matches!(self, Input::Chain { init: true, .. })
     }
 
+    /// 打包音频切帧时跳过的损坏处：音频流的下标与处数（见 [`Packed`]）；其余输入为 None。
+    pub(crate) fn damaged(&self) -> Option<(usize, u64)> {
+        match self {
+            Input::Packed(packed) => packed.damaged(),
+            Input::Chain { .. } => None,
+        }
+    }
+
     /// 打包音频，而这一组有分片没有时间戳。
     pub(crate) fn untimed(&self) -> bool {
         matches!(self, Input::Packed(packed) if !packed.timed())

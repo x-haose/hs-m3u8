@@ -4,6 +4,8 @@
 
 use std::io::{self, Read, Seek, SeekFrom};
 
+use crate::frame;
+
 /// 没有 init 段的分片的格式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -45,7 +47,7 @@ const TIMESTAMP_FRAME_LEN: usize = TIMESTAMP_OWNER.len() + 1 + 8;
 const PROBE_LEN: usize = 376;
 
 /// 读出分片开头的信息：TS 要偏移 0 处、长度够时偏移 188 处都是同步字节 0x47；打包音频要 ID3 标签之后是 ADTS、
-/// MPEG 音频或 AC-3 / E-AC-3 的同步字。都不是（含标签不完整、长度字段不合法）时为 None。只读开头与标签里的帧头，
+/// MPEG 音频或 AC-3 / E-AC-3 的合法帧头。都不是（含标签不完整、长度字段不合法）时为 None。只读开头与标签里的帧头，
 /// 大标签（如带封面图）不整个读进来。
 pub fn read_head(reader: &mut (impl Read + Seek)) -> io::Result<Option<Head>> {
     let mut start = 0u64;
@@ -65,25 +67,25 @@ pub fn read_head(reader: &mut (impl Read + Seek)) -> io::Result<Option<Head>> {
             start += tag.len();
             continue;
         }
-        let format = match data {
-            [0x47, ..] if start == 0 => {
-                return Ok((data.len() < 2 * 188 || data[188] == 0x47).then_some(Head {
-                    format: Format::Ts,
-                    data_start: 0,
-                    timestamp: None,
-                }));
+        if data.first() == Some(&0x47) && start == 0 {
+            return Ok((data.len() < 2 * 188 || data[188] == 0x47).then_some(Head {
+                format: Format::Ts,
+                data_start: 0,
+                timestamp: None,
+            }));
+        }
+        // 打包音频：开头是合法的帧头（判定见 crate::frame）。ADTS 另要求 layer 为 0（FFmpeg 探测 AAC 时同样要求），
+        // 否则与 MPEG 音频的同步字分不开
+        let format = if data.get(1).is_some_and(|b| b & 0x06 == 0) && frame::adts(data).is_some() {
+            Format::Aac
+        } else if frame::mpeg_audio(data).is_some() {
+            Format::Mp3
+        } else {
+            match frame::ac3(data) {
+                Some((frame, _)) if frame.substream.is_none() => Format::Ac3,
+                Some(_) => Format::Eac3,
+                None => return Ok(None),
             }
-            // ADTS：12 位同步字，layer 为 0
-            [0xFF, b, ..] if b & 0xF6 == 0xF0 => Format::Aac,
-            // MPEG 音频帧：11 位同步字，layer 不为 0
-            [0xFF, b, ..] if b & 0xE0 == 0xE0 && b & 0x06 != 0 => Format::Mp3,
-            // AC-3 与 E-AC-3 同步字相同，按第 6 字节高 5 位的 bsid 区分（≤ 10 为 AC-3，11..=16 为 E-AC-3）
-            [0x0B, 0x77, _, _, _, b, ..] => match b >> 3 {
-                0..=10 => Format::Ac3,
-                11..=16 => Format::Eac3,
-                _ => return Ok(None),
-            },
-            _ => return Ok(None),
         };
         return Ok(Some(Head {
             format,
@@ -274,7 +276,8 @@ mod tests {
         use Format::*;
         let mp3 = [0xFF, 0xFB, 0x90, 0x64];
         let ac3 = [0x0B, 0x77, 0, 0, 0, 8 << 3, 0];
-        let eac3 = [0x0B, 0x77, 0, 0, 0, 16 << 3, 0];
+        // strmtyp 0、frmsiz 383（768 字节）、48 kHz、每帧 6 块、5.1、bsid 16
+        let eac3 = [0x0B, 0x77, 0x01, 0x7F, 0x3F, 16 << 3, 0];
         assert_eq!(format(&ts_packets(3)), Some(Ts));
         // 不足两个包时只看首字节；第二个包错位不是 TS
         assert_eq!(format(&ts_packets(1)), Some(Ts));
@@ -298,6 +301,11 @@ mod tests {
         }
         // ID3 之后不是音频、标签超出数据、长度字段最高位为 1、bsid 超出 AC-3 与 E-AC-3 的范围、空
         assert_eq!(format(&[tag(0, &[], 0), b"<html>".to_vec()].concat()), None);
+        // 同步字对、帧头不合法：ADTS 的采样率下标 13，MPEG 音频的版本位为保留值 01
+        let mut reserved_rate = ADTS;
+        reserved_rate[2] = reserved_rate[2] & 0xC3 | 13 << 2;
+        assert_eq!(format(&reserved_rate), None);
+        assert_eq!(format(&[0xFF, 0xEB, 0x90, 0x64]), None);
         assert_eq!(format(&tag(0, &[], 20)[..15]), None);
         assert_eq!(format(b"ID3\x04\x00\x00\x00\x00\x00\x80\xFF\xF1"), None);
         assert_eq!(format(&[0x0B, 0x77, 0, 0, 0, 20 << 3]), None);

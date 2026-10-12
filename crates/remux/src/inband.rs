@@ -155,7 +155,7 @@ fn ac3(data: &[u8]) -> Option<AudioParams> {
 /// 包里的 MPEG 音频帧头；帧长与包长对不上时为 None。
 fn mpeg_audio(data: &[u8]) -> Option<AudioParams> {
     let (header, len) = frame::mpeg_audio(data)?;
-    (len == data.len()).then_some(AudioParams::Mpeg(header))
+    (len == Some(data.len())).then_some(AudioParams::Mpeg(header))
 }
 
 #[cfg(test)]

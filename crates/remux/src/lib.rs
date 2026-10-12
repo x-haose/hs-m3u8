@@ -152,9 +152,10 @@ pub struct StreamReport {
     pub packets: u64,
     /// 输入中没有 DTS、因而未写入的包数
     pub skipped_without_dts: u64,
-    /// TS 里损坏而没有写入的音频包数：读不出帧头或帧长与包长对不上的（来源丢了 TS 包，或缺片处 PES 不完整，拼出的
-    /// 包）。解复用器的损坏标志按整个 PES 打，连续计数器每片重来等不缺数据的写法也会触发，所以不据此丢包。视频包照常
-    /// 写入，由解码器做错误隐藏（丢掉一帧视频，后面直到下一个关键帧都解不出）
+    /// 损坏而没有写入的音频：TS 里为读不出帧头或帧长与包长对不上的包（来源丢了 TS 包，或缺片处 PES 不完整，拼出的
+    /// 包；解复用器的损坏标志按整个 PES 打，连续计数器每片重来等不缺数据的写法也会触发，所以不据此丢包），打包音频里为
+    /// 切帧时跳过的损坏处（不完整的帧或标签、认不出的字节，一处算一个）。视频包照常写入，由解码器做错误隐藏（丢掉一帧
+    /// 视频，后面直到下一个关键帧都解不出）
     pub discarded_corrupt: u64,
     /// 输出时间线上从最早的呈现时刻到最晚的结束时刻，微秒；含组内时间戳间断（如缺失的分片）留下的空档
     pub duration_us: u64,
@@ -323,17 +324,6 @@ pub enum Unsupported {
         "第 {group} 组第 {track} 条轨的分片格式在组内变了（TS 与打包音频，或打包音频的格式之间），无法放进同一条 MP4 轨"
     )]
     FormatChangedInGroup { group: usize, track: usize },
-    /// 打包音频的第 `segment` 个分片（下标）在字节 `offset` 处读不出音频帧：既不是音频帧也不是 ID3 标签、帧或标签
-    /// 不完整，或是自由格式（帧头不给码率）的 MP3
-    #[error(
-        "第 {group} 组第 {track} 条轨（打包音频）第 {segment} 个分片在字节 {offset} 处读不出音频帧（不是音频帧或 ID3 标签、帧不完整，或是自由格式的 MP3）"
-    )]
-    UnreadablePackedAudio {
-        group: usize,
-        track: usize,
-        segment: usize,
-        offset: u64,
-    },
     /// TS 或打包音频里的 E-AC-3 每帧不足 6 块：MP4 封装器把几帧并成一个 6 块（1536 个采样点）的样本，末尾凑不满的
     /// 帧不写出
     #[error("第 {group} 组第 {track} 条轨的 E-AC-3 每帧不足 6 块，放不进 MP4")]
@@ -629,7 +619,7 @@ struct Mapping {
 struct Dropped {
     /// 没有 DTS
     without_dts: u64,
-    /// 读不出帧头或帧长与包长对不上的音频包
+    /// 读不出帧头或帧长与包长对不上的音频包，打包音频另加切帧时跳过的损坏处
     corrupt: u64,
 }
 
@@ -676,13 +666,17 @@ impl Source {
                 });
             }
         }
+        let mut dropped = vec![Dropped::default(); streams];
+        if let Some((stream, damaged)) = input.damaged() {
+            dropped[stream].corrupt = damaged;
+        }
         Source {
             group,
             track,
             input,
             map,
             inband,
-            dropped: vec![Dropped::default(); streams],
+            dropped,
             queue: VecDeque::new(),
             finished: false,
             wrap_us: 0,

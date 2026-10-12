@@ -173,7 +173,7 @@ const MPEG_KBPS: [[[usize; 15]; 3]; 2] = [
 
 /// 一个 MPEG 音频帧（ISO/IEC 11172-3 2.4.1.3，含 MPEG-2 与 2.5）的帧头与整帧的字节数。自由格式（bitrate_index 为 0）
 /// 的帧长要找下一个同步字才知道，为 None。
-pub(crate) fn mpeg_audio(data: &[u8]) -> Option<(Mpeg, usize)> {
+pub(crate) fn mpeg_audio(data: &[u8]) -> Option<(Mpeg, Option<usize>)> {
     let mut b = Bits::new(data);
     b.expect(11, 0x7FF)?;
     let version = b.read(2)?;
@@ -184,8 +184,17 @@ pub(crate) fn mpeg_audio(data: &[u8]) -> Option<(Mpeg, usize)> {
     let padding = b.read(1)? as usize;
     b.read(1)?; // private_bit
     let mode = b.read(2)?;
-    if version == 1 || layer == 0 || !(1..15).contains(&bitrate_index) || sampling_index == 3 {
+    if version == 1 || layer == 0 || bitrate_index == 15 || sampling_index == 3 {
         return None;
+    }
+    let header = Mpeg {
+        version,
+        layer,
+        sampling_index,
+        mono: mode == 3,
+    };
+    if bitrate_index == 0 {
+        return Some((header, None));
     }
     // MPEG-2 与 2.5 采样率减半（2.5 再减半），Layer III 每帧的采样点数也减半
     let lsf = usize::from(version != 3);
@@ -197,15 +206,7 @@ pub(crate) fn mpeg_audio(data: &[u8]) -> Option<(Mpeg, usize)> {
         2 => kbps * 144_000 / rate + padding,
         _ => kbps * 144_000 / (rate << lsf) + padding,
     };
-    Some((
-        Mpeg {
-            version,
-            layer,
-            sampling_index,
-            mono: mode == 3,
-        },
-        len,
-    ))
+    Some((header, Some(len)))
 }
 
 /// 按位从高到低读字节。
@@ -439,17 +440,17 @@ mod tests {
             mpeg_audio(&mpeg_frame(version, layer, bitrate, rate, padding, mode, 4)).map(|h| h.1)
         };
         // MPEG-1 Layer III 128 kbps 44.1 kHz，有无 padding
-        assert_eq!(len(3, 1, 9, 0, 0, 0), Some(417));
-        assert_eq!(len(3, 1, 9, 0, 1, 0), Some(418));
+        assert_eq!(len(3, 1, 9, 0, 0, 0), Some(Some(417)));
+        assert_eq!(len(3, 1, 9, 0, 1, 0), Some(Some(418)));
         // MPEG-1 Layer III 64 kbps 48 kHz；MPEG-2 Layer III 64 kbps 24 kHz（每帧采样点数减半）
-        assert_eq!(len(3, 1, 5, 1, 0, 3), Some(192));
-        assert_eq!(len(2, 1, 8, 1, 0, 3), Some(192));
+        assert_eq!(len(3, 1, 5, 1, 0, 3), Some(Some(192)));
+        assert_eq!(len(2, 1, 8, 1, 0, 3), Some(Some(192)));
         // MPEG-2.5 Layer III 8 kbps 8 kHz；MPEG-1 Layer II 192 kbps 48 kHz；Layer I 32 kbps 32 kHz
-        assert_eq!(len(0, 1, 1, 2, 0, 3), Some(72));
-        assert_eq!(len(3, 2, 10, 1, 0, 0), Some(576));
-        assert_eq!(len(3, 3, 1, 2, 0, 0), Some(48));
-        // 自由格式、码率下标 15、版本 1、层 0、采样率下标 3
-        assert_eq!(len(3, 1, 0, 0, 0, 0), None);
+        assert_eq!(len(0, 1, 1, 2, 0, 3), Some(Some(72)));
+        assert_eq!(len(3, 2, 10, 1, 0, 0), Some(Some(576)));
+        assert_eq!(len(3, 3, 1, 2, 0, 0), Some(Some(48)));
+        // 自由格式的帧头合法、帧长不知道；码率下标 15、版本 1、层 0、采样率下标 3 不合法
+        assert_eq!(len(3, 1, 0, 0, 0, 0), Some(None));
         assert_eq!(len(3, 1, 15, 0, 0, 0), None);
         assert_eq!(len(1, 1, 9, 0, 0, 0), None);
         assert_eq!(len(3, 0, 9, 0, 0, 0), None);

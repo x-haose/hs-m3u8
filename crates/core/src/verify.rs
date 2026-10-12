@@ -54,7 +54,10 @@ mod tests {
     #[test]
     fn standalone_segments_must_be_recognized() {
         assert_eq!(check_standalone_segment(&ts_packets(3)), Ok(()));
-        assert_eq!(check_standalone_segment(&[0xFF, 0xF1, 0x50]), Ok(()));
+        assert_eq!(
+            check_standalone_segment(&[0xFF, 0xF1, 0x50, 0x80, 0x02, 0x1F, 0xFC]),
+            Ok(())
+        );
 
         let mut shifted = ts_packets(3);
         shifted[188] = 0;

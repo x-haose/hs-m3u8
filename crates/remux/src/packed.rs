@@ -9,7 +9,7 @@ use ffmpeg_next as ffmpeg;
 
 use crate::input::{new_chain, open_chain, read_packet};
 use crate::standalone::{self, Format, Head};
-use crate::{Error, Unsupported, chain, frame};
+use crate::{Error, chain, frame};
 
 /// 打包音频时间戳的时钟（90 kHz）。
 const CLOCK_90K: Rational = Rational(1, 90_000);
@@ -17,10 +17,10 @@ const CLOCK_90K: Rational = Rational(1, 90_000);
 /// ID3v1 标签的字节数（MP3 文件末尾，以 `TAG` 开头）。
 const ID3V1_LEN: usize = 128;
 
-/// 打包音频一条轨在一组里的分片。各片按帧头切出音频帧（见 [`audio_ranges`]），只把音频帧相连、作为一个输入读：格式
+/// 打包音频一条轨在一组里的分片。各片按帧头切出音频帧（见 [`cut_frames`]），只把音频帧相连、作为一个输入读：格式
 /// 只在开头识别一次，只有一两帧的分片也读得出，包在输入里的字节位置与分片一一对应。FFmpeg 的裸音频解复用器从 0 起按
 /// 样本数计时，所以按字节位置找到每个包所在的分片，平移到该片的 ID3 时间戳处：与同组的其他轨对齐，缺失的分片处留出
-/// 空档。有分片没有时间戳时整组按样本数接续，只能单独成轨（见 [`Unsupported::UntimedPackedAudio`]）。
+/// 空档。有分片没有时间戳时整组按样本数接续，只能单独成轨（见 [`crate::Unsupported::UntimedPackedAudio`]）。
 ///
 /// 简化：按样本数计时用的是 FFmpeg 给的包时长，AC-3 与 E-AC-3 的裸音频解复用器以 1/90000 秒为时间基，44.1 kHz
 /// 等采样率下每帧向下取整：有时间戳时每片重新对齐，误差不累积；按样本数接续时每小时约短 0.8 秒。遇到没有时间戳的
@@ -37,6 +37,8 @@ pub(crate) struct Packed {
     audio: Option<usize>,
     /// 当前分片的下标与它的音频包要加的偏移（以音频流的时间基为单位）；读到它第一个带 DTS 的音频包时确定
     current: Option<(usize, i64)>,
+    /// 切帧时跳过的损坏处数（见 [`cut_frames`]），各片合计
+    damaged: u64,
 }
 
 impl Packed {
@@ -50,7 +52,8 @@ impl Packed {
         let mut pieces = Vec::new();
         let mut starts = Vec::with_capacity(segments.len());
         let mut total = 0;
-        for (segment, (path, head)) in segments.iter().zip(heads).enumerate() {
+        let mut damaged = 0;
+        for (path, head) in segments.iter().zip(heads) {
             let read_failed = |cause| Error::Io {
                 action: "读取",
                 path: path.clone(),
@@ -67,16 +70,10 @@ impl Packed {
                         "文件比开始合并时短（合并期间被改动）",
                     ))
                 })?;
-            let ranges = audio_ranges(&data, data_start, head.format).map_err(|offset| {
-                Error::Unsupported(Unsupported::UnreadablePackedAudio {
-                    group,
-                    track,
-                    segment,
-                    offset,
-                })
-            })?;
+            let cut = cut_frames(&data, data_start, head.format);
+            damaged += cut.damaged;
             starts.push(total);
-            for range in ranges {
+            for range in cut.ranges {
                 total += range.end - range.start;
                 pieces.push((path.clone(), range));
             }
@@ -94,7 +91,13 @@ impl Packed {
             timestamps: heads.iter().map(|h| h.timestamp).collect(),
             audio,
             current: None,
+            damaged,
         })
+    }
+
+    /// 切帧时跳过的损坏处：音频流的下标与处数；没有音频流时为 None。
+    pub(crate) fn damaged(&self) -> Option<(usize, u64)> {
+        self.audio.map(|audio| (audio, self.damaged))
     }
 
     pub(crate) fn context(&self) -> &format::context::Input {
@@ -146,44 +149,85 @@ impl Packed {
     }
 }
 
-/// 一个打包音频分片从 `start`（开头的 ID3 标签之后）起音频帧所在的字节区间，相接的合成一段。跳过帧之间的 ID3v2
-/// 标签、末尾的 ID3v1 标签，以及 MP3 第一帧为 Xing、Info 或 VBRI 标签帧时的这一帧（它不含音频，FFmpeg 读单个文件
-/// 时同样跳过）。遇到既不是帧也不是标签的字节、不完整的帧或标签，或自由格式的 MP3 时，返回所在的偏移。
-fn audio_ranges(data: &[u8], start: usize, format: Format) -> Result<Vec<Range<u64>>, u64> {
-    let mut ranges: Vec<Range<u64>> = Vec::new();
+/// 一个打包音频分片切出的音频帧。
+struct Cut {
+    /// 音频帧所在的字节区间，相接的合成一段
+    ranges: Vec<Range<u64>>,
+    /// 跳过的损坏处数
+    damaged: u64,
+}
+
+/// 一个打包音频分片从 `start`（开头的 ID3 标签之后）起切出音频帧。跳过帧之间的 ID3v2 标签、末尾的 ID3v1 标签，以及
+/// MP3 第一帧为 Xing、Info 或 VBRI 标签帧时的这一帧（它不含音频，FFmpeg 读单个文件时同样跳过）。损坏处跳过并计数，与
+/// FFmpeg 读裸音频时重新同步一样：认不出的字节（含自由格式的 MP3）、超出分片的帧或标签，跳到下一个同步点（见
+/// [`synced`]），没有就到分片末尾。
+fn cut_frames(data: &[u8], start: usize, format: Format) -> Cut {
+    let mut cut = Cut {
+        ranges: Vec::new(),
+        damaged: 0,
+    };
     let mut at = start;
     let mut first_frame = true;
     while at < data.len() {
         let rest = &data[at..];
-        if rest.len() == ID3V1_LEN && rest.starts_with(b"TAG") {
+        if is_id3v1(rest) {
             break;
         }
-        let tag = standalone::tag_len(rest);
-        let len = match tag {
-            Some(len) => usize::try_from(len).ok(),
-            None => frame_len(format, rest),
-        }
-        .filter(|&len| len <= rest.len())
-        .ok_or(at as u64)?;
-        let audio = tag.is_none() && !(first_frame && format == Format::Mp3 && vbr_tag_frame(rest));
-        first_frame &= tag.is_some();
+        let Some((len, tag)) = item(format, rest).filter(|&(len, _)| len <= rest.len()) else {
+            cut.damaged += 1;
+            match (at + 1..data.len()).find(|&next| synced(data, next, format)) {
+                Some(next) => {
+                    at = next;
+                    continue;
+                }
+                None => break,
+            }
+        };
+        let audio = !tag && !(first_frame && format == Format::Mp3 && vbr_tag_frame(rest));
+        first_frame &= tag;
         if audio {
             let range = at as u64..(at + len) as u64;
-            match ranges.last_mut() {
+            match cut.ranges.last_mut() {
                 Some(last) if last.end == range.start => last.end = range.end,
-                _ => ranges.push(range),
+                _ => cut.ranges.push(range),
             }
         }
         at += len;
     }
-    Ok(ranges)
+    cut
+}
+
+/// `data` 是分片末尾的 ID3v1 标签（128 字节，以 `TAG` 开头）。
+fn is_id3v1(data: &[u8]) -> bool {
+    data.len() == ID3V1_LEN && data.starts_with(b"TAG")
+}
+
+/// `data` 开头的 ID3v2 标签或 `format` 的帧：字节数（可能超出 `data`）与是不是标签；都不是时为 None。
+fn item(format: Format, data: &[u8]) -> Option<(usize, bool)> {
+    match standalone::tag_len(data) {
+        Some(len) => Some((usize::try_from(len).ok()?, true)),
+        None => frame_len(format, data).map(|len| (len, false)),
+    }
+}
+
+/// 损坏处之后能从 `at` 重新同步：这里是一个完整的标签或帧，紧接着分片末尾、ID3v1 标签、另一个标签或帧。只看一个帧头
+/// 时，损坏的字节里碰巧像帧头的地方会被当成同步点。
+fn synced(data: &[u8], at: usize, format: Format) -> bool {
+    let Some((len, _)) = item(format, &data[at..]) else {
+        return false;
+    };
+    let next = at + len;
+    next == data.len()
+        || data
+            .get(next..)
+            .is_some_and(|rest| is_id3v1(rest) || item(format, rest).is_some())
 }
 
 /// `data` 开头一个 `format` 的帧的字节数；帧头不合法或是自由格式的 MP3 时为 None。
 fn frame_len(format: Format, data: &[u8]) -> Option<usize> {
     match format {
         Format::Aac => frame::adts(data).map(|(_, len)| len),
-        Format::Mp3 => frame::mpeg_audio(data).map(|(_, len)| len),
+        Format::Mp3 => frame::mpeg_audio(data).and_then(|(_, len)| len),
         Format::Ac3 | Format::Eac3 => frame::ac3(data).map(|(_, len)| len),
         Format::Ts => panic!("TS 分片不按打包音频读"),
     }
@@ -222,10 +266,11 @@ mod tests {
     use super::*;
     use crate::frame::testing::{ac3_syncframe, adts_frame, mpeg_frame};
 
-    /// [`audio_ranges`] 的结果，区间写成（起点, 终点）。
-    fn spans(data: &[u8], start: usize, format: Format) -> Result<Vec<(u64, u64)>, u64> {
-        audio_ranges(data, start, format)
-            .map(|ranges| ranges.iter().map(|r| (r.start, r.end)).collect())
+    /// [`cut_frames`] 的结果：区间写成（起点, 终点），与跳过的损坏处数。
+    fn spans(data: &[u8], start: usize, format: Format) -> (Vec<(u64, u64)>, u64) {
+        let cut = cut_frames(data, start, format);
+        let ranges = cut.ranges.iter().map(|r| (r.start, r.end)).collect();
+        (ranges, cut.damaged)
     }
 
     /// ID3v2.4 标签，内容为 `body` 字节的 0。
@@ -245,30 +290,49 @@ mod tests {
         let second = (start + 160 + inline.len()) as u64;
         assert_eq!(
             spans(&data, start, Format::Aac),
-            Ok(vec![
-                (start as u64, start as u64 + 160),
-                (second, second + 100)
-            ])
+            (
+                vec![(start as u64, start as u64 + 160), (second, second + 100)],
+                0
+            )
         );
 
         let ac3 = [ac3_syncframe(8, 2, false), ac3_syncframe(8, 2, false)].concat();
-        assert_eq!(spans(&ac3, 0, Format::Ac3), Ok(vec![(0, 512)]));
+        assert_eq!(spans(&ac3, 0, Format::Ac3), (vec![(0, 512)], 0));
     }
 
     #[test]
-    fn junk_truncated_frames_and_foreign_frames_give_their_offset() {
+    fn damage_is_skipped_up_to_the_next_sync_point_and_counted() {
         let frame = adts_frame(1, 3, 2, 100);
+        // 帧之间的杂字节：跳到下一个帧
         let junk = [frame.clone(), b"junk".to_vec(), frame.clone()].concat();
-        assert_eq!(spans(&junk, 0, Format::Aac), Err(100));
+        assert_eq!(
+            spans(&junk, 0, Format::Aac),
+            (vec![(0, 100), (104, 204)], 1)
+        );
+        // 末尾不完整的帧与标签：丢到分片末尾
         let truncated = [frame.clone(), frame[..50].to_vec()].concat();
-        assert_eq!(spans(&truncated, 0, Format::Aac), Err(100));
+        assert_eq!(spans(&truncated, 0, Format::Aac), (vec![(0, 100)], 1));
         let unfinished_tag = [frame.clone(), tag(30)[..20].to_vec()].concat();
-        assert_eq!(spans(&unfinished_tag, 0, Format::Aac), Err(100));
-        // AAC 的分片里出现 AC-3 帧；自由格式的 MP3
-        let foreign = [frame, ac3_syncframe(8, 2, false)].concat();
-        assert_eq!(spans(&foreign, 0, Format::Aac), Err(100));
+        assert_eq!(spans(&unfinished_tag, 0, Format::Aac), (vec![(0, 100)], 1));
+        // AAC 的分片里出现 AC-3 帧；自由格式的 MP3 读不出帧长
+        let foreign = [frame.clone(), ac3_syncframe(8, 2, false)].concat();
+        assert_eq!(spans(&foreign, 0, Format::Aac), (vec![(0, 100)], 1));
         let free = mpeg_frame(3, 1, 0, 0, 0, 0, 400);
-        assert_eq!(spans(&free, 0, Format::Mp3), Err(0));
+        assert_eq!(spans(&free, 0, Format::Mp3), (vec![], 1));
+        // 杂字节里碰巧像帧头、后面接不上帧的地方不当作同步点
+        let lookalike = adts_frame(1, 3, 2, 30);
+        let data = [
+            frame.clone(),
+            b"xx".to_vec(),
+            lookalike[..10].to_vec(),
+            vec![0x55; 40],
+            frame,
+        ]
+        .concat();
+        assert_eq!(
+            spans(&data, 0, Format::Aac),
+            (vec![(0, 100), (152, 252)], 1)
+        );
     }
 
     #[test]
@@ -284,16 +348,16 @@ mod tests {
         let start = lead.len() as u64;
         assert_eq!(
             spans(&data, lead.len(), Format::Mp3),
-            Ok(vec![(start + 417, start + 3 * 417)])
+            (vec![(start + 417, start + 3 * 417)], 0)
         );
         let data = [vbri, audio.clone()].concat();
-        assert_eq!(spans(&data, 0, Format::Mp3), Ok(vec![(417, 834)]));
+        assert_eq!(spans(&data, 0, Format::Mp3), (vec![(417, 834)], 0));
         // 单声道 MPEG-1 的 Xing 在帧头之后 17 字节处：32 字节处的不算
         let mut mono = mpeg_frame(3, 1, 5, 1, 0, 3, 192);
         mono[36..40].copy_from_slice(b"Xing");
-        assert_eq!(spans(&mono, 0, Format::Mp3), Ok(vec![(0, 192)]));
+        assert_eq!(spans(&mono, 0, Format::Mp3), (vec![(0, 192)], 0));
         mono[21..25].copy_from_slice(b"Xing");
-        assert_eq!(spans(&mono, 0, Format::Mp3), Ok(vec![]));
+        assert_eq!(spans(&mono, 0, Format::Mp3), (vec![], 0));
     }
 
     #[test]
