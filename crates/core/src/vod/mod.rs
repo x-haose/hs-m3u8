@@ -73,7 +73,8 @@ pub(crate) async fn download(
                 .enumerate()
                 .collect();
         let streams = streams.to_vec();
-        blocking(move || output::check_mp4(&streams, &groups)).await??;
+        let root = layout.root().to_path_buf();
+        blocking(move || output::check_mp4(&streams, &groups, &root)).await??;
     }
     let rest = items.into_iter().flatten().flatten().collect();
     fetch(fetcher, rest, progress).await?;

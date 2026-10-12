@@ -202,6 +202,9 @@ pub enum Error {
     EmptyGroup { group: usize },
     #[error("输出路径无法交给 FFmpeg（不是有效的 UTF-8 或含 NUL 字符）：{}", .0.display())]
     NonUtf8Path(PathBuf),
+    /// 没有 init 段的分片开头认不出格式（见 [`standalone::read_head`]）
+    #[error("{} 既不是 TS 也不是可识别的打包音频", .0.display())]
+    Unrecognized(PathBuf),
     #[error("打开第 {group} 组第 {track} 条轨失败：{cause}")]
     OpenInput {
         group: usize,

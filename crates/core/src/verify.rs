@@ -8,10 +8,9 @@ use crate::Integrity;
 
 /// 没有 init 段的分片须能识别出格式（见 [`standalone::read_head`]）。
 pub(crate) fn check_standalone_segment(data: &[u8]) -> Result<(), Integrity> {
-    match standalone::read_head(&mut Cursor::new(data)) {
-        Ok(Some(_)) => Ok(()),
-        // 读内存不会出错
-        Ok(None) | Err(_) => Err(Integrity::UnrecognizedSegment(head(data))),
+    match standalone::read_head(&mut Cursor::new(data)).expect("读内存不会出错") {
+        Some(_) => Ok(()),
+        None => Err(Integrity::UnrecognizedSegment(head(data))),
     }
 }
 

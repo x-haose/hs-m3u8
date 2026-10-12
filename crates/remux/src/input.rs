@@ -2,7 +2,6 @@
 //! 时钟，回绕另行对齐；fMP4 为媒体时间），整组因此共用一个偏移。
 
 use std::fs::File;
-use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -103,22 +102,16 @@ impl Input {
     }
 }
 
-/// 没有 init 段的分片开头的信息（见 [`standalone::read_head`]）；认不出格式时报 `InvalidData`。
+/// 没有 init 段的分片开头的信息（见 [`standalone::read_head`]）；认不出格式时报 [`Error::Unrecognized`]。
 pub(crate) fn segment_head(path: &Path) -> Result<standalone::Head, Error> {
-    let failed = |cause| Error::Io {
-        action: "读取",
-        path: path.to_path_buf(),
-        cause,
-    };
     let head = File::open(path)
         .and_then(|mut file| standalone::read_head(&mut file))
-        .map_err(failed)?;
-    head.ok_or_else(|| {
-        failed(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "既不是 TS 也不是可识别的打包音频",
-        ))
-    })
+        .map_err(|cause| Error::Io {
+            action: "读取",
+            path: path.to_path_buf(),
+            cause,
+        })?;
+    head.ok_or_else(|| Error::Unrecognized(path.to_path_buf()))
 }
 
 /// 把 `pieces`（文件与其中要读的字节区间）串成一个分片链，并返回记录文件错误的位置。

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use hs_m3u8_core::hls::AudioChoice;
 use hs_m3u8_core::{
-    Error, JobType, LiveEnd, LiveOptions, LiveReport, MissReason, Mp4Unsupported, Stage,
+    Error, JobType, LiveEnd, LiveOptions, LiveReport, MissReason, Mp4Unsupported, Stage, Target,
     Unsupported, Url, WorkDirProblem,
 };
 use hs_m3u8_remux::{DiscontinuityGroup, StreamKind, Streams};
@@ -328,6 +328,44 @@ async fn merge_recorded_merges_without_the_network() {
     };
     assert_eq!(output.live, Some(want));
     assert_eq!(server.hits("live.m3u8"), hits);
+}
+
+/// 任务目录里的分片被改成认不出的内容（下载时都核对过）：合并 MP4 与写本地 HLS 都报任务目录损坏。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tampered_segment_is_a_corrupt_work_dir_for_every_target() {
+    let dir = test_dir("resume_tampered");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1]);
+    server.put("live.m3u8", playlist(&[0, 1], false));
+    let req = live_request(server.url("live.m3u8"), &dir, STALL);
+    interrupt(&req, |p| p.segments_done == 2).await;
+    let work_dir = req.output.resolved_work_dir().unwrap();
+    let segment = std::fs::read_dir(work_dir.join("tracks/0"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.extension().is_some_and(|e| e == "seg"))
+        .unwrap();
+    std::fs::write(&segment, b"<html>not a segment</html>").unwrap();
+
+    for target in [
+        Target::Mp4(dir.join("tampered.mp4")),
+        Target::Hls(dir.join("tampered-hls")),
+    ] {
+        let mut output = req.output.clone();
+        output.target = target.clone();
+        output.work_dir = Some(work_dir.clone());
+        let failed = engine().merge_recorded(output).unwrap().wait().await;
+        assert!(
+            matches!(
+                &failed,
+                Err(Error::WorkDir {
+                    problem: WorkDirProblem::Corrupt(_),
+                    ..
+                })
+            ),
+            "{target:?}：{failed:?}"
+        );
+    }
 }
 
 /// 只合并时目录里是点播任务：明确报不是直播录制，不当作「没有录到」。

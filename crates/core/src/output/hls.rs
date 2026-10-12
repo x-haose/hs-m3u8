@@ -24,7 +24,7 @@ use crate::entries::{self, is_canonical_number};
 use crate::error::io_error;
 use crate::ident::Fingerprint;
 use crate::selection::SelectionKey;
-use crate::{Error, HlsUnsupported, Unsupported, WorkDirProblem};
+use crate::{Error, HlsUnsupported, Unsupported};
 
 const INDEX: &str = "index.m3u8";
 
@@ -224,10 +224,8 @@ fn sniff(path: &Path, work_dir: &Path) -> Result<Format, Error> {
     let head = File::open(path)
         .and_then(|mut file| standalone::read_head(&mut file))
         .map_err(io_error("读取", path))?;
-    head.map(|h| h.format).ok_or_else(|| Error::WorkDir {
-        path: work_dir.to_path_buf(),
-        problem: WorkDirProblem::Corrupt(format!("分片内容无法识别：{}", path.display())),
-    })
+    head.map(|h| h.format)
+        .ok_or_else(|| super::unrecognized_segment(work_dir, path))
 }
 
 /// 把 `src` 放到新文件 `dst`，返回字节数：能硬链接就硬链接，不占额外空间；做不了时（跨文件系统、文件系统不支持）

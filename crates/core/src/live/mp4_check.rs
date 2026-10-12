@@ -92,7 +92,8 @@ impl Mp4Check {
         };
         self.first.get_or_insert((key, group));
         let streams = self.streams.clone();
-        match blocking(move || output::check_mp4(&streams, &groups)).await? {
+        let root = layout.root().to_path_buf();
+        match blocking(move || output::check_mp4(&streams, &groups, &root)).await? {
             Ok(()) => Ok(None),
             Err(Error::Unsupported(Unsupported::Mp4(reason))) => {
                 self.unsupported = true;

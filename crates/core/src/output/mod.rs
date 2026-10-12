@@ -17,7 +17,7 @@ use self::commit::{Commit, Occupant};
 use crate::error::io_error;
 use crate::selection::SelectionKey;
 use crate::workdir::{Layout, OutputKind, SegmentName, WorkDir};
-use crate::{Error, Leftover, LiveReport, Mp4Output, Output, blocking};
+use crate::{Error, Leftover, LiveReport, Mp4Output, Output, WorkDirProblem, blocking};
 
 /// 交给输出的内容。
 pub(crate) struct Content {
@@ -193,7 +193,7 @@ fn write_temps(
     options: &ResolvedOutput,
 ) -> Result<Option<Report>, Error> {
     let report = match options.get(OutputKind::Mp4) {
-        Some(mp4) => Some(write_mp4(mp4.temp(), streams, groups)?),
+        Some(mp4) => Some(write_mp4(mp4.temp(), streams, groups, &options.work_dir)?),
         None => None,
     };
     if let Some(hls) = options.get(OutputKind::Hls) {
@@ -202,26 +202,45 @@ fn write_temps(
     Ok(report)
 }
 
-/// 合并为 MP4 写到 `temp`；失败时 `temp` 上可能留有写了一半的文件。
+/// 合并为 MP4 写到 `temp`；失败时 `temp` 上可能留有写了一半的文件。`work_dir` 为分片所在的任务目录。
 fn write_mp4(
     temp: &Path,
     streams: &[Streams],
     groups: &[Vec<GroupTrack>],
+    work_dir: &Path,
 ) -> Result<Report, Error> {
     let groups: Vec<DiscontinuityGroup> = groups.iter().map(|g| remux_group(g)).collect();
-    Ok(hs_m3u8_remux::remux(streams, &groups, temp)?)
+    hs_m3u8_remux::remux(streams, &groups, temp).map_err(|e| remux_error(e, work_dir))
 }
 
 /// 下载完之前核对能否合并进 MP4（见 [`hs_m3u8_remux::check`]），各轨只需开头的分片。`groups` 的各项为合并时的组号与
-/// 这一组，第一项为第 0 组。要读文件，在阻塞线程池中调用。
+/// 这一组，第一项为第 0 组；`work_dir` 为分片所在的任务目录。要读文件，在阻塞线程池中调用。
 pub(crate) fn check_mp4(
     streams: &[Streams],
     groups: &[(usize, Vec<GroupTrack>)],
+    work_dir: &Path,
 ) -> Result<(), Error> {
     let remux: Vec<(usize, DiscontinuityGroup)> =
         groups.iter().map(|(n, g)| (*n, remux_group(g))).collect();
     let numbered: Vec<(usize, &DiscontinuityGroup)> = remux.iter().map(|(n, g)| (*n, g)).collect();
-    Ok(hs_m3u8_remux::check(streams, &numbered)?)
+    hs_m3u8_remux::check(streams, &numbered).map_err(|e| remux_error(e, work_dir))
+}
+
+/// 任务目录里的分片认不出格式：下载时都核对过，认不出即目录里的文件被改动过。
+pub(super) fn unrecognized_segment(work_dir: &Path, path: &Path) -> Error {
+    Error::WorkDir {
+        path: work_dir.to_path_buf(),
+        problem: WorkDirProblem::Corrupt(format!("分片内容无法识别：{}", path.display())),
+    }
+}
+
+/// 合并任务目录里的分片时 remux 的错误：认不出的分片为任务目录损坏，与写本地 HLS 时相同（见
+/// [`unrecognized_segment`]）。
+fn remux_error(error: hs_m3u8_remux::Error, work_dir: &Path) -> Error {
+    match error {
+        hs_m3u8_remux::Error::Unrecognized(path) => unrecognized_segment(work_dir, &path),
+        other => other.into(),
+    }
 }
 
 fn remux_group(tracks: &[GroupTrack]) -> DiscontinuityGroup {
