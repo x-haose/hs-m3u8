@@ -7,6 +7,7 @@
 //! - 来源本身不行，同样的请求再试也不会成功：[`Error::Playlist`]、[`Error::NotMediaPlaylist`]、
 //!   [`Error::Unsupported`] 的其余各项、[`Error::Integrity`]、[`Error::KeyLength`]；
 //! - 网络：[`Error::Http`]，看 [`HttpError::retryable`]；
+//! - 源站给出没写完的内容：[`Error::Incomplete`]，可重试；
 //! - 说明出在哪里、看包着的原因：[`Error::Segment`]、[`Error::Key`]（哪个分片或 key）、[`Error::LiveStalled`]（直播
 //!   哪条轨停滞）、[`Error::Cleanup`]（失败后收拾也没做完，带残留列表）；
 //! - 读写文件：[`Error::Io`]、[`Error::VolumeUnavailable`]（盘不在、共享连不上，接上后再试）；合并 MP4：
@@ -84,6 +85,10 @@ pub enum Error {
     KeyLength { url: Box<Url>, length: usize },
     #[error("数据校验失败（{}）：{kind}", bare_url(.url))]
     Integrity { url: Box<Url>, kind: Integrity },
+    /// 分片或 init 段取到的内容没有写完：fMP4 的顶层 box 超出了数据，或加密分片的密文不足整块而整块部分解出的内容
+    /// 认得出；多为源站还在写这个文件，可重试。下载时已按 [`crate::RetryPolicy`] 重新取过
+    #[error("{} 的内容没有写完（fMP4 的 box 超出了数据，或密文不足整块）", bare_url(.url))]
+    Incomplete { url: Box<Url> },
     #[error("任务目录 {} 无法使用：{problem}", .path.display())]
     WorkDir {
         path: PathBuf,
@@ -196,9 +201,8 @@ impl From<hs_m3u8_hls::SelectError> for Error {
 }
 
 impl Error {
-    /// 取不到：404/410（已过期），或重试后仍失败的临时故障时返回原因；分片的失败看其原因。key、回调、校验等
-    /// 失败为 None。
-    pub(crate) fn missable(&self) -> Option<HttpFailure> {
+    /// 请求取不到：404/410（已过期），或重试后仍失败的临时故障时返回原因；其余为 None。
+    pub(crate) fn http_failure(&self) -> Option<HttpFailure> {
         match self {
             Error::Http {
                 kind, retry_after, ..
@@ -208,8 +212,23 @@ impl Error {
                     retry_after: *retry_after,
                 })
             }
-            Error::Segment { cause, .. } => cause.missable(),
             _ => None,
+        }
+    }
+
+    /// 分片或 init 段取不到：请求取不到（见 [`Error::http_failure`]），或重试后内容仍没写完；分片的失败看其原因。
+    /// key、回调、校验等失败为 None。
+    pub(crate) fn missable(&self) -> Option<FetchFailure> {
+        match self {
+            Error::Segment { cause, .. } => cause.missable(),
+            Error::Incomplete { .. } => Some(FetchFailure {
+                kind: FetchError::Incomplete,
+                retry_after: None,
+            }),
+            _ => self.http_failure().map(|failure| FetchFailure {
+                kind: FetchError::Http(failure.kind),
+                retry_after: failure.retry_after,
+            }),
         }
     }
 
@@ -229,6 +248,7 @@ impl Error {
     pub fn retryable(&self) -> bool {
         match self {
             Error::Http { kind, .. } => kind.retryable(),
+            Error::Incomplete { .. } => true,
             Error::Segment { cause, .. } | Error::Key { cause, .. } => cause.retryable(),
             Error::Cleanup { failure, .. } => failure.retryable(),
             Error::LiveStalled { cause, .. } => cause.retryable(),
@@ -293,6 +313,34 @@ pub struct HttpFailure {
     pub retry_after: Option<Duration>,
 }
 
+/// 取不到的分片或 init 段：原因，与服务器在 429/503 中要求（Retry-After）的最短等待。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{kind}")]
+pub struct FetchFailure {
+    pub kind: FetchError,
+    pub retry_after: Option<Duration>,
+}
+
+/// 分片或 init 段取不到的原因。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FetchError {
+    /// 请求取不到：404/410，或重试后仍失败的临时故障
+    #[error(transparent)]
+    Http(HttpError),
+    /// 重试后取到的内容仍没写完（见 [`Error::Incomplete`]）
+    #[error("内容没有写完")]
+    Incomplete,
+}
+
+impl FetchError {
+    pub fn retryable(&self) -> bool {
+        match self {
+            FetchError::Http(kind) => kind.retryable(),
+            FetchError::Incomplete => true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HttpError {
     #[error("HTTP 状态 {0}")]
@@ -316,20 +364,13 @@ pub enum HttpError {
     /// 读取响应体等其他传输错误
     #[error("{0}")]
     Transport(String),
-    /// 内容没有写完：fMP4 的顶层 box 超出了数据或末尾的字节凑不成 box 头，或加密分片的密文不足整块而整块部分解出的
-    /// 内容认得出，多为源站还在写这个文件
-    #[error("内容没有写完（fMP4 的 box 超出了数据，或密文不足整块）")]
-    Incomplete,
 }
 
 impl HttpError {
     pub fn retryable(&self) -> bool {
         match self {
             HttpError::Status(code) => matches!(code, 408 | 429 | 500..=599),
-            HttpError::Timeout
-            | HttpError::Connect(_)
-            | HttpError::Transport(_)
-            | HttpError::Incomplete => true,
+            HttpError::Timeout | HttpError::Connect(_) | HttpError::Transport(_) => true,
             HttpError::RangeIgnored(_)
             | HttpError::Certificate(_)
             | HttpError::Redirect(_)
@@ -343,7 +384,7 @@ pub enum Integrity {
     /// 多为 key 不对；IV 不对不会使填充不合法
     #[error("解密后填充不合法（key 不对或数据损坏）")]
     Padding,
-    /// 整块部分解出的内容也认不出（如源站返回的是错误页面）；认得出的报 [`HttpError::Incomplete`]
+    /// 整块部分解出的内容也认不出（如源站返回的是错误页面）；认得出的报 [`Error::Incomplete`]
     #[error("密文长度 {0} 不是 16 的整数倍")]
     CipherLength(usize),
     #[error("字节范围应为 {expected} 字节，实际 {found}")]
@@ -353,7 +394,7 @@ pub enum Integrity {
     #[error("不是 fMP4（开头 {0}）")]
     NotFmp4(String),
     /// fMP4 从第 `at` 字节起的顶层 box 的长度字段 `size` 小于 box 头的长度（8 字节，64 位长度时 16 字节）。没写完的
-    /// 报 [`HttpError::Incomplete`]
+    /// 报 [`Error::Incomplete`]
     #[error("fMP4 第 {at} 字节起的 box 长度 {size} 小于 box 头")]
     Fmp4BoxSize { at: u64, size: u64 },
     /// fMP4 最后一个顶层 box 的长度写为 0（到数据末尾），实际的 `size` 字节写不进 32 位的长度字段：存盘前要改写成实际
@@ -375,7 +416,7 @@ pub enum StallError {
     RefreshPending,
     /// 播放列表仍在列出新分片，但一个都没有下载成功；带最近一次取不到分片或 init 段的原因
     #[error("有新分片，但一个都没有下载成功，最近一次：{0}")]
-    Unrecordable(HttpFailure),
+    Unrecordable(FetchFailure),
     /// 这条轨看起来已结束（原因同 [`StallCause`]），而其他轨仍在出新分片；播放列表被删除时不可重试
     #[error("这条轨{}，其他轨仍在出新分片", stopped_text(*.0))]
     TrackStopped(StallCause),

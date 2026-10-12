@@ -6,7 +6,7 @@ use hs_m3u8_remux::standalone;
 use url::Url;
 
 use crate::crypto::DecryptError;
-use crate::{Error, HttpError, Integrity};
+use crate::{Error, Integrity};
 
 /// 没有 init 段的分片须能识别出格式（见 [`standalone::read_head`]）。
 pub(crate) fn check_standalone_segment(data: &[u8]) -> Result<(), Integrity> {
@@ -26,15 +26,11 @@ pub(crate) enum ContentError {
 }
 
 impl ContentError {
-    /// 取自 `url` 的数据的失败：没写完的是可重试的请求失败（[`HttpError::Incomplete`]），其余为校验失败。
-    pub(crate) fn at(self, url: &Url) -> Error {
+    /// 取自 `url` 的数据的失败（[`Error::Incomplete`] 或 [`Error::Integrity`]）。
+    pub(crate) fn into_error(self, url: &Url) -> Error {
         let url = Box::new(url.clone());
         match self {
-            ContentError::Incomplete => Error::Http {
-                url,
-                kind: HttpError::Incomplete,
-                retry_after: None,
-            },
+            ContentError::Incomplete => Error::Incomplete { url },
             ContentError::Invalid(kind) => Error::Integrity { url, kind },
         }
     }

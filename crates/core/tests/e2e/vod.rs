@@ -690,16 +690,9 @@ async fn a_truncated_fmp4_segment_is_fetched_again() {
         .unwrap_err();
     assert!(err.retryable(), "{err}");
     match err {
-        Error::Segment { cause, .. } => assert!(
-            matches!(
-                *cause,
-                Error::Http {
-                    kind: HttpError::Incomplete,
-                    ..
-                }
-            ),
-            "{cause}"
-        ),
+        Error::Segment { cause, .. } => {
+            assert!(matches!(*cause, Error::Incomplete { .. }), "{cause}")
+        }
         other => panic!("{other}"),
     }
     assert_eq!(server.hits("seg0.m4s"), 2 + 3);

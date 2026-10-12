@@ -354,6 +354,16 @@ exception! {
 }
 
 exception! {
+    /// 分片或 init 段取到的内容没有写完：fMP4 的顶层 box 超出了数据，或加密分片的密文不足整块而整块部分解出的内容
+    /// 认得出；多为源站还在写这个文件，稍后重试可能成功。下载时已按 `RetryPolicy` 重新取过；分片的失败由 `segment`
+    /// 指出是哪个。
+    pub struct IncompleteError extends HsM3u8Error {
+        /// 分片或 init 段的地址（可能带令牌；异常的说明里只显示到路径）
+        pub url: Address,
+    }
+}
+
+exception! {
     /// 请求失败；在分片、key 的请求里出错时，`segment`、`key_url` 指出是哪个。
     pub struct HttpError extends HsM3u8Error {
         /// 请求的地址（可能带令牌；异常的说明里只显示到路径）
@@ -633,6 +643,10 @@ fn exception(
                 },
             ),
         )?,
+        E::Incomplete { url } => instance(
+            py,
+            HsM3u8Error::chain(base, IncompleteError { url: Address(*url) }),
+        )?,
         E::Http { url, kind, .. } => instance(
             py,
             HsM3u8Error::chain(
@@ -763,6 +777,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<NotMediaPlaylistError>()?;
     module.add_class::<SourceUnsupportedError>()?;
     module.add_class::<IntegrityError>()?;
+    module.add_class::<IncompleteError>()?;
     module.add_class::<KeyLengthError>()?;
     module.add_class::<HttpError>()?;
     module.add_class::<LiveStalledError>()?;

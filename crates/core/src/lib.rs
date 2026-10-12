@@ -43,8 +43,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 pub use error::{
-    Error, HlsUnsupported, HttpError, HttpFailure, Integrity, JobType, StallError, Unsupported,
-    WorkDirProblem,
+    Error, FetchError, FetchFailure, HlsUnsupported, HttpError, HttpFailure, Integrity, JobType,
+    StallError, Unsupported, WorkDirProblem,
 };
 pub use hooks::{HookError, HookKind, Hooks, NoHooks, Purpose, RequestParts};
 /// 内容放不进 MP4 的原因（[`Unsupported::Mp4`]）；本地 HLS 表示不了的见 [`HlsUnsupported`]。

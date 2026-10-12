@@ -208,7 +208,7 @@ fn uncovered(hole: &Missed, known: &[Missed]) -> Vec<Missed> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::HttpError;
+    use crate::{FetchError, HttpError};
 
     fn missed(session: u32, track: usize, range: (u64, u64), reason: MissReason) -> Missed {
         Missed {
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn adjacent_ranges_with_the_same_reason_merge() {
-        let not_found = MissReason::Failed(HttpError::Status(404));
+        let not_found = MissReason::Failed(FetchError::Http(HttpError::Status(404)));
         let merged = merge_ranges(vec![
             missed(0, 0, (5, 5), not_found.clone()),
             missed(0, 0, (3, 4), not_found.clone()),
@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn holes_minus_known_reasons_are_unknown() {
-        let not_found = MissReason::Failed(HttpError::Status(404));
+        let not_found = MissReason::Failed(FetchError::Http(HttpError::Status(404)));
         let hole = missed(0, 0, (10, 20), MissReason::Unknown);
         let known = merge_ranges(vec![
             missed(0, 0, (12, 13), not_found.clone()),

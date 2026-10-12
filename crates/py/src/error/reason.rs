@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 
 use crate::convert::{Address, Seq};
 use crate::record::{record, variants};
-use crate::report::{HttpFailure, RefreshCause, Shape, StallCause, StreamKind};
+use crate::report::{FetchFailure, RefreshCause, Shape, StallCause, StreamKind};
 
 record! {
     /// 出错的分片。
@@ -154,7 +154,7 @@ variants! {
         /// 解密后填充不合法：多为 key 不对（IV 不对不会这样），或数据损坏
         Padding {},
         /// 密文长度不是 16 的整数倍，整块部分解出的内容也认不出（如源站返回的是错误页面）；认得出的报
-        /// `HttpErrorKind.Incomplete`
+        /// `IncompleteError`
         CipherLength {
             /// 密文字节数
             length: usize,
@@ -177,8 +177,7 @@ variants! {
             /// 开头几个字节的十六进制
             head: String,
         },
-        /// fMP4 顶层 box 的长度字段小于 box 头的长度（8 字节，64 位长度时 16 字节）；没写完的报
-        /// `HttpErrorKind.Incomplete`
+        /// fMP4 顶层 box 的长度字段小于 box 头的长度（8 字节，64 位长度时 16 字节）；没写完的报 `IncompleteError`
         #[pyo3(constructor = (*, at, size))]
         Fmp4BoxSize {
             /// 这个 box 的起点，字节
@@ -364,7 +363,7 @@ variants! {
         /// 播放列表仍在列出新分片，但一个都没有下载成功
         Unrecordable {
             /// 最近一次取不到分片或 init 段的原因
-            failure: HttpFailure,
+            failure: FetchFailure,
         },
         /// 这条轨看起来已结束，而其他轨仍在出新分片
         TrackStopped {

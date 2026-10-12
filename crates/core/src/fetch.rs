@@ -218,7 +218,7 @@ pub(crate) async fn fetch_init(
             .get_once(Purpose::Init, &init.uri, init.byte_range, permit, cancel)
             .await?
             .body;
-        check_fmp4(&mut data).map_err(|e| e.at(&init.uri))?;
+        check_fmp4(&mut data).map_err(|e| e.into_error(&init.uri))?;
         Ok(data)
     })
     .await
@@ -257,7 +257,7 @@ async fn fetch_segment(
             let fmp4 = segment.init.is_some();
             let mut data = match key {
                 Some((key, iv)) => decrypt(data, &key, &iv)
-                    .map_err(|e| decrypt_failure(e, fmp4).at(&segment.uri))?,
+                    .map_err(|e| decrypt_failure(e, fmp4).into_error(&segment.uri))?,
                 None => data,
             };
             if fmp4 {
@@ -265,7 +265,7 @@ async fn fetch_segment(
             } else {
                 check_standalone_segment(&data).map_err(ContentError::Invalid)
             }
-            .map_err(|e| e.at(&segment.uri))?;
+            .map_err(|e| e.into_error(&segment.uri))?;
             Ok(data)
         })
         .await

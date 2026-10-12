@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::info::Selected;
 use crate::remux::Report;
-use crate::{HttpError, HttpFailure, Mp4Unsupported, hls};
+use crate::{FetchError, HttpFailure, Mp4Unsupported, hls};
 
 /// 任务进度快照。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -239,10 +239,10 @@ impl Missed {
 pub enum MissReason {
     /// 两次刷新之间已滑出播放列表窗口，没有被列出过
     Expired,
-    /// 列出了，但取不到：404/410，或可重试的错误重试后仍失败
-    Failed(HttpError),
+    /// 列出了，但取不到：404/410，可重试的错误重试后仍失败，或重试后内容仍没写完
+    Failed(FetchError),
     /// 列出了，但它的 init 段取不到（同上）
-    InitFailed(HttpError),
+    InitFailed(FetchError),
     /// 所在不连续段不是每条轨都录到，无法合并
     Unmergeable,
     /// 之前的运行中缺失，原因没有记录

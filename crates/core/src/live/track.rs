@@ -12,7 +12,8 @@ use super::session::Start;
 use super::window::{InitsToFetch, NewInits, Scope, Update, Window};
 use crate::ident::Fingerprint;
 use crate::{
-    Error, HttpError, HttpFailure, LiveEnd, RefreshCause, StallCause, StallError, Unsupported,
+    Error, FetchFailure, HttpError, HttpFailure, LiveEnd, RefreshCause, StallCause, StallError,
+    Unsupported,
 };
 
 /// 两次刷新之间的最短间隔，防止 TARGETDURATION 为 0 或极小时空转。
@@ -88,7 +89,7 @@ pub(super) struct LiveTrack {
     /// 排入下载、还没有结果的分片数
     outstanding: usize,
     /// 最近一次取不到分片或 init 段的原因
-    last_download_failure: Option<HttpFailure>,
+    last_download_failure: Option<FetchFailure>,
     /// 最近一次刷新失败的原因；刷新成功即清空
     last_refresh_error: Option<RefreshCause>,
 }
@@ -348,7 +349,7 @@ impl LiveTrack {
     }
 
     /// 本轨排入下载的一个分片取不到，记为缺失。
-    pub(super) fn segment_missed(&mut self, failure: HttpFailure) {
+    pub(super) fn segment_missed(&mut self, failure: FetchFailure) {
         self.outstanding -= 1;
         self.last_download_failure = Some(failure);
     }

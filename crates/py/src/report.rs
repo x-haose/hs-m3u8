@@ -1,4 +1,4 @@
-//! 任务的进度与结果，以及失败原因里共用的类型：请求失败、直播刷新失败与停滞的原因、残留、合并出的流。
+//! 任务的进度与结果，以及失败原因里共用的类型：请求失败、分片取不到、直播刷新失败与停滞的原因、残留、合并出的流。
 
 use std::time::Duration;
 
@@ -50,9 +50,6 @@ variants! {
             /// 说明
             detail: String,
         },
-        /// 内容没有写完：fMP4 的顶层 box 超出了数据或末尾的字节凑不成 box 头，或加密分片的密文不足整块而整块部分解出
-        /// 的内容认得出，多为源站还在写这个文件
-        Incomplete {},
     }
 }
 
@@ -61,7 +58,32 @@ record! {
     pub struct HttpFailure {
         /// 失败的原因
         pub kind: HttpErrorKind,
-        /// 临时故障，重试可能成功：超时、连接与传输错误，内容没有写完，408、429 与 5xx
+        /// 临时故障，重试可能成功：超时、连接与传输错误，408、429 与 5xx
+        pub retryable: bool,
+        /// 服务器在 429/503 中要求（Retry-After）的最短等待，秒；没有要求时为 None
+        pub retry_after: Option<u64>,
+    }
+}
+
+variants! {
+    /// 分片或 init 段取不到的原因。
+    pub enum FetchErrorKind {
+        /// 请求取不到：404/410，或重试后仍失败的临时故障
+        Http {
+            /// 请求失败的原因
+            kind: HttpErrorKind,
+        },
+        /// 重试后取到的内容仍没写完（见 `IncompleteError`）
+        Incomplete {},
+    }
+}
+
+record! {
+    /// 取不到的分片或 init 段：原因，与服务器要求的最短等待。
+    pub struct FetchFailure {
+        /// 取不到的原因
+        pub kind: FetchErrorKind,
+        /// 临时故障，重试可能成功：请求的临时故障（见 `HttpFailure.retryable`），或内容没写完
         pub retryable: bool,
         /// 服务器在 429/503 中要求（Retry-After）的最短等待，秒；没有要求时为 None
         pub retry_after: Option<u64>,
@@ -313,15 +335,15 @@ variants! {
     pub enum MissReason {
         /// 两次刷新之间已滑出播放列表窗口，没有被列出过
         Expired {},
-        /// 列出了，但取不到：404/410，或可重试的错误重试后仍失败
+        /// 列出了，但取不到：404/410，可重试的错误重试后仍失败，或重试后内容仍没写完
         Failed {
-            /// 失败的原因
-            kind: HttpErrorKind,
+            /// 取不到的原因
+            kind: FetchErrorKind,
         },
         /// 列出了，但它的 init 段取不到（同上）
         InitFailed {
-            /// 失败的原因
-            kind: HttpErrorKind,
+            /// 取不到的原因
+            kind: FetchErrorKind,
         },
         /// 所在不连续段不是每条轨都录到，无法合并
         Unmergeable {},
@@ -393,7 +415,25 @@ impl From<core::HttpError> for HttpErrorKind {
             core::HttpError::Connect(detail) => HttpErrorKind::Connect { detail },
             core::HttpError::InvalidRequest(detail) => HttpErrorKind::InvalidRequest { detail },
             core::HttpError::Transport(detail) => HttpErrorKind::Transport { detail },
-            core::HttpError::Incomplete => HttpErrorKind::Incomplete {},
+        }
+    }
+}
+
+impl From<core::FetchError> for FetchErrorKind {
+    fn from(kind: core::FetchError) -> Self {
+        match kind {
+            core::FetchError::Http(kind) => FetchErrorKind::Http { kind: kind.into() },
+            core::FetchError::Incomplete => FetchErrorKind::Incomplete {},
+        }
+    }
+}
+
+impl From<core::FetchFailure> for FetchFailure {
+    fn from(failure: core::FetchFailure) -> Self {
+        FetchFailure {
+            retryable: failure.kind.retryable(),
+            kind: failure.kind.into(),
+            retry_after: failure.retry_after.map(|wait| wait.as_secs()),
         }
     }
 }
@@ -629,6 +669,8 @@ impl From<core::Output> for Output {
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<HttpErrorKind>()?;
     module.add_class::<HttpFailure>()?;
+    module.add_class::<FetchErrorKind>()?;
+    module.add_class::<FetchFailure>()?;
     module.add_class::<RefreshReason>()?;
     module.add_class::<RefreshCause>()?;
     module.add_class::<StallCause>()?;

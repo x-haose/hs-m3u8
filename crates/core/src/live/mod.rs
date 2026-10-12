@@ -596,7 +596,7 @@ fn waitable_refresh_error(error: &Error) -> Option<RefreshCause> {
             }),
             hls::Malformed::NotAPlaylist | hls::Malformed::NotUtf8 | hls::Malformed::Mixed => None,
         },
-        _ => error.missable().map(RefreshCause::Http),
+        _ => error.http_failure().map(RefreshCause::Http),
     }
 }
 

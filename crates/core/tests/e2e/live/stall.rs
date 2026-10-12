@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use hs_m3u8_core::{
-    Error, HttpError, HttpFailure, LiveEnd, MissReason, RefreshCause, StallCause, StallError,
+    Error, FetchError, FetchFailure, HttpError, HttpFailure, LiveEnd, MissReason, RefreshCause,
+    StallCause, StallError,
 };
 
 use super::{
@@ -202,8 +203,8 @@ async fn a_track_that_records_nothing_fails_the_recording() {
             err,
             Error::LiveStalled {
                 track: 1,
-                cause: StallError::Unrecordable(HttpFailure {
-                    kind: HttpError::Status(404),
+                cause: StallError::Unrecordable(FetchFailure {
+                    kind: FetchError::Http(HttpError::Status(404)),
                     retry_after: None
                 })
             }
@@ -239,8 +240,8 @@ async fn segments_that_keep_failing_temporarily_are_retryable() {
             err,
             Error::LiveStalled {
                 track: 0,
-                cause: StallError::Unrecordable(HttpFailure {
-                    kind: HttpError::Status(503),
+                cause: StallError::Unrecordable(FetchFailure {
+                    kind: FetchError::Http(HttpError::Status(503)),
                     ..
                 })
             }
@@ -308,7 +309,7 @@ async fn a_missing_last_segment_does_not_turn_the_end_into_a_failure() {
         track: 0,
         cause: StallCause::NoNewSegments,
     };
-    let not_found = MissReason::Failed(HttpError::Status(404));
+    let not_found = MissReason::Failed(FetchError::Http(HttpError::Status(404)));
     assert_eq!(output.live, report(end, 1, vec![missed(2, 2, not_found)]));
 }
 

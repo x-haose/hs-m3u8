@@ -12,6 +12,8 @@ __all__ = [
     "AudioInfo",
     "Encryption",
     "Engine",
+    "FetchErrorKind",
+    "FetchFailure",
     "FileError",
     "HlsUnsupported",
     "HlsUnsupportedError",
@@ -23,6 +25,7 @@ __all__ = [
     "HttpErrorKind",
     "HttpFailure",
     "HttpOptions",
+    "IncompleteError",
     "IntegrityError",
     "IntegrityFailure",
     "InvalidInputError",
@@ -264,6 +267,61 @@ class Engine:
         或由用户删掉记录（`outputs.json`；写了一半的临时输出与没能放回的旧输出以 `hsdl-` 开头，留在输出旁）后再放弃。
         """
 
+class FetchErrorKind:
+    r"""
+    分片或 init 段取不到的原因。
+    """
+    def __repr__(self) -> builtins.str: ...
+    @typing.final
+    class Http(FetchErrorKind):
+        r"""
+        请求取不到：404/410，或重试后仍失败的临时故障
+        """
+        __match_args__ = ("kind",)
+        @property
+        def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
+            r"""
+            请求失败的原因
+            """
+        def __new__(cls, kind: HttpErrorKind) -> FetchErrorKind.Http: ...
+    
+    @typing.final
+    class Incomplete(FetchErrorKind):
+        r"""
+        重试后取到的内容仍没写完（见 `IncompleteError`）
+        """
+        __match_args__ = ()
+        def __new__(cls) -> FetchErrorKind.Incomplete: ...
+    
+
+@typing.final
+class FetchFailure:
+    r"""
+    取不到的分片或 init 段：原因，与服务器要求的最短等待。
+    """
+    @property
+    def kind(self) -> FetchErrorKind.Http | FetchErrorKind.Incomplete:
+        r"""
+        取不到的原因
+        """
+    @property
+    def retryable(self) -> builtins.bool:
+        r"""
+        临时故障，重试可能成功：请求的临时故障（见 `HttpFailure.retryable`），或内容没写完
+        """
+    @property
+    def retry_after(self) -> typing.Optional[builtins.int]:
+        r"""
+        服务器在 429/503 中要求（Retry-After）的最短等待，秒；没有要求时为 None
+        """
+    def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
+    def __hash__(self) -> builtins.int: ...
+    def __repr__(self) -> builtins.str: ...
+    def __new__(cls, *, kind: FetchErrorKind, retryable: builtins.bool, retry_after: typing.Optional[builtins.int]) -> FetchFailure:
+        r"""
+        各参数即同名属性。
+        """
+
 @typing.final
 class FileError(HsM3u8Error):
     r"""
@@ -492,7 +550,7 @@ class HttpError(HsM3u8Error):
         请求的地址（可能带令牌；异常的说明里只显示到路径）
         """
     @property
-    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport | HttpErrorKind.Incomplete:
+    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
         r"""
         失败的原因
         """
@@ -610,15 +668,6 @@ class HttpErrorKind:
             """
         def __new__(cls, detail: builtins.str) -> HttpErrorKind.Transport: ...
     
-    @typing.final
-    class Incomplete(HttpErrorKind):
-        r"""
-        内容没有写完：fMP4 的顶层 box 超出了数据或末尾的字节凑不成 box 头，或加密分片的密文不足整块而整块部分解出
-        的内容认得出，多为源站还在写这个文件
-        """
-        __match_args__ = ()
-        def __new__(cls) -> HttpErrorKind.Incomplete: ...
-    
 
 @typing.final
 class HttpFailure:
@@ -626,14 +675,14 @@ class HttpFailure:
     取不到的请求：失败的原因，与服务器要求的最短等待。
     """
     @property
-    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport | HttpErrorKind.Incomplete:
+    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
         r"""
         失败的原因
         """
     @property
     def retryable(self) -> builtins.bool:
         r"""
-        临时故障，重试可能成功：超时、连接与传输错误，内容没有写完，408、429 与 5xx
+        临时故障，重试可能成功：超时、连接与传输错误，408、429 与 5xx
         """
     @property
     def retry_after(self) -> typing.Optional[builtins.int]:
@@ -689,6 +738,28 @@ class HttpOptions:
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
+class IncompleteError(HsM3u8Error):
+    r"""
+    分片或 init 段取到的内容没有写完：fMP4 的顶层 box 超出了数据，或加密分片的密文不足整块而整块部分解出的内容
+    认得出；多为源站还在写这个文件，稍后重试可能成功。下载时已按 `RetryPolicy` 重新取过；分片的失败由 `segment`
+    指出是哪个。
+    """
+    @property
+    def url(self) -> builtins.str:
+        r"""
+        分片或 init 段的地址（可能带令牌；异常的说明里只显示到路径）
+        """
+    def __new__(cls, message: builtins.str, *, url: builtins.str, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> IncompleteError:
+        r"""
+        `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
+        None 时为空。
+        """
+    def __init__(self, message: builtins.str, *, url: builtins.str, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+        r"""
+        同构造函数：把说明放进 `args`。
+        """
+
+@typing.final
 class IntegrityError(SourceError):
     r"""
     数据校验失败（解密后的内容不对）。
@@ -730,7 +801,7 @@ class IntegrityFailure:
     class CipherLength(IntegrityFailure):
         r"""
         密文长度不是 16 的整数倍，整块部分解出的内容也认不出（如源站返回的是错误页面）；认得出的报
-        `HttpErrorKind.Incomplete`
+        `IncompleteError`
         """
         __match_args__ = ("length",)
         @property
@@ -787,8 +858,7 @@ class IntegrityFailure:
     @typing.final
     class Fmp4BoxSize(IntegrityFailure):
         r"""
-        fMP4 顶层 box 的长度字段小于 box 头的长度（8 字节，64 位长度时 16 字节）；没写完的报
-        `HttpErrorKind.Incomplete`
+        fMP4 顶层 box 的长度字段小于 box 头的长度（8 字节，64 位长度时 16 字节）；没写完的报 `IncompleteError`
         """
         __match_args__ = ("at", "size",)
         @property
@@ -1380,15 +1450,15 @@ class MissReason:
     @typing.final
     class Failed(MissReason):
         r"""
-        列出了，但取不到：404/410，或可重试的错误重试后仍失败
+        列出了，但取不到：404/410，可重试的错误重试后仍失败，或重试后内容仍没写完
         """
         __match_args__ = ("kind",)
         @property
-        def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport | HttpErrorKind.Incomplete:
+        def kind(self) -> FetchErrorKind.Http | FetchErrorKind.Incomplete:
             r"""
-            失败的原因
+            取不到的原因
             """
-        def __new__(cls, kind: HttpErrorKind) -> MissReason.Failed: ...
+        def __new__(cls, kind: FetchErrorKind) -> MissReason.Failed: ...
     
     @typing.final
     class InitFailed(MissReason):
@@ -1397,11 +1467,11 @@ class MissReason:
         """
         __match_args__ = ("kind",)
         @property
-        def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport | HttpErrorKind.Incomplete:
+        def kind(self) -> FetchErrorKind.Http | FetchErrorKind.Incomplete:
             r"""
-            失败的原因
+            取不到的原因
             """
-        def __new__(cls, kind: HttpErrorKind) -> MissReason.InitFailed: ...
+        def __new__(cls, kind: FetchErrorKind) -> MissReason.InitFailed: ...
     
     @typing.final
     class Unmergeable(MissReason):
@@ -2895,11 +2965,11 @@ class StallReason:
         """
         __match_args__ = ("failure",)
         @property
-        def failure(self) -> HttpFailure:
+        def failure(self) -> FetchFailure:
             r"""
             最近一次取不到分片或 init 段的原因
             """
-        def __new__(cls, failure: HttpFailure) -> StallReason.Unrecordable: ...
+        def __new__(cls, failure: FetchFailure) -> StallReason.Unrecordable: ...
     
     @typing.final
     class TrackStopped(StallReason):

@@ -6,7 +6,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use hs_m3u8_core::hls::SyntaxError;
 use hs_m3u8_core::{
-    Engine, Error, HttpError, HttpFailure, LiveEnd, LiveOptions, MissReason, Missed,
+    Engine, Error, FetchError, HttpError, HttpFailure, LiveEnd, LiveOptions, MissReason, Missed,
     Mp4Unsupported, RefreshCause, Stage, Unsupported,
 };
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
@@ -244,7 +244,7 @@ async fn unavailable_segments_are_reported_as_missed() {
         .unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 3], &[2]));
-    let not_found = MissReason::Failed(HttpError::Status(404));
+    let not_found = MissReason::Failed(FetchError::Http(HttpError::Status(404)));
     assert_eq!(
         output.live,
         report(LiveEnd::EndList, 1, vec![missed(1, 2, not_found)])
@@ -281,7 +281,7 @@ async fn segments_still_incomplete_after_retries_are_missed() {
         &output,
         &expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]),
     );
-    let incomplete = MissReason::Failed(HttpError::Incomplete);
+    let incomplete = MissReason::Failed(FetchError::Incomplete);
     assert_eq!(
         output.live,
         report(LiveEnd::EndList, 1, vec![missed(1, 1, incomplete)])
@@ -394,7 +394,7 @@ async fn unavailable_new_init_is_missed() {
     let tracks = vec![track("fmp4_a/video", Some("init.mp4"), &["seg0.m4s"])];
     let want = expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]);
     assert_output(&output, &want);
-    let not_found = MissReason::InitFailed(HttpError::Status(404));
+    let not_found = MissReason::InitFailed(FetchError::Http(HttpError::Status(404)));
     assert_eq!(
         output.live,
         report(LiveEnd::EndList, 1, vec![missed(1, 1, not_found)])
