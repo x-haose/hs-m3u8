@@ -145,6 +145,15 @@ variants! {
             /// 这条轨的各不连续段编号
             found: Seq<u64>,
         },
+        /// fMP4 的 moof 用了绝对位置（tfhd 的 base_data_offset）：RFC 8216 3.3 要求按 moof 相对寻址，分片单独存放、
+        /// 接起来合并时绝对位置都对不上
+        #[pyo3(constructor = (*, url, at))]
+        Fmp4BaseDataOffset {
+            /// 分片或 init 段的地址
+            url: Address,
+            /// 这个 moof 的起点，字节
+            at: u64,
+        },
     }
 }
 
@@ -185,7 +194,8 @@ variants! {
             /// 长度字段的值，字节
             size: u64,
         },
-        /// fMP4 末尾多出不足 8 个、凑不成 box 头的字节（如 CDN 加了换行、`Hooks.on_segment` 没去干净）
+        /// fMP4 末尾的字节不是完整的 box：不足 8 个凑不成 box 头，或类型认不出而长度写 0 或超出了数据。多为多出的字节
+        /// （如 CDN 加了换行或填充、`Hooks.on_segment` 没去干净）；trun 声明的样本数据也超出了数据时报 `IncompleteError`
         #[pyo3(constructor = (*, at, len))]
         Fmp4TrailingBytes {
             /// 多出的字节的起点
@@ -193,9 +203,9 @@ variants! {
             /// 多出的字节数
             len: u64,
         },
-        /// fMP4 分片最后一个 mdat 的长度写为 0，核对它时发现前面的 moof 内容不合法（子 box 超出、字段不全）
-        Fmp4BadMoof {
-            /// 这个 moof 的起点，字节
+        /// fMP4 顶层 box（moof 或 moov）的内容不合法：子 box 超出、字段不全，或算出的样本位置溢出
+        Fmp4Malformed {
+            /// 这个 box 的起点，字节
             at: u64,
         },
         /// fMP4 最后一个顶层 box 的长度写为 0（到数据末尾），实际长度超过 4 GiB，存盘前改写不成实际长度
@@ -522,7 +532,7 @@ impl From<core::Integrity> for IntegrityFailure {
             I::NotFmp4(head) => IntegrityFailure::NotFmp4 { head },
             I::Fmp4BoxTooSmall { at, size } => IntegrityFailure::Fmp4BoxTooSmall { at, size },
             I::Fmp4TrailingBytes { at, len } => IntegrityFailure::Fmp4TrailingBytes { at, len },
-            I::Fmp4BadMoof { at } => IntegrityFailure::Fmp4BadMoof { at },
+            I::Fmp4Malformed { at } => IntegrityFailure::Fmp4Malformed { at },
             I::Fmp4OpenBoxTooLarge { at, size } => {
                 IntegrityFailure::Fmp4OpenBoxTooLarge { at, size }
             }

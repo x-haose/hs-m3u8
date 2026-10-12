@@ -64,9 +64,12 @@ pub fn read_head(reader: &mut (impl Read + Seek)) -> io::Result<Option<Head>> {
     let mut timestamp = None;
     loop {
         reader.seek(SeekFrom::Start(start))?;
-        let mut probe = [0u8; PROBE_LEN];
-        let read = read_up_to(reader, &mut probe)?;
-        let data = &probe[..read];
+        let mut probe = Vec::with_capacity(PROBE_LEN);
+        reader
+            .by_ref()
+            .take(PROBE_LEN as u64)
+            .read_to_end(&mut probe)?;
+        let data = probe.as_slice();
         if data.starts_with(b"ID3") {
             let Some(tag) = TagHeader::parse(data) else {
                 return Ok(None);
@@ -107,20 +110,6 @@ pub fn read_head(reader: &mut (impl Read + Seek)) -> io::Result<Option<Head>> {
 /// `data` 开头的 ID3v2 标签的总长，字节；不是标签或标签头不完整、长度字段不合法时为 None。
 pub(crate) fn tag_len(data: &[u8]) -> Option<u64> {
     TagHeader::parse(data).map(|tag| tag.len())
-}
-
-/// 读满 `buf` 或读到末尾，返回读到的字节数。
-fn read_up_to(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
-    let mut filled = 0;
-    while filled < buf.len() {
-        match reader.read(&mut buf[filled..]) {
-            Ok(0) => break,
-            Ok(n) => filled += n,
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(filled)
 }
 
 /// ID3v2 标签头（10 字节）。
@@ -211,8 +200,9 @@ fn read_at<const N: usize>(
         return Ok(None);
     }
     reader.seek(SeekFrom::Start(at))?;
-    let mut buf = [0u8; N];
-    Ok((read_up_to(reader, &mut buf)? == N).then_some(buf))
+    let mut buf = Vec::with_capacity(N);
+    reader.take(N as u64).read_to_end(&mut buf)?;
+    Ok(buf.try_into().ok())
 }
 
 /// 4 个各 7 位的字节（最高位须为 0）表示的长度。

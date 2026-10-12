@@ -610,6 +610,14 @@ fn exception(
                 found: Seq(found),
             },
         )?,
+        E::Unsupported(U::Fmp4BaseDataOffset { url, at }) => unsupported_source(
+            py,
+            base,
+            SourceUnsupported::Fmp4BaseDataOffset {
+                url: Address(*url),
+                at,
+            },
+        )?,
         E::Playlist { url, cause } => instance(
             py,
             SourceError::chain(

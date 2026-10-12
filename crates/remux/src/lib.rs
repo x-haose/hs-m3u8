@@ -43,8 +43,8 @@ use crate::input::Input;
 /// 时间戳在组间换算时使用的公共时间基（微秒）。
 const MICROS: Rational = Rational(1, 1_000_000);
 
-/// 一个不连续段组里某条轨的分片，按播放顺序；fMP4 时 `init` 是该组使用的 init 段。fMP4 的 init 段与各分片须由首尾
-/// 相接的顶层 box 恰好铺满、最后一个 box 的长度不写 0（见 [`fmp4`]）。
+/// 一个不连续段组里某条轨的分片，按播放顺序；fMP4 时 `init` 是该组使用的 init 段。fMP4 的 init 段与各分片须通过
+/// [`fmp4::check`]、最后一个 box 的长度不写 0（见 [`fmp4::seal`]）；合并时只再核对顶层 box。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackSegments {
     pub init: Option<PathBuf>,

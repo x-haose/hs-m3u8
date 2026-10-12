@@ -142,7 +142,7 @@ impl Hooks {
     }
 
     /// 在解密之前变换分片（如去掉伪装成图片的前缀字节），返回变换后的内容。`url` 为播放列表中的分片地址；init 段
-    /// 不经过此回调。每次尝试（含重试）调用一次：内容没写完要重新取时，同一个分片会再经过它，那时的 `data` 是截断的。
+    /// 与空的响应不经过此回调。重试时同一个分片会再经过它，`data` 可能没写完。
     #[pyo3(signature = (url, data, /))]
     fn on_segment<'py>(&self, url: String, data: Bound<'py, PyBytes>) -> Bound<'py, PyBytes> {
         let _ = url;

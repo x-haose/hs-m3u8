@@ -83,8 +83,8 @@ pub trait Hooks: Send + Sync {
         Ok(None)
     }
 
-    /// 在解密之前变换分片（如去掉伪装成图片的前缀字节）。`url` 为播放列表中的分片地址；init 段不经过此回调。每次
-    /// 尝试（含重试）调用一次：内容没写完要重新取时，同一个分片会再经过它，那时的 `data` 是截断的。
+    /// 在解密之前变换分片（如去掉伪装成图片的前缀字节）。`url` 为播放列表中的分片地址；init 段与空的响应不经过此
+    /// 回调。重试时同一个分片会再经过它，`data` 可能没写完。
     fn on_segment(&self, url: &Url, data: Vec<u8>) -> Result<Vec<u8>, HookError> {
         let _ = url;
         Ok(data)

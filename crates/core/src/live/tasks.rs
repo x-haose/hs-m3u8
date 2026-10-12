@@ -173,9 +173,10 @@ async fn check_mp4(
     Ok(())
 }
 
-/// 重叠的分片从新到旧逐个试，用第一个取得到的重新下载后与已存的比较；取不到的（404/410，或重试后仍失败的临时
-/// 故障）换更旧的试。都取不到时，有临时故障则如实上抛（可重试）；全是 404/410 则无从核对，按接不上算（它们也录
-/// 不到，另起会话不会重复）。其余失败（403 等、key、校验、回调）如实上抛，与录制时一样。
+/// 重叠的分片从新到旧逐个试，用第一个取得到的重新下载后与已存的比较（有无 init 段与已存的不同的不必取，即是不同）；
+/// 取不到的（404/410，或重试后仍失败的临时故障）换更旧的试。都取不到时，有临时故障则如实上抛（可重试）；全是
+/// 404/410 则无从核对，按接不上算（它们也录不到，另起会话不会重复）。其余失败（403 等、key、校验、回调）如实上抛，
+/// 与录制时一样。
 async fn check(
     direct: &Direct,
     track: usize,
@@ -190,6 +191,9 @@ async fn check(
         init,
     } in overlaps
     {
+        if segment.init.is_some() != init.is_some() {
+            return Ok(Verdict::Differs);
+        }
         let data = match direct.fetch(track, &segment, init.as_deref(), cancel).await {
             Ok(data) => data,
             Err(e) => match e.missable() {

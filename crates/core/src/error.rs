@@ -165,6 +165,9 @@ impl fmt::Display for CauseText<'_> {
         match self.cause {
             Error::Http { url, kind, .. } if same(url) => write!(f, "{kind}"),
             Error::Integrity { url, kind } if same(url) => write!(f, "数据校验失败：{kind}"),
+            Error::Unsupported(Unsupported::Fmp4BaseDataOffset { url, at }) if same(url) => {
+                write!(f, "不支持：{}", base_data_offset_text(*at))
+            }
             other => write!(f, "{other}"),
         }
     }
@@ -289,6 +292,16 @@ pub enum Unsupported {
         first: Vec<u64>,
         found: Vec<u64>,
     },
+    /// fMP4 分片或 init 段 `url` 从第 `at` 字节起的 moof 用了绝对位置（tfhd 的 base_data_offset）：RFC 8216 3.3 要求
+    /// 按 moof 相对寻址，分片单独存放、接起来合并时绝对位置都对不上
+    #[error("{} {}", bare_url(.url), base_data_offset_text(*.at))]
+    Fmp4BaseDataOffset { url: Box<Url>, at: u64 },
+}
+
+fn base_data_offset_text(at: u64) -> String {
+    format!(
+        "第 {at} 字节起的 moof 用了绝对位置（tfhd 的 base_data_offset），HLS 要求按 moof 相对寻址"
+    )
 }
 
 /// 本地 HLS 表示不了的内容。
@@ -397,13 +410,14 @@ pub enum Integrity {
     /// 报 [`Error::Incomplete`]
     #[error("fMP4 第 {at} 字节起的 box 长度 {size} 小于 box 头")]
     Fmp4BoxTooSmall { at: u64, size: u64 },
-    /// fMP4 从第 `at` 字节起末尾的 `len` 个字节（不足 8 个）凑不成 box 头：多为多出的字节（如 CDN 加了换行、回调没去
-    /// 干净），截断恰好落在 box 头里的极少
-    #[error("fMP4 第 {at} 字节起末尾的 {len} 个字节凑不成 box 头")]
+    /// fMP4 从第 `at` 字节起末尾的 `len` 个字节不是完整的 box：不足 8 个凑不成 box 头，或类型认不出而长度写 0 或超出了
+    /// 数据。多为多出的字节（如 CDN 加了换行或填充、回调没去干净）；trun 声明的样本数据也超出了数据时报
+    /// [`Error::Incomplete`]
+    #[error("fMP4 第 {at} 字节起末尾的 {len} 个字节不是完整的 box")]
     Fmp4TrailingBytes { at: u64, len: u64 },
-    /// fMP4 分片最后一个 mdat 的长度写为 0，核对它时发现前面从第 `at` 字节起的 moof 内容不合法（子 box 超出、字段不全）
-    #[error("fMP4 第 {at} 字节起的 moof 内容不合法")]
-    Fmp4BadMoof { at: u64 },
+    /// fMP4 从第 `at` 字节起的顶层 box（moof 或 moov）内容不合法：子 box 超出、字段不全，或算出的样本位置溢出
+    #[error("fMP4 第 {at} 字节起的 box 内容不合法")]
+    Fmp4Malformed { at: u64 },
     /// fMP4 最后一个顶层 box 的长度写为 0（到数据末尾），实际的 `size` 字节写不进 32 位的长度字段：存盘前要改写成实际
     /// 长度（合并时一条轨的分片接成一个输入读）
     #[error(

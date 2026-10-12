@@ -56,7 +56,7 @@ impl GroupTrack {
         let mut gaps = Vec::new();
         let mut previous: Option<u64> = None;
         for name in names {
-            init.get_or_insert(name.init);
+            init.get_or_insert_with(|| layout.segment_init(track, name));
             if previous.is_some_and(|p| p.checked_add(1) != Some(name.sequence)) {
                 gaps.push(segments.len());
             }
@@ -67,7 +67,7 @@ impl GroupTrack {
             });
         }
         GroupTrack {
-            init: init.flatten().map(|f| layout.init(track, f)),
+            init: init.flatten(),
             segments,
             gaps,
         }

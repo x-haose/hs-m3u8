@@ -494,7 +494,7 @@ class Hooks:
     def on_segment(self, url: builtins.str, data: bytes, /) -> bytes:
         r"""
         在解密之前变换分片（如去掉伪装成图片的前缀字节），返回变换后的内容。`url` 为播放列表中的分片地址；init 段
-        不经过此回调。每次尝试（含重试）调用一次：内容没写完要重新取时，同一个分片会再经过它，那时的 `data` 是截断的。
+        与空的响应不经过此回调。重试时同一个分片会再经过它，`data` 可能没写完。
         """
 
 class HsM3u8Error(builtins.Exception):
@@ -770,7 +770,7 @@ class IntegrityError(SourceError):
         出错的分片或 init 段的地址
         """
     @property
-    def reason(self) -> IntegrityFailure.Padding | IntegrityFailure.CipherLength | IntegrityFailure.RangeLength | IntegrityFailure.UnrecognizedSegment | IntegrityFailure.NotFmp4 | IntegrityFailure.Fmp4BoxTooSmall | IntegrityFailure.Fmp4TrailingBytes | IntegrityFailure.Fmp4BadMoof | IntegrityFailure.Fmp4OpenBoxTooLarge:
+    def reason(self) -> IntegrityFailure.Padding | IntegrityFailure.CipherLength | IntegrityFailure.RangeLength | IntegrityFailure.UnrecognizedSegment | IntegrityFailure.NotFmp4 | IntegrityFailure.Fmp4BoxTooSmall | IntegrityFailure.Fmp4TrailingBytes | IntegrityFailure.Fmp4Malformed | IntegrityFailure.Fmp4OpenBoxTooLarge:
         r"""
         失败的原因
         """
@@ -876,7 +876,8 @@ class IntegrityFailure:
     @typing.final
     class Fmp4TrailingBytes(IntegrityFailure):
         r"""
-        fMP4 末尾多出不足 8 个、凑不成 box 头的字节（如 CDN 加了换行、`Hooks.on_segment` 没去干净）
+        fMP4 末尾的字节不是完整的 box：不足 8 个凑不成 box 头，或类型认不出而长度写 0 或超出了数据。多为多出的字节
+        （如 CDN 加了换行或填充、`Hooks.on_segment` 没去干净）；trun 声明的样本数据也超出了数据时报 `IncompleteError`
         """
         __match_args__ = ("at", "len",)
         @property
@@ -892,17 +893,17 @@ class IntegrityFailure:
         def __new__(cls, *, at: builtins.int, len: builtins.int) -> IntegrityFailure.Fmp4TrailingBytes: ...
     
     @typing.final
-    class Fmp4BadMoof(IntegrityFailure):
+    class Fmp4Malformed(IntegrityFailure):
         r"""
-        fMP4 分片最后一个 mdat 的长度写为 0，核对它时发现前面的 moof 内容不合法（子 box 超出、字段不全）
+        fMP4 顶层 box（moof 或 moov）的内容不合法：子 box 超出、字段不全，或算出的样本位置溢出
         """
         __match_args__ = ("at",)
         @property
         def at(self) -> builtins.int:
             r"""
-            这个 moof 的起点，字节
+            这个 box 的起点，字节
             """
-        def __new__(cls, at: builtins.int) -> IntegrityFailure.Fmp4BadMoof: ...
+        def __new__(cls, at: builtins.int) -> IntegrityFailure.Fmp4Malformed: ...
     
     @typing.final
     class Fmp4OpenBoxTooLarge(IntegrityFailure):
@@ -2870,6 +2871,25 @@ class SourceUnsupported:
             """
         def __new__(cls, *, track: builtins.int, first: collections.abc.Sequence[builtins.int], found: collections.abc.Sequence[builtins.int]) -> SourceUnsupported.DiscontinuityMismatch: ...
     
+    @typing.final
+    class Fmp4BaseDataOffset(SourceUnsupported):
+        r"""
+        fMP4 的 moof 用了绝对位置（tfhd 的 base_data_offset）：RFC 8216 3.3 要求按 moof 相对寻址，分片单独存放、
+        接起来合并时绝对位置都对不上
+        """
+        __match_args__ = ("url", "at",)
+        @property
+        def url(self) -> builtins.str:
+            r"""
+            分片或 init 段的地址
+            """
+        @property
+        def at(self) -> builtins.int:
+            r"""
+            这个 moof 的起点，字节
+            """
+        def __new__(cls, *, url: builtins.str, at: builtins.int) -> SourceUnsupported.Fmp4BaseDataOffset: ...
+    
 
 @typing.final
 class SourceUnsupportedError(SourceError):
@@ -2877,7 +2897,7 @@ class SourceUnsupportedError(SourceError):
     来源用到了不支持的特性。
     """
     @property
-    def reason(self) -> SourceUnsupported.EmptyPlaylist | SourceUnsupported.NoTargetDuration | SourceUnsupported.Encrypted | SourceUnsupported.InitChangesWithinGroup | SourceUnsupported.DiscontinuityMismatch:
+    def reason(self) -> SourceUnsupported.EmptyPlaylist | SourceUnsupported.NoTargetDuration | SourceUnsupported.Encrypted | SourceUnsupported.InitChangesWithinGroup | SourceUnsupported.DiscontinuityMismatch | SourceUnsupported.Fmp4BaseDataOffset:
         r"""
         哪个特性
         """

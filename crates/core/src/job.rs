@@ -109,7 +109,7 @@ async fn run_live(
         },
     };
     let dir = WorkDir::open(task.output.work_dir.clone(), record, lock).await?;
-    let mut fetcher = task.fetcher();
+    let mut fetcher = task.fetcher(&dir);
     let ctx = Context {
         http: task.http.clone(),
         hooks: task.request.source.hooks.clone(),
@@ -148,7 +148,7 @@ async fn run_vod(
         },
     };
     let dir = WorkDir::open(task.output.work_dir.clone(), record, lock).await?;
-    let mut fetcher = task.fetcher();
+    let mut fetcher = task.fetcher(&dir);
     let mp4 = task.output.get(OutputKind::Mp4).map(|_| streams.as_slice());
     let groups = vod::download(
         &task.http,
@@ -249,12 +249,13 @@ fn merge_live(
 }
 
 impl Task {
-    fn fetcher(&self) -> Fetcher {
+    fn fetcher(&self, dir: &WorkDir) -> Fetcher {
         Fetcher::new(
             self.http.clone(),
             self.request.source.hooks.clone(),
             self.request.key,
             self.request.concurrency,
+            dir.layout().root(),
             &self.cancel,
         )
     }

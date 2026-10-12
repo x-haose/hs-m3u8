@@ -100,7 +100,7 @@ impl Recorder<'_> {
                 let name = &recorded.segments()[&segment.sequence];
                 StoredOverlap {
                     stored: dir.layout().segment(track, name),
-                    init: name.init.map(|init| dir.layout().init(track, init)),
+                    init: dir.layout().segment_init(track, name),
                     segment: segment.clone(),
                 }
             })

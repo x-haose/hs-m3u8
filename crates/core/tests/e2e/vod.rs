@@ -654,17 +654,22 @@ async fn a_truncated_encrypted_segment_is_fetched_again() {
     assert_eq!(server.hits("seg0.ts"), 2 + 1);
 }
 
-/// 源站给出没写完的 fMP4 分片（mdat 截断，Content-Length 与截断后的长度一致）：重新取，取到完整的照常合并；一直没写完
-/// 时按重试策略取完次数后失败（可重试），不写盘，不合并出把下一个分片的字节读成这一片样本的 MP4。
+/// 源站给出没写完的 fMP4 分片（Content-Length 与截断后的长度一致）：截在 mdat 里、截在 mdat 之前（顶层 box 都完整，
+/// 靠 trun 声明的样本数据看出）或是空的，都重新取，取到完整的照常合并；一直没写完时按重试策略取完次数后失败（可重试），
+/// 不写盘，不合并出把下一个分片的字节读成这一片样本的 MP4。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_truncated_fmp4_segment_is_fetched_again() {
     let dir = test_dir("truncated_fmp4");
     let server = Server::start().await;
     let seg0 = fixture("fmp4_a/video/seg0.m4s");
     let truncated = seg0[..seg0.len() * 9 / 10].to_vec();
+    let before_mdat = seg0[..last_box(&seg0)].to_vec();
     server.put("init.mp4", fixture("fmp4_a/video/init.mp4"));
-    server.put_sequence("seg0.m4s", vec![truncated.clone(), seg0]);
-    server.put("seg1.m4s", fixture("fmp4_a/video/seg1.m4s"));
+    server.put_sequence("seg0.m4s", vec![truncated.clone(), before_mdat, seg0]);
+    server.put_sequence(
+        "seg1.m4s",
+        vec![Vec::new(), fixture("fmp4_a/video/seg1.m4s")],
+    );
     server.put(
         "index.m3u8",
         "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"init.mp4\"\n\
@@ -681,7 +686,8 @@ async fn a_truncated_fmp4_segment_is_fetched_again() {
         &output,
         &expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]),
     );
-    assert_eq!(server.hits("seg0.m4s"), 2);
+    assert_eq!(server.hits("seg0.m4s"), 3);
+    assert_eq!(server.hits("seg1.m4s"), 2);
 
     std::fs::remove_file(dir.join("out.mp4")).unwrap();
     server.put("seg0.m4s", truncated);
@@ -695,7 +701,7 @@ async fn a_truncated_fmp4_segment_is_fetched_again() {
         }
         other => panic!("{other}"),
     }
-    assert_eq!(server.hits("seg0.m4s"), 2 + 3);
+    assert_eq!(server.hits("seg0.m4s"), 3 + 3);
 }
 
 /// fMP4 数据里最后一个顶层 box 的起点（各 box 的长度都写在 32 位字段里）。

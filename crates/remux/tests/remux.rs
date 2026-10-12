@@ -1612,35 +1612,37 @@ fn damage_before_a_gap_or_a_frameless_segment_in_packed_audio() {
     assert_eq!(ticks(a_out[n0 - 1].0), t2 - t0);
 }
 
-/// 样本里 fMP4 分片的 trun 声明的样本数据恰好到分片末尾；mdat 的长度写 0 再截掉末尾时，靠它看得出没写完。合并时
-/// 分片的顶层 box 没铺满、或最后一个 box 的长度写 0 都报错，不越过文件边界把下一片读成这一片的样本。
+/// 样本里 fMP4 分片的 trun 声明的样本数据恰好到分片末尾：mdat 的长度写 0 时少一个字节、或截在 mdat 之前，都看得出
+/// 没写完。合并时分片的顶层 box 没铺满、或最后一个 box 的长度写 0 都报错，不越过文件边界把下一片读成这一片的样本。
 #[test]
 fn fmp4_structure_is_checked() {
-    use hs_m3u8_remux::fmp4;
+    use hs_m3u8_remux::fmp4::{self, Problem};
     use std::io::Cursor;
 
     let dir = work_dir("fmp4_structure");
     for name in ["fmp4_a/video", "fmp4_a/audio", "fmp4_av1_opus", "fmp4_alac"] {
         let t = track(name);
-        let trex = fmp4::trex_sample_sizes(&std::fs::read(t.init.as_ref().unwrap()).unwrap());
+        let init = std::fs::read(t.init.as_ref().unwrap()).unwrap();
+        let trex = fmp4::trex_sample_sizes(&init).unwrap();
+        assert_eq!(fmp4::check(&init, &trex), Ok(()), "{name}");
         let data = std::fs::read(&t.segments[0]).unwrap();
         let boxes = fmp4::boxes(&mut Cursor::new(&data)).unwrap().unwrap();
-        let full = data.len() as u64;
-        assert_eq!(
-            fmp4::sample_data_end(&data, &boxes, &trex),
-            Ok(full),
-            "{name}"
-        );
         let mdat = *boxes.last().unwrap();
         assert_eq!(&mdat.kind, b"mdat", "{name}");
-        let mut open = data;
+        let mut open = data.clone();
         open[mdat.at as usize..][..4].fill(0);
-        open.truncate(open.len() - 10);
-        let boxes = fmp4::boxes(&mut Cursor::new(&open)).unwrap().unwrap();
-        assert!(boxes.last().unwrap().to_end, "{name}");
+        let mut sealed = open.clone();
+        assert_eq!(fmp4::seal(&mut sealed, &trex), Ok(()), "{name}");
+        assert_eq!(sealed, data, "{name}");
+        let incomplete = Err(Problem::Incomplete);
         assert_eq!(
-            fmp4::sample_data_end(&open, &boxes, &trex),
-            Ok(full),
+            fmp4::check(&open[..open.len() - 1], &trex),
+            incomplete,
+            "{name}"
+        );
+        assert_eq!(
+            fmp4::check(&data[..mdat.at as usize], &trex),
+            incomplete,
             "{name}"
         );
     }
@@ -1671,7 +1673,7 @@ fn fmp4_structure_is_checked() {
                 matches!(&err, Error::Fmp4OpenEnded { path: p, at } if *p == path && *at == mdat as u64)
             }
             _ => {
-                matches!(&err, Error::Fmp4 { path: p, problem: fmp4::Problem::Incomplete } if *p == path)
+                matches!(&err, Error::Fmp4 { path: p, problem: Problem::Incomplete } if *p == path)
             }
         };
         assert!(expected, "{name}：实际 {err:?}");

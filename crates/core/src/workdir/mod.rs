@@ -95,6 +95,11 @@ impl Layout {
         self.track(track).join(init_file_name(fingerprint))
     }
 
+    /// 第 `track` 条轨的分片 `name` 所用的 init 段；分片没有 init 段时为 None。
+    pub(crate) fn segment_init(&self, track: usize, name: &SegmentName) -> Option<PathBuf> {
+        name.init.map(|fingerprint| self.init(track, fingerprint))
+    }
+
     fn track(&self, track: usize) -> PathBuf {
         self.root.join(TRACKS_DIR).join(track.to_string())
     }

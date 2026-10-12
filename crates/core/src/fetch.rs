@@ -20,12 +20,12 @@ use crate::error::io_error;
 use crate::hooks::{HookKind, Hooks, Purpose, run_hook};
 use crate::http::{Http, Permit};
 use crate::request::KeyOverride;
-use crate::verify::{ContentError, Fmp4, check_standalone_segment, decrypt_failure};
+use crate::verify::{Container, ContentError, check_init, check_segment, decrypt_failure};
 use crate::workdir::{self, SegmentName};
-use crate::{Error, Progress};
+use crate::{Error, Progress, WorkDirProblem};
 
 /// 一项下载：第 `track` 条轨的分片，`name` 为它在任务目录中的名字，`path` 为由名字得出的写入位置，`init` 为它所用的
-/// init 段在任务目录里的文件（排入下载之前已落盘；分片没有 init 段时为 None）。
+/// init 段在任务目录里的文件（排入下载之前已落盘；分片没有 init 段、不是 fMP4 时为 None）。
 pub(crate) struct Item {
     pub track: usize,
     pub segment: Box<Segment>,
@@ -56,6 +56,8 @@ pub(crate) type Finished = (ItemInfo, Result<u64, Error>);
 struct Ctx {
     http: Arc<Http>,
     hooks: Arc<dyn Hooks>,
+    /// 任务目录
+    work_dir: PathBuf,
     /// 有值时加密的分片都用它，不取 key
     key_override: Option<KeyOverride>,
     /// key 地址 → 处理后的 16 字节 key；每个地址只拉取一次
@@ -72,17 +74,20 @@ pub(crate) struct Fetcher {
 }
 
 impl Fetcher {
+    /// `work_dir` 为任务目录，各项的 init 段在其中。
     pub(crate) fn new(
         http: Arc<Http>,
         hooks: Arc<dyn Hooks>,
         key_override: Option<KeyOverride>,
         limit: NonZeroUsize,
+        work_dir: &Path,
         cancel: &CancellationToken,
     ) -> Self {
         Fetcher {
             ctx: Arc::new(Ctx {
                 http,
                 hooks,
+                work_dir: work_dir.to_path_buf(),
                 key_override,
                 keys: Mutex::new(HashMap::new()),
             }),
@@ -212,7 +217,7 @@ async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
     (id, result)
 }
 
-/// 拉取 init 段并核对是 fMP4（见 [`check_fmp4`]）；没写完的与请求的临时故障一起重试。
+/// 拉取 init 段并校验（见 [`check_init`]）；没写完的与请求的临时故障一起重试。
 pub(crate) async fn fetch_init(
     http: &Http,
     init: &InitSection,
@@ -220,17 +225,17 @@ pub(crate) async fn fetch_init(
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>, Error> {
     http.retrying(&init.uri, cancel, || async move {
-        let mut data = http
+        let response = http
             .get_once(Purpose::Init, &init.uri, init.byte_range, permit, cancel)
-            .await?
-            .body;
-        check_fmp4(&mut data, None, &init.uri).await?;
+            .await?;
+        let mut data = nonempty(response.body, &init.uri)?;
+        check_init(&mut data).map_err(|e| e.into_error(&init.uri))?;
         Ok(data)
     })
     .await
 }
 
-/// 拉取分片，经 `on_segment` 回调后解密并校验内容（fMP4 见 [`check_fmp4`]，`init` 见 [`Item`]；解密失败见
+/// 拉取分片，经 `on_segment` 回调后解密并校验内容（见 [`check_segment`]，`init` 见 [`Item`]；解密失败见
 /// [`decrypt_failure`]）；有自定义 key 时用它解密。请求、回调、解密与校验作为一次尝试，没写完的与请求的临时故障一起
 /// 重试。
 async fn fetch_segment(
@@ -244,9 +249,15 @@ async fn fetch_segment(
         (Some(key), Some(given)) => Some((given.key, given.iv.unwrap_or(key.iv))),
         (Some(key), None) => Some((key_for(ctx, &key.uri, cancel).await?, key.iv)),
     };
+    let container = &match init {
+        Some(path) => Container::Fmp4 {
+            trex: stored_trex(&ctx.work_dir, path).await?,
+        },
+        None => Container::Standalone,
+    };
     ctx.http
         .retrying(&segment.uri, cancel, || async move {
-            let body = ctx
+            let response = ctx
                 .http
                 .get_once(
                     Purpose::Segment,
@@ -255,49 +266,46 @@ async fn fetch_segment(
                     Permit::Required,
                     cancel,
                 )
-                .await?
-                .body;
+                .await?;
+            let body = nonempty(response.body, &segment.uri)?;
             let url = segment.uri.clone();
             let data = run_hook(&ctx.hooks, HookKind::Segment, move |hooks| {
                 hooks.on_segment(&url, body)
             })
             .await?;
-            let fmp4 = segment.init.is_some();
+            let content = |e: ContentError| e.into_error(&segment.uri);
             let mut data = match key {
-                Some((key, iv)) => decrypt(data, &key, &iv)
-                    .map_err(|e| decrypt_failure(e, fmp4).into_error(&segment.uri))?,
+                Some((key, iv)) => {
+                    decrypt(data, &key, &iv).map_err(|e| content(decrypt_failure(e, container)))?
+                }
                 None => data,
             };
-            if fmp4 {
-                check_fmp4(&mut data, init, &segment.uri).await?;
-            } else {
-                check_standalone_segment(&data)
-                    .map_err(|kind| ContentError::Invalid(kind).into_error(&segment.uri))?;
-            }
+            check_segment(&mut data, container).map_err(content)?;
             Ok(data)
         })
         .await
 }
 
-/// 核对取自 `url` 的 fMP4 分片或 init 段的结构，并把长度写 0 的最后一个 box 改写成实际长度（见 [`Fmp4`]）。最后一个
-/// box 是长度写 0 的 mdat 时，样本长度可能要用 init 段里 trex 的默认值：`init` 为分片所用的 init 段的文件，这时才读；
-/// 核对的是 init 段本身时为 None。
-async fn check_fmp4(data: &mut [u8], init: Option<&Path>, url: &Url) -> Result<(), Error> {
-    let content = |e: ContentError| e.into_error(url);
-    let fmp4 = Fmp4::of(data).map_err(content)?;
-    if fmp4.open_mdat() {
-        let trex = match init {
-            Some(path) => {
-                let init = tokio::fs::read(path)
-                    .await
-                    .map_err(io_error("读取", path))?;
-                fmp4::trex_sample_sizes(&init)
-            }
-            None => HashMap::new(),
-        };
-        fmp4.check_samples(data, &trex).map_err(content)?;
+/// 源站返回空的内容（多为文件刚建出、还没写进内容）时为取自 `url` 的内容没写完。
+fn nonempty(body: Vec<u8>, url: &Url) -> Result<Vec<u8>, Error> {
+    if body.is_empty() {
+        return Err(Error::Incomplete {
+            url: Box::new(url.clone()),
+        });
     }
-    fmp4.seal(data).map_err(content)
+    Ok(body)
+}
+
+/// 任务目录 `work_dir` 里的 init 段 `path` 里各轨的默认样本长度（见 [`fmp4::trex_sample_sizes`]）。init 段落盘前校验
+/// 过，解析不了即目录里的文件被改动过。
+async fn stored_trex(work_dir: &Path, path: &Path) -> Result<HashMap<u32, u32>, Error> {
+    let init = tokio::fs::read(path)
+        .await
+        .map_err(io_error("读取", path))?;
+    fmp4::trex_sample_sizes(&init).map_err(|problem| Error::WorkDir {
+        path: work_dir.to_path_buf(),
+        problem: WorkDirProblem::Corrupt(format!("{} 的 fMP4 结构不对：{problem}", path.display())),
+    })
 }
 
 /// 取 key：同一地址只拉取一次。`on_key` 回调不改时拉到的必须是 16 字节。拉取失败不缓存，下次重新拉取。
