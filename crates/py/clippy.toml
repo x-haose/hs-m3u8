@@ -1,3 +1,3 @@
-# 11 为 Progress 构造函数的参数个数（record! 生成，参数与字段一一对应）；FileError.__init__ 为 10：self、说明、自己的
-# 三个属性与基类的五个。构造函数的参数即 Python 侧的关键字参数，个数由类的字段决定
+# 11 为 Progress 构造函数的参数个数（record! 生成，参数与字段一一对应）：构造函数的参数即 Python 侧的关键字参数，
+# 个数由类的字段决定
 too-many-arguments-threshold = 11

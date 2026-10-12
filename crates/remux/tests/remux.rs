@@ -595,7 +595,6 @@ fn resolution_change_between_groups_is_rejected() {
     );
 }
 
-/// fMP4 里的 AV1、VP9 视频与 Opus、FLAC、ALAC 音频原样复制，MP4 里的样本描述带各自的配置 box。
 /// fMP4 的 AAC：AudioSpecificConfig 写法不同而等价（FFmpeg 的编码器显式写出没有 SBR，AudioToolbox 的省略），两种
 /// 顺序都照常合并。
 #[test]
@@ -717,6 +716,7 @@ fn decoder_configs_differing_between_groups_are_rejected() {
     }
 }
 
+/// fMP4 里的 AV1、VP9 视频与 Opus、FLAC、ALAC 音频原样复制，MP4 里的样本描述带各自的配置 box。
 #[test]
 fn av1_vp9_opus_flac_and_alac_are_copied() {
     let dir = work_dir("fmp4_codecs");
@@ -1317,7 +1317,6 @@ fn packed_audio_with_very_short_segments_is_read() {
     }
 }
 
-/// 两个 TS 输入的起点跨在回绕点前 60 秒两侧：FFmpeg 读两个输入时展开的方向不同，读出的起点差 2^33，合并时对齐回来。
 /// 不带时间戳 PRIV 帧的 ID3v2.4 标签（如定时元数据），约 640 字节。
 fn metadata_tag() -> Vec<u8> {
     let data = [b"com.example.metadata\0".as_slice(), &[0x5A; 600]].concat();
@@ -1454,6 +1453,7 @@ fn damage_in_packed_audio_is_skipped_and_counted() {
     );
 }
 
+/// 两个 TS 输入的起点跨在回绕点前 60 秒两侧：FFmpeg 读两个输入时展开的方向不同，读出的起点差 2^33，合并时对齐回来。
 #[test]
 fn ts_inputs_across_the_wrap_edge_stay_aligned() {
     let dir = work_dir("ts_wrap_edge");
