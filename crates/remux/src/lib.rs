@@ -138,6 +138,9 @@ pub struct StreamReport {
     pub packets: u64,
     /// 输入中没有 DTS、因而未写入的包数
     pub skipped_without_dts: u64,
+    /// TS 里损坏而没有写入的音频包数：解复用器标为损坏（来源丢了 TS 包，或 PES 不完整，如直播缺片处）或读不出帧头
+    /// 的。损坏的视频包照常写入，由解码器做错误隐藏（丢掉一帧视频，后面直到下一个关键帧都解不出）
+    pub discarded_corrupt: u64,
     /// 输出时间线上从最早的呈现时刻到最晚的结束时刻，微秒；含组内时间戳间断（如缺失的分片）留下的空档
     pub duration_us: u64,
 }
@@ -268,8 +271,8 @@ pub enum Unsupported {
         first: Shape,
         found: Shape,
     },
-    /// 参数随帧携带的分片（TS 与打包音频）里，这路流在组内中途换了编码参数（采样率、声道、画面宽高等），或有音频帧
-    /// 读不出参数：MP4 的一条轨只有一个样本描述
+    /// 参数随帧携带的分片（TS 与打包音频）里，这路流在组内中途换了编码或编码参数（采样率、声道、画面宽高等）：MP4
+    /// 的一条轨只有一个样本描述
     #[error("第 {group} 组第 {track} 条轨的{kind}编码参数在组内变了，无法放进同一条 MP4 轨")]
     ParamsChangedInGroup {
         group: usize,
@@ -522,8 +525,18 @@ fn check_codec(
 #[derive(Clone, Copy)]
 struct Mapping {
     output: usize,
+    kind: StreamKind,
     /// 输入流的时间基
     time_base: Rational,
+}
+
+/// 一路输入流读到而没有写出的包数。
+#[derive(Clone, Copy, Default)]
+struct Dropped {
+    /// 没有 DTS
+    without_dts: u64,
+    /// 解复用器标为损坏的音频包
+    corrupt: u64,
 }
 
 struct Source {
@@ -534,6 +547,8 @@ struct Source {
     map: Vec<Option<Mapping>>,
     /// 按输入流下标；进输出、参数随帧携带的流为 Some
     inband: Vec<Option<Inband>>,
+    /// 按输入流下标
+    dropped: Vec<Dropped>,
     /// 已读出、待写入的包及其映射；包一定带 DTS
     queue: VecDeque<(Packet, Mapping)>,
     finished: bool,
@@ -556,6 +571,7 @@ impl Source {
         for (s, &output) in selected.iter().zip(outputs) {
             map[s.index] = Some(Mapping {
                 output,
+                kind: s.shape.kind(),
                 time_base: s.time_base,
             });
             if input.standalone() {
@@ -569,15 +585,16 @@ impl Source {
             input,
             map,
             inband,
+            dropped: vec![Dropped::default(); streams],
             queue: VecDeque::new(),
             finished: false,
             wrap_us: 0,
         }
     }
 
-    /// 读下一个要写出的包。跳过未映射流的包；没有 DTS 的包计入该输出流的 `skipped`；参数随帧携带的包核对参数。读到
-    /// 末尾返回 `None`。
-    fn read_next(&mut self, outs: &mut [OutStream]) -> Result<Option<(Packet, Mapping)>, Error> {
+    /// 读下一个要写出的包。跳过未映射流的包；损坏（解复用器标出或读不出帧头）的音频包与没有 DTS 的包记入
+    /// `dropped`；参数随帧携带的包核对参数。读到末尾返回 `None`。
+    fn read_next(&mut self) -> Result<Option<(Packet, Mapping)>, Error> {
         loop {
             let mut packet = Packet::empty();
             if !self.input.read(&mut packet, self.group, self.track)? {
@@ -587,8 +604,13 @@ impl Source {
             let Some(mapping) = self.map.get(packet.stream()).copied().flatten() else {
                 continue;
             };
+            let dropped = &mut self.dropped[packet.stream()];
+            if packet.is_corrupt() && mapping.kind == StreamKind::Audio {
+                dropped.corrupt += 1;
+                continue;
+            }
             if packet.dts().is_none() {
-                outs[mapping.output].skipped += 1;
+                dropped.without_dts += 1;
                 continue;
             }
             if let Some(check) = self.inband[packet.stream()].as_mut() {
@@ -597,17 +619,27 @@ impl Source {
                     .context()
                     .stream(packet.stream())
                     .expect("包所属的流存在");
-                if let Err(mismatch) = check.check(packet.data().unwrap_or_default(), &stream) {
-                    let (group, track) = (self.group, self.track);
-                    return Err(Error::Unsupported(match mismatch {
-                        Mismatch::Changed => Unsupported::ParamsChangedInGroup {
-                            group,
-                            track,
-                            kind: outs[mapping.output].shape.kind(),
-                        },
-                        Mismatch::Eac3ShortFrames => Unsupported::Eac3ShortFrames { group, track },
-                        Mismatch::Eac3Substreams => Unsupported::Eac3Substreams { group, track },
-                    }));
+                let (group, track) = (self.group, self.track);
+                let unsupported = match check.check(packet.data().unwrap_or_default(), &stream) {
+                    Ok(()) => None,
+                    Err(Mismatch::Unreadable) => {
+                        self.dropped[packet.stream()].corrupt += 1;
+                        continue;
+                    }
+                    Err(Mismatch::Changed) => Some(Unsupported::ParamsChangedInGroup {
+                        group,
+                        track,
+                        kind: mapping.kind,
+                    }),
+                    Err(Mismatch::Eac3ShortFrames) => {
+                        Some(Unsupported::Eac3ShortFrames { group, track })
+                    }
+                    Err(Mismatch::Eac3Substreams) => {
+                        Some(Unsupported::Eac3Substreams { group, track })
+                    }
+                };
+                if let Some(unsupported) = unsupported {
+                    return Err(Error::Unsupported(unsupported));
                 }
             }
             return Ok(Some((packet, mapping)));
@@ -615,14 +647,14 @@ impl Source {
     }
 
     /// 读到每路映射流都至少有一个包排队（或读到末尾），用于确定本组各流的首个 DTS 与最早的 PTS。
-    fn prime(&mut self, outs: &mut [OutStream]) -> Result<(), Error> {
+    fn prime(&mut self) -> Result<(), Error> {
         let mapped: Vec<usize> = self.map.iter().flatten().map(|m| m.output).collect();
         while !self.finished
             && !mapped
                 .iter()
                 .all(|&out| self.queue.iter().any(|(_, m)| m.output == out))
         {
-            match self.read_next(outs)? {
+            match self.read_next()? {
                 Some(item) => self.queue.push_back(item),
                 None => self.finished = true,
             }
@@ -644,7 +676,7 @@ struct OutStream {
     /// 写头之后由封装器确定
     time_base: Rational,
     written: u64,
-    skipped: u64,
+    dropped: Dropped,
     start_us: Option<i64>,
     end_us: Option<i64>,
     last_dts_us: Option<i64>,
@@ -673,7 +705,7 @@ fn write_verified(
             shape,
             time_base: octx.stream(out).expect("输出流已创建").time_base(),
             written: 0,
-            skipped: 0,
+            dropped: Dropped::default(),
             start_us: None,
             end_us: None,
             last_dts_us: None,
@@ -705,7 +737,8 @@ fn write_verified(
             .map(|o| StreamReport {
                 shape: o.shape,
                 packets: o.written,
-                skipped_without_dts: o.skipped,
+                skipped_without_dts: o.dropped.without_dts,
+                discarded_corrupt: o.dropped.corrupt,
                 duration_us: match (o.start_us, o.end_us) {
                     (Some(start), Some(end)) => u64::try_from(end - start).unwrap_or(0),
                     _ => 0,
@@ -873,7 +906,7 @@ fn write_group(
     margin_us: i64,
 ) -> Result<(), Error> {
     for source in &mut sources {
-        source.prime(outs)?;
+        source.prime()?;
     }
     align_wraps(&mut sources);
     // 本组各输出流的首个 DTS 与全组最早的 PTS（输入时间线，微秒）；队列内同一路流按解码顺序排列
@@ -897,7 +930,7 @@ fn write_group(
     loop {
         for source in &mut sources {
             if source.queue.is_empty() && !source.finished {
-                match source.read_next(outs)? {
+                match source.read_next()? {
                     Some(item) => source.queue.push_back(item),
                     None => source.finished = true,
                 }
@@ -941,6 +974,15 @@ fn write_group(
             .write_interleaved(octx)
             .map_err(|e| Error::Mux(e.into()))?;
         o.written += 1;
+    }
+    for source in &sources {
+        for (mapping, dropped) in source.map.iter().zip(&source.dropped) {
+            if let Some(mapping) = mapping {
+                let total = &mut outs[mapping.output].dropped;
+                total.without_dts += dropped.without_dts;
+                total.corrupt += dropped.corrupt;
+            }
+        }
     }
     Ok(())
 }

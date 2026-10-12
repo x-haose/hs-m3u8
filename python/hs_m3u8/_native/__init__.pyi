@@ -1550,7 +1550,7 @@ class Mp4Unsupported:
     @typing.final
     class ParamsChangedInGroup(Mp4Unsupported):
         r"""
-        这一组里中途换了编码参数（采样率、声道、画面宽高等），只出在参数随帧携带的 TS 与打包音频里
+        这一组里中途换了编码或编码参数（采样率、声道、画面宽高等），只出在参数随帧携带的 TS 与打包音频里
         """
         __match_args__ = ("group", "track", "kind",)
         @property
@@ -2852,13 +2852,19 @@ class StreamReport:
         输入中没有解码时间戳、因而未写入的包数
         """
     @property
+    def discarded_corrupt(self) -> builtins.int:
+        r"""
+        TS 里损坏而没有写入的音频包数：解复用器标为损坏（来源丢了 TS 包，或 PES 不完整，如直播缺片处）或读不出
+        帧头的。损坏的视频包照常写入，由解码器做错误隐藏
+        """
+    @property
     def duration(self) -> datetime.timedelta:
         r"""
         输出时间线上从最早的呈现时刻到最晚的结束时刻；含组内时间戳间断（如缺失的分片）留下的空档
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, shape: Shape, packets: builtins.int, skipped_without_dts: builtins.int, duration: datetime.timedelta) -> StreamReport:
+    def __new__(cls, *, shape: Shape, packets: builtins.int, skipped_without_dts: builtins.int, discarded_corrupt: builtins.int, duration: datetime.timedelta) -> StreamReport:
         r"""
         各参数即同名属性。
         """

@@ -227,7 +227,7 @@ variants! {
             /// 这一组的参数
             found: Shape,
         },
-        /// 这一组里中途换了编码参数（采样率、声道、画面宽高等），只出在参数随帧携带的 TS 与打包音频里
+        /// 这一组里中途换了编码或编码参数（采样率、声道、画面宽高等），只出在参数随帧携带的 TS 与打包音频里
         #[pyo3(constructor = (*, group, track, kind))]
         ParamsChangedInGroup {
             /// 第几个不连续段组

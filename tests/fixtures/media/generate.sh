@@ -108,6 +108,15 @@ packed mp3_info mp3 -c:a libmp3lame -b:a 64k -segment_format mp3 -segment_format
 read -r -a long_src <<< "$(source_args testsrc2 160x90 440 4)"
 ts_segments ts_long "${long_src[@]}" "${h264[@]}" "${aac[@]}"
 
+# 按固定字节数（不按帧）切成 4 片的 TS：音频 PES 跨在分片边界上，去掉一片后缺片处的 PES 不完整
+rm -rf -- "${DIR:?}/ts_cut"
+mkdir -p "$DIR/ts_cut"
+"${ff[@]}" $(source_args testsrc2 160x90 440 4) "${h264[@]}" "${aac[@]}" -f mpegts "$TMP/cut.ts"
+cut_packets=$(( ($(wc -c < "$TMP/cut.ts") / 188 + 3) / 4 ))
+for i in 0 1 2 3; do
+  dd if="$TMP/cut.ts" of="$DIR/ts_cut/seg$i.ts" bs=188 skip=$((i * cut_packets)) count="$cut_packets" 2>/dev/null
+done
+
 # 边界重复一帧：两个 10 帧/秒、没有 B 帧的纯视频分片，第二个从第一个的最后一帧开始，两帧的解码时间戳相同
 rm -rf -- "${DIR:?}/ts_repeat"
 mkdir -p "$DIR/ts_repeat"

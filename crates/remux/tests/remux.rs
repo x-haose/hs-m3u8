@@ -650,6 +650,55 @@ fn parameter_changes_within_a_group_are_rejected() {
     }
 }
 
+/// 缺了一片、音频 PES 跨在缺片处的 TS：解复用器标为损坏的音频包丢弃并计数，其余照常合并；视频不丢。
+#[test]
+fn audio_damaged_at_a_missing_segment_is_dropped_and_counted() {
+    let dir = work_dir("damaged_audio");
+    let output = dir.join("out.mp4");
+    let mut holed = track("ts_cut");
+    holed.segments.remove(2);
+    let (v_in, a_in) = timelines(&concat_track(&holed, &dir, "in.ts"));
+
+    let report = remux(&[Streams::All], &[group([holed])], &output).unwrap();
+
+    let [video, audio] = &report.streams[..] else {
+        panic!("应有视频与音频两路流：{report:?}");
+    };
+    assert_eq!(
+        (video.packets, video.discarded_corrupt),
+        (v_in.len() as u64, 0)
+    );
+    assert!(audio.discarded_corrupt > 0, "{audio:?}");
+    assert_eq!(
+        audio.packets + audio.discarded_corrupt,
+        a_in.len() as u64,
+        "{audio:?}"
+    );
+}
+
+/// 同一个 PID 中途从 AAC 换成 AC-3（漏标 EXT-X-DISCONTINUITY）：编码在组内变了。
+#[test]
+fn a_codec_switch_on_one_pid_is_rejected() {
+    let dir = work_dir("pid_switch");
+    let output = dir.join("out.mp4");
+    let mut switched = track("ts_a");
+    switched.segments.extend(track("ts_ac3").segments);
+
+    let err = remux(&[Streams::Audio], &[group([switched])], &output).unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::ParamsChangedInGroup {
+                group: 0,
+                track: 0,
+                kind: StreamKind::Audio
+            })
+        ),
+        "实际 {err:?}"
+    );
+}
+
 /// 没有 init 段的一条轨在组内换了分片格式：打包音频从 AAC 换成 AC-3、TS 与打包音频前后相接，两个方向都报错，不跳过
 /// 后面那种格式的分片。
 #[test]

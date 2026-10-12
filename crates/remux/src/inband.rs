@@ -8,9 +8,17 @@ use ffmpeg_next as ffmpeg;
 
 use crate::{ffi, frame};
 
-/// 一路流在一组里的参数核对：每个包的参数须与第一个包的相同。
+/// 一路流在一组里的参数核对：编码不变，每个包的参数须与第一个包的相同。
 #[derive(Clone)]
-pub(crate) enum Inband {
+pub(crate) struct Inband {
+    /// 这路流开始时的编码。TS 的 PMT 中途改了这个 PID 的流类型时，FFmpeg 换掉流的编码并重建解析器
+    /// （mpegts.c 的 mpegts_set_stream_info）
+    codec: codec::Id,
+    params: Params,
+}
+
+#[derive(Clone)]
+enum Params {
     Audio {
         read: fn(&[u8]) -> Option<AudioParams>,
         first: Option<AudioParams>,
@@ -25,26 +33,37 @@ impl Inband {
     /// 编码 `id` 的核对；不能逐帧读出参数的编码为 None。
     pub(crate) fn of(id: codec::Id) -> Option<Inband> {
         let read: fn(&[u8]) -> Option<AudioParams> = match id {
-            codec::Id::H264 | codec::Id::HEVC => return Some(Inband::Video { first: None }),
+            codec::Id::H264 | codec::Id::HEVC => {
+                return Some(Inband {
+                    codec: id,
+                    params: Params::Video { first: None },
+                });
+            }
             codec::Id::AAC => adts,
             codec::Id::AC3 | codec::Id::EAC3 => ac3,
             codec::Id::MP3 => mpeg_audio,
             _ => return None,
         };
-        Some(Inband::Audio { read, first: None })
+        Some(Inband {
+            codec: id,
+            params: Params::Audio { read, first: None },
+        })
     }
 
     /// 核对 `stream` 的一个包 `data`。解析器还没读到参数集的视频包不核对。
     pub(crate) fn check(&mut self, data: &[u8], stream: &Stream<'_>) -> Result<(), Mismatch> {
-        let same = match self {
-            Inband::Audio { read, first } => {
-                let params = read(data).ok_or(Mismatch::Changed)?;
+        if stream.parameters().id() != self.codec {
+            return Err(Mismatch::Changed);
+        }
+        let same = match &mut self.params {
+            Params::Audio { read, first } => {
+                let params = read(data).ok_or(Mismatch::Unreadable)?;
                 if let AudioParams::Ac3(frames) = &params {
                     check_eac3(frames)?;
                 }
                 *first.get_or_insert_with(|| params.clone()) == params
             }
-            Inband::Video { first } => {
+            Params::Video { first } => {
                 ffi::parsed_size(stream).is_none_or(|size| *first.get_or_insert(size) == size)
             }
         };
@@ -55,8 +74,10 @@ impl Inband {
 /// 一个包通不过核对的原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mismatch {
-    /// 参数与第一个包的不同，或音频包读不出参数
+    /// 编码变了，或参数与第一个包的不同
     Changed,
+    /// 音频包读不出帧头：数据损坏而解复用器没有标出（如前一个损坏的 PES 剩下的字节被解析器拼进下一个包）
+    Unreadable,
     /// E-AC-3 每帧不足 6 块：MP4 封装器把几帧并成一个 6 块（1536 个采样点）的样本，末尾凑不满的帧不写出
     Eac3ShortFrames,
     /// E-AC-3 有多个独立子流：MP4 封装器不支持
