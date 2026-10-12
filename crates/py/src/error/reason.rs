@@ -205,6 +205,16 @@ variants! {
             /// Hz
             sample_rate: u32,
         },
+        /// 选中的流探测不出编码或编码参数（视频的宽高、音频的采样率与声道数）：这一组开头一段里没有它的数据
+        #[pyo3(constructor = (*, group, track, kind))]
+        ParamsUnknown {
+            /// 第几个不连续段组
+            group: usize,
+            /// 第几条轨
+            track: usize,
+            /// 流的种类
+            kind: StreamKind,
+        },
         /// 流的种类与第 0 组不同
         #[pyo3(constructor = (*, group, track))]
         LayoutChanged {
@@ -498,6 +508,11 @@ impl From<core::Mp4Unsupported> for Mp4Unsupported {
                 track,
                 kind: kind.into(),
                 codec: codec.to_owned(),
+            },
+            U::ParamsUnknown { group, track, kind } => Mp4Unsupported::ParamsUnknown {
+                group,
+                track,
+                kind: kind.into(),
             },
             U::LayoutChanged { group, track } => Mp4Unsupported::LayoutChanged { group, track },
             U::ParamsChanged {

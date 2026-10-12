@@ -830,16 +830,19 @@ fn format_changes_within_a_group_are_rejected() {
     }
 }
 
-/// 只核对：各轨开头的分片就能发现编码不受支持、流参数与第 0 组不同；能合并的通过，不写输出。
+/// 各轨只给开头的分片。
+fn head(name: &str) -> TrackSegments {
+    let t = track(name);
+    TrackSegments {
+        init: t.init,
+        segments: t.segments[..1].to_vec(),
+    }
+}
+
+/// 只核对：各轨开头的分片就能发现编码不受支持、流参数或解码配置与第 0 组不同、E-AC-3 的帧结构；能合并的通过，不写
+/// 输出。
 #[test]
 fn check_finds_what_cannot_go_into_an_mp4_from_the_first_segments() {
-    let head = |name: &str| {
-        let t = track(name);
-        TrackSegments {
-            init: t.init,
-            segments: t.segments[..1].to_vec(),
-        }
-    };
     hs_m3u8_remux::check(
         &[Streams::Video, Streams::Audio],
         &[
@@ -869,6 +872,67 @@ fn check_finds_what_cannot_go_into_an_mp4_from_the_first_segments() {
         ),
         "实际 {err:?}"
     );
+    let err = hs_m3u8_remux::check(
+        &[Streams::All],
+        &[group([head("ts_aac_stereo")]), group([head("ts_he_aac")])],
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::ConfigChanged { group: 1, .. })
+        ),
+        "实际 {err:?}"
+    );
+    let err =
+        hs_m3u8_remux::check(&[Streams::Audio], &[group([head("ts_eac3_short")])]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::Eac3ShortFrames { group: 0, .. })
+        ),
+        "实际 {err:?}"
+    );
+}
+
+/// 只靠开头的分片判断不了的，核对不报、留给合并：第一个分片里没有音频包（探测不出参数），打包 MP3 的第一个分片只有
+/// 一帧（FFmpeg 要两帧相连才认）。整组合并照常成功；整组都探测不出参数时合并报 ParamsUnknown。
+#[test]
+fn check_leaves_what_the_first_segment_cannot_tell_to_the_merge() {
+    let dir = work_dir("check_undecided");
+    let output = dir.join("out.mp4");
+    let late = track("ts_late_audio");
+    hs_m3u8_remux::check(&[Streams::All], &[group([head("ts_late_audio")])]).unwrap();
+    remux(&[Streams::All], &[group([late])], &output).unwrap();
+    let err = remux(&[Streams::All], &[group([head("ts_late_audio")])], &output).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::ParamsUnknown {
+                group: 0,
+                track: 0,
+                kind: StreamKind::Audio
+            })
+        ),
+        "实际 {err:?}"
+    );
+
+    let segments = packed_fixture("mp3");
+    let sliver = dir.join("sliver");
+    std::fs::write(&sliver, first_frames(&segments[0].0, 1)).unwrap();
+    let first = packed_segment(&dir, &sliver, Some(900_000));
+    // 48 kHz 的 MPEG-1 Layer III 每帧 1152 个采样点，即 2160 个 90 kHz 的 tick
+    let rest = packed_segment(&dir, &segments[1].0, Some(900_000 + 2160));
+    let head = TrackSegments {
+        init: None,
+        segments: vec![first.clone()],
+    };
+    hs_m3u8_remux::check(&[Streams::Audio], &[group([head])]).unwrap();
+    let whole = TrackSegments {
+        init: None,
+        segments: vec![first, rest],
+    };
+    remux(&[Streams::Audio], &[group([whole])], &output).unwrap();
 }
 
 /// TS 里每帧 3 块的 E-AC-3：MP4 封装器会把几帧并成一个样本、丢掉末尾凑不满的，放不进 MP4。

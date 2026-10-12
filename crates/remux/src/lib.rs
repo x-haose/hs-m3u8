@@ -118,6 +118,18 @@ pub enum Shape {
 }
 
 impl Shape {
+    /// 探测出了参数：视频有宽高，音频有采样率与声道数。
+    fn determined(&self) -> bool {
+        match *self {
+            Shape::Video { width, height, .. } => width > 0 && height > 0,
+            Shape::Audio {
+                sample_rate,
+                channels,
+                ..
+            } => sample_rate > 0 && channels > 0,
+        }
+    }
+
     pub fn kind(&self) -> StreamKind {
         match self {
             Shape::Video { .. } => StreamKind::Video,
@@ -261,6 +273,15 @@ pub enum Unsupported {
         /// Hz
         sample_rate: u32,
     },
+    /// 选中的流探测不出编码或编码参数（视频的宽高、音频的采样率与声道数）：这一组里 FFmpeg 探测读的那一段没有它的数据
+    #[error(
+        "第 {group} 组第 {track} 条轨的{kind}流探测不出编码参数（开头一段里没有它的数据），写不出 MP4 的样本描述"
+    )]
+    ParamsUnknown {
+        group: usize,
+        track: usize,
+        kind: StreamKind,
+    },
     #[error("第 {group} 组第 {track} 条轨的流种类与第 0 组不同，无法放进同一个 MP4")]
     LayoutChanged { group: usize, track: usize },
     #[error(
@@ -352,17 +373,39 @@ pub fn remux(
     Ok(report)
 }
 
-/// 只打开各组各轨的输入，核对能否合并进一个 MP4，不读包、不写输出：编码受支持，同类流不来自两条轨，各组的流种类与
-/// 参数与第 0 组相同，打包音频有时间戳（与别的轨同组时）。这些都看 init 段与开头的帧，各轨只给开头的分片即可，
-/// 用于下载完全部分片之前尽早发现放不进 MP4 的内容；通过不保证合并成功：组内中途换参数、时间戳不递增等要读到才知道。
+/// 核对能否合并进一个 MP4，不写输出，用于下载完全部分片之前尽早发现放不进 MP4 的内容：各轨只给开头的分片。打开各组
+/// 各轨的输入、读到每路流的第一个包，核对编码受支持，同类流不来自两条轨，各组的流种类、编码参数与解码配置与第 0 组
+/// 相同，给出的分片有时间戳（打包音频与别的轨同组时），E-AC-3 的帧结构。
+///
+/// 只靠开头的分片判断不了的不报，留给合并：FFmpeg 打不开（如只有一两帧的 MP3）或探测不出参数（如开头没有这路流的包）
+/// 的组跳过，第 0 组判断不了时整个跳过。通过不保证合并成功：组内中途的变化、后面的分片缺时间戳、时间戳不递增等要读到
+/// 才知道。
 pub fn check(streams: &[Streams], groups: &[DiscontinuityGroup]) -> Result<(), Error> {
     init()?;
     validate(streams, groups)?;
-    let layout = layout_of(&open_group(streams, groups, 0, None)?)?;
+    let Some(first) = judgeable(open_group(streams, groups, 0, None))? else {
+        return Ok(());
+    };
+    let layout = layout_of(&first)?;
+    let outputs = layout.iter().map(Vec::len).sum();
+    let references = references_of(&primed(0, first, &layout, &[])?, outputs);
     for group in 1..groups.len() {
-        open_group(streams, groups, group, Some(&layout))?;
+        if let Some(opened) = judgeable(open_group(streams, groups, group, Some(&layout)))? {
+            primed(group, opened, &layout, &references)?;
+        }
     }
     Ok(())
+}
+
+/// 只给开头的分片时判断不了的结果当作没有结果（见 [`check`]）：合并时有整组的数据，同样的问题照常报出。
+fn judgeable<T>(result: Result<T, Error>) -> Result<Option<T>, Error> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(Error::OpenInput { .. } | Error::Unsupported(Unsupported::ParamsUnknown { .. })) => {
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// 落盘。Windows 上落盘要求写权限，所以以可写方式打开。
@@ -527,7 +570,7 @@ fn supported_codecs() -> String {
     )
 }
 
-/// 编码能否放进 MP4；`standalone` 为输入没有 init 段。
+/// 编码能否放进 MP4；`standalone` 为输入没有 init 段。编码已知而不收的先报，参数探测不出（含编码也没认出）的再报。
 fn check_codec(
     id: codec::Id,
     shape: &Shape,
@@ -535,13 +578,17 @@ fn check_codec(
     group: usize,
     track: usize,
 ) -> Result<(), Unsupported> {
-    if !accepts(id, standalone) {
+    let kind = shape.kind();
+    if id != codec::Id::None && !accepts(id, standalone) {
         return Err(Unsupported::Codec {
             group,
             track,
-            kind: shape.kind(),
+            kind,
             codec: id.name(),
         });
+    }
+    if id == codec::Id::None || !shape.determined() {
+        return Err(Unsupported::ParamsUnknown { group, track, kind });
     }
     match *shape {
         Shape::Audio { sample_rate, .. }

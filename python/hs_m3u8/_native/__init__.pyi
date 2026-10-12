@@ -1497,6 +1497,29 @@ class Mp4Unsupported:
         def __new__(cls, *, group: builtins.int, track: builtins.int, sample_rate: builtins.int) -> Mp4Unsupported.Mp3SampleRate: ...
     
     @typing.final
+    class ParamsUnknown(Mp4Unsupported):
+        r"""
+        选中的流探测不出编码或编码参数（视频的宽高、音频的采样率与声道数）：这一组开头一段里没有它的数据
+        """
+        __match_args__ = ("group", "track", "kind",)
+        @property
+        def group(self) -> builtins.int:
+            r"""
+            第几个不连续段组
+            """
+        @property
+        def track(self) -> builtins.int:
+            r"""
+            第几条轨
+            """
+        @property
+        def kind(self) -> StreamKind.Video | StreamKind.Audio:
+            r"""
+            流的种类
+            """
+        def __new__(cls, *, group: builtins.int, track: builtins.int, kind: StreamKind) -> Mp4Unsupported.ParamsUnknown: ...
+    
+    @typing.final
     class LayoutChanged(Mp4Unsupported):
         r"""
         流的种类与第 0 组不同
@@ -1731,11 +1754,12 @@ class Mp4Unsupported:
 @typing.final
 class Mp4UnsupportedError(RequestError):
     r"""
-    内容放不进 MP4；可只输出本地 HLS（`Target.Hls`）。编码、各组的流种类与参数在下到（直播为录到）各组各轨的
-    第一个分片时就核对，组内的变化要合并时读到才报。
+    内容放不进 MP4；可只输出本地 HLS（`Target.Hls`）。下到（直播为录到）各组各轨的第一个分片时先核对其中判断
+    得了的：编码，各组的流种类、编码参数与解码配置，E-AC-3 的帧结构；组内中途的变化、后面分片里的问题，以及只靠
+    第一个分片判断不了的，合并时读到才报。
     """
     @property
-    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.Mp3SampleRate | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ConfigChanged | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.FormatChangedInGroup | Mp4Unsupported.UnreadablePackedAudio | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
+    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.Mp3SampleRate | Mp4Unsupported.ParamsUnknown | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ConfigChanged | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.FormatChangedInGroup | Mp4Unsupported.UnreadablePackedAudio | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
         r"""
         放不进的原因
         """

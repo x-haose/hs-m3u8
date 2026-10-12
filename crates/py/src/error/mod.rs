@@ -284,8 +284,9 @@ exception! {
 }
 
 exception! {
-    /// 内容放不进 MP4；可只输出本地 HLS（`Target.Hls`）。编码、各组的流种类与参数在下到（直播为录到）各组各轨的
-    /// 第一个分片时就核对，组内的变化要合并时读到才报。
+    /// 内容放不进 MP4；可只输出本地 HLS（`Target.Hls`）。下到（直播为录到）各组各轨的第一个分片时先核对其中判断
+    /// 得了的：编码，各组的流种类、编码参数与解码配置，E-AC-3 的帧结构；组内中途的变化、后面分片里的问题，以及只靠
+    /// 第一个分片判断不了的，合并时读到才报。
     pub struct Mp4UnsupportedError extends RequestError {
         /// 放不进的原因
         pub reason: Mp4Unsupported,
