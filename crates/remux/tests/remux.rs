@@ -148,6 +148,19 @@ fn packed_segment(dir: &Path, src: &Path, timestamp: Option<u64>) -> PathBuf {
     path
 }
 
+/// 文件开头 `frames` 个包（打包音频样本里即前几帧）的字节。
+fn first_frames(path: &Path, frames: usize) -> Vec<u8> {
+    ffmpeg::init().unwrap();
+    let mut ictx = ffmpeg::format::input(path).unwrap();
+    let mut len = 0;
+    for _ in 0..frames {
+        let mut packet = ffmpeg::Packet::empty();
+        packet.read(&mut ictx).unwrap();
+        len += packet.size();
+    }
+    std::fs::read(path).unwrap()[..len].to_vec()
+}
+
 /// 时间线上最早的呈现时刻，秒。
 fn earliest(timeline: &Timeline) -> f64 {
     timeline.iter().map(|p| p.0).fold(f64::INFINITY, f64::min)
@@ -807,6 +820,45 @@ fn packed_audio_timestamps_wrap_around() {
         (duration - expected).abs() < 0.001,
         "应连续 {expected} 秒，实际 {duration}"
     );
+}
+
+/// 打包音频的末片只有一两帧：整条轨作为一个输入读，格式只在开头识别，短片照常读出，各帧都带时间戳。
+#[test]
+fn packed_audio_with_very_short_segments_is_read() {
+    let dir = work_dir("packed_short");
+    let output = dir.join("out.mp4");
+    for name in ["aac", "ac3", "eac3", "mp3"] {
+        let segments = packed_fixture(name);
+        let first = &segments[0];
+        let full: usize = timelines(&first.0).1.len();
+        for frames in [1, 2] {
+            let tail = dir.join(format!("{name}-tail{frames}"));
+            std::fs::write(&tail, first_frames(&segments[1].0, frames)).unwrap();
+            let audio = TrackSegments {
+                init: None,
+                segments: vec![
+                    packed_segment(&dir, &first.0, Some(900_000)),
+                    packed_segment(&dir, &tail, Some(900_000 + first.1)),
+                ],
+            };
+
+            let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
+
+            let stream = &report.streams[0];
+            assert_eq!(
+                (stream.packets, stream.skipped_without_dts),
+                ((full + frames) as u64, 0),
+                "{name} 末片 {frames} 帧"
+            );
+            let a_out = timelines(&output).1;
+            let tail_start = a_out[full].0 - a_out[0].0;
+            let expected = first.1 as f64 / 90_000.0;
+            assert!(
+                (tail_start - expected).abs() < 0.001,
+                "{name} 末片 {frames} 帧应从 {expected} 秒处开始，实际 {tail_start}"
+            );
+        }
+    }
 }
 
 /// 两个 TS 输入的起点跨在回绕点前 60 秒两侧：FFmpeg 读两个输入时展开的方向不同，读出的起点差 2^33，合并时对齐回来。

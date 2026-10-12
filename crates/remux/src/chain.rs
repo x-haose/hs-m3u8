@@ -60,6 +60,11 @@ impl SegmentChain {
         Ok((chain, failure))
     }
 
+    /// 各文件在整个流中的起始偏移，按文件顺序。
+    pub(crate) fn starts(&self) -> &[u64] {
+        &self.starts[..self.starts.len() - 1]
+    }
+
     fn total(&self) -> u64 {
         *self.starts.last().expect("starts 至少有总长一项")
     }
