@@ -374,24 +374,35 @@ pub fn remux(
 /// 相同，给出的分片有时间戳（打包音频与别的轨同组时），E-AC-3 的帧结构。
 ///
 /// 只靠开头的分片判断不了的不报，留给合并：FFmpeg 打不开（如只有一两帧的 MP3）或探测不出参数（如开头没有这路流的包）
-/// 的组跳过，第 0 组判断不了时整个跳过。通过不保证合并成功：组内中途的变化、后面的分片缺时间戳、时间戳不递增等要读到
-/// 才知道。
+/// 的组跳过；第 0 组判断不了时，其余各组只核对自身（编码、E-AC-3 的帧结构等），不与第 0 组比较。通过不保证合并成功：
+/// 组内中途的变化、后面的分片缺时间戳、时间戳不递增等要读到才知道。
 ///
 /// `groups` 的各项为报错时用的组号（合并时这一组的下标）与这一组，按合并的顺序，第一项为第 0 组：可以只核对其中几组，
 /// 如直播录制中拿第 0 组与新录到的一组核对。
 pub fn check(streams: &[Streams], groups: &[(usize, &DiscontinuityGroup)]) -> Result<(), Error> {
     init()?;
     validate(streams, groups)?;
-    let Some(first) = judgeable(open_group(streams, groups[0], None))? else {
-        return Ok(());
-    };
-    let layout = layout_of(&first)?;
-    let outputs = layout.iter().map(Vec::len).sum();
-    let references = references_of(&primed(groups[0].0, first, &layout, &[])?, outputs);
-    for &numbered in &groups[1..] {
-        if let Some(opened) = judgeable(open_group(streams, numbered, Some(&layout)))? {
-            primed(numbered.0, opened, &layout, &references)?;
+    let first = match judgeable(open_group(streams, groups[0], None))? {
+        Some(first) => {
+            let layout = layout_of(&first)?;
+            let outputs = layout.iter().map(Vec::len).sum();
+            let references = references_of(&primed(groups[0].0, first, &layout, &[])?, outputs);
+            Some((layout, references))
         }
+        None => None,
+    };
+    for &numbered in &groups[1..] {
+        let layout = first.as_ref().map(|(layout, _)| layout.as_slice());
+        let Some(opened) = judgeable(open_group(streams, numbered, layout))? else {
+            continue;
+        };
+        match &first {
+            Some((layout, references)) => primed(numbered.0, opened, layout, references)?,
+            None => {
+                let own = layout_of(&opened)?;
+                primed(numbered.0, opened, &own, &[])?
+            }
+        };
     }
     Ok(())
 }

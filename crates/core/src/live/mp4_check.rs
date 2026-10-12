@@ -1,7 +1,10 @@
-//! 录制中核对能否合并进 MP4（见 [`output::check_mp4`]）：每个（会话, 不连续段）组在各轨都录到分片时，拿各轨录到的
-//! 第一个分片与合并时的第 0 组一起核对一次。放不进 MP4 的原因交给调用方放进进度
+//! 录制中核对能否合并进 MP4（见 [`output::check_mp4`]）。放不进 MP4 的原因交给调用方放进进度
 //! （[`crate::Progress::mp4_unsupported`]），录制照常进行：直播错过的内容录不回来，停不停由调用方定；合并 MP4 时照样
 //! 报错。
+//! - 录制开始时任务目录里已录齐的组（之前几次运行录的）在后台一起核对一次。
+//! - 之后每个（会话, 不连续段）组在各轨都有分片时（含之前录了一部分、这次才录齐的），拿各轨的第一个分片与合并时的第 0
+//!   组一起核对一次；第 0 组开头的分片判断不了时只核对这一组自身。报的组号为核对时的：之后才录齐、排在前面的组会让
+//!   合并时的组号变大。
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -10,7 +13,7 @@ use hs_m3u8_remux::Streams;
 use super::merge::MergePlan;
 use crate::fetch::ItemInfo;
 use crate::output::{self, GroupTrack};
-use crate::workdir::{GroupKey, Layout, SegmentName};
+use crate::workdir::{GroupKey, Layout, SegmentName, Stored};
 use crate::{Error, Mp4Unsupported, Unsupported, blocking};
 
 pub(super) struct Mp4Check {
@@ -20,35 +23,64 @@ pub(super) struct Mp4Check {
     first: Option<(GroupKey, Vec<GroupTrack>)>,
     /// 各轨都有分片的组：录制开始时任务目录里的与本次录齐的
     complete: BTreeSet<GroupKey>,
-    /// 还没录齐的组里各轨录到的第一个分片
+    /// 还没录齐的组里各轨的第一个分片：录制开始时任务目录里的，加上本次录到的
     pending: HashMap<GroupKey, Vec<Option<SegmentName>>>,
     /// 已核对出放不进：之后不再核对
     unsupported: bool,
 }
 
 impl Mp4Check {
-    /// `plan` 为录制开始时任务目录的合并计划：它的第 0 组即合并时的第 0 组，之前几次运行录的组不再核对。
-    pub(super) fn new(streams: Vec<Streams>, plan: &MergePlan) -> Self {
-        let first = plan.keys.first().map(|&key| {
-            let heads = plan.groups[0]
-                .iter()
-                .map(|t| GroupTrack {
-                    init: t.init.clone(),
-                    segments: t.segments[..1].to_vec(),
-                })
-                .collect();
-            (key, heads)
-        });
-        Mp4Check {
-            streams,
-            first,
-            complete: plan.keys.iter().copied().collect(),
-            pending: HashMap::new(),
-            unsupported: false,
+    /// `plan` 为录制开始时任务目录的合并计划，`stored` 为目录里的分片。另返回目录里已录齐的组（各轨的第一个分片与
+    /// 合并时的组号），由调用方交给后台一起核对一次；没有时为空。
+    pub(super) fn new(
+        streams: Vec<Streams>,
+        plan: &MergePlan,
+        stored: &Stored,
+    ) -> (Self, Vec<(usize, Vec<GroupTrack>)>) {
+        let recorded: Vec<(usize, Vec<GroupTrack>)> = plan
+            .groups
+            .iter()
+            .map(|tracks| {
+                tracks
+                    .iter()
+                    .map(|t| GroupTrack {
+                        init: t.init.clone(),
+                        segments: t.segments[..1].to_vec(),
+                    })
+                    .collect()
+            })
+            .enumerate()
+            .collect();
+        let complete: BTreeSet<GroupKey> = plan.keys.iter().copied().collect();
+        let mut pending: HashMap<GroupKey, Vec<Option<SegmentName>>> = HashMap::new();
+        for (track, files) in stored.segments.iter().enumerate() {
+            for file in files.iter().filter(|f| !complete.contains(&f.name.group())) {
+                pending
+                    .entry(file.name.group())
+                    .or_insert_with(|| vec![None; streams.len()])[track]
+                    .get_or_insert(file.name);
+            }
         }
+        let check = Mp4Check {
+            first: plan
+                .keys
+                .first()
+                .copied()
+                .zip(recorded.first().map(|(_, heads)| heads.clone())),
+            streams,
+            complete,
+            pending,
+            unsupported: false,
+        };
+        (check, recorded)
     }
 
-    /// 分片 `id` 录到了任务目录；它所在的组各轨都有分片时核对这一组，放不进 MP4 时返回原因。文件读写等其余失败上抛。
+    /// 各轨的取流方式。
+    pub(super) fn streams(&self) -> &[Streams] {
+        &self.streams
+    }
+
+    /// 分片 `id` 录到了任务目录；它所在的组各轨都有分片时核对这一组，放不进 MP4 时返回原因（见 [`Mp4Check::judged`]）。
     pub(super) async fn recorded(
         &mut self,
         id: ItemInfo,
@@ -93,7 +125,16 @@ impl Mp4Check {
         self.first.get_or_insert((key, group));
         let streams = self.streams.clone();
         let root = layout.root().to_path_buf();
-        match blocking(move || output::check_mp4(&streams, &groups, &root)).await? {
+        let result = blocking(move || output::check_mp4(&streams, &groups, &root)).await?;
+        self.judged(result)
+    }
+
+    /// 一次核对的结果：放不进 MP4 时返回原因，之后不再核对；文件读写等其余失败上抛。
+    pub(super) fn judged(
+        &mut self,
+        result: Result<(), Error>,
+    ) -> Result<Option<Mp4Unsupported>, Error> {
+        match result {
             Ok(()) => Ok(None),
             Err(Error::Unsupported(Unsupported::Mp4(reason))) => {
                 self.unsupported = true;

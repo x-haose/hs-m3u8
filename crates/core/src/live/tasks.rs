@@ -1,10 +1,12 @@
-//! 录制派出的后台任务：刷新播放列表、准备暂存的播放列表（拉它要用的 init 段）、续录时核对内容。事件循环不等它们，
+//! 录制派出的后台任务：刷新播放列表、准备暂存的播放列表（拉它要用的 init 段）、续录时核对内容、续录时核对之前录齐的组
+//! 能否放进 MP4。事件循环不等它们，
 //! 由 [`Tasks`] 持有，完成后作为事件交回；录制结束时取消并等它们退出（协作取消，在途的回调返回后才结束）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use hs_m3u8_hls::{MediaPlaylist, Segment};
+use hs_m3u8_remux::Streams;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -16,6 +18,7 @@ use crate::error::io_error;
 use crate::fetch::{self, Direct};
 use crate::hooks::Hooks;
 use crate::http::{Http, Permit};
+use crate::output::{self, GroupTrack};
 use crate::{Error, HttpError, HttpFailure, blocking, resolve};
 
 /// 一个后台任务的结果。
@@ -37,6 +40,8 @@ pub(super) enum Done {
         track: usize,
         result: Result<Verdict, Error>,
     },
+    /// 之前录齐的组能否放进 MP4
+    Mp4Checked { result: Result<(), Error> },
 }
 
 /// 核对用的一个重叠分片与它已存的文件。
@@ -113,6 +118,22 @@ impl Tasks {
         self.set.spawn(async move {
             let result = check(&direct, track, overlaps, &cancel).await;
             Done::Checked { track, result }
+        });
+    }
+
+    /// 核对之前录齐的组 `groups`（合并时的组号与各轨的第一个分片）能否放进 MP4（见 [`output::check_mp4`]）；`root` 为
+    /// 任务目录。
+    pub(super) fn check_mp4(
+        &mut self,
+        streams: Vec<Streams>,
+        groups: Vec<(usize, Vec<GroupTrack>)>,
+        root: PathBuf,
+    ) {
+        self.set.spawn(async move {
+            let result = blocking(move || output::check_mp4(&streams, &groups, &root))
+                .await
+                .and_then(|checked| checked);
+            Done::Mp4Checked { result }
         });
     }
 

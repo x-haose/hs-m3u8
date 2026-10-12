@@ -40,7 +40,10 @@ use crate::http::Http;
 use crate::request::LiveOptions;
 use crate::resolve::ResolvedTrack;
 use crate::workdir::{self, Stored, StoredInit, WorkDir};
-use crate::{Error, LiveEnd, MissReason, Missed, Progress, RefreshCause, Stage, WorkDirProblem};
+use crate::{
+    Error, LiveEnd, MissReason, Missed, Mp4Unsupported, Progress, RefreshCause, Stage,
+    WorkDirProblem,
+};
 
 /// 本次运行的录制结果。
 pub(crate) struct Outcome {
@@ -129,12 +132,13 @@ pub(crate) async fn record(
         Some(verdicts) => Phase::Deciding(verdicts),
         None => Phase::Decided { session: 0 },
     };
-    let mp4 = match mp4 {
-        Some(streams) => Some(Mp4Check::new(
-            streams,
-            &merge_plan(&stored.segments, dir.layout())?,
-        )),
-        None => None,
+    let (mp4, recorded) = match mp4 {
+        Some(streams) => {
+            let plan = merge_plan(&stored.segments, dir.layout())?;
+            let (check, recorded) = Mp4Check::new(streams, &plan, &stored);
+            (Some(check), recorded)
+        }
+        None => (None, Vec::new()),
     };
     let mut recorder = Recorder {
         http: ctx.http,
@@ -150,6 +154,14 @@ pub(crate) async fn record(
         ending: None,
         mp4,
     };
+    if let Some(check) = &recorder.mp4
+        && !recorded.is_empty()
+    {
+        let root = dir.layout().root().to_path_buf();
+        recorder
+            .tasks
+            .check_mp4(check.streams().to_vec(), recorded, root);
+    }
     let refresh_errors = recorder.refresh_errors(true);
     progress.send_modify(|p| {
         p.stage = Stage::Recording;
@@ -233,11 +245,9 @@ impl Recorder<'_> {
                 Event::Downloaded((id, result)) => {
                     let recorded = result.is_ok();
                     self.on_finished(id, result)?;
-                    if let (true, Some(check)) = (recorded, &mut self.mp4)
-                        && let Some(reason) = check.recorded(id, self.dir.layout()).await?
-                    {
-                        self.progress
-                            .send_modify(|p| p.mp4_unsupported = Some(reason));
+                    if let (true, Some(check)) = (recorded, &mut self.mp4) {
+                        let reason = check.recorded(id, self.dir.layout()).await?;
+                        self.report_mp4(reason);
                     }
                 }
             }
@@ -403,6 +413,21 @@ impl Recorder<'_> {
                 Ok(())
             }
             Done::Checked { track, result } => self.checked(track, result?).await,
+            Done::Mp4Checked { result } => {
+                let check = self.mp4.as_mut().expect("只在输出 MP4 时派出");
+                let reason = check.judged(result)?;
+                self.report_mp4(reason);
+                Ok(())
+            }
+        }
+    }
+
+    /// 核对出的放不进 MP4 的原因放进进度；已有的不换。
+    fn report_mp4(&self, reason: Option<Mp4Unsupported>) {
+        if let Some(reason) = reason {
+            self.progress.send_modify(|p| {
+                p.mp4_unsupported.get_or_insert(reason);
+            });
         }
     }
 

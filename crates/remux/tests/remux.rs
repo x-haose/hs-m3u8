@@ -989,13 +989,31 @@ fn check_finds_what_cannot_go_into_an_mp4_from_the_first_segments() {
 }
 
 /// 只靠开头的分片判断不了的，核对不报、留给合并：第一个分片里没有音频包（探测不出参数），打包 MP3 的第一个分片只有
-/// 一帧（FFmpeg 要两帧相连才认）。整组合并照常成功；整组都探测不出参数时合并报 ParamsUnknown。
+/// 一帧（FFmpeg 要两帧相连才认）。整组合并照常成功；整组都探测不出参数时合并报 ParamsUnknown。第 0 组判断不了时其余
+/// 各组照样核对自身。
 #[test]
 fn check_leaves_what_the_first_segment_cannot_tell_to_the_merge() {
     let dir = work_dir("check_undecided");
     let output = dir.join("out.mp4");
     let late = track("ts_late_audio");
     check(&[Streams::All], &[group([head("ts_late_audio")])]).unwrap();
+    // 第 0 组判断不了时，其余各组照样核对自身
+    let err = check(
+        &[Streams::All],
+        &[group([head("ts_late_audio")]), group([head("ts_mp2")])],
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::Codec {
+                group: 1,
+                codec: "mp2",
+                ..
+            })
+        ),
+        "实际 {err:?}"
+    );
     remux(&[Streams::All], &[group([late])], &output).unwrap();
     let err = remux(&[Streams::All], &[group([head("ts_late_audio")])], &output).unwrap_err();
     assert!(

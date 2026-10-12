@@ -80,6 +80,68 @@ async fn a_new_session_is_checked_against_the_group_recorded_before() {
     );
 }
 
+/// 之前的运行录下的两组分辨率不同（160x90 与 320x180）：续录另起会话后，开始时在后台核对目录里已录齐的组，进度里
+/// 照样报出 ParamsChanged（组号为合并时的）。
+#[tokio::test(flavor = "multi_thread")]
+async fn problems_recorded_before_are_reported_again_when_resuming() {
+    let dir = test_dir("resume_known_problem");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1, 2, 3]);
+    server.put("b0.ts", fixture("ts_a/seg0.ts"));
+    server.put(
+        "live.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXTINF:1,\nseg0.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:1,\nb0.ts\n",
+    );
+    let req = live_request(server.url("live.m3u8"), &dir, STALL);
+    let changed = |reason: &Option<Mp4Unsupported>| {
+        matches!(
+            reason,
+            Some(Mp4Unsupported::ParamsChanged {
+                group: 1,
+                track: 0,
+                kind: StreamKind::Video,
+                ..
+            })
+        )
+    };
+    let job = engine().start(req.clone()).unwrap();
+    let mut progress = job.control().progress();
+    let first = tokio::time::timeout(
+        Duration::from_secs(10),
+        progress.wait_for(|p| p.mp4_unsupported.is_some()),
+    )
+    .await
+    .expect("第一次运行应在进度里报出")
+    .unwrap()
+    .mp4_unsupported
+    .clone();
+    assert!(changed(&first), "{first:?}");
+    job.control().cancel();
+    assert!(matches!(job.wait().await, Err(Error::Cancelled)));
+
+    // 窗口已换成后两片，与之前录的没有重叠：另起会话
+    let window = "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MEDIA-SEQUENCE:10\n#EXTINF:1,\nseg2.ts\n#EXTINF:1,\nseg3.ts\n";
+    server.put("live.m3u8", window);
+    let job = engine().start(req).unwrap();
+    let mut progress = job.control().progress();
+    let again = tokio::time::timeout(
+        Duration::from_secs(10),
+        progress.wait_for(|p| p.mp4_unsupported.is_some()),
+    )
+    .await
+    .expect("续录开始后应在进度里报出")
+    .unwrap()
+    .mp4_unsupported
+    .clone();
+    server.put("live.m3u8", format!("{window}#EXT-X-ENDLIST\n"));
+    let failed = job.wait().await;
+    assert!(changed(&again), "{again:?}");
+    assert!(
+        matches!(&failed, Err(Error::Unsupported(Unsupported::Mp4(reason))) if changed(&Some(reason.clone()))),
+        "{failed:?}"
+    );
+}
+
 /// 窗口仍含已录的分片：接着原会话录，重叠部分不重录，时间线连续成一组。
 #[tokio::test(flavor = "multi_thread")]
 async fn overlapping_window_continues_the_session() {
