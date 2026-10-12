@@ -157,15 +157,23 @@ fn packed_segment(dir: &Path, src: &Path, timestamp: Option<u64>) -> PathBuf {
 
 /// 文件开头 `frames` 个包（打包音频样本里即前几帧）的字节。
 fn first_frames(path: &Path, frames: usize) -> Vec<u8> {
+    let len: usize = packet_sizes(path)[..frames].iter().sum();
+    std::fs::read(path).unwrap()[..len].to_vec()
+}
+
+/// 文件里各包的字节数，按读出的顺序（裸音频样本里即各帧）。
+fn packet_sizes(path: &Path) -> Vec<usize> {
     ffmpeg::init().unwrap();
     let mut ictx = ffmpeg::format::input(path).unwrap();
-    let mut len = 0;
-    for _ in 0..frames {
+    let mut sizes = Vec::new();
+    loop {
         let mut packet = ffmpeg::Packet::empty();
-        packet.read(&mut ictx).unwrap();
-        len += packet.size();
+        match packet.read(&mut ictx) {
+            Ok(()) => sizes.push(packet.size()),
+            Err(ffmpeg::Error::Eof) => return sizes,
+            Err(e) => panic!("{e}"),
+        }
     }
-    std::fs::read(path).unwrap()[..len].to_vec()
 }
 
 /// 文件里各路流的编码名，按流的顺序。
@@ -1475,21 +1483,6 @@ fn packed_mp3_info_frames_and_id3v1_tags_are_skipped() {
         (span - expected).abs() < 0.03,
         "输出应长 {expected} 秒，实际 {span}"
     );
-}
-
-/// 文件里各包的字节数，按读出的顺序（裸音频样本里即各帧）。
-fn packet_sizes(path: &Path) -> Vec<usize> {
-    ffmpeg::init().unwrap();
-    let mut ictx = ffmpeg::format::input(path).unwrap();
-    let mut sizes = Vec::new();
-    loop {
-        let mut packet = ffmpeg::Packet::empty();
-        match packet.read(&mut ictx) {
-            Ok(()) => sizes.push(packet.size()),
-            Err(ffmpeg::Error::Eof) => return sizes,
-            Err(e) => panic!("{e}"),
-        }
-    }
 }
 
 /// 打包音频损坏：中间一片丢了一帧（同步字坏了）、帧之间夹着杂字节，最后一片丢了一帧。中间一片损坏之后的帧照常写入、

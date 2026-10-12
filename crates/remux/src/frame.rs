@@ -221,6 +221,35 @@ pub(crate) fn mpeg_audio(data: &[u8]) -> Option<(Mpeg, Option<usize>)> {
     Some((header, Some(len)))
 }
 
+/// 裸音频帧的帧头格式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Framing {
+    /// ADTS（AAC）
+    Adts,
+    /// AC-3 与 E-AC-3
+    Ac3,
+    /// MPEG 音频（MP3 等）
+    Mpeg,
+}
+
+/// 一帧的帧头里比较是否同一路流的参数（打包音频重新同步、逐包核对时用）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Header {
+    Adts(Adts),
+    Ac3(Ac3Frame),
+    Mpeg(Mpeg),
+}
+
+/// `data` 开头一个 `framing` 格式的帧的帧头与整帧的字节数；帧头不合法时为 None，帧长读不出（自由格式的 MP3）时字节数
+/// 为 None。
+pub(crate) fn header(framing: Framing, data: &[u8]) -> Option<(Header, Option<usize>)> {
+    match framing {
+        Framing::Adts => adts(data).map(|(h, len)| (Header::Adts(h), Some(len))),
+        Framing::Ac3 => ac3(data).map(|(f, len)| (Header::Ac3(f), Some(len))),
+        Framing::Mpeg => mpeg_audio(data).map(|(h, len)| (Header::Mpeg(h), len)),
+    }
+}
+
 /// audioObjectType 里 USAC 的值（ISO/IEC 14496-3 表 1.1）。
 pub(crate) const AOT_USAC: u32 = 42;
 

@@ -133,11 +133,11 @@ pub(crate) async fn record(
         Some(verdicts) => Phase::Deciding(verdicts),
         None => Phase::Decided { session: 0 },
     };
-    let (mp4, recorded) = match mp4 {
+    let (mp4, batches) = match mp4 {
         Some(streams) => {
             let plan = merge_plan(&stored.segments, dir.layout())?;
-            let (check, recorded) = Mp4Check::new(streams, &plan, &stored);
-            (Some(check), recorded)
+            let (check, batches) = Mp4Check::new(streams, &plan, &stored);
+            (Some(check), batches)
         }
         None => (None, Vec::new()),
     };
@@ -156,12 +156,12 @@ pub(crate) async fn record(
         mp4,
     };
     if let Some(check) = &recorder.mp4
-        && !recorded.is_empty()
+        && !batches.is_empty()
     {
         let root = dir.layout().root().to_path_buf();
         recorder
             .tasks
-            .check_mp4(check.streams().to_vec(), recorded, root);
+            .check_mp4(check.streams().to_vec(), batches, root);
     }
     let refresh_errors = recorder.refresh_errors(true);
     progress.send_modify(|p| {

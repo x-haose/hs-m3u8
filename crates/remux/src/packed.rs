@@ -233,27 +233,24 @@ struct Cut {
     discarded: u64,
 }
 
-/// 帧头里比较是否同一路流的参数（见 [`synced`]）。
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Key {
-    Adts(frame::Adts),
-    Ac3(frame::Ac3Frame),
-    Mpeg(frame::Mpeg),
-}
-
 /// 一个 ID3v2 标签或帧。
 struct Item {
     /// 字节数，可能超出数据
     len: usize,
-    /// 帧头的参数；标签为 None
-    key: Option<Key>,
+    /// 帧头的参数（重新同步时比较，见 [`synced`]）；标签为 None
+    key: Option<frame::Header>,
 }
 
 /// 一个打包音频分片从 `start`（开头的 ID3 标签之后）起切出音频帧。跳过帧之间的 ID3v2 标签、末尾的 ID3v1 标签，以及
 /// MP3 第一帧为 Xing、Info 或 VBRI 标签帧时的这一帧（它不含音频，FFmpeg 读单个文件时同样跳过）。损坏处跳过并计数，与
 /// FFmpeg 读裸音频时重新同步一样：认不出的字节（含自由格式的 MP3）、超出分片的帧或标签，跳到下一个同步点（见
 /// [`synced`]），没有就到分片末尾。`reference` 为这条轨开头的帧头参数，切到第一帧时记下。
-fn cut_frames(data: &[u8], start: usize, format: Format, reference: &mut Option<Key>) -> Cut {
+fn cut_frames(
+    data: &[u8],
+    start: usize,
+    format: Format,
+    reference: &mut Option<frame::Header>,
+) -> Cut {
     let mut cut = Cut {
         ranges: Vec::new(),
         resume: None,
@@ -310,14 +307,10 @@ fn item(format: Format, data: &[u8]) -> Option<Item> {
             key: None,
         });
     }
-    let (key, len) = match format {
-        Format::Aac => frame::adts(data).map(|(h, len)| (Key::Adts(h), len))?,
-        Format::Mp3 => frame::mpeg_audio(data).and_then(|(h, len)| Some((Key::Mpeg(h), len?)))?,
-        Format::Ac3 | Format::Eac3 => frame::ac3(data).map(|(f, len)| (Key::Ac3(f), len))?,
-        Format::Ts => panic!("TS 分片不按打包音频读"),
-    };
+    let framing = format.framing().expect("TS 分片不按打包音频读");
+    let (key, len) = frame::header(framing, data)?;
     Some(Item {
-        len,
+        len: len?,
         key: Some(key),
     })
 }
@@ -325,7 +318,7 @@ fn item(format: Format, data: &[u8]) -> Option<Item> {
 /// 损坏处之后能从 `at` 重新同步：这里是一个完整的标签，或一个完整的帧且帧头参数与这条轨开头的帧相同。还没有开头的帧
 /// 时，要求它之后紧接分片末尾、ID3v1 标签、另一个标签或帧。只看帧头是否合法时，损坏的字节里碰巧像帧头的地方会被当成
 /// 同步点，切出的杂字节再被逐包核对当作参数变了。
-fn synced(data: &[u8], at: usize, format: Format, reference: Option<&Key>) -> bool {
+fn synced(data: &[u8], at: usize, format: Format, reference: Option<&frame::Header>) -> bool {
     let rest = &data[at..];
     let Some(Item { len, key }) = item(format, rest).filter(|i| i.len <= rest.len()) else {
         return false;

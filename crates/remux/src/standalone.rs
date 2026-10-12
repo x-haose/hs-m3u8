@@ -25,6 +25,16 @@ impl Format {
         Format::Ac3,
         Format::Eac3,
     ];
+
+    /// 打包音频的帧头格式；TS 为 None。
+    pub(crate) fn framing(self) -> Option<frame::Framing> {
+        match self {
+            Format::Ts => None,
+            Format::Aac => Some(frame::Framing::Adts),
+            Format::Mp3 => Some(frame::Framing::Mpeg),
+            Format::Ac3 | Format::Eac3 => Some(frame::Framing::Ac3),
+        }
+    }
 }
 
 /// 分片开头的信息。

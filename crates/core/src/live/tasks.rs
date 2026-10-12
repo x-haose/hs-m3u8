@@ -11,6 +11,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+use super::mp4_check::Batch;
 use super::session::Verdict;
 use super::track::{Fetched, RefreshRequest};
 use super::window::{InitsToFetch, NewInits};
@@ -18,7 +19,7 @@ use crate::error::io_error;
 use crate::fetch::{self, Direct};
 use crate::hooks::Hooks;
 use crate::http::{Http, Permit};
-use crate::output::{self, GroupTrack};
+use crate::output;
 use crate::{Error, FetchError, FetchFailure, HttpError, blocking, resolve};
 
 /// 一个后台任务的结果。
@@ -122,17 +123,11 @@ impl Tasks {
         });
     }
 
-    /// 核对之前录齐的组 `groups`（合并时的组号与各轨的第一个分片，第一项为第 0 组）能否放进 MP4（见
-    /// [`output::check_mp4`]）；`root` 为任务目录。
-    pub(super) fn check_mp4(
-        &mut self,
-        streams: Vec<Streams>,
-        groups: Vec<(usize, Vec<GroupTrack>)>,
-        root: PathBuf,
-    ) {
+    /// 核对之前录齐的组能否放进 MP4：按顺序核对 `batches`（见 [`super::mp4_check::Mp4Check::new`]）；`root` 为任务目录。
+    pub(super) fn check_mp4(&mut self, streams: Vec<Streams>, batches: Vec<Batch>, root: PathBuf) {
         let cancel = self.cancel.clone();
         self.set.spawn(async move {
-            let result = check_mp4(streams, groups, root, &cancel).await;
+            let result = check_mp4(streams, batches, root, &cancel).await;
             Done::Mp4Checked { result }
         });
     }
@@ -160,23 +155,14 @@ impl Tasks {
     }
 }
 
-/// 见 [`Tasks::check_mp4`]：逐组与第 0 组一起核对（只有第 0 组时核对它自身），组与组之间看取消信号，取消时返回
-/// [`Error::Cancelled`]。报出的与一次核对全部组的相同：组号最小的那个问题。
+/// 见 [`Tasks::check_mp4`]：按顺序核对各批，批与批之间看取消信号，取消时返回 [`Error::Cancelled`]。
 async fn check_mp4(
     streams: Vec<Streams>,
-    groups: Vec<(usize, Vec<GroupTrack>)>,
+    batches: Vec<Batch>,
     root: PathBuf,
     cancel: &CancellationToken,
 ) -> Result<(), Error> {
     let (streams, root) = (Arc::new(streams), Arc::new(root));
-    let mut groups = groups.into_iter();
-    let first = groups.next().expect("调用方只在有录齐的组时派出");
-    let rest: Vec<_> = groups.collect();
-    let batches: Vec<Vec<(usize, Vec<GroupTrack>)>> = if rest.is_empty() {
-        vec![vec![first]]
-    } else {
-        rest.into_iter().map(|g| vec![first.clone(), g]).collect()
-    };
     for batch in batches {
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);

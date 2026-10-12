@@ -1,7 +1,7 @@
 //! 录制中核对能否合并进 MP4（见 [`output::check_mp4`]）。放不进 MP4 的原因交给调用方放进进度
 //! （[`crate::Progress::mp4_unsupported`]），录制照常进行：直播错过的内容录不回来，停不停由调用方定；合并 MP4 时照样
 //! 报错。
-//! - 录制开始时任务目录里已录齐的组（之前几次运行录的）在后台一起核对一次。
+//! - 录制开始时任务目录里已录齐的组（之前几次运行录的）在后台逐组与第 0 组一起核对一次（见 [`Mp4Check::new`]）。
 //! - 之后每个（会话, 不连续段）组在各轨都有分片时（含之前录了一部分、这次才录齐的），拿各轨的第一个分片与合并时的第 0
 //!   组一起核对一次；第 0 组开头的分片判断不了时只核对这一组自身。报的组号为核对时的：之后才录齐、排在前面的组会让
 //!   合并时的组号变大。
@@ -15,6 +15,9 @@ use crate::fetch::ItemInfo;
 use crate::output::{self, GroupTrack};
 use crate::workdir::{GroupKey, Layout, SegmentName, Stored};
 use crate::{Error, Mp4Unsupported, Unsupported, blocking};
+
+/// 一次核对（见 [`output::check_mp4`]）：各组合并时的组号与各轨的第一个分片，第一项为第 0 组。
+pub(super) type Batch = Vec<(usize, Vec<GroupTrack>)>;
 
 pub(super) struct Mp4Check {
     /// 各轨的取流方式
@@ -30,13 +33,13 @@ pub(super) struct Mp4Check {
 }
 
 impl Mp4Check {
-    /// `plan` 为录制开始时任务目录的合并计划，`stored` 为目录里的分片。另返回目录里已录齐的组（各轨的第一个分片与
-    /// 合并时的组号），由调用方交给后台一起核对一次；没有时为空。
+    /// `plan` 为录制开始时任务目录的合并计划，`stored` 为目录里的分片。另返回核对目录里已录齐的组的各批：逐组与第 0
+    /// 组一起（只有第 0 组时为它自身），由调用方交给后台按顺序核对；没有录齐的组时为空。
     pub(super) fn new(
         streams: Vec<Streams>,
         plan: &MergePlan,
         stored: &Stored,
-    ) -> (Self, Vec<(usize, Vec<GroupTrack>)>) {
+    ) -> (Self, Vec<Batch>) {
         let recorded: Vec<(usize, Vec<GroupTrack>)> = plan
             .groups
             .iter()
@@ -73,7 +76,19 @@ impl Mp4Check {
             pending,
             unsupported: false,
         };
-        (check, recorded)
+        let mut recorded = recorded.into_iter();
+        let batches = match recorded.next() {
+            None => Vec::new(),
+            Some(first) => {
+                let rest: Vec<Batch> = recorded.map(|g| vec![first.clone(), g]).collect();
+                if rest.is_empty() {
+                    vec![vec![first]]
+                } else {
+                    rest
+                }
+            }
+        };
+        (check, batches)
     }
 
     /// 各轨的取流方式。
@@ -112,7 +127,7 @@ impl Mp4Check {
         // 合并时的组号：各轨都有分片的组按键排列。新录齐的组排在原来的第 0 组前面时（续录接上的会话里，之前没录齐
         // 的组这次录齐）它成为第 0 组
         let number = |key: &GroupKey| self.complete.range(..key).count();
-        let groups = match self.first.take() {
+        let batch: Batch = match self.first.take() {
             None => vec![(0, group.clone())],
             Some((first_key, first)) if key < first_key => {
                 vec![(0, group.clone()), (number(&first_key), first)]
@@ -126,7 +141,7 @@ impl Mp4Check {
         self.first.get_or_insert((key, group));
         let streams = self.streams.clone();
         let root = layout.root().to_path_buf();
-        let result = blocking(move || output::check_mp4(&streams, &groups, &root)).await?;
+        let result = blocking(move || output::check_mp4(&streams, &batch, &root)).await?;
         self.judged(result)
     }
 

@@ -747,13 +747,13 @@ struct Mapping {
     time_base: Rational,
 }
 
-/// 一路输入流读到而没有写出的包数。
+/// 一路输入流读到而没有写出的部分。
 #[derive(Clone, Copy, Default)]
 struct Dropped {
-    /// 没有 DTS
+    /// 没有 DTS 的包数
     without_dts: u64,
-    /// 丢弃的损坏音频字节（见 [`StreamReport::discarded_corrupt_bytes`]）
-    corrupt: u64,
+    /// 丢弃的损坏音频字节数（见 [`StreamReport::discarded_corrupt_bytes`]）
+    corrupt_bytes: u64,
 }
 
 struct Source {
@@ -768,6 +768,7 @@ struct Source {
     dropped: Vec<Dropped>,
     /// 已读出、待写入的包及其映射；包一定带 DTS
     queue: VecDeque<(Packet, Mapping)>,
+    /// 读到了末尾（见 [`Source::read_next`]）
     finished: bool,
     /// 按回绕对齐时加到这个输入所有时间戳上的量，微秒（见 [`align_wraps`]）
     wrap_us: i64,
@@ -813,11 +814,16 @@ impl Source {
     }
 
     /// 读下一个要写出的包。跳过未映射流的包；没有 DTS 的包与损坏（读不出帧头或帧长与包长对不上）的音频包记入
-    /// `dropped`；参数随帧携带的包核对参数。读到末尾返回 `None`。
+    /// `dropped`；参数随帧携带的包核对参数。读到末尾返回 `None` 并记下 `finished`，打包音频丢弃的损坏字节这时才是
+    /// 全部（见 [`Input::discarded`]），一并记入 `dropped`；之后不再调用。
     fn read_next(&mut self) -> Result<Option<(Packet, Mapping)>, Error> {
         loop {
             let mut packet = Packet::empty();
             if !self.input.read(&mut packet, self.group, self.track)? {
+                if let Some((stream, bytes)) = self.input.discarded() {
+                    self.dropped[stream].corrupt_bytes += bytes;
+                }
+                self.finished = true;
                 return Ok(None);
             }
             let Some(mapping) = self.map.get(packet.stream()).copied().flatten() else {
@@ -838,7 +844,7 @@ impl Source {
                 let unsupported = match check.check(packet.data().unwrap_or_default(), &stream) {
                     Ok(()) => None,
                     Err(Mismatch::Unreadable) => {
-                        self.dropped[packet.stream()].corrupt += packet.size() as u64;
+                        self.dropped[packet.stream()].corrupt_bytes += packet.size() as u64;
                         continue;
                     }
                     Err(Mismatch::Changed) => Some(Unsupported::ParamsChangedInGroup {
@@ -901,9 +907,8 @@ impl Source {
                 .iter()
                 .all(|&out| self.queue.iter().any(|(_, m)| m.output == out))
         {
-            match self.read_next()? {
-                Some(item) => self.queue.push_back(item),
-                None => self.finished = true,
+            if let Some(item) = self.read_next()? {
+                self.queue.push_back(item);
             }
         }
         Ok(())
@@ -986,7 +991,7 @@ fn write_verified(
                 shape: o.shape,
                 packets: o.written,
                 skipped_without_dts: o.dropped.without_dts,
-                discarded_corrupt_bytes: o.dropped.corrupt,
+                discarded_corrupt_bytes: o.dropped.corrupt_bytes,
                 duration_us: match (o.start_us, o.end_us) {
                     (Some(start), Some(end)) => u64::try_from(end - start).unwrap_or(0),
                     _ => 0,
@@ -1224,11 +1229,11 @@ fn write_group(
 
     loop {
         for source in &mut sources {
-            if source.queue.is_empty() && !source.finished {
-                match source.read_next()? {
-                    Some(item) => source.queue.push_back(item),
-                    None => source.finished = true,
-                }
+            if source.queue.is_empty()
+                && !source.finished
+                && let Some(item) = source.read_next()?
+            {
+                source.queue.push_back(item);
             }
         }
         // 同组各输入共用一个偏移，按对齐回绕后的 DTS 交错写出
@@ -1271,15 +1276,11 @@ fn write_group(
         o.written += 1;
     }
     for source in &sources {
-        let packed = source.input.discarded();
-        for (index, (mapping, dropped)) in source.map.iter().zip(&source.dropped).enumerate() {
+        for (mapping, dropped) in source.map.iter().zip(&source.dropped) {
             if let Some(mapping) = mapping {
                 let total = &mut outs[mapping.output].dropped;
                 total.without_dts += dropped.without_dts;
-                total.corrupt += dropped.corrupt;
-                if let Some((_, bytes)) = packed.filter(|&(stream, _)| stream == index) {
-                    total.corrupt += bytes;
-                }
+                total.corrupt_bytes += dropped.corrupt_bytes;
             }
         }
     }
