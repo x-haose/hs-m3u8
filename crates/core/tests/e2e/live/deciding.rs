@@ -9,9 +9,9 @@ use hs_m3u8_core::{Error, HttpError, LiveEnd, LiveOptions, StallCause, StallErro
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
 use super::{
-    STALL, expected_split, expected_split_long, interrupt, live_request, playlist, playlist_in,
-    put_long, put_split_master, report, run_until_full, signed_fmp4_playlist, slow_retry,
-    split_source,
+    STALL, expected_split, expected_split_long, interrupt, live_request, media_playlist, playlist,
+    playlist_in, put_long, put_split_master, report, run_until_full, signed_fmp4_playlist,
+    slow_retry, split_source,
 };
 use crate::server::Server;
 use crate::{assert_output, engine, expected, expected_long, fixture, run, test_dir, track};
@@ -160,7 +160,8 @@ async fn a_stall_while_deciding_still_records_listed_segments() {
 }
 
 /// 判定期间音频一直没有分片而停滞、看起来直播已结束，这时视频的核对还没完（重试退避使它长于停滞时长）：
-/// 只有还没拿到候选的音频这次不录，视频等核对完、接着原会话录完，按停滞收尾。
+/// 只有还没拿到候选的音频这次不录，视频等核对完、接着原会话录完，按停滞收尾。音频的目标时长 0.3 秒：停滞在
+/// 0.9 秒时，它的刷新在途 0.3 秒以上才算刷新没有返回；视频两次退避各 0.6～1 秒。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stall_while_another_track_is_checking() {
     let dir = test_dir("deciding_stall_while_checking");
@@ -173,10 +174,10 @@ async fn a_stall_while_another_track_is_checking() {
     let mut req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(300));
     interrupt(&req, |p| p.segments_done == 4).await;
 
-    req.source.http.retry = slow_retry(Duration::from_millis(400));
+    req.source.http.retry = slow_retry(Duration::from_millis(800));
     server.fail("v/seg1.ts", 2);
     server.put("video.m3u8", playlist_in("v/", &[0, 1, 2], true));
-    server.put("audio.m3u8", playlist_in("a/", &[], false));
+    server.put("audio.m3u8", media_playlist("0.3", "a/", &[], false));
     let output = run(req).await.unwrap();
 
     assert_output(

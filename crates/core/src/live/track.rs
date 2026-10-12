@@ -404,11 +404,29 @@ impl LiveTrack {
 
     /// 停滞的结论，取走最近一次刷新失败的原因；只在据此结束录制时调用。`Ok` 为看起来直播已结束，
     /// `Err` 为故障。`others_live` 为其他轨的播放列表还在出：这时本轨不再出新分片是本轨的故障。
+    ///
+    /// 播放列表没被删除（最近一次刷新不是 404/410）而仍在列出新分片时，刷新是通的，停滞的原因是新分片都取不到；
+    /// 否则依次看刷新在途超过一个目标时长、播放列表已删除、刷新失败，都没有时为不再出新分片。
     pub(super) fn stall(
         &mut self,
         now: Instant,
         others_live: bool,
     ) -> Result<StallCause, StallError> {
+        let refresh_error = self.last_refresh_error.take();
+        let gone = match &refresh_error {
+            Some(RefreshCause::Http(HttpFailure {
+                kind: HttpError::Status(status @ (404 | 410)),
+                ..
+            })) => Some(*status),
+            _ => None,
+        };
+        if gone.is_none() && self.is_live(now) {
+            let failure = self
+                .last_download_failure
+                .clone()
+                .expect("仍在列出新分片、没有在途的下载又没有录到：新分片都记了缺失，有失败原因");
+            return Err(StallError::Unrecordable(failure));
+        }
         let pending_since = match self.refresh {
             Refresh::InFlight { started } => Some(started),
             _ => self.preparing,
@@ -416,19 +434,10 @@ impl LiveTrack {
         if pending_since.is_some_and(|started| now.duration_since(started) >= self.target) {
             return Err(StallError::RefreshPending);
         }
-        let ended = match self.last_refresh_error.take() {
-            Some(RefreshCause::Http(HttpFailure {
-                kind: HttpError::Status(status @ (404 | 410)),
-                ..
-            })) => StallCause::PlaylistGone(status),
-            Some(cause) => return Err(StallError::RefreshFailed(cause)),
-            None if self.is_live(now) => {
-                let failure = self.last_download_failure.clone().expect(
-                    "仍在列出新分片、没有在途的下载又没有录到：新分片都记了缺失，有失败原因",
-                );
-                return Err(StallError::Unrecordable(failure));
-            }
-            None => StallCause::NoNewSegments,
+        let ended = match (gone, refresh_error) {
+            (Some(status), _) => StallCause::PlaylistGone(status),
+            (None, Some(cause)) => return Err(StallError::RefreshFailed(cause)),
+            (None, None) => StallCause::NoNewSegments,
         };
         if others_live {
             return Err(StallError::TrackStopped(ended));

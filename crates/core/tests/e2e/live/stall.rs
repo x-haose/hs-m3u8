@@ -165,7 +165,8 @@ async fn one_failing_track_fails_the_recording() {
 }
 
 /// 音频轨每次都有新分片、但它们的 init 段一直 404：一个都录不到，超过 stall_timeout 即任务失败，
-/// 不会无限录下去。
+/// 不会无限录下去；停滞那一刻即使有刷新在途，原因也是取不到分片。音频的目标时长 0.3 秒，「仍在列出新分片」的
+/// 判定留有 0.6 秒。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_track_that_records_nothing_fails_the_recording() {
     let dir = test_dir("live_unrecordable");
@@ -184,7 +185,7 @@ async fn a_track_that_records_nothing_fails_the_recording() {
     let audio: Vec<String> = (0..100u64)
         .map(|n| {
             format!(
-                "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MEDIA-SEQUENCE:{n}\n\
+                "#EXTM3U\n#EXT-X-TARGETDURATION:0.3\n#EXT-X-MEDIA-SEQUENCE:{n}\n\
                  #EXT-X-MAP:URI=\"audio/missing.mp4\"\n#EXTINF:1,\naudio/seg{n}.m4s\n"
             )
         })
