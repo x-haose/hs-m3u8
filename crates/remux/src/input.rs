@@ -125,7 +125,10 @@ fn fmp4_len(path: &Path) -> Result<u64, Error> {
             at: open.at,
         });
     }
-    Ok(boxes.last().map_or(0, |b| b.at + b.size))
+    let last = boxes
+        .last()
+        .expect("铺满了文件的顶层 box 至少一个（空文件报不是 fMP4）");
+    Ok(last.at + last.size)
 }
 
 /// 读文件 `path` 失败。

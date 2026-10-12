@@ -232,7 +232,7 @@ pub(crate) enum Framing {
     Mpeg,
 }
 
-/// 一帧的帧头里比较是否同一路流的参数（打包音频重新同步、逐包核对时用）。
+/// 一帧的帧头里比较是否同一路流的参数（打包音频重新同步时用）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Header {
     Adts(Adts),

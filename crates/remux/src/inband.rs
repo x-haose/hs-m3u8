@@ -130,26 +130,36 @@ fn check_eac3(frames: &[frame::Ac3Frame]) -> Result<(), Mismatch> {
 /// 一个音频包的编码参数；只与同一路流的其他包比较。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AudioParams {
-    /// ADTS 与 MPEG 音频：包里的一帧。MP4 的 AudioSpecificConfig 由第一帧的 ADTS 帧头写成
-    Frame(frame::Header),
-    /// 包里各同步帧（E-AC-3 为独立帧及其从属帧）
+    /// 包里一个 ADTS 帧的帧头。MP4 的 AudioSpecificConfig 由第一帧的写成
+    Adts(frame::Adts),
+    /// 包里一个 MPEG 音频帧的帧头
+    Mpeg(frame::Mpeg),
+    /// 包里各 AC-3 或 E-AC-3 同步帧（E-AC-3 为独立帧及其从属帧）
     Ac3(Vec<frame::Ac3Frame>),
 }
 
 /// 包 `data` 的参数：AC-3 与 E-AC-3 为包里的各同步帧，须恰好由整帧组成；其余为一帧，帧长须等于包长。读不出时为 None。
 fn audio_params(framing: frame::Framing, data: &[u8]) -> Option<AudioParams> {
-    if framing != frame::Framing::Ac3 {
-        let (header, len) = frame::header(framing, data)?;
-        return (len == Some(data.len())).then_some(AudioParams::Frame(header));
+    match framing {
+        frame::Framing::Adts => {
+            let (header, len) = frame::adts(data)?;
+            (len == data.len()).then_some(AudioParams::Adts(header))
+        }
+        frame::Framing::Mpeg => {
+            let (header, len) = frame::mpeg_audio(data)?;
+            (len == Some(data.len())).then_some(AudioParams::Mpeg(header))
+        }
+        frame::Framing::Ac3 => {
+            let mut frames = Vec::new();
+            let mut rest = data;
+            while !rest.is_empty() {
+                let (frame, size) = frame::ac3(rest)?;
+                frames.push(frame);
+                rest = rest.get(size..)?;
+            }
+            (!frames.is_empty()).then_some(AudioParams::Ac3(frames))
+        }
     }
-    let mut frames = Vec::new();
-    let mut rest = data;
-    while !rest.is_empty() {
-        let (frame, size) = frame::ac3(rest)?;
-        frames.push(frame);
-        rest = rest.get(size..)?;
-    }
-    (!frames.is_empty()).then_some(AudioParams::Ac3(frames))
 }
 
 #[cfg(test)]
