@@ -227,6 +227,17 @@ variants! {
             /// 这一组的参数
             found: Shape,
         },
+        /// 编码参数相同而解码配置与第 0 组不同：如 AAC 的 profile（LC 与 HE-AAC 的采样率都可以是 48 kHz）、H.264 的
+        /// 参数集，或一组是 fMP4 而另一组是 TS 或打包音频
+        #[pyo3(constructor = (*, group, track, kind))]
+        ConfigChanged {
+            /// 第几个不连续段组
+            group: usize,
+            /// 第几条轨
+            track: usize,
+            /// 流的种类
+            kind: StreamKind,
+        },
         /// 这一组里中途换了编码或编码参数（采样率、声道、画面宽高等），只出在参数随帧携带的 TS 与打包音频里
         #[pyo3(constructor = (*, group, track, kind))]
         ParamsChangedInGroup {
@@ -501,6 +512,11 @@ impl From<core::Mp4Unsupported> for Mp4Unsupported {
                 kind: kind.into(),
                 first: first.into(),
                 found: found.into(),
+            },
+            U::ConfigChanged { group, track, kind } => Mp4Unsupported::ConfigChanged {
+                group,
+                track,
+                kind: kind.into(),
             },
             U::ParamsChangedInGroup { group, track, kind } => {
                 Mp4Unsupported::ParamsChangedInGroup {

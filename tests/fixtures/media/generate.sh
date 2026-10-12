@@ -2,7 +2,7 @@
 # 生成 remux 与 core 的测试样本：ffmpeg 合成画面与正弦音，按 1 秒切成 HLS 分片，不含第三方内容。
 # 每个目录是一条轨在一个不连续段组里的分片（fMP4 另带 init.mp4）；各节目的时间戳都从头开始，
 # 前后拼接即构成 EXT-X-DISCONTINUITY。需要带 libx264、libx265、libmp3lame、libaom、libvpx、libopus 的
-# ffmpeg 命令行。
+# ffmpeg 命令行；ts_he_aac 另要 macOS 上的 aac_at。
 # 产物已提交到仓库，仅在需要重建时运行。
 set -euo pipefail
 
@@ -11,7 +11,8 @@ TMP=$(mktemp -d)
 trap 'rm -rf -- "${TMP:?}"' EXIT
 
 ff=(ffmpeg -hide_banner -loglevel error -y)
-h264=(-c:v libx264 -preset veryfast -g 25 -b:v 150k)
+# 画面源 testsrc 是 RGB，不指定像素格式时 x264 编成 4:4:4
+h264=(-c:v libx264 -preset veryfast -g 25 -b:v 150k -pix_fmt yuv420p)
 aac=(-c:a aac -b:a 64k)
 
 # 输入：$1 画面源，$2 尺寸，$3 正弦频率，$4 时长（秒）
@@ -67,7 +68,8 @@ read -r -a b_src <<< "$(source_args testsrc 320x180 880 1)"
 ts_segments ts_a "${a_src[@]}" "${h264[@]}" "${aac[@]}"
 ts_segments ts_b "${b_src[@]}" "${h264[@]}" "${aac[@]}"
 fmp4_split fmp4_a "${a_src[@]}"
-fmp4_split fmp4_b "${b_src[@]}"
+# B 的视频轨 handler 名不同：init 段不同而样本描述相同，测试据此核对每组用的 init 段
+fmp4_split fmp4_b "${b_src[@]}" -metadata:s:v:0 handler_name=ProgramB
 
 # 编码与参数：分辨率与前面的组不同（合并应报参数变化）；HEVC、AC-3、E-AC-3（5.1 声道）、MP3（支持）；MP2、8 kHz
 # 的 MP3 与 TS 里的 Opus 音频（不支持）
@@ -86,6 +88,11 @@ read -r -a tiny_src <<< "$(source_args testsrc2 160x90 440 2)"
 fmp4_muxed fmp4_av1_opus "${tiny_src[@]}" -c:v libaom-av1 -cpu-used 8 -g 25 -b:v 100k -c:a libopus -b:a 48k
 fmp4_muxed fmp4_vp9_flac "${tiny_src[@]}" -c:v libvpx-vp9 -deadline realtime -g 25 -b:v 100k -c:a flac
 fmp4_muxed fmp4_alac "${tiny_src[@]}" -c:v libx264 -preset veryfast -g 25 -b:v 100k -c:a alac
+# 编码参数相同、解码配置不同：H.264 的 High（fmp4_alac）与 Baseline；立体声 AAC 的 LC 与 HE-AAC（解码都是 48 kHz
+# 双声道，ADTS 帧头不同）。HE-AAC 用 macOS 的 AudioToolbox 编码器（aac_at）编
+fmp4_muxed fmp4_baseline "${tiny_src[@]}" -c:v libx264 -preset veryfast -profile:v baseline -g 25 -b:v 100k "${aac[@]}"
+ts_segments ts_aac_stereo "${one_src[@]}" "${h264[@]}" -c:a aac -ac 2 -b:a 64k
+ts_segments ts_he_aac "${one_src[@]}" "${h264[@]}" -c:a aac_at -profile:a 4 -ac 2 -b:a 48k
 
 # 打包音频（RFC 8216 3.4）：约 3 秒正弦音的裸音频帧按 1 秒切成 3 片，不带 ID3 标签，测试按要的时间戳加上。$1 目录名，
 # $2 扩展名，其余为编码与切分参数
@@ -139,6 +146,14 @@ change_enc=(-c:v libx264 -preset veryfast -bf 0 -g 10 -b:v 150k "${aac[@]}" -f m
   "${change_enc[@]}" "$DIR/ts_param_change/seg0.ts"
 "${ff[@]}" -f lavfi -i testsrc2=size=160x90:rate=10 -f lavfi -i sine=frequency=440:sample_rate=44100 -t 1 \
   -output_ts_offset 1.1 "${change_enc[@]}" "$DIR/ts_param_change/seg1.ts"
+
+# 组内换色度采样：两个时间戳相接、宽高相同的纯视频分片，第二个为 4:4:4
+rm -rf -- "${DIR:?}/ts_chroma_change"
+mkdir -p "$DIR/ts_chroma_change"
+chroma=(-f lavfi -i testsrc2=size=320x180:rate=10 -t 1)
+chroma_enc=(-c:v libx264 -preset veryfast -bf 0 -g 10 -b:v 150k -an -f mpegts)
+"${ff[@]}" "${chroma[@]}" -pix_fmt yuv420p "${chroma_enc[@]}" "$DIR/ts_chroma_change/seg0.ts"
+"${ff[@]}" "${chroma[@]}" -output_ts_offset 1.1 -pix_fmt yuv444p "${chroma_enc[@]}" "$DIR/ts_chroma_change/seg1.ts"
 
 # 回绕点前：一个纯视频分片，第一个时间戳比 33 位回绕点前 60 秒早 0.05 秒（mpegts 封装器另加 1.4 秒的起始延迟）
 rm -rf -- "${DIR:?}/ts_wrap"

@@ -590,6 +590,105 @@ fn resolution_change_between_groups_is_rejected() {
 }
 
 /// fMP4 里的 AV1、VP9 视频与 Opus、FLAC、ALAC 音频原样复制，MP4 里的样本描述带各自的配置 box。
+/// 视频的色度采样变了（4:2:0 与 4:4:4，宽高相同）：跨组与组内都报出。TS 的参数集随帧携带，FFmpeg 按带内的解得出，
+/// 只认样本描述的解码器（如 AVFoundation）解不出。
+#[test]
+fn chroma_changes_are_rejected() {
+    let dir = work_dir("chroma_changed");
+    let output = dir.join("out.mp4");
+    let changing = track("ts_chroma_change");
+    let err = remux(&[Streams::Video], &[group([changing.clone()])], &output).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::ParamsChangedInGroup {
+                group: 0,
+                track: 0,
+                kind: StreamKind::Video
+            })
+        ),
+        "组内：实际 {err:?}"
+    );
+
+    let first = TrackSegments {
+        init: None,
+        segments: changing.segments[..1].to_vec(),
+    };
+    let second = TrackSegments {
+        init: None,
+        segments: changing.segments[1..].to_vec(),
+    };
+    let err = remux(
+        &[Streams::Video],
+        &[group([first]), group([second])],
+        &output,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::ParamsChanged {
+                group: 1,
+                first: Shape::Video {
+                    pixel_format: Some("yuv420p"),
+                    ..
+                },
+                found: Shape::Video {
+                    pixel_format: Some("yuv444p"),
+                    ..
+                },
+                ..
+            })
+        ),
+        "跨组：实际 {err:?}"
+    );
+}
+
+/// 编码参数相同而解码配置不同的两组：fMP4 的 H.264 High 与 Baseline（avcC 不同）、TS 里的 AAC LC 与 HE-AAC（都解码为
+/// 48 kHz 双声道，ADTS 帧头不同）、一组 fMP4 一组 TS 的 AAC。MP4 的样本描述由第 0 组的写成，用在后面的组上解不出。
+#[test]
+fn decoder_configs_differing_between_groups_are_rejected() {
+    let dir = work_dir("config_changed");
+    let output = dir.join("out.mp4");
+    let cases = [
+        (
+            Streams::Video,
+            "fmp4_alac",
+            "fmp4_baseline",
+            StreamKind::Video,
+        ),
+        (
+            Streams::All,
+            "ts_aac_stereo",
+            "ts_he_aac",
+            StreamKind::Audio,
+        ),
+        (
+            Streams::All,
+            "ts_he_aac",
+            "ts_aac_stereo",
+            StreamKind::Audio,
+        ),
+        (Streams::Audio, "fmp4_a/audio", "ts_a", StreamKind::Audio),
+    ];
+    for (streams, first, second, kind) in cases {
+        let err = remux(
+            &[streams],
+            &[group([track(first)]), group([track(second)])],
+            &output,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                Error::Unsupported(Unsupported::ConfigChanged { group: 1, track: 0, kind: found })
+                    if *found == kind
+            ),
+            "{first} 接 {second}：实际 {err:?}"
+        );
+    }
+}
+
 #[test]
 fn av1_vp9_opus_flac_and_alac_are_copied() {
     let dir = work_dir("fmp4_codecs");

@@ -735,7 +735,7 @@ async fn signed_init_urls_resume_with_the_right_init() {
     req.output.keep_work_dir = true;
     let output = run(req.clone()).await.unwrap();
 
-    // 两个样本的 init 段只差 SPS/PPS，配错时成片也可能逐字节相同，所以另核对目录里的 init 段
+    // 两个样本的 init 段只差视频轨的 handler 名，配错时成片也可能逐字节相同，所以另核对目录里的 init 段
     let mut inits: Vec<Vec<u8>> =
         std::fs::read_dir(req.output.resolved_work_dir().unwrap().join("tracks/0"))
             .unwrap()

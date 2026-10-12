@@ -1,6 +1,7 @@
 //! 参数随帧携带的输入（TS 与打包音频，没有 MP4 那样的样本描述）里每个包的编码参数。MP4 的一条轨只有一个样本描述，
 //! 由开头的包得出；同一路流后面的包参数变了，样本描述就与它们不符，如采样率变了时播放的音调与速度都不对。音频的
-//! 参数从帧头读出（见 [`crate::frame`]）；视频（H.264、HEVC）的画面宽高取 FFmpeg 解复用器的解析器从参数集得出的值。
+//! 参数从帧头读出（见 [`crate::frame`]）；视频（H.264、HEVC）的画面宽高与像素格式取 FFmpeg 解复用器的解析器从参数集
+//! 得出的值。
 
 use ffmpeg::codec;
 use ffmpeg::format::stream::Stream;
@@ -8,13 +9,16 @@ use ffmpeg_next as ffmpeg;
 
 use crate::{ffi, frame};
 
-/// 一路流在一组里的参数核对：编码不变，每个包的参数须与第一个包的相同。
+/// 一路流在一组里的参数核对：编码不变，每个包的参数须与第一个包的相同。第 0 组之后的组从第 0 组的核对开始（见
+/// [`Inband::for_next_group`]），第一个包就与第 0 组的比较。
 #[derive(Clone)]
 pub(crate) struct Inband {
     /// 这路流开始时的编码。TS 的 PMT 中途改了这个 PID 的流类型时，FFmpeg 换掉流的编码并重建解析器
     /// （mpegts.c 的 mpegts_set_stream_info）
     codec: codec::Id,
     params: Params,
+    /// 第一个包的参数取自第 0 组，这一组还没有核对过读得出的包
+    leading: bool,
 }
 
 #[derive(Clone)]
@@ -24,8 +28,8 @@ enum Params {
         first: Option<AudioParams>,
     },
     Video {
-        /// 画面宽高
-        first: Option<(u32, u32)>,
+        /// 画面的宽、高与像素格式值（见 [`ffi::parsed_picture`]）
+        first: Option<(u32, u32, i32)>,
     },
 }
 
@@ -37,6 +41,7 @@ impl Inband {
                 return Some(Inband {
                     codec: id,
                     params: Params::Video { first: None },
+                    leading: false,
                 });
             }
             codec::Id::AAC => adts,
@@ -47,35 +52,56 @@ impl Inband {
         Some(Inband {
             codec: id,
             params: Params::Audio { read, first: None },
+            leading: false,
         })
+    }
+
+    /// 以这路流（第 0 组的，已读到第一个包）为准核对后面一组的同一路流。
+    pub(crate) fn for_next_group(&self) -> Inband {
+        Inband {
+            leading: true,
+            ..self.clone()
+        }
     }
 
     /// 核对 `stream` 的一个包 `data`。解析器还没读到参数集的视频包不核对。
     pub(crate) fn check(&mut self, data: &[u8], stream: &Stream<'_>) -> Result<(), Mismatch> {
+        let differs = if self.leading {
+            Mismatch::Config
+        } else {
+            Mismatch::Changed
+        };
         if stream.parameters().id() != self.codec {
-            return Err(Mismatch::Changed);
+            return Err(differs);
         }
         let same = match &mut self.params {
             Params::Audio { read, first } => {
                 let params = read(data).ok_or(Mismatch::Unreadable)?;
+                self.leading = false;
                 if let AudioParams::Ac3(frames) = &params {
                     check_eac3(frames)?;
                 }
                 *first.get_or_insert_with(|| params.clone()) == params
             }
-            Params::Video { first } => {
-                ffi::parsed_size(stream).is_none_or(|size| *first.get_or_insert(size) == size)
-            }
+            Params::Video { first } => match ffi::parsed_picture(stream) {
+                Some(picture) => {
+                    self.leading = false;
+                    *first.get_or_insert(picture) == picture
+                }
+                None => true,
+            },
         };
-        if same { Ok(()) } else { Err(Mismatch::Changed) }
+        if same { Ok(()) } else { Err(differs) }
     }
 }
 
 /// 一个包通不过核对的原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Mismatch {
-    /// 编码变了，或参数与第一个包的不同
+    /// 编码变了，或参数与这一组第一个包的不同
     Changed,
+    /// 这一组第一个读得出的包与第 0 组的编码或参数不同
+    Config,
     /// 音频包读不出帧头：数据损坏而解复用器没有标出（如前一个损坏的 PES 剩下的字节被解析器拼进下一个包）
     Unreadable,
     /// E-AC-3 每帧不足 6 块：MP4 封装器把几帧并成一个 6 块（1536 个采样点）的样本，末尾凑不满的帧不写出

@@ -1548,6 +1548,30 @@ class Mp4Unsupported:
         def __new__(cls, *, group: builtins.int, track: builtins.int, kind: StreamKind, first: Shape, found: Shape) -> Mp4Unsupported.ParamsChanged: ...
     
     @typing.final
+    class ConfigChanged(Mp4Unsupported):
+        r"""
+        编码参数相同而解码配置与第 0 组不同：如 AAC 的 profile（LC 与 HE-AAC 的采样率都可以是 48 kHz）、H.264 的
+        参数集，或一组是 fMP4 而另一组是 TS 或打包音频
+        """
+        __match_args__ = ("group", "track", "kind",)
+        @property
+        def group(self) -> builtins.int:
+            r"""
+            第几个不连续段组
+            """
+        @property
+        def track(self) -> builtins.int:
+            r"""
+            第几条轨
+            """
+        @property
+        def kind(self) -> StreamKind.Video | StreamKind.Audio:
+            r"""
+            流的种类
+            """
+        def __new__(cls, *, group: builtins.int, track: builtins.int, kind: StreamKind) -> Mp4Unsupported.ConfigChanged: ...
+    
+    @typing.final
     class ParamsChangedInGroup(Mp4Unsupported):
         r"""
         这一组里中途换了编码或编码参数（采样率、声道、画面宽高等），只出在参数随帧携带的 TS 与打包音频里
@@ -1711,7 +1735,7 @@ class Mp4UnsupportedError(RequestError):
     第一个分片时就核对，组内的变化要合并时读到才报。
     """
     @property
-    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.Mp3SampleRate | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.FormatChangedInGroup | Mp4Unsupported.UnreadablePackedAudio | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
+    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.Mp3SampleRate | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ConfigChanged | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.FormatChangedInGroup | Mp4Unsupported.UnreadablePackedAudio | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
         r"""
         放不进的原因
         """
@@ -2475,7 +2499,7 @@ class Shape:
         r"""
         视频
         """
-        __match_args__ = ("codec", "width", "height",)
+        __match_args__ = ("codec", "width", "height", "pixel_format",)
         @property
         def codec(self) -> builtins.str:
             r"""
@@ -2491,7 +2515,12 @@ class Shape:
             r"""
             高，像素
             """
-        def __new__(cls, *, codec: builtins.str, width: builtins.int, height: builtins.int) -> Shape.Video: ...
+        @property
+        def pixel_format(self) -> typing.Optional[builtins.str]:
+            r"""
+            FFmpeg 的像素格式名（色度采样与位深），如 `yuv420p`、`yuv420p10le`；探测不出时为 None
+            """
+        def __new__(cls, *, codec: builtins.str, width: builtins.int, height: builtins.int, pixel_format: typing.Optional[builtins.str]) -> Shape.Video: ...
     
     @typing.final
     class Audio(Shape):

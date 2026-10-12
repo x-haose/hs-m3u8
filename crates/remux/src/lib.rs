@@ -105,6 +105,8 @@ pub enum Shape {
         codec: &'static str,
         width: u32,
         height: u32,
+        /// FFmpeg 的像素格式名（色度采样与位深），如 `yuv420p`、`yuv420p10le`；探测不出时为 None
+        pixel_format: Option<&'static str>,
     },
     Audio {
         /// FFmpeg 的编码名，如 `aac`、`ac3`、`eac3`、`mp3`
@@ -271,6 +273,17 @@ pub enum Unsupported {
         first: Shape,
         found: Shape,
     },
+    /// 编码参数相同而解码配置与第 0 组不同：fMP4 的为 init 段里的（如 H.264 的参数集），TS 与打包音频里的音频为帧头
+    /// （如 AAC 的 profile 与采样率下标，LC 与 HE-AAC 的采样率都可以是 48 kHz）；或一组是 fMP4 而另一组是 TS 或打包
+    /// 音频。MP4 的样本描述由第 0 组的写成，用在后面的组上解不出
+    #[error(
+        "第 {group} 组第 {track} 条轨的{kind}解码配置（如 AAC 的 profile、H.264 的参数集，或分片封装）与第 0 组不同，无法放进同一条 MP4 轨"
+    )]
+    ConfigChanged {
+        group: usize,
+        track: usize,
+        kind: StreamKind,
+    },
     /// 参数随帧携带的分片（TS 与打包音频）里，这路流在组内中途换了编码或编码参数（采样率、声道、画面宽高等）：MP4
     /// 的一条轨只有一个样本描述
     #[error("第 {group} 组第 {track} 条轨的{kind}编码参数在组内变了，无法放进同一条 MP4 轨")]
@@ -407,7 +420,25 @@ struct Selected {
     index: usize,
     time_base: Rational,
     id: codec::Id,
+    desc: Desc,
+}
+
+/// 一路流的编码参数与解码配置；MP4 的样本描述由第 0 组的写成，其余组须相同。
+#[derive(Clone, PartialEq, Eq)]
+struct Desc {
     shape: Shape,
+    config: Config,
+}
+
+/// 一路流的解码配置。
+#[derive(Clone, PartialEq, Eq)]
+enum Config {
+    /// 有 init 段（fMP4）：init 段里的解码配置（codecpar 的 extradata，如 avcC、esds 里的 AudioSpecificConfig），样本里
+    /// 不带，按字节比较
+    Init(Vec<u8>),
+    /// 参数随帧携带（TS 与打包音频）：音频以第 0 组第一个包的帧头为准逐包核对（见 [`Inband`]）；视频的参数集在关键帧
+    /// 前重复、解码器按带内的解码，只核对编码参数（宽高与像素格式，见 [`Shape`]）
+    Inband,
 }
 
 /// 打开一条轨在一组里的分片，按 `wanted` 选出第一路视频与（或）第一路音频，并检查编码是否受支持。
@@ -433,11 +464,16 @@ fn open_selected(
         let id = stream.parameters().id();
         let shape = ffi::shape(&stream, kind);
         check_codec(id, &shape, input.standalone(), group, track).map_err(Error::Unsupported)?;
+        let config = if input.standalone() {
+            Config::Inband
+        } else {
+            Config::Init(ffi::extradata(&stream))
+        };
         selected.push(Selected {
             index: stream.index(),
             time_base: stream.time_base(),
             id,
-            shape,
+            desc: Desc { shape, config },
         });
     }
     Ok((input, selected))
@@ -557,13 +593,14 @@ struct Source {
 }
 
 impl Source {
-    /// `outputs[i]` 为 `selected[i]` 对应的输出流下标。
+    /// `outputs[i]` 为 `selected[i]` 对应的输出流下标；`references` 见 [`references_of`]，第 0 组为空。
     fn new(
         group: usize,
         track: usize,
         input: Input,
         selected: &[Selected],
         outputs: &[usize],
+        references: &[Option<Inband>],
     ) -> Self {
         let streams = input.context().nb_streams() as usize;
         let mut map = vec![None; streams];
@@ -571,12 +608,14 @@ impl Source {
         for (s, &output) in selected.iter().zip(outputs) {
             map[s.index] = Some(Mapping {
                 output,
-                kind: s.shape.kind(),
+                kind: s.desc.shape.kind(),
                 time_base: s.time_base,
             });
             if input.standalone() {
-                inband[s.index] =
-                    Some(Inband::of(s.id).expect("check_codec 只收能逐帧读出参数的编码"));
+                inband[s.index] = Some(match references.get(output).cloned().flatten() {
+                    Some(reference) => reference.for_next_group(),
+                    None => Inband::of(s.id).expect("check_codec 只收能逐帧读出参数的编码"),
+                });
             }
         }
         Source {
@@ -627,6 +666,11 @@ impl Source {
                         continue;
                     }
                     Err(Mismatch::Changed) => Some(Unsupported::ParamsChangedInGroup {
+                        group,
+                        track,
+                        kind: mapping.kind,
+                    }),
+                    Err(Mismatch::Config) => Some(Unsupported::ConfigChanged {
                         group,
                         track,
                         kind: mapping.kind,
@@ -701,8 +745,8 @@ fn write_verified(
         .iter()
         .flatten()
         .enumerate()
-        .map(|(out, &shape)| OutStream {
-            shape,
+        .map(|(out, desc)| OutStream {
+            shape: desc.shape,
             time_base: octx.stream(out).expect("输出流已创建").time_base(),
             written: 0,
             dropped: Dropped::default(),
@@ -720,11 +764,12 @@ fn write_verified(
         .max()
         .expect("第 0 组至少有一路输出流");
 
-    let sources = into_sources(0, first, &layout);
+    let sources = primed(0, first, &layout, &[])?;
+    let references = references_of(&sources, outs.len());
     write_group(0, sources, &mut octx, &mut outs, margin_us)?;
     for group in 1..groups.len() {
         let opened = open_group(streams, groups, group, Some(&layout))?;
-        let sources = into_sources(group, opened, &layout);
+        let sources = primed(group, opened, &layout, &references)?;
         write_group(group, sources, &mut octx, &mut outs, margin_us)?;
     }
     octx.write_trailer().map_err(|e| Error::Mux(e.into()))?;
@@ -755,19 +800,19 @@ struct OpenTrack {
     selected: Vec<Selected>,
 }
 
-/// 打开第 `group` 组的各轨并选流（见 [`open_selected`]）。`layout` 为第 0 组各轨选中的流参数（见 [`layout_of`]），
-/// 其余组的流种类与参数须与它相同；打开第 0 组时为 None。
+/// 打开第 `group` 组的各轨并选流（见 [`open_selected`]）。`layout` 为第 0 组各轨选中的流（见 [`layout_of`]），其余组
+/// 的流种类、参数与解码配置须与它相同；打开第 0 组时为 None。
 fn open_group(
     streams: &[Streams],
     groups: &[DiscontinuityGroup],
     group: usize,
-    layout: Option<&[Vec<Shape>]>,
+    layout: Option<&[Vec<Desc>]>,
 ) -> Result<Vec<OpenTrack>, Error> {
     let mut opened = Vec::new();
     for (track, segments) in groups[group].tracks.iter().enumerate() {
         let (input, selected) = open_selected(segments, streams[track], group, track)?;
         if let Some(layout) = layout {
-            same_shapes(&selected, &layout[track], group, track)?;
+            same_streams(&selected, &layout[track], group, track)?;
         }
         opened.push(OpenTrack {
             track,
@@ -779,10 +824,10 @@ fn open_group(
     Ok(opened)
 }
 
-/// 一条轨这一组选中的流与第 0 组的 `first` 种类、参数都相同。
-fn same_shapes(
+/// 一条轨这一组选中的流与第 0 组的 `first` 种类、参数、解码配置都相同。
+fn same_streams(
     selected: &[Selected],
-    first: &[Shape],
+    first: &[Desc],
     group: usize,
     track: usize,
 ) -> Result<(), Error> {
@@ -790,23 +835,33 @@ fn same_shapes(
         || selected
             .iter()
             .zip(first)
-            .any(|(s, f)| s.shape.kind() != f.kind())
+            .any(|(s, f)| s.desc.shape.kind() != f.shape.kind())
     {
         return Err(Error::Unsupported(Unsupported::LayoutChanged {
             group,
             track,
         }));
     }
-    match selected.iter().zip(first).find(|(s, f)| s.shape != **f) {
-        Some((s, f)) => Err(Error::Unsupported(Unsupported::ParamsChanged {
-            group,
-            track,
-            kind: s.shape.kind(),
-            first: *f,
-            found: s.shape,
-        })),
-        None => Ok(()),
+    for (s, f) in selected.iter().zip(first) {
+        let kind = f.shape.kind();
+        if s.desc.shape != f.shape {
+            return Err(Error::Unsupported(Unsupported::ParamsChanged {
+                group,
+                track,
+                kind,
+                first: f.shape,
+                found: s.desc.shape,
+            }));
+        }
+        if s.desc.config != f.config {
+            return Err(Error::Unsupported(Unsupported::ConfigChanged {
+                group,
+                track,
+                kind,
+            }));
+        }
     }
+    Ok(())
 }
 
 /// 一组里有打包音频的轨没有时间戳时，只有它一条轨贡献流才能定时。
@@ -823,23 +878,23 @@ fn check_timed(group: usize, opened: &[OpenTrack]) -> Result<(), Error> {
     }
 }
 
-/// 第 0 组各轨选中的流参数，下标为轨道号；依次排开即各路输出流。同一类流只能来自一条轨，各轨合起来至少一路。
-fn layout_of(first: &[OpenTrack]) -> Result<Vec<Vec<Shape>>, Error> {
-    let mut layout: Vec<Vec<Shape>> = Vec::new();
+/// 第 0 组各轨选中的流，下标为轨道号；依次排开即各路输出流。同一类流只能来自一条轨，各轨合起来至少一路。
+fn layout_of(first: &[OpenTrack]) -> Result<Vec<Vec<Desc>>, Error> {
+    let mut layout: Vec<Vec<Desc>> = Vec::new();
     for t in first {
         let duplicate = t.selected.iter().find(|s| {
             layout
                 .iter()
                 .flatten()
-                .any(|shape| shape.kind() == s.shape.kind())
+                .any(|d| d.shape.kind() == s.desc.shape.kind())
         });
         if let Some(s) = duplicate {
             return Err(Error::DuplicateKind {
                 track: t.track,
-                kind: s.shape.kind(),
+                kind: s.desc.shape.kind(),
             });
         }
-        layout.push(t.selected.iter().map(|s| s.shape).collect());
+        layout.push(t.selected.iter().map(|s| s.desc.clone()).collect());
     }
     if layout.iter().all(Vec::is_empty) {
         return Err(Error::Unsupported(Unsupported::NoStreams));
@@ -866,18 +921,41 @@ fn add_streams(octx: &mut format::context::Output, first: &[OpenTrack]) -> Resul
     Ok(())
 }
 
-/// 一组打开的各轨换成读包的输入：各轨选中的流按 `layout` 依次对应输出流；没有要取的流的轨不贡献，不读它的包。
-fn into_sources(group: usize, opened: Vec<OpenTrack>, layout: &[Vec<Shape>]) -> Vec<Source> {
+/// 一组打开的各轨换成读包的输入，各自读到每路流的第一个包（见 [`Source::prime`]）：各轨选中的流按 `layout` 依次
+/// 对应输出流；没有要取的流的轨不贡献，不读它的包。`references` 见 [`references_of`]，第 0 组为空。
+fn primed(
+    group: usize,
+    opened: Vec<OpenTrack>,
+    layout: &[Vec<Desc>],
+    references: &[Option<Inband>],
+) -> Result<Vec<Source>, Error> {
     let mut next = 0;
     let mut sources = Vec::new();
     for t in opened {
         let outputs: Vec<usize> = (next..next + t.selected.len()).collect();
         next += layout[t.track].len();
         if !t.selected.is_empty() {
-            sources.push(Source::new(group, t.track, t.input, &t.selected, &outputs));
+            let mut source =
+                Source::new(group, t.track, t.input, &t.selected, &outputs, references);
+            source.prime()?;
+            sources.push(source);
         }
     }
-    sources
+    Ok(sources)
+}
+
+/// 第 0 组读到第一个包之后各路输出流的逐包核对，下标为输出流；其余组的核对从它开始（见 [`Inband::for_next_group`]），
+/// 第一个包就与第 0 组的比较。
+fn references_of(sources: &[Source], outputs: usize) -> Vec<Option<Inband>> {
+    let mut references = vec![None; outputs];
+    for source in sources {
+        for (mapping, inband) in source.map.iter().zip(&source.inband) {
+            if let (Some(mapping), Some(inband)) = (mapping, inband) {
+                references[mapping.output] = Some(inband.clone());
+            }
+        }
+    }
+    references
 }
 
 /// 写 MP4 头（moov 前置）；封装器不认识的选项视为错误。
@@ -897,7 +975,8 @@ fn write_header(octx: &mut format::context::Output) -> Result<(), Error> {
     }
 }
 
-/// 写出一组：各输入按回绕对齐（见 [`align_wraps`]），再按全组共用的偏移平移时间戳，按 DTS 交错写出。
+/// 写出一组（各输入已读到每路流的第一个包）：各输入按回绕对齐（见 [`align_wraps`]），再按全组共用的偏移平移时间戳，
+/// 按 DTS 交错写出。
 fn write_group(
     group: usize,
     mut sources: Vec<Source>,
@@ -905,9 +984,6 @@ fn write_group(
     outs: &mut [OutStream],
     margin_us: i64,
 ) -> Result<(), Error> {
-    for source in &mut sources {
-        source.prime()?;
-    }
     align_wraps(&mut sources);
     // 本组各输出流的首个 DTS 与全组最早的 PTS（输入时间线，微秒）；队列内同一路流按解码顺序排列
     let mut first_dts_us: Vec<Option<i64>> = vec![None; outs.len()];

@@ -158,7 +158,7 @@ variants! {
     /// 一路流的编码参数。
     pub enum Shape {
         /// 视频
-        #[pyo3(constructor = (*, codec, width, height))]
+        #[pyo3(constructor = (*, codec, width, height, pixel_format))]
         Video {
             /// FFmpeg 的编码名，如 `h264`、`hevc`
             codec: String,
@@ -166,6 +166,8 @@ variants! {
             width: u32,
             /// 高，像素
             height: u32,
+            /// FFmpeg 的像素格式名（色度采样与位深），如 `yuv420p`、`yuv420p10le`；探测不出时为 None
+            pixel_format: Option<String>,
         },
         /// 音频
         #[pyo3(constructor = (*, codec, sample_rate, channels))]
@@ -464,10 +466,12 @@ impl From<core::remux::Shape> for Shape {
                 codec,
                 width,
                 height,
+                pixel_format,
             } => Shape::Video {
                 codec: codec.to_owned(),
                 width,
                 height,
+                pixel_format: pixel_format.map(str::to_owned),
             },
             core::remux::Shape::Audio {
                 codec,
