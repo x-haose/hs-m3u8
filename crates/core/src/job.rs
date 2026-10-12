@@ -16,7 +16,9 @@ use crate::output::{self, Content, ResolvedOutput};
 use crate::request::JobRequest;
 use crate::resolve::{self, Resolved};
 use crate::vod::{self, Plan};
-use crate::workdir::{self, JobRecord, Lock, RecordKind, Stored, WorkDir, read_resumable};
+use crate::workdir::{
+    self, JobRecord, Lock, OutputKind, RecordKind, Stored, WorkDir, read_resumable,
+};
 use crate::{
     Error, Leftover, LeftoverKind, LiveReport, Output, Progress, Stage, Unsettled, WorkDirProblem,
     blocking,
@@ -117,7 +119,11 @@ async fn run_live(
         cancel: &task.cancel,
         stop: &task.stop,
     };
-    let recording = live::record(ctx, resolved.tracks, options).await?;
+    let mp4 = task
+        .output
+        .get(OutputKind::Mp4)
+        .map(|_| dir.record().streams());
+    let recording = live::record(ctx, resolved.tracks, options, mp4).await?;
     let streams = dir.record().streams();
     let stored = dir.scan(streams.len()).await?;
     let input = merge_live(&dir, &stored, streams, Some(recording))?;
@@ -143,11 +149,13 @@ async fn run_vod(
     };
     let dir = WorkDir::open(task.output.work_dir.clone(), record, lock).await?;
     let mut fetcher = task.fetcher();
+    let mp4 = task.output.get(OutputKind::Mp4).map(|_| streams.as_slice());
     let groups = vod::download(
         &task.http,
         &mut fetcher,
         &plan,
         dir.layout(),
+        mp4,
         &task.progress,
         &task.cancel,
     )

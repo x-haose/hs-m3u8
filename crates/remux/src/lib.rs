@@ -315,6 +315,19 @@ pub fn remux(
     Ok(report)
 }
 
+/// 只打开各组各轨的输入，核对能否合并进一个 MP4，不读包、不写输出：编码受支持，同类流不来自两条轨，各组的流种类与
+/// 参数与第 0 组相同，打包音频有时间戳（与别的轨同组时）。这些都看 init 段与开头的帧，各轨只给开头的分片即可，
+/// 用于下载完全部分片之前尽早发现放不进 MP4 的内容；通过不保证合并成功：组内中途换参数、时间戳不递增等要读到才知道。
+pub fn check(streams: &[Streams], groups: &[DiscontinuityGroup]) -> Result<(), Error> {
+    init()?;
+    validate(streams, groups)?;
+    let layout = layout_of(&open_group(streams, groups, 0, None)?)?;
+    for group in 1..groups.len() {
+        open_group(streams, groups, group, Some(&layout))?;
+    }
+    Ok(())
+}
+
 /// 落盘。Windows 上落盘要求写权限，所以以可写方式打开。
 fn sync(path: &Path) -> Result<(), Error> {
     std::fs::File::options()

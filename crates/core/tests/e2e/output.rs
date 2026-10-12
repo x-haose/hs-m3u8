@@ -410,25 +410,28 @@ async fn live_holes_and_sessions_in_hls() {
     assert_output(&output, &expected_long(&dir, &[0, 2, 3], &[2, 1]));
 }
 
-/// 合并 MP4 时编码不受支持（MP2 音频）而失败，写了一半的临时输出删掉、任务目录保留；改为输出 HLS 后用同一个
-/// 默认任务目录，不重新下载。HLS 目录路径带结尾的分隔符也照常。
+/// 编码放不进 MP4（MP2 音频）：下了第一个分片、核对出来就报错，其余分片不下，任务目录保留；改为输出 HLS 后用同一个
+/// 默认任务目录接着下，已下的不重下。HLS 目录路径带结尾的分隔符也照常。
 #[tokio::test(flavor = "multi_thread")]
 async fn switching_to_hls_after_an_unsupported_codec_reuses_the_download() {
     let dir = test_dir("output_switch");
     let server = Server::start().await;
-    server.put("seg0.ts", fixture("ts_mp2/seg0.ts"));
-    server.put(
-        "index.m3u8",
-        "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1.5,\nseg0.ts\n#EXT-X-ENDLIST\n",
-    );
+    let mut playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n".to_owned();
+    for i in 0..3 {
+        server.put(&format!("seg{i}.ts"), fixture("ts_mp2/seg0.ts"));
+        playlist += &format!("#EXTINF:1.5,\nseg{i}.ts\n");
+    }
+    server.put("index.m3u8", playlist + "#EXT-X-ENDLIST\n");
+    let hits = || [0, 1, 2].map(|i| server.hits(&format!("seg{i}.ts")));
     let url = server.url("index.m3u8");
     let mp4 = request_to(url.clone(), &dir, Target::Mp4(dir.join("out.mp4")));
     match run(mp4).await {
         Err(Error::Unsupported(Unsupported::Mp4(Mp4Unsupported::Codec {
             codec: "mp2", ..
         }))) => {}
-        other => panic!("MP2 音频应合并失败：{other:?}"),
+        other => panic!("MP2 音频应放不进 MP4：{other:?}"),
     }
+    assert_eq!(hits(), [1, 0, 0]);
     assert_eq!(names_in(&dir), ["out.hsdl"]);
     assert!(dir.join("out.hsdl/job.json").exists());
 
@@ -438,10 +441,10 @@ async fn switching_to_hls_after_an_unsupported_codec_reuses_the_download() {
         .await
         .unwrap();
 
-    assert!(dir.join("out/0/0.ts").is_file());
+    assert!(dir.join("out/0/2.ts").is_file());
     assert_eq!(output.leftovers, []);
     assert!(!dir.join("out.hsdl").exists());
-    assert_eq!(server.hits("seg0.ts"), 1);
+    assert_eq!(hits(), [1, 1, 1]);
 }
 
 /// 打包音频前的 ID3 标签很长（带封面图）：下载时整片校验通过，本地 HLS 按标签长度跳过后识别出 AAC。

@@ -284,7 +284,8 @@ exception! {
 }
 
 exception! {
-    /// 内容放不进 MP4；可只输出本地 HLS（`Target.Hls`）。
+    /// 内容放不进 MP4；可只输出本地 HLS（`Target.Hls`）。编码、各组的流种类与参数在下到（直播为录到）各组各轨的
+    /// 第一个分片时就核对，组内的变化要合并时读到才报。
     pub struct Mp4UnsupportedError extends RequestError {
         /// 放不进的原因
         pub reason: Mp4Unsupported,
@@ -401,7 +402,8 @@ exception! {
 }
 
 exception! {
-    /// 合并 MP4 失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是 `Mp4UnsupportedError`。
+    /// 合并 MP4 或下载中核对能否合并时失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是
+    /// `Mp4UnsupportedError`。
     pub struct RemuxError extends HsM3u8Error {}
 }
 

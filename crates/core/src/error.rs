@@ -110,7 +110,8 @@ pub enum Error {
     /// 用了 PAC 等）是 [`Error::InvalidInput`]。可改用 [`crate::Proxy::Direct`] 或 [`crate::Proxy::Url`]
     #[error("读不出操作系统的代理设置：{0}")]
     SystemProxy(String),
-    /// 合并 MP4 失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是 [`Unsupported::Mp4`]
+    /// 合并 MP4 或下载中核对能否合并时失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是
+    /// [`Unsupported::Mp4`]
     #[error("合并失败：{0}")]
     Remux(Box<hs_m3u8_remux::Error>),
     /// 写输出失败后收拾本次写出的、或任务开头收拾上次写输出留下的，没能做完：`failure` 为失败的原因（后者为
@@ -263,7 +264,8 @@ pub enum Unsupported {
         line: usize,
         what: hs_m3u8_hls::Encryption,
     },
-    /// 内容放不进 MP4，可只输出本地 HLS（[`crate::Target::Hls`]）：它原样保留分片，不受这些限制
+    /// 内容放不进 MP4，可只输出本地 HLS（[`crate::Target::Hls`]）：它原样保留分片，不受这些限制。编码、各组的流
+    /// 种类与参数在下到（直播为录到）各组各轨的第一个分片时就核对，组内的变化要合并时读到才报
     #[error("{0}")]
     Mp4(Mp4Unsupported),
     /// 本地 HLS 表示不了这些内容，可只输出 MP4（[`crate::Target::Mp4`]）

@@ -33,6 +33,7 @@ pub(crate) struct Content {
 }
 
 /// 一组里一条轨的内容。
+#[derive(Clone)]
 pub(crate) struct GroupTrack {
     /// fMP4 的 init 段；None 即分片自成一体（TS 或打包音频）
     pub init: Option<PathBuf>,
@@ -40,6 +41,7 @@ pub(crate) struct GroupTrack {
     pub segments: Vec<GroupSegment>,
 }
 
+#[derive(Clone)]
 pub(crate) struct GroupSegment {
     pub path: PathBuf,
     /// EXTINF 声明的时长，微秒
@@ -124,8 +126,8 @@ pub(crate) async fn write(
     })
 }
 
-/// 先把 MP4 合并到临时名、HLS 备齐到准备目录，都成功后再换上（见 [`commit`]）。最常见的失败（编码不受支持）发生在
-/// 合并 MP4 时，此时还没有动到输出；任一步失败都撤回，等于没有写过。成功时另返回收尾没删掉的东西。
+/// 先把 MP4 合并到临时名、HLS 备齐到准备目录，都成功后再换上（见 [`commit`]）。合并 MP4 失败时还没有动到输出；
+/// 任一步失败都撤回，等于没有写过。成功时另返回收尾没删掉的东西。
 fn write_files(
     streams: &[Streams],
     groups: &[Vec<GroupTrack>],
@@ -180,7 +182,17 @@ fn write_mp4(
     streams: &[Streams],
     groups: &[Vec<GroupTrack>],
 ) -> Result<Report, Error> {
-    let groups: Vec<DiscontinuityGroup> = groups
+    Ok(hs_m3u8_remux::remux(streams, &remux_groups(groups), temp)?)
+}
+
+/// 下载完之前核对各组能否合并进 MP4（见 [`hs_m3u8_remux::check`]），各轨只需开头的分片。要读文件，在阻塞线程池中
+/// 调用。
+pub(crate) fn check_mp4(streams: &[Streams], groups: &[Vec<GroupTrack>]) -> Result<(), Error> {
+    Ok(hs_m3u8_remux::check(streams, &remux_groups(groups))?)
+}
+
+fn remux_groups(groups: &[Vec<GroupTrack>]) -> Vec<DiscontinuityGroup> {
+    groups
         .iter()
         .map(|tracks| DiscontinuityGroup {
             tracks: tracks
@@ -191,6 +203,5 @@ fn write_mp4(
                 })
                 .collect(),
         })
-        .collect();
-    Ok(hs_m3u8_remux::remux(streams, &groups, temp)?)
+        .collect()
 }

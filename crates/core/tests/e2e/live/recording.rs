@@ -6,8 +6,8 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use hs_m3u8_core::hls::SyntaxError;
 use hs_m3u8_core::{
-    Engine, Error, HttpError, HttpFailure, LiveEnd, LiveOptions, MissReason, Missed, RefreshCause,
-    Stage,
+    Engine, Error, HttpError, HttpFailure, LiveEnd, LiveOptions, MissReason, Missed,
+    Mp4Unsupported, RefreshCause, Stage, Unsupported,
 };
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
@@ -45,6 +45,30 @@ async fn records_until_endlist() {
     assert_eq!(
         (last.stage, last.segments_done, last.segments_total),
         (Stage::Done, 4, 4)
+    );
+}
+
+/// 编码放不进 MP4（MP2 音频）：录到第一个分片、核对出来就报错，不等直播结束。
+#[tokio::test(flavor = "multi_thread")]
+async fn unsupported_codecs_fail_once_the_first_segment_is_recorded() {
+    let dir = test_dir("live_unsupported_codec");
+    let server = Server::start().await;
+    server.put("seg0.ts", fixture("ts_mp2/seg0.ts"));
+    server.put("live.m3u8", playlist(&[0], false));
+
+    let req = live_request(server.url("live.m3u8"), &dir, Duration::MAX);
+    let failed = tokio::time::timeout(Duration::from_secs(10), run(req))
+        .await
+        .expect("直播还没结束就应报错");
+
+    assert!(
+        matches!(
+            failed,
+            Err(Error::Unsupported(Unsupported::Mp4(
+                Mp4Unsupported::Codec { codec: "mp2", .. }
+            )))
+        ),
+        "{failed:?}"
     );
 }
 

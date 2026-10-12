@@ -13,6 +13,7 @@
 
 mod deciding;
 mod merge;
+mod mp4_check;
 mod session;
 mod tasks;
 mod track;
@@ -22,11 +23,13 @@ use std::ops::ControlFlow;
 use std::sync::Arc;
 
 use hs_m3u8_hls as hls;
+use hs_m3u8_remux::Streams;
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use self::merge::{merge_plan, report_missed};
+use self::mp4_check::Mp4Check;
 use self::session::Verdicts;
 use self::tasks::{Done, Tasks};
 use self::track::{Fetched, LiveTrack};
@@ -99,15 +102,19 @@ struct Recorder<'a> {
     phase: Phase,
     /// 定下的结束原因：不再刷新，处理完暂存的播放列表即结束
     ending: Option<LiveEnd>,
+    /// 要合并 MP4 时录制中的核对；不输出 MP4 时为 None
+    mp4: Option<Mp4Check>,
 }
 
-/// 录制：定下会话，从首次拉到的播放列表开始，直到满足结束条件，并等已列出的分片下完。
+/// 录制：定下会话，从首次拉到的播放列表开始，直到满足结束条件，并等已列出的分片下完。要合并 MP4 时 `mp4` 为各轨的
+/// 取流方式，录制中核对能否放进 MP4（见 [`Mp4Check`]），放不进时录制失败。
 ///
 /// 目录里记录的完整来源地址与本次的不同时（见 [`WorkDir::url_changed`]），处理见 [`session::NewUrl`]。
 pub(crate) async fn record(
     ctx: Context<'_>,
     tracks: Vec<ResolvedTrack>,
     options: LiveOptions,
+    mp4: Option<Vec<Streams>>,
 ) -> Result<Outcome, Error> {
     let (dir, progress) = (ctx.dir, ctx.progress);
     let stored = dir.scan(tracks.len()).await?;
@@ -134,6 +141,7 @@ pub(crate) async fn record(
         direct: ctx.fetcher.direct(),
         phase,
         ending: None,
+        mp4: mp4.map(Mp4Check::new),
     };
     let refresh_errors = recorder.refresh_errors(true);
     progress.send_modify(|p| {
@@ -215,7 +223,13 @@ impl Recorder<'_> {
                 Event::Stall(track) => self.on_stall(track).await?,
                 Event::Due => {}
                 Event::Done(done) => self.on_done(done, fetcher).await?,
-                Event::Downloaded((id, result)) => self.on_finished(id, result)?,
+                Event::Downloaded((id, result)) => {
+                    let recorded = result.is_ok();
+                    self.on_finished(id, result)?;
+                    if let (true, Some(check)) = (recorded, &mut self.mp4) {
+                        check.recorded(id, self.dir.layout()).await?;
+                    }
+                }
             }
             self.publish_refresh_errors(true);
         }
@@ -501,8 +515,8 @@ impl Recorder<'_> {
         self.missed.push(Missed {
             session: self.session(),
             track: id.track,
-            first: id.sequence,
-            last: id.sequence,
+            first: id.name.sequence,
+            last: id.name.sequence,
             reason,
         });
         self.progress.send_modify(|p| p.segments_failed += 1);

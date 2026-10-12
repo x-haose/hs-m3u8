@@ -2,7 +2,10 @@
 
 mod plan;
 
+use std::ops::Range;
+
 use hs_m3u8_hls::Segment;
+use hs_m3u8_remux::Streams;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -10,11 +13,12 @@ pub(crate) use self::plan::Plan;
 use crate::fetch::{Fetcher, Item, ItemInfo, count_done, fetch_init};
 use crate::http::{Http, Permit};
 use crate::ident::Fingerprint;
-use crate::output::{GroupSegment, GroupTrack};
+use crate::output::{self, GroupSegment, GroupTrack};
 use crate::workdir::{self, Layout, SegmentName, SessionStart};
 use crate::{Error, Progress, Stage, blocking};
 
-/// 下载计划中的 init 段与尚未完成的分片，返回合并输入；返回 `Ok` 即全部已在任务目录中。
+/// 下载计划中的 init 段与尚未完成的分片，返回合并输入；返回 `Ok` 即全部已在任务目录中。合并 MP4 时 `mp4` 为各轨的
+/// 取流方式：先下各组各轨的第一个分片，核对能否放进 MP4（见 [`output::check_mp4`]），放不进的不必下完才报。
 ///
 /// init 段每次都重新拉取（地址常带每次会话不同的签名，内容决定文件名）；任一项失败时取消其余项并返回该错误，
 /// 任务被取消时返回 [`Error::Cancelled`]。
@@ -23,6 +27,7 @@ pub(crate) async fn download(
     fetcher: &mut Fetcher,
     plan: &Plan,
     layout: &Layout,
+    mp4: Option<&[Streams]>,
     progress: &watch::Sender<Progress>,
     cancel: &CancellationToken,
 ) -> Result<Vec<Vec<GroupTrack>>, Error> {
@@ -34,20 +39,53 @@ pub(crate) async fn download(
     plan.check_inits(&inits)?;
     let names = names(plan, &inits);
 
-    let mut items = Vec::new();
-    for (track, (t, names)) in plan.tracks.iter().zip(&names).enumerate() {
-        for (segment, name) in t.segments.iter().zip(names) {
-            items.push(Item {
-                track,
-                segment: Box::new(segment.clone()),
-                path: layout.segment(track, name),
-            });
-        }
+    let mut items: Vec<Vec<Option<Item>>> = plan
+        .tracks
+        .iter()
+        .zip(&names)
+        .enumerate()
+        .map(|(track, (t, names))| {
+            t.segments
+                .iter()
+                .zip(names)
+                .map(|(segment, name)| {
+                    Some(Item {
+                        track,
+                        segment: Box::new(segment.clone()),
+                        name: *name,
+                        path: layout.segment(track, name),
+                    })
+                })
+                .collect()
+        })
+        .collect();
+    if let Some(streams) = mp4 {
+        let heads = plan
+            .groups
+            .iter()
+            .flat_map(|ranges| ranges.iter().enumerate())
+            .filter_map(|(track, range)| items[track][range.start].take())
+            .collect();
+        fetch(fetcher, heads, progress).await?;
+        let groups = group_input(plan, &names, layout, |range| range.start..range.start + 1);
+        let streams = streams.to_vec();
+        blocking(move || output::check_mp4(&streams, &groups)).await??;
     }
+    let rest = items.into_iter().flatten().flatten().collect();
+    fetch(fetcher, rest, progress).await?;
+    Ok(group_input(plan, &names, layout, Range::clone))
+}
+
+/// 下载 `items` 中尚未在任务目录里的，已在的计入进度；任一项失败时取消其余项并返回该错误。
+async fn fetch(
+    fetcher: &mut Fetcher,
+    items: Vec<Item>,
+    progress: &watch::Sender<Progress>,
+) -> Result<(), Error> {
     let Split { pending, done } = blocking(move || split(items)).await??;
     progress.send_modify(|p| {
         for (id, len) in done {
-            p.count_segment(id.track, id.duration_us, len);
+            p.count_segment(id.track, id.name.duration_us, len);
         }
     });
     for item in pending {
@@ -58,8 +96,7 @@ pub(crate) async fn download(
             count_done(progress, id, result?);
             Ok(())
         })
-        .await?;
-    Ok(merge_input(plan, &names, layout))
+        .await
 }
 
 /// 拉取并存入各轨的 init 段，返回 `inits[t][i]`：第 t 条轨 `inits[i]` 的内容指纹。
@@ -130,17 +167,20 @@ fn split(items: Vec<Item>) -> Result<Split, Error> {
     };
     for item in items {
         match workdir::completed_len(&item.path)? {
-            Some(len) => split
-                .done
-                .push((ItemInfo::of(item.track, &item.segment), len)),
+            Some(len) => split.done.push((ItemInfo::of(&item), len)),
             None => split.pending.push(item),
         }
     }
     Ok(split)
 }
 
-/// 计划中的不连续段组换成任务目录中的文件。
-fn merge_input(plan: &Plan, names: &[Vec<SegmentName>], layout: &Layout) -> Vec<Vec<GroupTrack>> {
+/// 计划中的不连续段组换成任务目录中的文件；`pick` 从各组各轨分片的下标范围里取要的部分（不为空）。
+fn group_input(
+    plan: &Plan,
+    names: &[Vec<SegmentName>],
+    layout: &Layout,
+    pick: impl Fn(&Range<usize>) -> Range<usize>,
+) -> Vec<Vec<GroupTrack>> {
     plan.groups
         .iter()
         .map(|ranges| {
@@ -148,7 +188,7 @@ fn merge_input(plan: &Plan, names: &[Vec<SegmentName>], layout: &Layout) -> Vec<
                 .iter()
                 .enumerate()
                 .map(|(t, range)| {
-                    let names = &names[t][range.clone()];
+                    let names = &names[t][pick(range)];
                     GroupTrack {
                         init: names[0].init.map(|f| layout.init(t, f)),
                         segments: names

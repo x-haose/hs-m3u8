@@ -624,6 +624,47 @@ fn parameter_changes_within_a_group_are_rejected() {
     );
 }
 
+/// 只核对：各轨开头的分片就能发现编码不受支持、流参数与第 0 组不同；能合并的通过，不写输出。
+#[test]
+fn check_finds_what_cannot_go_into_an_mp4_from_the_first_segments() {
+    let head = |name: &str| {
+        let t = track(name);
+        TrackSegments {
+            init: t.init,
+            segments: t.segments[..1].to_vec(),
+        }
+    };
+    hs_m3u8_remux::check(
+        &[Streams::Video, Streams::Audio],
+        &[
+            group([head("fmp4_a/video"), head("fmp4_a/audio")]),
+            group([head("fmp4_b/video"), head("fmp4_b/audio")]),
+        ],
+    )
+    .unwrap();
+
+    let err = hs_m3u8_remux::check(&[Streams::All], &[group([head("ts_mp2")])]).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::Codec { codec: "mp2", .. })
+        ),
+        "实际 {err:?}"
+    );
+    let err = hs_m3u8_remux::check(
+        &[Streams::All],
+        &[group([head("ts_a")]), group([head("ts_small")])],
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::ParamsChanged { group: 1, .. })
+        ),
+        "实际 {err:?}"
+    );
+}
+
 /// MP2 音频，以及采样率低于 16 kHz 的 MP3（MP4 封装器不收）放不进 MP4。
 #[test]
 fn mp2_and_low_rate_mp3_audio_are_rejected() {

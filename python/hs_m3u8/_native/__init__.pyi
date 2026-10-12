@@ -1601,7 +1601,8 @@ class Mp4Unsupported:
 @typing.final
 class Mp4UnsupportedError(RequestError):
     r"""
-    内容放不进 MP4；可只输出本地 HLS（`Target.Hls`）。
+    内容放不进 MP4；可只输出本地 HLS（`Target.Hls`）。编码、各组的流种类与参数在下到（直播为录到）各组各轨的
+    第一个分片时就核对，组内的变化要合并时读到才报。
     """
     @property
     def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
@@ -2092,7 +2093,8 @@ class RefreshReason:
 @typing.final
 class RemuxError(HsM3u8Error):
     r"""
-    合并 MP4 失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是 `Mp4UnsupportedError`。
+    合并 MP4 或下载中核对能否合并时失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是
+    `Mp4UnsupportedError`。
     """
     def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> RemuxError:
         r"""

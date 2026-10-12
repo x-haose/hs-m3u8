@@ -19,30 +19,29 @@ use crate::hooks::{HookKind, Hooks, Purpose, run_hook};
 use crate::http::{Http, Permit};
 use crate::request::KeyOverride;
 use crate::verify::{check_fmp4, check_standalone_segment};
-use crate::{Error, Integrity, Progress, workdir};
+use crate::workdir::{self, SegmentName};
+use crate::{Error, Integrity, Progress};
 
-/// 一项下载：第 `track` 条轨的分片，`path` 为写入任务目录的位置。
+/// 一项下载：第 `track` 条轨的分片，`name` 为它在任务目录中的名字，`path` 为由名字得出的写入位置。
 pub(crate) struct Item {
     pub track: usize,
     pub segment: Box<Segment>,
+    pub name: SegmentName,
     pub path: PathBuf,
 }
 
-/// 随结果返回的项的信息：哪条轨的哪个分片，以及它的声明时长。
+/// 随结果返回的项的信息：哪条轨的哪个分片（序号、声明时长、所在的组等见 `name`）。
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ItemInfo {
     pub track: usize,
-    pub sequence: u64,
-    /// EXTINF 声明的时长，微秒
-    pub duration_us: u64,
+    pub name: SegmentName,
 }
 
 impl ItemInfo {
-    pub(crate) fn of(track: usize, segment: &Segment) -> Self {
+    pub(crate) fn of(item: &Item) -> Self {
         ItemInfo {
-            track,
-            sequence: segment.sequence,
-            duration_us: segment.duration_us,
+            track: item.track,
+            name: item.name,
         }
     }
 }
@@ -182,16 +181,17 @@ fn segment_error(track: usize, segment: &Segment, error: Error) -> Error {
 
 /// 一个分片成功后计入进度；`len` 为写入的字节数。
 pub(crate) fn count_done(progress: &watch::Sender<Progress>, id: ItemInfo, len: u64) {
-    progress.send_modify(|p| p.count_segment(id.track, id.duration_us, len));
+    progress.send_modify(|p| p.count_segment(id.track, id.name.duration_us, len));
 }
 
 async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
+    let id = ItemInfo::of(&item);
     let Item {
         track,
         segment,
         path,
+        ..
     } = item;
-    let id = ItemInfo::of(track, &segment);
     let data = fetch_segment(&ctx, &segment, &cancel)
         .await
         .map_err(|e| segment_error(track, &segment, e));
