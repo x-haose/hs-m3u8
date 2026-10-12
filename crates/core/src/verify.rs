@@ -38,9 +38,9 @@ impl Fmp4Error {
     }
 }
 
-/// fMP4 分片或 init 段：以认得的 ISO BMFF box 开头，顶层 box 首尾相接、恰好铺满数据。只看开头时，截断的分片（源站给出
-/// 没写完的文件）能通过，合并时 mov 解复用器按 mdat 声明的长度越过它，读进下一个分片的字节。最后一个 box 的长度写为
-/// 0（到数据末尾）时改写成实际长度：合并时一条轨的 init 段与分片接成一个输入读，到末尾就成了到所有分片的末尾。
+/// fMP4 分片或 init 段：以认得的 ISO BMFF box 开头，顶层 box 首尾相接、恰好铺满数据（没写完的分片合并时，mov 解复用器
+/// 按 mdat 声明的长度读进下一个分片的字节）。最后一个 box 的长度写为 0（到数据末尾）时改写成实际长度：合并时一条轨的
+/// init 段与分片接成一个输入读，到末尾就成了到所有分片的末尾。
 pub(crate) fn check_fmp4(data: &mut [u8]) -> Result<(), Fmp4Error> {
     const BOXES: [&[u8; 4]; 9] = [
         b"ftyp", b"styp", b"moof", b"moov", b"sidx", b"emsg", b"prft", b"free", b"skip",

@@ -189,7 +189,6 @@ pub(crate) fn io_error(action: &'static str, path: &Path) -> impl FnOnce(io::Err
     }
 }
 
-/// 内容放不进 MP4 的归入 [`Unsupported::Mp4`]，其余为 [`Error::Remux`]。
 impl From<hs_m3u8_hls::SelectError> for Error {
     fn from(error: hs_m3u8_hls::SelectError) -> Self {
         Error::Select(error)
