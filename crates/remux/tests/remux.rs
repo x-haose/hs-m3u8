@@ -731,24 +731,26 @@ fn eac3_with_fewer_than_six_blocks_per_frame_is_rejected() {
     );
 }
 
-/// MP2 音频放不进 MP4；采样率低于 16 kHz 的 MP3 也放不进，报出采样率。
+/// MP2 音频放不进 MP4；TS 里的 Opus 也不收（只收 fMP4 里的）；采样率低于 16 kHz 的 MP3 也放不进，报出采样率。
 #[test]
-fn mp2_and_low_rate_mp3_audio_are_rejected() {
+fn mp2_opus_in_ts_and_low_rate_mp3_audio_are_rejected() {
     let dir = work_dir("rejected_audio");
     let output = dir.join("out.mp4");
 
-    let err = remux(&[Streams::All], &[group([track("ts_mp2")])], &output).unwrap_err();
-    assert!(
-        matches!(
-            err,
-            Error::Unsupported(Unsupported::Codec {
-                kind: StreamKind::Audio,
-                codec: "mp2",
-                ..
-            })
-        ),
-        "实际 {err:?}"
-    );
+    for (name, expected) in [("ts_mp2", "mp2"), ("ts_opus", "opus")] {
+        let err = remux(&[Streams::All], &[group([track(name)])], &output).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Unsupported(Unsupported::Codec {
+                    kind: StreamKind::Audio,
+                    codec,
+                    ..
+                }) if codec == expected
+            ),
+            "{name}：实际 {err:?}"
+        );
+    }
     let err = remux(&[Streams::All], &[group([track("ts_mp3_8k")])], &output).unwrap_err();
     assert!(
         matches!(

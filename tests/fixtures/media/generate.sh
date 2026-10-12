@@ -69,8 +69,8 @@ ts_segments ts_b "${b_src[@]}" "${h264[@]}" "${aac[@]}"
 fmp4_split fmp4_a "${a_src[@]}"
 fmp4_split fmp4_b "${b_src[@]}"
 
-# 编码与参数：分辨率与前面的组不同（合并应报参数变化）；HEVC、AC-3、E-AC-3（5.1 声道）、MP3（支持）；MP2 与 8 kHz
-# 的 MP3 音频（不支持）
+# 编码与参数：分辨率与前面的组不同（合并应报参数变化）；HEVC、AC-3、E-AC-3（5.1 声道）、MP3（支持）；MP2、8 kHz
+# 的 MP3 与 TS 里的 Opus 音频（不支持）
 read -r -a small_src <<< "$(source_args testsrc2 160x90 440 1)"
 ts_segments ts_small "${small_src[@]}" "${h264[@]}" "${aac[@]}"
 read -r -a one_src <<< "$(source_args testsrc2 320x180 440 1)"
@@ -80,6 +80,7 @@ ts_segments ts_ac3 "${one_src[@]}" "${h264[@]}" -c:a ac3 -ac 6 -b:a 384k
 ts_segments ts_eac3 "${one_src[@]}" "${h264[@]}" -c:a eac3 -ac 6 -b:a 384k
 ts_segments ts_mp2 "${one_src[@]}" "${h264[@]}" -c:a mp2 -b:a 64k
 ts_segments ts_mp3_8k "${one_src[@]}" "${h264[@]}" -c:a libmp3lame -ar 8000 -b:a 16k
+ts_segments ts_opus "${one_src[@]}" "${h264[@]}" -c:a libopus -b:a 48k
 # 只出现在 fMP4 里的编码：AV1 与 Opus、VP9 与 FLAC、H.264 与 ALAC
 read -r -a tiny_src <<< "$(source_args testsrc2 160x90 440 2)"
 fmp4_muxed fmp4_av1_opus "${tiny_src[@]}" -c:v libaom-av1 -cpu-used 8 -g 25 -b:v 100k -c:a libopus -b:a 48k

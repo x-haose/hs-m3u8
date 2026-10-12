@@ -11,7 +11,8 @@
 //!   一致，参数随帧携带的（TS 与打包音频）在组内也不能变；每路流的解码时间戳必须严格递增（组内不能往回跳或
 //!   重复）。
 //! - 只接受 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、MP3、FLAC、Opus、ALAC 音频，与 FFmpeg 构建启用的组件
-//!   一致；MP3 的采样率须不低于 16 kHz，TS 与打包音频里的 E-AC-3 每帧须为 6 块、只有一个独立子流（MP4 封装器的限制）。
+//!   一致；TS 与打包音频里只收其中能逐帧读出参数的 H.264、HEVC、AAC、AC-3、E-AC-3、MP3。MP3 的采样率须不低于
+//!   16 kHz，TS 与打包音频里的 E-AC-3 每帧须为 6 块、只有一个独立子流（MP4 封装器的限制）。
 //!
 //! 输出写完回读核对每路流的包数并落盘；失败时输出上可能留有写了一半的文件。输出要么完整、要么不存在由调用方
 //! 写到临时路径、成功后改名、失败时删除来保证。错误信息已包含原因，不经 `source()` 重复给出。
@@ -233,7 +234,8 @@ pub enum Error {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unsupported {
     #[error(
-        "第 {group} 组第 {track} 条轨的{kind}编码 {codec} 放不进 MP4（只支持 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、MP3、FLAC、Opus、ALAC 音频）"
+        "第 {group} 组第 {track} 条轨的{kind}编码 {codec} 放不进 MP4（{}）",
+        supported_codecs()
     )]
     Codec {
         group: usize,
@@ -408,7 +410,7 @@ fn open_selected(
         };
         let id = stream.parameters().id();
         let shape = ffi::shape(&stream, kind);
-        check_codec(id, &shape, group, track).map_err(Error::Unsupported)?;
+        check_codec(id, &shape, input.standalone(), group, track).map_err(Error::Unsupported)?;
         selected.push(Selected {
             index: stream.index(),
             time_base: stream.time_base(),
@@ -419,48 +421,81 @@ fn open_selected(
     Ok((input, selected))
 }
 
+/// MP4 能放的编码：FFmpeg 的编码 ID、流种类与报错时用的名称。参数随帧携带的输入（TS 与打包音频）要逐包核对参数
+/// （MP4 的一条轨只有一个样本描述），只收其中能逐帧读出参数的（见 [`Inband::of`]）。
+const MP4_CODECS: [(codec::Id, StreamKind, &str); 11] = [
+    (codec::Id::H264, StreamKind::Video, "H.264"),
+    (codec::Id::HEVC, StreamKind::Video, "HEVC"),
+    (codec::Id::AV1, StreamKind::Video, "AV1"),
+    (codec::Id::VP9, StreamKind::Video, "VP9"),
+    (codec::Id::AAC, StreamKind::Audio, "AAC"),
+    (codec::Id::AC3, StreamKind::Audio, "AC-3"),
+    (codec::Id::EAC3, StreamKind::Audio, "E-AC-3"),
+    (codec::Id::MP3, StreamKind::Audio, "MP3"),
+    (codec::Id::FLAC, StreamKind::Audio, "FLAC"),
+    (codec::Id::OPUS, StreamKind::Audio, "Opus"),
+    (codec::Id::ALAC, StreamKind::Audio, "ALAC"),
+];
+
 /// MP4 封装器收的 MP3 最低采样率，Hz（FFmpeg 9.0.2 movenc 的 mov_init）。
 const MP3_MIN_SAMPLE_RATE: u32 = 16_000;
 
-/// 编码能否放进 MP4。
+/// 编码 `id` 能否放进 MP4；`standalone` 为输入没有 init 段（TS 与打包音频）。
+fn accepts(id: codec::Id, standalone: bool) -> bool {
+    MP4_CODECS.iter().any(|&(c, ..)| c == id) && (!standalone || Inband::of(id).is_some())
+}
+
+/// [`Unsupported::Codec`] 报错时列出的支持的编码。
+fn supported_codecs() -> String {
+    let list = |standalone: bool| {
+        let names = |kind: StreamKind| {
+            MP4_CODECS
+                .iter()
+                .filter(|&&(id, k, _)| k == kind && accepts(id, standalone))
+                .map(|&(.., name)| name)
+                .collect::<Vec<_>>()
+                .join("、")
+        };
+        format!(
+            "{} 视频与 {} 音频",
+            names(StreamKind::Video),
+            names(StreamKind::Audio)
+        )
+    };
+    format!(
+        "fMP4 里支持 {}，TS 与打包音频里支持 {}",
+        list(false),
+        list(true)
+    )
+}
+
+/// 编码能否放进 MP4；`standalone` 为输入没有 init 段。
 fn check_codec(
     id: codec::Id,
     shape: &Shape,
+    standalone: bool,
     group: usize,
     track: usize,
 ) -> Result<(), Unsupported> {
-    let accepted = match *shape {
-        Shape::Video { .. } => matches!(
-            id,
-            codec::Id::H264 | codec::Id::HEVC | codec::Id::AV1 | codec::Id::VP9
-        ),
-        Shape::Audio { sample_rate, .. } => match id {
-            codec::Id::MP3 if sample_rate < MP3_MIN_SAMPLE_RATE => {
-                return Err(Unsupported::Mp3SampleRate {
-                    group,
-                    track,
-                    sample_rate,
-                });
-            }
-            codec::Id::AAC
-            | codec::Id::AC3
-            | codec::Id::EAC3
-            | codec::Id::MP3
-            | codec::Id::FLAC
-            | codec::Id::OPUS
-            | codec::Id::ALAC => true,
-            _ => false,
-        },
-    };
-    if accepted {
-        Ok(())
-    } else {
-        Err(Unsupported::Codec {
+    if !accepts(id, standalone) {
+        return Err(Unsupported::Codec {
             group,
             track,
             kind: shape.kind(),
             codec: id.name(),
-        })
+        });
+    }
+    match *shape {
+        Shape::Audio { sample_rate, .. }
+            if id == codec::Id::MP3 && sample_rate < MP3_MIN_SAMPLE_RATE =>
+        {
+            Err(Unsupported::Mp3SampleRate {
+                group,
+                track,
+                sample_rate,
+            })
+        }
+        _ => Ok(()),
     }
 }
 
@@ -478,7 +513,7 @@ struct Source {
     input: Input,
     /// 按输入流下标；None 表示该流不进输出
     map: Vec<Option<Mapping>>,
-    /// 按输入流下标；进输出、参数随帧携带且读得出的流为 Some
+    /// 按输入流下标；进输出、参数随帧携带的流为 Some
     inband: Vec<Option<Inband>>,
     /// 已读出、待写入的包及其映射；包一定带 DTS
     queue: VecDeque<(Packet, Mapping)>,
@@ -505,7 +540,8 @@ impl Source {
                 time_base: s.time_base,
             });
             if input.standalone() {
-                inband[s.index] = Inband::of(s.id);
+                inband[s.index] =
+                    Some(Inband::of(s.id).expect("check_codec 只收能逐帧读出参数的编码"));
             }
         }
         Source {
