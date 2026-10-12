@@ -912,7 +912,7 @@ async fn interrupted_swaps_are_recovered_before_anything_else() {
     std::fs::write(&temp, "写了一半").unwrap();
     std::fs::write(&aside, "旧").unwrap();
     let record = serde_json::json!({
-        "format_version": 7,
+        "format_version": 8,
         "swapped": false,
         "outputs": [{"kind": "mp4", "target": target, "fingerprint": "0123456789abcdef"}],
     });

@@ -31,7 +31,7 @@ async fn failed_job(dir: &Path) -> PathBuf {
 /// 在任务目录 `work` 里记下 MP4 输出 `target` 换上没做完，返回它的临时名与挪开的名字。
 fn record_unfinished(work: &Path, target: &Path) -> (PathBuf, PathBuf) {
     let record = serde_json::json!({
-        "format_version": 7,
+        "format_version": 8,
         "swapped": false,
         "outputs": [{"kind": "mp4", "target": target, "fingerprint": FINGERPRINT}],
     });
