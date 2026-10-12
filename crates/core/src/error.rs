@@ -4,8 +4,8 @@
 //! - 改请求再试：[`Error::InvalidInput`]；[`Error::OutputExists`]（要求覆盖）；[`Error::OutputOccupied`]（换路径）；
 //!   [`Error::Select`]（选轨偏好与来源不符）；[`Error::LiveNotEnabled`]（开启直播录制）；[`Unsupported::Mp4`]、
 //!   [`Unsupported::Hls`]（改用另一种输出）；
-//! - 来源本身不行，同样的请求再试也不会成功：[`Error::Playlist`]、[`Error::NotMediaPlaylist`]、
-//!   [`Error::Unsupported`] 的其余各项、[`Error::Integrity`]、[`Error::KeyLength`]；
+//! - 来源本身不行，同样的请求再试也不会成功：[`Error::Playlist`]（结尾截断的除外，多为服务器还没写完，可重试）、
+//!   [`Error::NotMediaPlaylist`]、[`Error::Unsupported`] 的其余各项、[`Error::Integrity`]、[`Error::KeyLength`]；
 //! - 网络：[`Error::Http`]，看 [`HttpError::retryable`]；
 //! - 源站给出没写完的内容：[`Error::Incomplete`]，可重试；
 //! - 说明出在哪里、看包着的原因：[`Error::Segment`]、[`Error::Key`]（哪个分片或 key）、[`Error::LiveStalled`]（直播

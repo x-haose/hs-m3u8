@@ -303,7 +303,8 @@ exception! {
 }
 
 exception! {
-    /// 来源本身不行，同样的请求再试也不会成功。
+    /// 来源本身不行，同样的请求再试也不会成功；播放列表结尾截断（`Malformed.Truncated`）的除外，多为服务器还没写完，
+    /// `retryable` 为真。
     pub struct SourceError extends HsM3u8Error, subclass {}
 }
 

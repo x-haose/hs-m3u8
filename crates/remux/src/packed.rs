@@ -315,9 +315,9 @@ fn item(format: Format, data: &[u8]) -> Option<Item> {
     })
 }
 
-/// 损坏处之后能从 `at` 重新同步：这里是一个完整的标签，或一个完整的帧且帧头参数与这条轨开头的帧相同。还没有开头的帧
-/// 时，要求它之后紧接分片末尾、ID3v1 标签、另一个标签或帧。只看帧头是否合法时，损坏的字节里碰巧像帧头的地方会被当成
-/// 同步点，切出的杂字节再被逐包核对当作参数变了。
+/// 损坏处之后能从 `at` 重新同步：这里是一个完整的标签，或一个完整的帧且帧头参数与这条轨开头的帧相同（损坏的字节里
+/// 碰巧会有合法的帧头，从那里切出的杂字节会被逐包核对当作参数变了）。还没有开头的帧时，要求它之后紧接分片末尾、
+/// ID3v1 标签、另一个标签或帧。
 fn synced(data: &[u8], at: usize, format: Format, reference: Option<&frame::Header>) -> bool {
     let rest = &data[at..];
     let Some(Item { len, key }) = item(format, rest).filter(|i| i.len <= rest.len()) else {

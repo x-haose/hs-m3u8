@@ -494,7 +494,7 @@ class Hooks:
     def on_segment(self, url: builtins.str, data: bytes, /) -> bytes:
         r"""
         在解密之前变换分片（如去掉伪装成图片的前缀字节），返回变换后的内容。`url` 为播放列表中的分片地址；init 段
-        不经过此回调。
+        不经过此回调。每次尝试（含重试）调用一次：内容没写完要重新取时，同一个分片会再经过它，那时的 `data` 是截断的。
         """
 
 class HsM3u8Error(builtins.Exception):
@@ -2762,7 +2762,8 @@ class Source:
 
 class SourceError(HsM3u8Error):
     r"""
-    来源本身不行，同样的请求再试也不会成功。
+    来源本身不行，同样的请求再试也不会成功；播放列表结尾截断（`Malformed.Truncated`）的除外，多为服务器还没写完，
+    `retryable` 为真。
     """
     def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> SourceError:
         r"""
