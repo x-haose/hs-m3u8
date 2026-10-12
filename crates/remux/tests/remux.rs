@@ -869,6 +869,56 @@ fn audio_in_pes_flagged_corrupt_but_intact_is_kept() {
     }
 }
 
+/// 组内音频换了 PID（PMT 更新、漏标 EXT-X-DISCONTINUITY）：报错，不静默跳过新 PID 上的包；一开始就有两路音频时取
+/// 第一路，不算换了 PID。
+#[test]
+fn a_pid_change_within_a_group_is_rejected() {
+    let dir = work_dir("pid_change");
+    let output = dir.join("out.mp4");
+
+    let err = remux(&[Streams::All], &[group([track("ts_pid_change")])], &output).unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::StreamChangedInGroup {
+                group: 0,
+                track: 0,
+                kind: StreamKind::Audio
+            })
+        ),
+        "实际 {err:?}"
+    );
+    // 只取视频时新的音频流与它无关
+    remux(
+        &[Streams::Video],
+        &[group([track("ts_pid_change")])],
+        &output,
+    )
+    .unwrap();
+
+    // 一开始就有两路音频：取第一路，另一路一直列在节目里，不算换了 PID
+    let two = track("ts_two_audio");
+    let report = remux(&[Streams::All], &[group([two.clone()])], &output).unwrap();
+    ffmpeg::init().unwrap();
+    let mut ictx = ffmpeg::format::input(&two.segments[0]).unwrap();
+    let first_audio = ictx
+        .streams()
+        .find(|s| s.parameters().medium() == ffmpeg::media::Type::Audio)
+        .unwrap()
+        .index();
+    let mut packets = 0;
+    loop {
+        let mut packet = ffmpeg::Packet::empty();
+        match packet.read(&mut ictx) {
+            Ok(()) => packets += u64::from(packet.stream() == first_audio),
+            Err(ffmpeg::Error::Eof) => break,
+            Err(e) => panic!("{e}"),
+        }
+    }
+    assert_eq!(report.streams[1].packets, packets);
+}
+
 /// 同一个 PID 中途从 AAC 换成 AC-3（漏标 EXT-X-DISCONTINUITY）：编码在组内变了。
 #[test]
 fn a_codec_switch_on_one_pid_is_rejected() {

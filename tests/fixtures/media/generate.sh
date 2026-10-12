@@ -156,6 +156,20 @@ change_enc=(-c:v libx264 -preset veryfast -bf 0 -g 10 -b:v 150k "${aac[@]}" -f m
 "${ff[@]}" -f lavfi -i testsrc2=size=160x90:rate=10 -f lavfi -i sine=frequency=440:sample_rate=44100 -t 1 \
   -output_ts_offset 1.1 "${change_enc[@]}" "$DIR/ts_param_change/seg1.ts"
 
+# 组内换音频 PID：两个时间戳相接的分片，第二个的音频 PID 从 0x101 换成 0x102
+rm -rf -- "${DIR:?}/ts_pid_change"
+mkdir -p "$DIR/ts_pid_change"
+pid_src=(-f lavfi -i testsrc2=size=320x180:rate=10 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 1)
+"${ff[@]}" "${pid_src[@]}" "${change_enc[@]}" "$DIR/ts_pid_change/seg0.ts"
+"${ff[@]}" "${pid_src[@]}" -output_ts_offset 1.1 -streamid 1:0x102 "${change_enc[@]}" "$DIR/ts_pid_change/seg1.ts"
+
+# 一开始就有两路音频（如双语）：取第一路，另一路不进输出，不算换了 PID
+rm -rf -- "${DIR:?}/ts_two_audio"
+mkdir -p "$DIR/ts_two_audio"
+"${ff[@]}" -f lavfi -i testsrc2=size=320x180:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 \
+  -f lavfi -i sine=frequency=660:sample_rate=48000 -t 1 -map 0:v -map 1:a -map 2:a "${h264[@]}" "${aac[@]}" \
+  -f mpegts "$DIR/ts_two_audio/seg0.ts"
+
 # 组内换色度采样：两个时间戳相接、宽高相同的纯视频分片，第二个为 4:4:4
 rm -rf -- "${DIR:?}/ts_chroma_change"
 mkdir -p "$DIR/ts_chroma_change"

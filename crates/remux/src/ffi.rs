@@ -1,9 +1,10 @@
-//! 本 crate 的全部 unsafe：直接读写 AVCodecParameters 字段、读解复用器给流用的解析器的状态，ffmpeg-next 没有对应的
-//! 安全接口。
+//! 本 crate 的全部 unsafe：直接读写 AVCodecParameters 字段，读解复用器给流用的解析器的状态、输入的节目列表，查像素
+//! 格式描述表，ffmpeg-next 没有对应的安全接口。
 
 use std::ffi::CStr;
 
 use ffmpeg::codec;
+use ffmpeg::format;
 use ffmpeg::format::stream::{Stream, StreamMut};
 use ffmpeg_next as ffmpeg;
 
@@ -42,6 +43,32 @@ pub(crate) fn extradata(stream: &Stream<'_>) -> Vec<u8> {
         }
         _ => Vec::new(),
     }
+}
+
+/// 输入的节目（AVProgram）里列不列出流 `index`：TS 每读到一份 PMT，FFmpeg 先清空节目的流列表再按它重新加入
+/// （mpegts.c 的 clear_avprogram），列表即最近一份 PMT 里的流。没有节目的输入（不是 TS）为 None。
+pub(crate) fn in_program(ictx: &format::context::Input, index: usize) -> Option<bool> {
+    // SAFETY: 输入上下文在 ictx 存活期间有效；programs 指向 nb_programs 个有效的节目指针，各节目的 stream_index 指向
+    // nb_stream_indexes 个下标，都归输入上下文所有；此处只读。
+    let programs = unsafe {
+        let ctx = &*ictx.as_ptr();
+        if ctx.nb_programs == 0 || ctx.programs.is_null() {
+            return None;
+        }
+        std::slice::from_raw_parts(ctx.programs, ctx.nb_programs as usize)
+    };
+    Some(programs.iter().any(|&program| {
+        // SAFETY: 同上，节目指针非空且有效。
+        let program = unsafe { &*program };
+        if program.stream_index.is_null() {
+            return false;
+        }
+        // SAFETY: 同上。
+        let indexes = unsafe {
+            std::slice::from_raw_parts(program.stream_index, program.nb_stream_indexes as usize)
+        };
+        indexes.iter().any(|&i| i as usize == index)
+    }))
 }
 
 /// 流的 profile 与每帧的采样点数（codecpar 的 profile 与 frame_size，探测时由解码器得出；不知道时分别为负数与 0）。

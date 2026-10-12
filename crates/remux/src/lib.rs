@@ -311,6 +311,16 @@ pub enum Unsupported {
         track: usize,
         kind: StreamKind,
     },
+    /// TS 的一条轨在组内换了要取的那一路的 PID：PMT 更新后原来那路不再列出、换成了另一路（RFC 8216 要求这时标
+    /// EXT-X-DISCONTINUITY）。不报的话新 PID 的包都不进输出
+    #[error(
+        "第 {group} 组第 {track} 条轨的{kind}流在组内换了 PID（PMT 更新后原来那路不再列出），无法放进同一条 MP4 轨"
+    )]
+    StreamChangedInGroup {
+        group: usize,
+        track: usize,
+        kind: StreamKind,
+    },
     /// 参数随帧携带的分片（TS 与打包音频）里，这路流在组内中途换了编码或编码参数（采样率、声道、画面宽高等）：MP4
     /// 的一条轨只有一个样本描述
     #[error("第 {group} 组第 {track} 条轨的{kind}编码参数在组内变了，无法放进同一条 MP4 轨")]
@@ -712,8 +722,8 @@ impl Source {
             if !self.input.read(&mut packet, self.group, self.track)? {
                 return Ok(None);
             }
-            // TS 可能在文件中途出现新流，其下标超出建立映射时的流数
             let Some(mapping) = self.map.get(packet.stream()).copied().flatten() else {
+                self.check_replaced(packet.stream())?;
                 continue;
             };
             if packet.dts().is_none() {
@@ -755,6 +765,33 @@ impl Source {
                 }
             }
             return Ok(Some((packet, mapping)));
+        }
+    }
+
+    /// 读到不进输出的流 `index` 的包：TS 的 PMT 中途把这条轨要取的一路换成了它（原来那路已不在节目里、它在）时报错；
+    /// 其余（同类的另一路、定时元数据等，或打开时探测读到了后面的 PMT 而先建出的流）跳过。
+    fn check_replaced(&self, index: usize) -> Result<(), Error> {
+        let ictx = self.input.context();
+        // TS 可能在文件中途出现新流，其下标超出建立映射时的流数
+        let medium = ictx
+            .stream(index)
+            .expect("包所属的流存在")
+            .parameters()
+            .medium();
+        let replaced = self.map.iter().enumerate().find_map(|(selected, mapping)| {
+            mapping.filter(|m| {
+                m.kind.medium() == medium
+                    && ffi::in_program(ictx, selected) == Some(false)
+                    && ffi::in_program(ictx, index) == Some(true)
+            })
+        });
+        match replaced {
+            Some(mapping) => Err(Error::Unsupported(Unsupported::StreamChangedInGroup {
+                group: self.group,
+                track: self.track,
+                kind: mapping.kind,
+            })),
+            None => Ok(()),
         }
     }
 

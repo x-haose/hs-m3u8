@@ -260,6 +260,16 @@ variants! {
             /// 流的种类
             kind: StreamKind,
         },
+        /// TS 的一条轨在这一组里换了要取的那一路的 PID（PMT 更新后原来那路不再列出）
+        #[pyo3(constructor = (*, group, track, kind))]
+        StreamChangedInGroup {
+            /// 第几个不连续段组
+            group: usize,
+            /// 第几条轨
+            track: usize,
+            /// 流的种类
+            kind: StreamKind,
+        },
         /// 这一组里中途换了编码或编码参数（采样率、声道、画面宽高等），只出在参数随帧携带的 TS 与打包音频里
         #[pyo3(constructor = (*, group, track, kind))]
         ParamsChangedInGroup {
@@ -533,6 +543,13 @@ impl From<core::Mp4Unsupported> for Mp4Unsupported {
                 track,
                 kind: kind.into(),
             },
+            U::StreamChangedInGroup { group, track, kind } => {
+                Mp4Unsupported::StreamChangedInGroup {
+                    group,
+                    track,
+                    kind: kind.into(),
+                }
+            }
             U::ParamsChangedInGroup { group, track, kind } => {
                 Mp4Unsupported::ParamsChangedInGroup {
                     group,
