@@ -8,14 +8,11 @@ use ffmpeg::{Packet, Rational, Rescale, format, media};
 use ffmpeg_next as ffmpeg;
 
 use crate::input::{new_chain, open_chain, read_packet};
-use crate::standalone::{self, Format, Head};
+use crate::standalone::{Format, Head, Item, is_id3v1, item};
 use crate::{Error, TrackSegments, chain, frame};
 
 /// 打包音频时间戳的时钟（90 kHz）。
 const CLOCK_90K: Rational = Rational(1, 90_000);
-
-/// ID3v1 标签的字节数（MP3 文件末尾，以 `TAG` 开头）。
-const ID3V1_LEN: usize = 128;
 
 /// 打包音频一条轨在一组里的分片。各片按帧头切出音频帧（见 [`cut_frames`]），只把音频帧相连、作为一个输入读：格式
 /// 只在开头识别一次，只有一两帧的分片也读得出，包在输入里的字节位置与分片一一对应。FFmpeg 的裸音频解复用器从 0 起按
@@ -236,14 +233,6 @@ struct Cut {
     discarded: u64,
 }
 
-/// 一个 ID3v2 标签或帧。
-struct Item {
-    /// 字节数，可能超出数据
-    len: usize,
-    /// 帧头的参数（重新同步时比较，见 [`synced`]）；标签为 None
-    key: Option<frame::Header>,
-}
-
 /// 一个打包音频分片从 `start`（开头的 ID3 标签之后）起切出音频帧。跳过帧之间的 ID3v2 标签、末尾的 ID3v1 标签，以及
 /// MP3 第一帧为 Xing、Info 或 VBRI 标签帧时的这一帧（它不含音频，FFmpeg 读单个文件时同样跳过）。损坏处跳过并计数，与
 /// FFmpeg 读裸音频时重新同步一样：认不出的字节（含自由格式的 MP3）、超出分片的帧或标签，跳到下一个同步点（见
@@ -267,7 +256,7 @@ fn cut_frames(
         if is_id3v1(rest) {
             break;
         }
-        let Some(Item { len, key }) = item(format, rest).filter(|i| i.len <= rest.len()) else {
+        let Some(Item { len, header }) = item(format, rest).filter(|i| i.len <= rest.len()) else {
             let next = (at + 1..data.len())
                 .find(|&next| synced(data, next, format, reference.as_ref()))
                 .unwrap_or(data.len());
@@ -276,10 +265,11 @@ fn cut_frames(
             at = next;
             continue;
         };
-        let audio = key.is_some() && !(first_frame && format == Format::Mp3 && vbr_tag_frame(rest));
-        if let Some(key) = key {
+        let audio =
+            header.is_some() && !(first_frame && format == Format::Mp3 && vbr_tag_frame(rest));
+        if let Some(header) = header {
             first_frame = false;
-            reference.get_or_insert(key);
+            reference.get_or_insert(header);
         }
         if audio {
             let range = at as u64..(at + len) as u64;
@@ -297,38 +287,17 @@ fn cut_frames(
     cut
 }
 
-/// `data` 是分片末尾的 ID3v1 标签（128 字节，以 `TAG` 开头）。
-fn is_id3v1(data: &[u8]) -> bool {
-    data.len() == ID3V1_LEN && data.starts_with(b"TAG")
-}
-
-/// `data` 开头的 ID3v2 标签或 `format` 的帧；都不是、或是读不出帧长的自由格式 MP3 时为 None。
-fn item(format: Format, data: &[u8]) -> Option<Item> {
-    if let Some(len) = standalone::tag_len(data) {
-        return Some(Item {
-            len: usize::try_from(len).ok()?,
-            key: None,
-        });
-    }
-    let framing = format.framing().expect("TS 分片不按打包音频读");
-    let (key, len) = frame::header(framing, data)?;
-    Some(Item {
-        len: len?,
-        key: Some(key),
-    })
-}
-
 /// 损坏处之后能从 `at` 重新同步：这里是一个完整的标签，或一个完整的帧且帧头参数与这条轨开头的帧相同（损坏的字节里
 /// 碰巧会有合法的帧头，从那里切出的杂字节会被逐包核对当作参数变了）。还没有开头的帧时，要求它之后紧接分片末尾、
 /// ID3v1 标签、另一个标签或帧。
 fn synced(data: &[u8], at: usize, format: Format, reference: Option<&frame::Header>) -> bool {
     let rest = &data[at..];
-    let Some(Item { len, key }) = item(format, rest).filter(|i| i.len <= rest.len()) else {
+    let Some(Item { len, header }) = item(format, rest).filter(|i| i.len <= rest.len()) else {
         return false;
     };
-    match (key, reference) {
+    match (header, reference) {
         (None, _) => true,
-        (Some(key), Some(reference)) => key == *reference,
+        (Some(header), Some(reference)) => header == *reference,
         (Some(_), None) => {
             let next = &rest[len..];
             next.is_empty() || is_id3v1(next) || item(format, next).is_some()

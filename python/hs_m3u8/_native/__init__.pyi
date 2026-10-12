@@ -792,7 +792,7 @@ class IntegrityFailure:
     @typing.final
     class Padding(IntegrityFailure):
         r"""
-        解密后填充不合法：多为 key 不对（IV 不对不会这样），或数据损坏
+        解密后填充不合法：多为 key 不对（IV 不对不会这样），或数据损坏；解出的是截断的媒体数据时报 `IncompleteError`
         """
         __match_args__ = ()
         def __new__(cls) -> IntegrityFailure.Padding: ...
@@ -800,8 +800,8 @@ class IntegrityFailure:
     @typing.final
     class CipherLength(IntegrityFailure):
         r"""
-        密文长度不是 16 的整数倍，整块部分解出的内容也认不出（如源站返回的是错误页面）；认得出的报
-        `IncompleteError`
+        密文长度不是 16 的整数倍，整块部分解出的不是截断的媒体数据（如源站返回的是错误页面、完整的内容后面多了
+        字节）；是的报 `IncompleteError`
         """
         __match_args__ = ("length",)
         @property

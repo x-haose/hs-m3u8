@@ -88,20 +88,20 @@ fn recognized(data: &[u8]) -> bool {
         .is_some()
 }
 
-/// 解密失败的分片：密文不足整块、或填充不合法而解出的明文是只差没写完的 fMP4（截在整块处，见 [`fmp4::check`]），
-/// 或密文不足整块而整块部分解出的明文认得出是 TS 或打包音频时，为没写完；其余密文不足整块的为长度不对（如源站返回
-/// 的是错误页面），填充不合法的多为 key 不对。
+/// 解密失败的分片：解出的明文（密文不足整块时为整块部分，都不去填充）是截断的媒体数据时为没写完（fMP4 见
+/// [`fmp4::check`]，其余见 [`standalone::truncated`]）；不是的报原来的错：密文不足整块为长度不对（如源站返回的是
+/// 错误页面、完整的内容后面多了字节），填充不合法多为 key 不对。完整的内容之后的填充字节不像 box、TS 包或帧的开头，
+/// 不会被当成截断。
 pub(crate) fn decrypt_failure(error: DecryptError, container: &Container) -> ContentError {
     let (plain, otherwise) = match error {
         DecryptError::Padding { plain } => (plain, Integrity::Padding),
         DecryptError::Unaligned { len, whole } => (whole, Integrity::CipherLength(len)),
     };
-    let incomplete = match (container, &otherwise) {
-        (Container::Fmp4 { trex }, _) => fmp4::check(&plain, trex) == Err(Problem::Incomplete),
-        (Container::Standalone, Integrity::CipherLength(_)) => recognized(&plain),
-        (Container::Standalone, _) => false,
+    let truncated = match container {
+        Container::Fmp4 { trex } => fmp4::check(&plain, trex) == Err(Problem::Incomplete),
+        Container::Standalone => standalone::truncated(&plain),
     };
-    if incomplete {
+    if truncated {
         ContentError::Incomplete
     } else {
         ContentError::Invalid(otherwise)
@@ -155,23 +155,29 @@ mod tests {
     }
 
     #[test]
-    fn failed_decryption_is_incomplete_only_when_the_plaintext_is_recognized() {
+    fn failed_decryption_is_incomplete_only_when_the_plaintext_is_truncated() {
         let fmp4 = Container::Fmp4 {
             trex: HashMap::new(),
         };
         let standalone = Container::Standalone;
         let unaligned = |whole: Vec<u8>| DecryptError::Unaligned { len: 1000, whole };
-        let unfinished = [boxed(16, b"moof", 8), boxed(40, b"mdat", 0)].concat();
+        let padding = |plain: Vec<u8>| DecryptError::Padding { plain };
+        let unfinished_fmp4 = [boxed(16, b"moof", 8), boxed(40, b"mdat", 0)].concat();
+        let unfinished_ts = ts_packets(3)[..400].to_vec();
+        // 截在整块处与整块之内都是没写完
+        for (plain, container) in [(unfinished_fmp4, &fmp4), (unfinished_ts, &standalone)] {
+            assert_eq!(
+                decrypt_failure(unaligned(plain.clone()), container),
+                ContentError::Incomplete
+            );
+            assert_eq!(
+                decrypt_failure(padding(plain), container),
+                ContentError::Incomplete
+            );
+        }
+        // 错误页面、不足一块、完整的 TS 后面跟着填充（多出了字节）
         let page = b"<html>not found</html>".to_vec();
-        assert_eq!(
-            decrypt_failure(unaligned(ts_packets(3)), &standalone),
-            ContentError::Incomplete
-        );
-        assert_eq!(
-            decrypt_failure(unaligned(unfinished.clone()), &fmp4),
-            ContentError::Incomplete
-        );
-        // 错误页面、不足一块
+        let padded_ts = [ts_packets(3), vec![4; 4]].concat();
         let invalid = ContentError::Invalid(Integrity::CipherLength(1000));
         assert_eq!(
             decrypt_failure(unaligned(page.clone()), &standalone),
@@ -179,12 +185,8 @@ mod tests {
         );
         assert_eq!(decrypt_failure(unaligned(page.clone()), &fmp4), invalid);
         assert_eq!(decrypt_failure(unaligned(Vec::new()), &standalone), invalid);
-        // 填充不合法：截在整块处的 fMP4 是没写完；key 不对解出的乱码与 TS 都按填充不合法
-        let padding = |plain: Vec<u8>| DecryptError::Padding { plain };
-        assert_eq!(
-            decrypt_failure(padding(unfinished), &fmp4),
-            ContentError::Incomplete
-        );
+        assert_eq!(decrypt_failure(unaligned(padded_ts), &standalone), invalid);
+        // 填充不合法：key 不对解出的乱码、恰好在包的边界上结束的 TS
         let invalid = ContentError::Invalid(Integrity::Padding);
         assert_eq!(decrypt_failure(padding(page), &fmp4), invalid);
         assert_eq!(
