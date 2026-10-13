@@ -457,7 +457,8 @@ async fn long_id3_tags_before_packed_audio_are_skipped() {
     let size = body.len();
     let syncsafe = [size >> 21, size >> 14, size >> 7, size].map(|b| (b & 0x7F) as u8);
     let tag = [b"ID3\x04\x00\x00".as_slice(), &syncsafe, &body].concat();
-    let adts = [0xFF, 0xF1, 0x50, 0x80, 0x02, 0x1F, 0xFC];
+    // 帧头声明帧长 16 字节的一个 ADTS 帧
+    let adts = [&[0xFF, 0xF1, 0x50, 0x80, 0x02, 0x1F, 0xFC][..], &[0; 9]].concat();
     server.put("seg0.aac", [tag.as_slice(), &adts].concat());
     server.put(
         "index.m3u8",

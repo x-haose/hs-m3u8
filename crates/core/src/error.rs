@@ -86,8 +86,8 @@ pub enum Error {
     #[error("数据校验失败（{}）：{kind}", bare_url(.url))]
     Integrity { url: Box<Url>, kind: Integrity },
     /// 取到的内容没有写完，多为源站还在写这个文件，可重试：播放列表结尾截在多字节字符中间；分片或 init 段的响应
-    /// 为空、fMP4 的 box 或样本数据超出了数据，或解密失败而解出的是截断的媒体数据。分片与 init 段在下载时已按
-    /// [`crate::RetryPolicy`] 重新取过
+    /// 为空、fMP4 的 box 或样本数据超出了数据，或 TS、打包音频截在包、帧或标签中间（加密的看解出的内容）。分片与
+    /// init 段在下载时已按 [`crate::RetryPolicy`] 重新取过
     #[error("{} 的内容没有写完", bare_url(.url))]
     Incomplete { url: Box<Url> },
     #[error("任务目录 {} 无法使用：{problem}", .path.display())]

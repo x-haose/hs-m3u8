@@ -2,7 +2,7 @@
 //! 多个 ID3v2 标签）。打包音频首个样本的 PTS 写在 owner 为 `com.apple.streaming.transportStreamTimestamp` 的 ID3
 //! PRIV 帧里（90 kHz、33 位，与 TS 同一个时钟）。
 
-use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
 
 use crate::frame;
 
@@ -115,16 +115,13 @@ pub fn read_head(reader: &mut (impl Read + Seek)) -> io::Result<Option<Head>> {
     }
 }
 
-/// `data`（没有 init 段的分片的开头一段）认得出格式、且截在一个 TS 包、音频帧或 ID3v2 标签中间：
+/// 没有 init 段的分片 `data`（开头的信息为 `head`，见 [`read_head`]）截在一个 TS 包、音频帧或 ID3v2 标签中间：
 /// - TS 要前两个包的起点都是同步字，末尾不足一个包的部分也以同步字起头；
 /// - 打包音频从开头起逐个切出 ID3v2 标签或帧，最后一个超出了数据，或末尾切不出的字节比帧头或标签头短、开头与同步字
 ///   或 `ID3` 相同。中途有切不出的字节的不算。
 ///
 /// 恰好在包、帧或标签的边界上结束的看不出截断，不算。
-pub fn truncated(data: &[u8]) -> bool {
-    let Some(head) = read_head(&mut Cursor::new(data)).expect("读内存不会出错") else {
-        return false;
-    };
+pub fn truncated(data: &[u8], head: &Head) -> bool {
     if head.format == Format::Ts {
         let partial = data.len() % TS_PACKET;
         return data.get(TS_PACKET) == Some(&0x47)
@@ -399,37 +396,36 @@ mod tests {
     #[test]
     fn truncation_is_a_partial_packet_frame_or_tag_at_the_end() {
         use crate::frame::testing::{ac3_syncframe, adts_frame};
+        let cut = |data: &[u8]| truncated(data, &head(data).unwrap());
 
         // TS：末尾不足一个包、以同步字起头的是截断；整包结束、末尾跟着填充、只有一个包的不算
         let ts = ts_packets(3);
-        assert!(truncated(&ts[..400]));
-        assert!(truncated(&ts[..189]));
-        assert!(!truncated(&ts));
-        assert!(!truncated(&[ts.clone(), vec![4; 4]].concat()));
-        assert!(!truncated(&ts[..100]));
+        assert!(cut(&ts[..400]));
+        assert!(cut(&ts[..189]));
+        assert!(!cut(&ts));
+        assert!(!cut(&[ts.clone(), vec![4; 4]].concat()));
+        assert!(!cut(&ts[..100]));
 
         // ADTS：最后一帧超出数据、帧头不全是截断；整帧结束、末尾跟着填充或 ID3v1 标签的不算
         let frames = adts_frame(1, 3, 2, 20).repeat(3);
-        assert!(truncated(&frames[..50]));
-        assert!(truncated(&frames[..43]));
-        assert!(!truncated(&frames));
-        assert!(!truncated(&[frames.clone(), vec![2; 2]].concat()));
+        assert!(cut(&frames[..50]));
+        assert!(cut(&frames[..43]));
+        assert!(!cut(&frames));
+        assert!(!cut(&[frames.clone(), vec![2; 2]].concat()));
         let id3v1 = [b"TAG".as_slice(), &[0; 125]].concat();
-        assert!(!truncated(&[frames.clone(), id3v1].concat()));
+        assert!(!cut(&[frames.clone(), id3v1].concat()));
         // 截在帧之间的 ID3v2 标签里
         let timed = tag(0, &frame(b"PRIV", &priv_timestamp(1)), 0);
-        assert!(truncated(&[frames.clone(), timed[..20].to_vec()].concat()));
-        assert!(truncated(&[frames.clone(), b"ID".to_vec()].concat()));
+        assert!(cut(&[frames.clone(), timed[..20].to_vec()].concat()));
+        assert!(cut(&[frames.clone(), b"ID".to_vec()].concat()));
         // 中途有切不出的字节
         let damaged = [&frames[..20], &[0; 9], &frames[..23]].concat();
-        assert!(!truncated(&damaged));
+        assert!(!cut(&damaged));
 
         // AC-3：完整的帧之后，11 个 0x0B 的填充不是截断的帧头
         let ac3 = ac3_syncframe(8, 2, false);
-        assert!(truncated(&ac3[..100]));
-        assert!(!truncated(&[ac3, vec![0x0B; 11]].concat()));
-        assert!(!truncated(&[]));
-        assert!(!truncated(b"<html>"));
+        assert!(cut(&ac3[..100]));
+        assert!(!cut(&[ac3, vec![0x0B; 11]].concat()));
     }
 
     #[test]

@@ -607,15 +607,17 @@ async fn wrong_key_fails_integrity() {
     assert_eq!(written, 0, "校验失败的分片不应写盘");
 }
 
-/// 加密的 TS 分片没写完（截在整块之内或整块处，解出的是截在包中间的 TS）：重新取，取到完整的照常合并。源站对分片
-/// 返回错误页面、或完整的分片后面多了字节时，长度同样不是 16 的整数倍，而解出的不是截断的 TS，报密文长度不对，不重试。
+/// 加密的 TS 分片没写完，解出的是截在包中间的 TS：密文截在整块之内或整块处（解密失败），或截断的 TS 被完整地加密
+/// （解密成功，如填充恰好像合法的）。都重新取，取到完整的照常合并。源站对分片返回错误页面、或完整的分片后面多了字节
+/// 时，长度同样不是 16 的整数倍，而解出的不是截断的 TS，报密文长度不对，不重试。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_truncated_encrypted_segment_is_fetched_again() {
     let dir = test_dir("truncated_encrypted");
     let server = Server::start().await;
     let (key, iv) = ([0x01; 16], [0u8; 16]);
     server.put("key", key);
-    let [seg0, seg1] = TS_A.map(|name| encrypt(&fixture(&format!("ts_a/{name}")), &key, &iv));
+    let plain = TS_A.map(|name| fixture(&format!("ts_a/{name}")));
+    let [seg0, seg1] = plain.each_ref().map(|data| encrypt(data, &key, &iv));
     // 密文是 16 的整数倍，截到一半再多 5 字节必不是；截在整块处时避开 TS 包的边界
     let unaligned = seg0[..seg0.len() / 2 + 5].to_vec();
     let mut at_block = seg0.len() / 2 / 16 * 16;
@@ -624,7 +626,8 @@ async fn a_truncated_encrypted_segment_is_fetched_again() {
     }
     let aligned = seg0[..at_block].to_vec();
     server.put_sequence("seg0.ts", vec![unaligned, aligned, seg0.clone()]);
-    server.put("seg1.ts", seg1);
+    let cut_plain = encrypt(&plain[1][..plain[1].len() - 100], &key, &iv);
+    server.put_sequence("seg1.ts", vec![cut_plain, seg1]);
     server.put(
         "index.m3u8",
         "#EXTM3U\n#EXT-X-TARGETDURATION:1\n\
@@ -635,6 +638,7 @@ async fn a_truncated_encrypted_segment_is_fetched_again() {
     let output = run(request(server.url("index.m3u8"), &dir)).await.unwrap();
     assert_output(&output, &expected_ts_a(&dir));
     assert_eq!(server.hits("seg0.ts"), 3);
+    assert_eq!(server.hits("seg1.ts"), 2);
 
     std::fs::remove_file(dir.join("out.mp4")).unwrap();
     let mut hits = 3;
@@ -663,6 +667,24 @@ async fn a_truncated_encrypted_segment_is_fetched_again() {
         hits += 1;
         assert_eq!(server.hits("seg0.ts"), hits);
     }
+}
+
+/// 源站给出没写完的 TS 分片（截在包中间，Content-Length 与截断后的长度一致）：重新取，取到完整的照常合并。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_truncated_ts_segment_is_fetched_again() {
+    let dir = test_dir("truncated_ts");
+    let server = Server::start().await;
+    let seg0 = fixture("ts_a/seg0.ts");
+    server.put_sequence("seg0.ts", vec![seg0[..seg0.len() - 100].to_vec(), seg0]);
+    server.put("seg1.ts", fixture("ts_a/seg1.ts"));
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n#EXT-X-ENDLIST\n",
+    );
+
+    let output = run(request(server.url("index.m3u8"), &dir)).await.unwrap();
+    assert_output(&output, &expected_ts_a(&dir));
+    assert_eq!(server.hits("seg0.ts"), 2);
 }
 
 /// 源站给出没写完的 fMP4 分片（Content-Length 与截断后的长度一致）：截在 mdat 里、截在 mdat 之前（顶层 box 都完整，

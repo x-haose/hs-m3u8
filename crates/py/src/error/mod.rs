@@ -355,8 +355,8 @@ exception! {
 
 exception! {
     /// 取到的内容没有写完，多为源站还在写这个文件，稍后重试可能成功：播放列表结尾截在多字节字符中间；分片或 init 段
-    /// 的响应为空、fMP4 的 box 或样本数据超出了数据，或解密失败而解出的是截断的媒体数据。分片与 init 段在下载时已按
-    /// `RetryPolicy` 重新取过，分片的失败由 `segment` 指出是哪个。
+    /// 的响应为空、fMP4 的 box 或样本数据超出了数据，或 TS、打包音频截在包、帧或标签中间（加密的看解出的内容）。分片
+    /// 与 init 段在下载时已按 `RetryPolicy` 重新取过，分片的失败由 `segment` 指出是哪个。
     pub struct IncompleteError extends HsM3u8Error {
         /// 播放列表、分片或 init 段的地址（可能带令牌；异常的说明里只显示到路径）
         pub url: Address,
