@@ -44,7 +44,7 @@ use crate::input::Input;
 const MICROS: Rational = Rational(1, 1_000_000);
 
 /// 一个不连续段组里某条轨的分片，按播放顺序；fMP4 时 `init` 是该组使用的 init 段。fMP4 的 init 段与各分片须通过
-/// [`fmp4::check`]、最后一个 box 的长度不写 0（见 [`fmp4::seal`]）；合并时只再核对顶层 box。
+/// [`fmp4::check`]、最后一个 box 的长度不写 0（见 [`fmp4::seal`]），合并时再核对一遍（见 [`Error::Fmp4`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackSegments {
     pub init: Option<PathBuf>,
@@ -237,7 +237,7 @@ pub enum Error {
     /// 没有 init 段的分片开头认不出格式（见 [`standalone::read_head`]）
     #[error("{} 既不是 TS 也不是可识别的打包音频", .0.display())]
     Unrecognized(PathBuf),
-    /// fMP4 的 init 段或分片的顶层结构不对（见 [`fmp4::boxes`]）
+    /// fMP4 的 init 段或分片通不过核对（见 [`fmp4::check`]）
     #[error("{} 的 fMP4 结构不对：{problem}", .path.display())]
     Fmp4 {
         path: PathBuf,

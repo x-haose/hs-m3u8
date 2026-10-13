@@ -1643,7 +1643,8 @@ fn damage_before_a_gap_or_a_frameless_segment_in_packed_audio() {
 }
 
 /// 样本里 fMP4 分片的 trun 声明的样本数据恰好到分片末尾：mdat 的长度写 0 时少一个字节、或截在 mdat 之前，都看得出
-/// 没写完。合并时分片的顶层 box 没铺满、或最后一个 box 的长度写 0 都报错，不越过文件边界把下一片读成这一片的样本。
+/// 没写完。合并时同样核对：没写完（截在 mdat 里或 mdat 之前）、最后一个 box 的长度写 0 都报错，不越过文件边界把下一片
+/// 读成这一片的样本。
 #[test]
 fn fmp4_structure_is_checked() {
     use hs_m3u8_remux::fmp4::{self, Problem};
@@ -1656,7 +1657,9 @@ fn fmp4_structure_is_checked() {
         let trex = fmp4::trex_sample_sizes(&init).unwrap();
         assert_eq!(fmp4::check(&init, &trex), Ok(()), "{name}");
         let data = std::fs::read(&t.segments[0]).unwrap();
-        let boxes = fmp4::boxes(&mut Cursor::new(&data)).unwrap().unwrap();
+        let boxes = fmp4::check_reader(&mut Cursor::new(&data), &trex)
+            .unwrap()
+            .unwrap();
         let mdat = *boxes.last().unwrap();
         assert_eq!(&mdat.kind, b"mdat", "{name}");
         let mut open = data.clone();
@@ -1679,12 +1682,21 @@ fn fmp4_structure_is_checked() {
 
     let video = track("fmp4_a/video");
     let original = std::fs::read(&video.segments[0]).unwrap();
-    let boxes = fmp4::boxes(&mut Cursor::new(&original)).unwrap().unwrap();
+    let trex =
+        fmp4::trex_sample_sizes(&std::fs::read(video.init.as_ref().unwrap()).unwrap()).unwrap();
+    let boxes = fmp4::check_reader(&mut Cursor::new(&original), &trex)
+        .unwrap()
+        .unwrap();
     let mdat = boxes.last().unwrap().at as usize;
     let mut open = original.clone();
     open[mdat..mdat + 4].fill(0);
     let truncated = original[..original.len() - 10].to_vec();
-    for (name, data) in [("open", open), ("truncated", truncated)] {
+    let before_mdat = original[..mdat].to_vec();
+    for (name, data) in [
+        ("open", open),
+        ("truncated", truncated),
+        ("before_mdat", before_mdat),
+    ] {
         let path = dir.join(format!("{name}.m4s"));
         std::fs::write(&path, data).unwrap();
         let segments = TrackSegments {

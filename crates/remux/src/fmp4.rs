@@ -62,16 +62,6 @@ pub enum Problem {
     OpenBoxTooLarge { at: u64, size: u64 },
 }
 
-/// `reader`（一个 init 段或分片）的顶层 box，须首尾相接、恰好铺满到末尾（见 [`check`]）；读不了时为外层的 `Err`。
-/// 只读各 box 的头，不核对 box 里的内容。
-pub fn boxes(reader: &mut (impl Read + Seek)) -> io::Result<Result<Vec<BoxHeader>, Problem>> {
-    let walk = walk(reader)?;
-    Ok(match walk.rest {
-        None => Ok(walk.boxes),
-        Some(problem) => Err(problem),
-    })
-}
-
 /// 核对一个 init 段或分片 `data`：
 /// - 顶层 box 首尾相接、恰好铺满。认得出类型的 box 超出了数据为没写完；末尾不足 8 个字节、或类型认不出而长度写 0
 ///   或超出了数据的为多出的字节。
@@ -83,13 +73,43 @@ pub fn boxes(reader: &mut (impl Read + Seek)) -> io::Result<Result<Vec<BoxHeader
 ///
 /// `trex` 为所用 init 段里各轨的默认样本长度（见 [`trex_sample_sizes`]），核对 init 段本身时取它自己的。
 pub fn check(data: &[u8], trex: &HashMap<u32, u32>) -> Result<(), Problem> {
-    checked(data, trex).map(drop)
+    check_reader(&mut Cursor::new(data), trex)
+        .expect("读内存不会出错")
+        .map(drop)
+}
+
+/// 同 [`check`]，从 `reader`（一个 init 段或分片）读，通过时返回顶层 box；读不了时为外层的 `Err`。只读各 box 的头与
+/// moof 的内容。
+pub fn check_reader(
+    reader: &mut (impl Read + Seek),
+    trex: &HashMap<u32, u32>,
+) -> io::Result<Result<Vec<BoxHeader>, Problem>> {
+    let Walk { len, boxes, rest } = walk(reader)?;
+    let mut moofs = Vec::new();
+    for moof in boxes.iter().filter(|b| &b.kind == b"moof") {
+        reader.seek(SeekFrom::Start(moof.at + moof.head))?;
+        let mut body = Vec::new();
+        reader
+            .by_ref()
+            .take(moof.size - moof.head)
+            .read_to_end(&mut body)?;
+        moofs.push((moof.at, body));
+    }
+    let samples_end = match sample_data_end(&moofs, trex) {
+        Ok(end) => end,
+        Err(problem) => return Ok(Err(problem)),
+    };
+    Ok(match rest {
+        None | Some(Problem::TrailingBytes { .. }) if samples_end > len => Err(Problem::Incomplete),
+        Some(problem) => Err(problem),
+        None => Ok(boxes),
+    })
 }
 
 /// 核对 `data`（见 [`check`]），并把长度写 0 的最后一个 box 的长度字段改写成实际长度：接成一个输入读时，到末尾就
 /// 成了到所有分片的末尾。64 位的长度要多 8 字节的头，原地放不下，超过 4 GiB 时报 [`Problem::OpenBoxTooLarge`]。
 pub fn seal(data: &mut [u8], trex: &HashMap<u32, u32>) -> Result<(), Problem> {
-    let boxes = checked(data, trex)?;
+    let boxes = check_reader(&mut Cursor::new(&*data), trex).expect("读内存不会出错")?;
     let Some(open) = boxes.last().filter(|b| b.to_end) else {
         return Ok(());
     };
@@ -123,21 +143,10 @@ pub fn trex_sample_sizes(init: &[u8]) -> Result<HashMap<u32, u32>, Problem> {
     Ok(sizes)
 }
 
-/// 核对 `data`（见 [`check`]），返回顶层 box。
-fn checked(data: &[u8], trex: &HashMap<u32, u32>) -> Result<Vec<BoxHeader>, Problem> {
-    let Walk { boxes, rest } = walk(&mut Cursor::new(data)).expect("读内存不会出错");
-    let samples_end = sample_data_end(data, &boxes, trex)?;
-    match rest {
-        None | Some(Problem::TrailingBytes { .. }) if samples_end > data.len() as u64 => {
-            Err(Problem::Incomplete)
-        }
-        Some(problem) => Err(problem),
-        None => Ok(boxes),
-    }
-}
-
-/// 顶层 box 的遍历：从头起首尾相接的完整的 box，与之后凑不成完整 box 的原因（恰好铺满到末尾时为 None）。
+/// 顶层 box 的遍历：数据的字节数，从头起首尾相接的完整的 box，与之后凑不成完整 box 的原因（恰好铺满到末尾时为
+/// None）。
 struct Walk {
+    len: u64,
     boxes: Vec<BoxHeader>,
     rest: Option<Problem>,
 }
@@ -157,6 +166,7 @@ fn walk(reader: &mut (impl Read + Seek)) -> io::Result<Walk> {
             }
             Err(problem) => {
                 return Ok(Walk {
+                    len,
                     boxes,
                     rest: Some(problem),
                 });
@@ -165,7 +175,7 @@ fn walk(reader: &mut (impl Read + Seek)) -> io::Result<Walk> {
     }
     // 空的数据
     let rest = boxes.is_empty().then_some(Problem::NotFmp4);
-    Ok(Walk { boxes, rest })
+    Ok(Walk { len, boxes, rest })
 }
 
 /// 从 `at` 起的顶层 box，`bytes` 为从 `at` 起至多 16 个字节，`room` 为从 `at` 到末尾的字节数（分类见 [`check`]）。
@@ -262,24 +272,21 @@ struct Fragment {
     default_size: u32,
 }
 
-/// 各 moof 的 trun 声明的样本数据的终点中最大的，字节；没有 trun 时为 0（规则见 [`check`]）。
-fn sample_data_end(
-    data: &[u8],
-    boxes: &[BoxHeader],
-    trex: &HashMap<u32, u32>,
-) -> Result<u64, Problem> {
+/// 各 moof（起点与内容）的 trun 声明的样本数据的终点中最大的，字节；没有 trun 时为 0（规则见 [`check`]）。
+fn sample_data_end(moofs: &[(u64, Vec<u8>)], trex: &HashMap<u32, u32>) -> Result<u64, Problem> {
     let mut end = 0;
-    for moof in boxes.iter().filter(|b| &b.kind == b"moof") {
-        let malformed = || Problem::Malformed { at: moof.at };
-        let mut implicit = moof.at;
-        for traf in of_kind(children(moof.body(data)).ok_or_else(malformed)?, b"traf") {
+    for (moof_at, moof) in moofs {
+        let moof_at = *moof_at;
+        let malformed = || Problem::Malformed { at: moof_at };
+        let mut implicit = moof_at;
+        for traf in of_kind(children(moof).ok_or_else(malformed)?, b"traf") {
             let mut fragment = None;
             for (kind, body) in children(traf).ok_or_else(malformed)? {
                 match &kind {
-                    b"tfhd" => fragment = tfhd(body, moof.at, implicit, trex)?,
+                    b"tfhd" => fragment = tfhd(body, moof_at, implicit, trex)?,
                     b"trun" => {
                         if let Some(fragment) = &fragment {
-                            implicit = trun(body, fragment, moof.at)?;
+                            implicit = trun(body, fragment, moof_at)?;
                             end = end.max(implicit);
                         }
                     }
