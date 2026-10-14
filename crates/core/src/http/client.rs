@@ -154,5 +154,5 @@ fn build(config: &Config, route: Route<'_>) -> Result<reqwest::Client, Error> {
     };
     builder
         .build()
-        .map_err(|e| Error::HttpClient(chain_text(&e)))
+        .map_err(|e| Error::HttpClientInit(chain_text(&e)))
 }
