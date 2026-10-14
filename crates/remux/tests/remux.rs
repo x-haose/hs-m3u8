@@ -222,6 +222,43 @@ fn span(timeline: &Timeline) -> f64 {
     end - start
 }
 
+/// 解码文件中的第一路视频：(送进解码器的包数, 解码器拒收的包数, 解出的帧数)。
+fn decode_video(path: &Path) -> (usize, usize, usize) {
+    ffmpeg::init().unwrap();
+    let mut ictx = ffmpeg::format::input(path).unwrap();
+    let stream = ictx.streams().best(ffmpeg::media::Type::Video).unwrap();
+    let index = stream.index();
+    let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
+        .unwrap()
+        .decoder()
+        .video()
+        .unwrap();
+    let mut frame = ffmpeg::frame::Video::empty();
+    let (mut packets, mut rejected, mut frames) = (0, 0, 0);
+    loop {
+        let mut packet = ffmpeg::Packet::empty();
+        match packet.read(&mut ictx) {
+            Ok(()) if packet.stream() == index => {
+                packets += 1;
+                if decoder.send_packet(&packet).is_err() {
+                    rejected += 1;
+                }
+                while decoder.receive_frame(&mut frame).is_ok() {
+                    frames += 1;
+                }
+            }
+            Ok(()) => {}
+            Err(ffmpeg::Error::Eof) => break,
+            Err(e) => panic!("读取 {} 失败: {e}", path.display()),
+        }
+    }
+    decoder.send_eof().unwrap();
+    while decoder.receive_frame(&mut frame).is_ok() {
+        frames += 1;
+    }
+    (packets, rejected, frames)
+}
+
 /// MP4 顶层 box 的类型序列。
 fn top_level_boxes(path: &Path) -> Vec<[u8; 4]> {
     let data = std::fs::read(path).unwrap();
@@ -784,6 +821,70 @@ fn parameter_changes_within_a_group_are_rejected() {
             "{kind}：实际 {err:?}"
         );
     }
+}
+
+/// 从 GOP 中间开始的组：第一个关键帧之前的视频包参考的帧不在输出里，不写出、计数，输出的视频每个包都解得出。
+#[test]
+fn video_before_the_first_keyframe_of_a_group_is_dropped_and_counted() {
+    let dir = work_dir("before_keyframe");
+    let output = dir.join("out.mp4");
+    let mut cut = track("ts_cut");
+    // 按字节切开的 TS：第二片从 GOP 中间开始
+    cut.segments.remove(0);
+    let v_in = timelines(&concat_track(&cut, &dir, "in.ts")).0;
+
+    let report = remux(&[Streams::All], &[group([cut])], &output).unwrap();
+
+    let video = &report.streams[0];
+    assert!(video.skipped_before_keyframe > 0, "{video:?}");
+    assert_eq!(
+        video.packets + video.skipped_before_keyframe,
+        v_in.len() as u64
+    );
+    assert_eq!(report.streams[1].skipped_before_keyframe, 0);
+    let (packets, rejected, frames) = decode_video(&output);
+    assert_eq!((packets, rejected, frames), (packets, 0, packets));
+}
+
+/// 开放 GOP 的 HEVC：第二组以 CRA 开头，它的前导帧（RASL）参考第一组的帧，在不连续处之后解不对：不写出、计数，第二组
+/// 的画面接在第一组之后、不与它重叠。
+#[test]
+fn leading_pictures_of_a_group_starting_with_cra_are_dropped() {
+    let dir = work_dir("open_gop");
+    let output = dir.join("out.mp4");
+    let gop = track("ts_hevc_open_gop");
+    let first = TrackSegments {
+        segments: gop.segments[..1].to_vec(),
+        ..gop.clone()
+    };
+    let second = TrackSegments {
+        segments: gop.segments[1..].to_vec(),
+        ..gop.clone()
+    };
+    // 第二片里解码顺序在 CRA 之后、呈现时刻早于它的帧
+    let second_in = timelines(&concat_track(&second, &dir, "second.ts")).0;
+    let leading = second_in
+        .iter()
+        .skip(1)
+        .filter(|p| p.0 < second_in[0].0)
+        .count();
+    assert!(leading > 0, "样本的第二片应以带前导帧的 CRA 开头");
+    let first_in = timelines(&concat_track(&first, &dir, "first.ts")).0;
+
+    let report = remux(&[Streams::All], &[group([first]), group([second])], &output).unwrap();
+
+    assert_eq!(
+        report.streams[0].skipped_before_keyframe, leading as u64,
+        "{report:?}"
+    );
+    let v_out = timelines(&output).0;
+    let (group0, group1) = v_out.split_at(first_in.len());
+    let group0_end = group0.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+    let group1_start = group1.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+    assert!(
+        group1_start >= group0_end - 1e-6,
+        "第二组从 {group1_start} 开始，第一组到 {group0_end} 结束"
+    );
 }
 
 /// 缺了一片、音频 PES 跨在缺片处的 TS：只丢缺片处拼坏的音频包并计数，其余照常合并；视频不丢。

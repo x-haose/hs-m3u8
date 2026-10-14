@@ -80,6 +80,7 @@ pub(crate) fn write_verified(
                 shape: o.shape,
                 packets: o.written,
                 skipped_without_dts: o.dropped.without_dts,
+                skipped_before_keyframe: o.dropped.before_keyframe,
                 discarded_corrupt_bytes: o.dropped.corrupt_bytes,
                 duration_us: match (o.start_us, o.end_us) {
                     (Some(start), Some(end)) => u64::try_from(end - start).unwrap_or(0),
@@ -208,6 +209,7 @@ fn write_group(
                 let total = &mut outs[mapping.output].dropped;
                 total.without_dts += dropped.without_dts;
                 total.corrupt_bytes += dropped.corrupt_bytes;
+                total.before_keyframe += dropped.before_keyframe;
             }
         }
     }

@@ -10,7 +10,8 @@
 //!   一路），未指定种类的流不进输出、不检查编码；同一类流只能来自一条轨；编码参数须探测得出；后续组的流布局、编码
 //!   参数与解码配置必须与第一组一致，参数随帧携带的（TS 与打包音频）在组内也不能变，分片格式与 PID 也不能换；每路流
 //!   的解码时间戳必须严格递增（组内不能往回跳或重复）。TS 里损坏的音频包、打包音频里的损坏处跳过并计数（见
-//!   [`StreamReport::discarded_corrupt_bytes`]）。
+//!   [`StreamReport::discarded_corrupt_bytes`]）；每组开头解不出的视频包不写出并计数（见
+//!   [`StreamReport::skipped_before_keyframe`]）。
 //! - 只接受 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、MP3、FLAC、Opus、ALAC 音频，与 FFmpeg 构建启用的组件
 //!   一致；TS 与打包音频里只收其中能逐帧读出参数的 H.264、HEVC、AAC、AC-3、E-AC-3、MP3。MP3 的采样率须不低于
 //!   16 kHz，TS 与打包音频里的 E-AC-3 每帧须为 6 块、只有一个独立子流（MP4 封装器的限制）。
@@ -163,6 +164,9 @@ pub struct StreamReport {
     pub packets: u64,
     /// 输入中没有 DTS、因而未写入的包数
     pub skipped_without_dts: u64,
+    /// 各组开头解不出、因而未写入的视频包数：第一个关键帧之前的包，与呈现时刻早于它的前导帧（开放 GOP 里参考上一个
+    /// GOP 的帧，如 HEVC 的 RASL）。与 FFmpeg 流复制的默认行为一致；音频为 0
+    pub skipped_before_keyframe: u64,
     /// 损坏而没有写入的音频字节数：TS 里读不出帧头或帧长与包长对不上的包（来源丢了 TS 包，或缺片处 PES 不完整，拼出
     /// 的包），打包音频里切帧时跳过的不完整的帧或标签、认不出的字节，以及片内损坏之后定不了时刻（这一片是最后一片，
     /// 或下一片之前缺了分片）的帧。视频包照常写入，由解码器做错误隐藏

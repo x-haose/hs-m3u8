@@ -77,6 +77,13 @@ read -r -a small_src <<< "$(source_args testsrc2 160x90 440 1)"
 ts_segments ts_small "${small_src[@]}" "${h264[@]}" "${aac[@]}"
 read -r -a one_src <<< "$(source_args testsrc2 320x180 440 1)"
 ts_segments ts_hevc "${one_src[@]}" -c:v libx265 -preset ultrafast -x265-params log-level=error -g 25 -b:v 150k "${aac[@]}"
+# HEVC 开放 GOP：4 秒纯视频按 2 秒切成两片，第二片以 CRA 开头，解码顺序在它之后、呈现在它之前的前导帧（RASL）参考
+# 第一片的帧
+rm -rf -- "${DIR:?}/ts_hevc_open_gop"
+mkdir -p "$DIR/ts_hevc_open_gop"
+"${ff[@]}" -f lavfi -i testsrc2=size=320x180:rate=25 -t 4 -c:v libx265 -preset veryfast \
+  -x265-params log-level=error:open-gop=1:keyint=50:min-keyint=50:scenecut=0:bframes=3 -pix_fmt yuv420p -b:v 150k -an \
+  -f hls -hls_time 2 -hls_playlist_type vod -hls_segment_filename "$DIR/ts_hevc_open_gop/seg%d.ts" "$TMP/open_gop.m3u8"
 ts_segments ts_mp3 "${one_src[@]}" "${h264[@]}" -c:a libmp3lame -b:a 64k
 ts_segments ts_ac3 "${one_src[@]}" "${h264[@]}" -c:a ac3 -ac 6 -b:a 384k
 ts_segments ts_eac3 "${one_src[@]}" "${h264[@]}" -c:a eac3 -ac 6 -b:a 384k

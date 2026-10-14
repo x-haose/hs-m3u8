@@ -3069,6 +3069,12 @@ class StreamReport:
         输入中没有解码时间戳、因而未写入的包数
         """
     @property
+    def skipped_before_keyframe(self) -> builtins.int:
+        r"""
+        各组开头解不出、因而未写入的视频包数：第一个关键帧之前的包，与呈现时刻早于它的前导帧（开放 GOP 里参考上一个
+        GOP 的帧，如 HEVC 的 RASL）。与 FFmpeg 流复制的默认行为一致；音频为 0
+        """
+    @property
     def discarded_corrupt_bytes(self) -> builtins.int:
         r"""
         损坏而没有写入的音频字节数：TS 里读不出帧头或帧长与包长对不上的包（来源丢了 TS 包，或缺片处 PES 不完整，
@@ -3082,7 +3088,7 @@ class StreamReport:
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, shape: Shape, packets: builtins.int, skipped_without_dts: builtins.int, discarded_corrupt_bytes: builtins.int, duration: datetime.timedelta) -> StreamReport:
+    def __new__(cls, *, shape: Shape, packets: builtins.int, skipped_without_dts: builtins.int, skipped_before_keyframe: builtins.int, discarded_corrupt_bytes: builtins.int, duration: datetime.timedelta) -> StreamReport:
         r"""
         各参数即同名属性。
         """

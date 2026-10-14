@@ -270,6 +270,9 @@ record! {
         pub packets: u64,
         /// 输入中没有解码时间戳、因而未写入的包数
         pub skipped_without_dts: u64,
+        /// 各组开头解不出、因而未写入的视频包数：第一个关键帧之前的包，与呈现时刻早于它的前导帧（开放 GOP 里参考上一个
+        /// GOP 的帧，如 HEVC 的 RASL）。与 FFmpeg 流复制的默认行为一致；音频为 0
+        pub skipped_before_keyframe: u64,
         /// 损坏而没有写入的音频字节数：TS 里读不出帧头或帧长与包长对不上的包（来源丢了 TS 包，或缺片处 PES 不完整，
         /// 拼出的包），打包音频里切帧时跳过的不完整的帧或标签、认不出的字节，以及片内损坏之后定不了时刻（这一片是最后
         /// 一片，或下一片之前缺了分片）的帧。视频包照常写入，由解码器做错误隐藏
@@ -580,6 +583,7 @@ impl From<core::remux::StreamReport> for StreamReport {
             shape: s.shape.into(),
             packets: s.packets,
             skipped_without_dts: s.skipped_without_dts,
+            skipped_before_keyframe: s.skipped_before_keyframe,
             discarded_corrupt_bytes: s.discarded_corrupt_bytes,
             duration: Duration::from_micros(s.duration_us),
         }

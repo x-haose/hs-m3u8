@@ -27,6 +27,8 @@ pub(crate) struct Dropped {
     pub(crate) without_dts: u64,
     /// 丢弃的损坏音频字节数（见 [`crate::StreamReport::discarded_corrupt_bytes`]）
     pub(crate) corrupt_bytes: u64,
+    /// 组开头解不出的视频包数（见 [`crate::StreamReport::skipped_before_keyframe`]）
+    pub(crate) before_keyframe: u64,
 }
 
 pub(crate) struct Source {
@@ -39,6 +41,8 @@ pub(crate) struct Source {
     pub(crate) inband: Vec<Option<Inband>>,
     /// 按输入流下标
     pub(crate) dropped: Vec<Dropped>,
+    /// 按输入流下标：视频流在这一组里读到的第一个关键帧的 PTS（没有 PTS 时为 DTS），还没读到时为 None
+    keyframe_pts: Vec<Option<i64>>,
     /// 已读出、待写入的包及其映射；包一定带 DTS
     pub(crate) queue: VecDeque<(Packet, Mapping)>,
     /// 读到了末尾（见 [`Source::read_next`]）
@@ -80,14 +84,15 @@ impl Source {
             map,
             inband,
             dropped: vec![Dropped::default(); streams],
+            keyframe_pts: vec![None; streams],
             queue: VecDeque::new(),
             finished: false,
             wrap_us: 0,
         }
     }
 
-    /// 读下一个要写出的包。跳过未映射流的包；没有 DTS 的包与损坏（读不出帧头或帧长与包长对不上）的音频包记入
-    /// `dropped`；参数随帧携带的包核对参数。读到末尾返回 `None` 并记下 `finished`，打包音频丢弃的损坏字节这时才是
+    /// 读下一个要写出的包。跳过未映射流的包；没有 DTS 的包、组开头解不出的视频包（见 [`Source::decodable`]）与损坏
+    /// （读不出帧头或帧长与包长对不上）的音频包记入 `dropped`；参数随帧携带的包核对参数。读到末尾返回 `None` 并记下 `finished`，打包音频丢弃的损坏字节这时才是
     /// 全部（见 [`Input::discarded`]），一并记入 `dropped`；之后不再调用。
     pub(crate) fn read_next(&mut self) -> Result<Option<(Packet, Mapping)>, Error> {
         loop {
@@ -105,6 +110,10 @@ impl Source {
             };
             if packet.dts().is_none() {
                 self.dropped[packet.stream()].without_dts += 1;
+                continue;
+            }
+            if mapping.kind == StreamKind::Video && !self.decodable(&packet) {
+                self.dropped[packet.stream()].before_keyframe += 1;
                 continue;
             }
             if let Some(check) = self.inband[packet.stream()].as_mut() {
@@ -142,6 +151,22 @@ impl Source {
                 }
             }
             return Ok(Some((packet, mapping)));
+        }
+    }
+
+    /// 带 DTS 的视频包在这一组里解得出：从这一组第一个关键帧起，除去呈现时刻早于这个关键帧的前导帧（开放 GOP 里参考
+    /// 上一个 GOP 的帧，如 HEVC 的 RASL）。第一个关键帧之前的包与前导帧参考的帧不在这一组里：第 0 组之前什么也没有，
+    /// 其余组之前是不连续处另一段内容的帧。
+    fn decodable(&mut self, packet: &Packet) -> bool {
+        let pts = packet.pts().or(packet.dts()).expect("调用方已确认带 DTS");
+        let key = &mut self.keyframe_pts[packet.stream()];
+        match *key {
+            Some(key) => pts >= key,
+            None if packet.is_key() => {
+                *key = Some(pts);
+                true
+            }
+            None => false,
         }
     }
 
