@@ -5,11 +5,13 @@
 //! 挪开的旧输出看记录：
 //! - 换上还没做完（记录在、没记为已换好）：原处空着或是空目录就放回；原处是输出就删掉（只有要替换时才挪开旧输出，
 //!   原处是输出说明更新的输出已经装上，本任务的或同时写同一输出的别的任务的）；原处是别的东西就留着，报出来；
-//! - 已换好，或没有记录（换好后删不掉而留下，记录已删）：只删不放回。
+//! - 已换好（记录记为已换好）：只删不放回；
+//! - 没有记录：不动，报出来。记录在挪开的旧输出删净之后才删，没有记录的只可能是放弃任务时没能放回、已报给用户处理
+//!   的旧输出（记录随任务目录删了），不知道该放回还是删掉。
 //!
 //! 「不存在」只在根读得到时才算没有（见 [`volume::reachable`]）：读不到时报错，记录留着，下次接着收拾。
 //!
-//! 写临时输出之前把各输出记进任务目录（[`Commit::begin`]），全部装上后改记为已换好，再删旧输出。之后每次运行在任务
+//! 写临时输出之前把各输出记进任务目录（[`Commit::begin`]），全部装上后改记为已换好，删净旧输出与临时输出后删记录。之后每次运行在任务
 //! 开头、检查输出之前按记录与本次各输出的名字收拾一遍（[`recover`]）。换上时只挪开检查认可替换的东西，装上与放回都
 //! 不替换已有的（例外见 [`install`]）：几个任务同时写同一输出，先装上的成功，后到的报已存在。任一步失败都撤回，每一项
 //! 都尽量做完；没做完的留在记录里，下次接着收拾。
@@ -111,28 +113,36 @@ fn occupied(o: &PendingOutput, ancestor: Option<PathBuf>) -> Error {
     }
 }
 
-/// 收拾上次留下的：先按记录，再按本次各输出 `current` 的名字（没有记录的），规则见模块说明。返回旧输出因原处是别的
-/// 东西而留着的输出，它们留在记录里；都收拾完时删掉记录。失败时记录留着，可以重试。任务目录存在时调用方须已加锁。
-pub(super) fn recover(
-    work_dir: &Path,
-    current: &[PendingOutput],
-) -> Result<Vec<PendingOutput>, Error> {
+/// 收拾上次留下的：先按记录，再按本次各输出 `current` 的名字（没有记录的），规则见模块说明。返回留着的旧输出：原处是
+/// 别的东西的（留在记录里），与没有记录的；记录里的都收拾完时删掉记录。失败时记录留着，可以重试。任务目录存在时
+/// 调用方须已加锁。
+pub(super) fn recover(work_dir: &Path, current: &[PendingOutput]) -> Result<Vec<Leftover>, Error> {
     let record = workdir::read_outputs(work_dir)?;
-    let mut unsettled = Vec::new();
+    let mut kept = Vec::new();
     for o in &record.outputs {
         if !settle(o, !record.swapped)? {
-            unsettled.push(o.clone());
+            kept.push(unsettled(o));
         }
     }
-    let recorded = |o: &PendingOutput| record.outputs.iter().any(|r| r.aside() == o.aside());
-    for o in current.iter().filter(|o| !recorded(o)) {
-        settle(o, false)?;
-    }
-    if unsettled.is_empty() {
+    if kept.is_empty() {
         workdir::clear_outputs(work_dir)
             .map_err(io_error("删除", &workdir::outputs_file(work_dir)))?;
     }
-    Ok(unsettled)
+    let recorded = |o: &PendingOutput| record.outputs.iter().any(|r| r.aside() == o.aside());
+    for o in current.iter().filter(|o| !recorded(o)) {
+        remove(o.temp(), o.kind())?;
+        if exists(o.aside())? {
+            kept.push(Leftover {
+                path: o.aside().to_path_buf(),
+                kind: LeftoverKind::Displaced {
+                    target: o.target().to_path_buf(),
+                },
+                cause: "不在任务目录的记录里（放弃任务时没能放回），不知道该放回还是删掉"
+                    .to_owned(),
+            });
+        }
+    }
+    Ok(kept)
 }
 
 /// 放弃任务时按记录收拾，规则同 [`recover`]，记录不删（随任务目录删掉）。返回留下的东西：原处是别的东西而没放回的
@@ -179,8 +189,8 @@ fn given_up(o: &PendingOutput, swapped: bool, failure: &Error) -> [Leftover; 2] 
     ]
 }
 
-/// [`recover`] 留着的旧输出，作为残留报出。
-pub(super) fn unsettled(o: &PendingOutput) -> Leftover {
+/// 记录里的旧输出因原处是别的东西而留着，作为残留报出。
+fn unsettled(o: &PendingOutput) -> Leftover {
     Leftover {
         path: o.aside().to_path_buf(),
         kind: LeftoverKind::Displaced {
@@ -239,7 +249,8 @@ impl<'a> Commit<'a> {
     }
 
     /// 换上备齐的临时输出；`existing` 为换上前检查各输出的结果（见 [`check`]），顺序同各输出。成功时返回收尾没删掉
-    /// 的东西（被替换的旧输出、临时名、记录）：输出已换好；删不掉的旧输出与临时名，下次写同一输出时在任务开头再删。
+    /// 的东西（被替换的旧输出、临时名、记录）：输出已换好；旧输出与临时名删不掉时记录留着（已换好），下次用同一任务
+    /// 目录运行时在任务开头再删。
     pub(super) fn swap(self, existing: &[Occupant]) -> Result<Vec<Leftover>, Error> {
         let (mut moved, mut installed) = (Vec::new(), Vec::new());
         if let Err(failure) = self.move_and_install(existing, &mut moved, &mut installed) {
@@ -252,7 +263,9 @@ impl<'a> Commit<'a> {
             }
         }
         self.remove_temps(&mut leftovers);
-        self.clear_record(&mut leftovers);
+        if leftovers.is_empty() {
+            self.clear_record(&mut leftovers);
+        }
         Ok(leftovers)
     }
 
@@ -739,22 +752,30 @@ mod tests {
         assert_no_names_left(&outputs, &work);
     }
 
-    /// 已换好（记录记为已换好，新输出随后被用户挪走），或没有记录（换好后删不掉而留下）：挪开的旧输出只删不放回。
+    /// 已换好（记录记为已换好，新输出随后被用户挪走）：挪开的旧输出只删不放回。没有记录的（放弃任务时没能放回、已报给
+    /// 用户的）不动，报出来；没有记录的临时输出照样删掉。
     #[test]
-    fn swapped_or_unrecorded_old_outputs_are_only_removed() {
+    fn swapped_old_outputs_are_removed_and_unrecorded_ones_left_alone() {
         let dir = scratch("swapped");
         let work = dir.join("work");
         let outputs = outputs(&dir);
         let [mp4, hls] = &outputs;
         for o in &outputs {
             put(o, o.aside(), "旧");
+            put(o, o.temp(), "半个");
         }
         workdir::record_outputs(&work, std::slice::from_ref(mp4), true).unwrap();
 
-        assert_eq!(recover(&work, &outputs).unwrap(), []);
+        let kept = recover(&work, &outputs).unwrap();
 
-        assert!(!mp4.target().exists() && !hls.target().exists());
-        assert_no_names_left(&outputs, &work);
+        let target = hls.target().to_path_buf();
+        let kinds: Vec<_> = kept.iter().map(|l| (&*l.path, &l.kind)).collect();
+        assert_eq!(kinds, [(hls.aside(), &LeftoverKind::Displaced { target })]);
+        assert!(!mp4.aside().exists() && !mp4.target().exists() && !hls.target().exists());
+        assert_eq!(read(hls, hls.aside()).as_deref(), Some("旧"));
+        assert!(!mp4.temp().exists() && !hls.temp().exists());
+        let record = workdir::read_outputs(&work).unwrap();
+        assert!(record.outputs.is_empty() && !record.swapped, "{record:?}");
     }
 
     /// 换上没做完、原处是空目录（系统自动生成的元数据文件不算）：放回旧输出。原处是别的东西（MP4 路径上的目录、
@@ -776,10 +797,10 @@ mod tests {
         let outputs = [mp4, hls, other];
         workdir::record_outputs(&work, &outputs, false).unwrap();
 
-        let unsettled = recover(&work, &[]).unwrap();
+        let kept = recover(&work, &[]).unwrap();
 
         let [mp4, hls, other] = &outputs;
-        assert_eq!(unsettled, [mp4.clone(), other.clone()]);
+        assert_eq!(kept, [unsettled(mp4), unsettled(other)]);
         assert_eq!(read(hls, hls.target()).as_deref(), Some("旧"));
         assert!(mp4.aside().exists() && other.aside().exists());
         assert!(other.target().join("notes.txt").exists());

@@ -137,9 +137,10 @@ pub struct Leftover {
 pub enum LeftoverKind {
     /// 本库写的、可以直接删除的东西：写了一半的临时输出、已被新输出替换的旧输出、任务目录里的记录
     Removable,
-    /// 没能放回原处的旧输出，原来的路径为 `target`。[`crate::Error::Cleanup`] 里的仍记在任务目录里：下次用同一任务
+    /// 没能放回原处的旧输出，原来的路径为 `target`。[`crate::Error::Cleanup`] 里的多数仍记在任务目录里：下次用同一任务
     /// 目录运行或放弃任务时，原处空着或是空目录就放回，原处是输出（更新的输出已装上）就删掉，原处是别的东西就留着；
-    /// 放弃任务（[`crate::Engine::discard`]）返回的已没有记录。留着的要用户处理
+    /// 放弃任务（[`crate::Engine::discard`]）返回的已没有记录，之后用同一任务目录运行时不动它，在任务开头报出来。留着
+    /// 的要用户处理
     Displaced { target: PathBuf },
     /// 写输出失败后没能撤下的新输出：完整可用，留在原处
     Installed,

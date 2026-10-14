@@ -121,7 +121,8 @@ pub enum Error {
     #[error("合并失败：{0}")]
     Remux(Box<hs_m3u8_remux::Error>),
     /// 写输出失败后收拾本次写出的、或任务开头收拾上次写输出留下的，没能做完：`failure` 为失败的原因（后者为
-    /// [`Error::OutputOccupied`]：上次没能放回的旧输出，原处是别的东西），`leftovers` 为留下的东西（至少一项）
+    /// [`Error::OutputOccupied`]：上次没能放回的旧输出，原处是别的东西或已没有记录），`leftovers` 为留下的东西（至少
+    /// 一项）
     #[error("{failure}；{}", joined(.leftovers))]
     Cleanup {
         failure: Box<Error>,

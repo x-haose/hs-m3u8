@@ -18,7 +18,9 @@ use self::commit::{Commit, Occupant};
 use crate::error::io_error;
 use crate::selection::SelectionKey;
 use crate::workdir::{Layout, OutputKind, SegmentName, WorkDir};
-use crate::{Error, Leftover, LiveReport, Mp4Output, Output, WorkDirProblem, blocking};
+use crate::{
+    Error, Leftover, LeftoverKind, LiveReport, Mp4Output, Output, WorkDirProblem, blocking,
+};
 
 /// 交给输出的内容。
 pub(crate) struct Content {
@@ -83,17 +85,21 @@ pub(crate) struct GroupSegment {
 }
 
 /// 任务开头：收拾上次写输出留下的（见 [`commit::recover`]），检查各输出能否写，再建出各输出所在的目录（见
-/// [`create_dirs`]），都不等下载完。上次没能放回的旧输出原处是别的东西时报 [`Error::Cleanup`]（原因为
-/// [`Error::OutputOccupied`]），要用户处理。要读写文件系统，在阻塞线程池中调用；任务目录已存在时调用方已加锁。
+/// [`create_dirs`]），都不等下载完。有留着的旧输出（上次没能放回而原处是别的东西，或没有记录）时报
+/// [`Error::Cleanup`]（原因为 [`Error::OutputOccupied`]），要用户处理。要读写文件系统，在阻塞线程池中调用；任务目录
+/// 已存在时调用方已加锁。
 pub(crate) fn prepare(options: &ResolvedOutput) -> Result<(), Error> {
-    let unsettled = commit::recover(&options.work_dir, &options.outputs)?;
-    if let Some(first) = unsettled.first() {
+    let kept = commit::recover(&options.work_dir, &options.outputs)?;
+    if let Some(first) = kept.first() {
+        let LeftoverKind::Displaced { target } = &first.kind else {
+            unreachable!("recover 只报留着的旧输出");
+        };
         return Err(Error::Cleanup {
             failure: Box::new(Error::OutputOccupied {
-                path: first.target().to_path_buf(),
+                path: target.clone(),
                 ancestor: None,
             }),
-            leftovers: unsettled.iter().map(commit::unsettled).collect(),
+            leftovers: kept,
         });
     }
     check_all(options)?;

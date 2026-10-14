@@ -835,8 +835,8 @@ async fn long_output_names_are_written() {
 }
 
 /// 要求覆盖、两者都要，旧的 HLS 目录里有删不掉的内容：新的 MP4 与 HLS 照常换上，旧的挪开后删不掉，记在
-/// leftovers 里，任务目录里不留记录。之后再运行时，任务开头、联网之前先删这个残留，删不掉就报它的路径；能删了即照常
-/// 运行，新输出被挪走了也不会把它放回去。以 root 运行时权限位不起作用，造不出删不掉的情形，不测。
+/// leftovers 里，任务目录里的记录留着（已换好）。之后再运行时，任务开头、联网之前先删这个残留，删不掉就报它的路径；
+/// 能删了即照常运行，新输出被挪走了也不会把它放回去。以 root 运行时权限位不起作用，造不出删不掉的情形，不测。
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn old_outputs_that_cannot_be_removed_are_reported_and_removed_later() {
@@ -873,7 +873,7 @@ async fn old_outputs_that_cannot_be_removed_are_reported_and_removed_later() {
     let old = leftover.path.clone();
     assert!(old.to_string_lossy().ends_with(".hls.old"), "{leftover}");
     assert_hls_matches(&dir.join("out"), &output.mp4.unwrap().path);
-    assert!(!dir.join("out.hsdl/outputs.json").exists());
+    assert!(dir.join("out.hsdl/outputs.json").exists());
 
     let hits = server.hits("index.m3u8");
     match run(req.clone()).await {
