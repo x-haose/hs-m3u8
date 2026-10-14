@@ -794,10 +794,10 @@ class HttpOptions:
     @property
     def headers(self) -> builtins.tuple[tuple[builtins.str, builtins.str], ...]:
         r"""
-        附加到请求的请求头，按顺序，同名的可以有多个。其中的 Cookie（`名=值; 名=值`）记进本任务的 Cookie 存储，作为只
-        属于来源地址的主机的 Cookie：只发往这个主机，服务器下发同名的即被替换；Authorization 只发往与来源地址协议、
-        主机、端口都相同的地址；其余的发往所有地址。跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉
-        Authorization 与 Proxy-Authorization
+        附加到请求的请求头，按顺序，同名的可以有多个。其中的 Cookie（`名=值; 名=值`）记进本任务的 Cookie 存储，作为只属
+        于来源地址的主机的 Cookie：只发往这个主机，服务器给这个主机下发同名的（不带 Domain 或 Domain 即这个主机）即被替
+        换，给上级域下发的与它并存、一同发出；Authorization 只发往与来源地址协议、主机、端口都相同的地址；其余的发往所有
+        地址。跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉 Authorization 与 Proxy-Authorization
         """
     @property
     def proxy(self) -> Proxy.System | Proxy.Direct | Proxy.Url:
