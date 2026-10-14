@@ -82,8 +82,8 @@ enum Phase {
 /// 等到的下一件事。
 enum Event {
     Stop,
-    /// 该轨停滞
-    Stall(usize),
+    /// 到了检查停滞的时刻（见 [`Recorder::stall_check_at`]）
+    StallCheck,
     /// 有轨到了刷新的时刻
     Due,
     Done(Done),
@@ -240,7 +240,11 @@ impl Recorder<'_> {
                     }
                     Phase::Decided { .. } => self.end(LiveEnd::Stopped),
                 },
-                Event::Stall(track) => self.on_stall(track).await?,
+                Event::StallCheck => {
+                    if let Some(track) = self.judgeable_stall(Instant::now()) {
+                        self.on_stall(track).await?;
+                    }
+                }
                 Event::Due => {}
                 Event::Done(done) => self.on_done(done, fetcher).await?,
                 Event::Downloaded((id, result)) => {
@@ -312,15 +316,20 @@ impl Recorder<'_> {
         let (stall, next_due) = if ending {
             (None, None)
         } else {
-            self.start_due_refreshes(Instant::now());
+            let now = Instant::now();
+            let probe = self
+                .next_stall()
+                .map(|(since, _)| since)
+                .filter(|&since| since <= now);
+            self.start_due_refreshes(now, probe);
             let max_us = self.max_us();
             let next_due = self
                 .tracks
                 .iter()
                 .filter(|t| t.needs_refresh(max_us))
-                .filter_map(LiveTrack::due_at)
+                .filter_map(|t| t.due_at(probe))
                 .min();
-            (self.next_stall(), next_due)
+            (self.stall_check_at(now), next_due)
         };
         let downloads = async {
             match fetcher.next().await {
@@ -334,9 +343,7 @@ impl Recorder<'_> {
             done = self.tasks.next() => Ok(Event::Done(done)),
             finished = downloads => Ok(Event::Downloaded(finished)),
             _ = signals.stop.cancelled(), if stoppable => Ok(Event::Stop),
-            _ = sleep_until(stall.map(|(at, _)| at)), if stall.is_some() => {
-                Ok(Event::Stall(stall.expect("分支只在有停滞时刻时启用").1))
-            }
+            _ = sleep_until(stall), if stall.is_some() => Ok(Event::StallCheck),
             _ = sleep_until(next_due), if next_due.is_some() => Ok(Event::Due),
         }
     }
@@ -347,10 +354,11 @@ impl Recorder<'_> {
             .map(|max| u64::try_from(max.as_micros()).unwrap_or(u64::MAX))
     }
 
-    fn start_due_refreshes(&mut self, now: Instant) {
+    /// 发起到期的刷新；`probe` 见 [`LiveTrack::due_at`]。
+    fn start_due_refreshes(&mut self, now: Instant, probe: Option<Instant>) {
         let max_us = self.max_us();
         for (index, t) in self.tracks.iter_mut().enumerate() {
-            if !t.needs_refresh(max_us) || t.due_at().is_none_or(|at| at > now) {
+            if !t.needs_refresh(max_us) || t.due_at(probe).is_none_or(|at| at > now) {
                 continue;
             }
             let request = t.start_refresh(now);
@@ -359,15 +367,59 @@ impl Recorder<'_> {
         }
     }
 
-    /// 最早停滞的轨及其时刻。
+    /// 最早开始停滞的轨及其停滞开始的时刻（见 [`LiveTrack::stall_since`]）。
     fn next_stall(&self) -> Option<(Instant, usize)> {
         let max_us = self.max_us();
         self.tracks
             .iter()
             .enumerate()
             .filter(|(_, t)| t.needs_refresh(max_us))
-            .filter_map(|(i, t)| Some((t.stall_at(self.options.stall_timeout)?, i)))
+            .filter_map(|(i, t)| Some((t.stall_since(self.options.stall_timeout)?, i)))
             .min()
+    }
+
+    /// 下次检查停滞的时刻：最早开始停滞的轨停滞开始的时刻；已开始停滞而结论要等的，为让结论可下的最早的将来时刻
+    /// （停滞的轨那次刷新、或其他轨在途的刷新满一个目标时长，见 [`Recorder::judgeable_stall`]），没有时为 None（等刷新
+    /// 返回的事件）。只取将来的时刻：已过去的不会再让结论可下，取了会让循环空转。
+    fn stall_check_at(&self, now: Instant) -> Option<Instant> {
+        let (since, track) = self.next_stall()?;
+        if since > now || self.judgeable_stall(now).is_some() {
+            return Some(since.max(now));
+        }
+        let max_us = self.max_us();
+        let own = self.tracks[track].pending_deadline(since);
+        let others = self
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|&(i, t)| i != track && t.needs_refresh(max_us))
+            .filter_map(|(_, t)| t.overdue_at());
+        own.into_iter().chain(others).filter(|&at| at > now).min()
+    }
+
+    /// 此刻能对哪条停滞的轨下结论。结论要依据停滞开始之后的刷新结果，不能只看过了多久：进程被挂起（Windows 上睡眠时
+    /// 单调时钟照走、调试器暂停）醒来时停滞已到，而期间一次刷新也没发，凭挂起前的情况会把仍在进行的直播判为已结束。
+    /// 所以停滞的轨要有停滞开始之后发起、已返回的刷新（还没发起的由 [`LiveTrack::due_at`] 立即发起），或那之后发起的
+    /// 刷新在途满了一个目标时长（结论为刷新没有返回）；其他还要刷新的轨（判断它们是否还在出新分片）同样要有那之后返回
+    /// 的刷新，或者刷新在途已满一个目标时长（等不到它，按已知的判断）。
+    fn judgeable_stall(&self, now: Instant) -> Option<usize> {
+        let (since, track) = self.next_stall()?;
+        if since > now {
+            return None;
+        }
+        let stalled = &self.tracks[track];
+        let own = stalled.observed_since(since)
+            || stalled
+                .pending_deadline(since)
+                .is_some_and(|deadline| deadline <= now);
+        let max_us = self.max_us();
+        let others = self
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|&(i, t)| i != track && t.needs_refresh(max_us))
+            .all(|(_, t)| t.observed_since(since) || t.refresh_overdue(now));
+        (own && others).then_some(track)
     }
 
     /// 第 `track` 条轨停滞：看起来直播已结束时定下结束原因，否则任务失败。会话定下之前停滞的是还没拿到候选的轨，

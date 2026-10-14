@@ -84,6 +84,10 @@ pub(super) struct LiveTrack {
     recorded_us: u64,
     /// 最近一次有分片下载成功的时刻（或录制开始、会话定下的时刻）
     last_recorded: Instant,
+    /// 最近一次发起的刷新的发起时刻
+    last_started: Option<Instant>,
+    /// 最近一次返回的刷新（成功或失败）的发起时刻
+    last_returned: Option<Instant>,
     /// 最近一次列出新分片的时刻（或录制开始、会话定下的时刻）
     last_listed: Instant,
     /// 排入下载、还没有结果的分片数
@@ -117,6 +121,8 @@ impl LiveTrack {
             preparing: None,
             recorded_us,
             last_recorded: now,
+            last_started: None,
+            last_returned: None,
             last_listed: now,
             outstanding: 0,
             last_download_failure: None,
@@ -198,18 +204,25 @@ impl LiveTrack {
     }
 
     /// 下次刷新的时刻。会话定下后，暂存的处理完才再刷新：刷新时按已处理到的位置决定拉哪些新 init 段。
+    /// `probe` 为停滞判定要的刷新（见 [`super::Recorder`] 的 `judgeable_stall`）：那之后还没发起过刷新时，最迟在它发起。
     /// 在途、等处理、暂停或已结束时为 None。
-    pub(super) fn due_at(&self) -> Option<Instant> {
+    pub(super) fn due_at(&self, probe: Option<Instant>) -> Option<Instant> {
         let Refresh::Due(at) = self.refresh else {
             return None;
         };
-        let held = self.window().is_some() && self.has_held();
-        (!held).then_some(at)
+        if self.window().is_some() && self.has_held() {
+            return None;
+        }
+        Some(match probe {
+            Some(probe) if !self.last_started.is_some_and(|s| s >= probe) => at.min(probe),
+            _ => at,
+        })
     }
 
     /// 发起刷新。
     pub(super) fn start_refresh(&mut self, now: Instant) -> RefreshRequest {
         self.refresh = Refresh::InFlight { started: now };
+        self.last_started = Some(now);
         RefreshRequest {
             url: self.url.clone(),
             inits: self.window().map(Window::inits_to_fetch),
@@ -218,8 +231,36 @@ impl LiveTrack {
 
     /// 刷新返回了（成功、失败或在结束中被丢弃）：不再在途。
     pub(super) fn refresh_returned(&mut self) {
-        if let Refresh::InFlight { .. } = self.refresh {
+        if let Refresh::InFlight { started } = self.refresh {
             self.refresh = Refresh::Waiting;
+            self.last_returned = Some(started);
+        }
+    }
+
+    /// `since` 之后发起的刷新已经返回，或刷新已暂停（不会再有刷新，只能按最近一次的结果判断）：这条轨在 `since`
+    /// 之后的状况有据可依。
+    pub(super) fn observed_since(&self, since: Instant) -> bool {
+        matches!(self.refresh, Refresh::Suspended) || self.last_returned.is_some_and(|r| r >= since)
+    }
+
+    /// 刷新在途已满一个目标时长（不论何时发起）。
+    pub(super) fn refresh_overdue(&self, now: Instant) -> bool {
+        self.overdue_at().is_some_and(|at| at <= now)
+    }
+
+    /// 在途的刷新满一个目标时长的时刻；没有在途的刷新时为 None。
+    pub(super) fn overdue_at(&self) -> Option<Instant> {
+        match self.refresh {
+            Refresh::InFlight { started } => started.checked_add(self.target),
+            _ => None,
+        }
+    }
+
+    /// `since` 之后发起、还在途的刷新再过一个目标时长的时刻：到时还没返回即刷新没有返回；没有这样的刷新时为 None。
+    pub(super) fn pending_deadline(&self, since: Instant) -> Option<Instant> {
+        match self.refresh {
+            Refresh::InFlight { started } if started >= since => started.checked_add(self.target),
+            _ => None,
         }
     }
 
@@ -387,13 +428,14 @@ impl LiveTrack {
         now.duration_since(self.last_listed) < self.target.saturating_mul(LISTING_TARGETS)
     }
 
-    /// 停滞的时刻：最近一次录到分片（或录制开始、会话定下）之后，持续 `stall_timeout`（至少 [`STALL_TARGETS`]
-    /// 个目标时长）。在等本任务的时为 None：会话定下之前已有候选（在等核对或其他轨），或有分片排着队、在下载；
-    /// 时长大到无法表示时也为 None。
-    pub(super) fn stall_at(&self, stall_timeout: Duration) -> Option<Instant> {
+    /// 停滞开始的时刻：最近一次录到分片（或录制开始、会话定下）之后，持续 `stall_timeout`（至少 [`STALL_TARGETS`]
+    /// 个目标时长）。在等本任务的时为 None：会话定下之前已有候选（在等核对或其他轨），或有分片排着队、在下载，或有
+    /// 拉到的播放列表还没处理完；时长大到无法表示时也为 None。停滞的结论另要这之后的刷新结果（见 [`super::Recorder`]
+    /// 的 `judgeable_stall`）。
+    pub(super) fn stall_since(&self, stall_timeout: Duration) -> Option<Instant> {
         let waiting = match self.role {
             Role::Undecided { candidate, .. } => candidate,
-            Role::Decided(_) => self.outstanding > 0,
+            Role::Decided(_) => self.outstanding > 0 || self.has_held(),
             Role::Idle => true,
         };
         if waiting {
@@ -403,8 +445,9 @@ impl LiveTrack {
             .checked_add(stall_timeout.max(self.target.saturating_mul(STALL_TARGETS)))
     }
 
-    /// 停滞的结论，取走最近一次刷新失败的原因；只在据此结束录制时调用。`Ok` 为看起来直播已结束，
-    /// `Err` 为故障。`others_live` 为其他轨的播放列表还在出：这时本轨不再出新分片是本轨的故障。
+    /// 停滞的结论，取走最近一次刷新失败的原因；只在据此结束录制时调用，此时停滞开始之后的刷新结果都已拿到（或本轨
+    /// 那次刷新在途超过了一个目标时长）。`Ok` 为看起来直播已结束，`Err` 为故障。`others_live` 为其他轨的播放列表还在
+    /// 出：这时本轨不再出新分片是本轨的故障。
     ///
     /// 播放列表没被删除（最近一次刷新不是 404/410）而仍在列出新分片时，刷新是通的，停滞的原因是新分片都取不到；
     /// 否则依次看刷新在途超过一个目标时长、播放列表已删除、刷新失败，都没有时为不再出新分片。

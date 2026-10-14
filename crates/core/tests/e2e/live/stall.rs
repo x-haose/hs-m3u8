@@ -73,6 +73,38 @@ async fn no_new_segments_ends_recording() {
     assert_eq!(output.live, report(end, 1, vec![]));
 }
 
+/// 进程整个停住（如 Windows 上合盖睡眠，单调时钟照走）超过停滞时长，其间直播出了新分片：醒来时停滞已到，先刷新一次
+/// 再下结论，接着录到新出的分片，之后真的不再出新分片才按直播已结束收尾。
+#[tokio::test(flavor = "current_thread")]
+async fn a_stall_after_the_process_was_suspended_is_judged_on_a_fresh_refresh() {
+    let dir = test_dir("live_suspended");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1, 2, 3]);
+    server.put("live.m3u8", playlist(&[0, 1], false));
+    // stall_timeout 取 1 毫秒：实际至少等三个 0.1 秒的目标时长
+    let job = engine()
+        .start(live_request(
+            server.url("live.m3u8"),
+            &dir,
+            Duration::from_millis(1),
+        ))
+        .unwrap();
+    let mut progress = job.control().progress();
+    progress.wait_for(|p| p.segments_done == 2).await.unwrap();
+    server.put("live.m3u8", playlist(&[0, 1, 2, 3], false));
+    // 停住唯一的运行时线程，模拟进程被挂起：其间录制与测试服务都不运行，时钟照走，超过停滞时长
+    std::thread::sleep(Duration::from_millis(600));
+
+    let output = job.wait().await.unwrap();
+
+    assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
+    let end = LiveEnd::Stalled {
+        track: 0,
+        cause: StallCause::NoNewSegments,
+    };
+    assert_eq!(output.live, report(end, 1, vec![]));
+}
+
 /// 音频轨的播放列表在首次之后被删除、视频轨照常：按音频轨的直播已结束收尾。
 #[tokio::test(flavor = "multi_thread")]
 async fn one_track_whose_playlist_is_removed_ends_the_recording() {
