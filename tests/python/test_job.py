@@ -297,6 +297,42 @@ def test_cancelling_the_wait_cancels_the_job(server: Server, tmp_path: Path) -> 
     assert request.output.resolved_work_dir().is_dir()
 
 
+def test_a_cancelled_wait_raises_once_the_job_has_ended(server: Server, tmp_path: Path) -> None:
+    put_media(server, VOD)
+    gate = server.gate("seg1.ts")
+    entered, release = threading.Event(), threading.Event()
+    returned: list[str] = []
+
+    class Blocking(Hooks):
+        def on_segment(self, url: str, data: bytes) -> bytes:
+            entered.set()
+            release.wait(ARRIVAL)
+            returned.append(url)
+            return data
+
+    # 输出 MP4 时先下完第一个分片核对编码才请求其余的；本地 HLS 目录两个分片同时请求
+    output = OutputOptions(Target.Hls(tmp_path / "out"))
+    blocking = JobRequest(Source(server.url("index.m3u8"), hooks=Blocking()), output, concurrency=2)
+
+    async def main() -> None:
+        waiting = asyncio.create_task(Engine().start(blocking).wait())
+        await arrived(gate)
+        assert await asyncio.to_thread(entered.wait, ARRIVAL)
+        waiting.cancel()
+        # 停住的分片请求被放弃即任务已收到取消；回调还没返回，取消还不抛出
+        assert await asyncio.to_thread(gate.abandoned.wait, ARRIVAL)
+        assert not waiting.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        assert returned
+        # 任务目录已放开，马上用它续传
+        gate.release()
+        await Engine().start(JobRequest(Source(server.url("index.m3u8")), output)).wait()
+
+    asyncio.run(main())
+
+
 def test_jobs_no_longer_referenced_are_cancelled(server: Server, tmp_path: Path) -> None:
     put_media(server, VOD)
     gate = server.gate("seg1.ts")

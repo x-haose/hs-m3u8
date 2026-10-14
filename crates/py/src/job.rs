@@ -4,6 +4,7 @@ use std::any::Any;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use hs_m3u8_core as core;
+use pyo3::coroutine::CancelHandle;
 use pyo3::exceptions::PyBaseException;
 use pyo3::panic::PanicException;
 use pyo3::prelude::*;
@@ -140,7 +141,8 @@ impl Drop for Job {
     }
 }
 
-/// 等待被取消（协程被丢弃）时取消任务，在 fork 出的子进程里除外（同 `Job`）；正常拿到结果后解除。
+/// 等待的协程被丢弃（没有收到取消就被回收）时取消任务，在 fork 出的子进程里除外（同 `Job`）；拿到结果或按取消
+/// 收尾后解除。
 struct CancelOnDrop {
     control: Owned<core::JobControl>,
     armed: bool,
@@ -153,6 +155,20 @@ impl Drop for CancelOnDrop {
         {
             control.cancel();
         }
+    }
+}
+
+// 签名手写：存根生成认不出 `cancel_handle` 参数（它不是 Python 参数）；说明与方法的文档注释逐字相同
+pyo3_stub_gen::inventory::submit! {
+    pyo3_stub_gen::derive::gen_methods_from_python! {
+        r#"
+        class Job:
+            async def wait(self) -> Output:
+                """等任务结束，返回输出；失败时抛 `HsM3u8Error` 的子类，本库内部出错时抛 `pyo3_runtime.PanicException`，
+                解释器正在退出（运行时已关闭）时抛 `RuntimeError`。可多次等待，得到同一结果或同一异常。等待的协程被取消时
+                任务也取消，等任务真正结束（任务目录放开、在执行的回调返回）才抛出 `CancelledError`，随后用同一任务目录不会
+                遇到它还被占着；写出时换上输出的几步不中断，取消晚于它们时任务照常成功。"""
+        "#
     }
 }
 
@@ -180,22 +196,36 @@ impl Job {
         Ok(())
     }
 
-    /// 等任务结束，返回输出；失败时抛 `HsM3u8Error` 的子类，本库内部出错时抛 `pyo3_runtime.PanicException`，解释器
-    /// 正在退出（运行时已关闭）时抛 `RuntimeError`。可多次等待，得到同一结果或同一异常；等待的协程被取消时任务也取消。
-    async fn wait(&self) -> PyResult<Output> {
+    /// 等任务结束，返回输出；失败时抛 `HsM3u8Error` 的子类，本库内部出错时抛 `pyo3_runtime.PanicException`，
+    /// 解释器正在退出（运行时已关闭）时抛 `RuntimeError`。可多次等待，得到同一结果或同一异常。等待的协程被取消时
+    /// 任务也取消，等任务真正结束（任务目录放开、在执行的回调返回）才抛出 `CancelledError`，随后用同一任务目录不会
+    /// 遇到它还被占着；写出时换上输出的几步不中断，取消晚于它们时任务照常成功。
+    #[gen_stub(skip)]
+    async fn wait(&self, #[pyo3(cancel_handle)] mut cancelled: CancelHandle) -> PyResult<Output> {
         let running = self.running.get("Job")?;
         runtime::require_event_loop()?;
+        let control = running.control.clone();
         let mut finished = running.finished.clone();
         let mut cancel_on_drop = CancelOnDrop {
-            control: Owned::new(running.control.clone()),
+            control: Owned::new(control.clone()),
             armed: true,
         };
         // 在运行时上等，协程只持有句柄：它在 fork 出的子进程里被回收时，不碰父进程的同步原语
-        let finished = runtime::spawn(async move {
+        let mut waiting = runtime::spawn(async move {
             let finished = finished.wait_for(Option::is_some).await;
             finished.map(|value| value.clone().expect("wait_for 返回时值已满足条件"))
-        })?
-        .await?;
+        })?;
+        let finished = tokio::select! {
+            biased;
+            finished = &mut waiting => finished?,
+            exception = cancelled.cancelled() => {
+                control.cancel();
+                // 任务的结果不在这里用：要抛的是取消，再次等待仍拿得到它
+                let _ended = waiting.await;
+                cancel_on_drop.armed = false;
+                return Err(Python::attach(|py| PyErr::from_value(exception.into_bound(py))));
+            }
+        };
         cancel_on_drop.armed = false;
         let Ok(finished) = finished else {
             return Err(runtime::closed_error());

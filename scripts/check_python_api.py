@@ -2,6 +2,7 @@
 
 - 说明齐全：导出的每个函数与类、类的属性与方法、带数据的枚举的每种取值，以及存根里各类的构造函数（它们的说明只在
   存根里，运行时看不到；枚举取值的构造函数由存根生成器按字段生成，参数即取值类的属性，不查）。
+- 公开方法的说明在存根与运行时一致：存根手写的方法（存根生成认不出它的参数）说明在两处各写一份。
 - 两个以上字段的枚举取值只收关键字参数：同类型的字段（如几个下标）按位置写反时不报错。
 """
 
@@ -43,6 +44,22 @@ def undocumented_constructors(stub: ast.Module) -> list[str]:
     ]
 
 
+def mismatched_docs(stub: ast.Module, exported: list[tuple[str, object]]) -> list[str]:
+    """存根与运行时的说明不同的公开方法，按 `类.方法` 列出。"""
+    classes = dict(exported)
+    found: list[str] = []
+    for cls in stub.body:
+        owner = classes.get(cls.name) if isinstance(cls, ast.ClassDef) else None
+        if not isinstance(cls, ast.ClassDef) or not isinstance(owner, type):
+            continue
+        for method in cls.body:
+            if not isinstance(method, ast.FunctionDef | ast.AsyncFunctionDef) or method.name.startswith("_"):
+                continue
+            if ast.get_docstring(method) != inspect.getdoc(vars(owner).get(method.name)):
+                found.append(f"{cls.name}.{method.name}")
+    return found
+
+
 def positional_variants(owner: type, path: str) -> list[str]:
     """`owner` 里两个以上参数能按位置传的枚举取值，按 `path.取值` 列出。"""
     found: list[str] = []
@@ -65,6 +82,7 @@ def main() -> int:
     problems = [f"没有说明：{item}" for name, owner in exported for item in undocumented(owner, name)]
     stub = ast.parse(STUB.read_text(encoding="utf-8"))
     problems += [f"存根里的构造函数没有说明：{item}" for item in undocumented_constructors(stub)]
+    problems += [f"存根与运行时的说明不同：{item}" for item in mismatched_docs(stub, exported)]
     problems += [
         f"两个以上字段能按位置传：{item}"
         for name, owner in exported

@@ -284,7 +284,7 @@ class Encryption:
 class Engine:
     r"""
     下载引擎：所有任务共用一个在途请求上限。异步方法返回协程，在 asyncio 事件循环里 await（在别处驱动时抛
-    `RuntimeError`，不开始操作）；协程被取消时，所等的操作随之取消。只能在建立它的进程里使用：fork 出的子进程要另建，
+    `RuntimeError`，不开始操作）；协程被取消时的处理见各方法。只能在建立它的进程里使用：fork 出的子进程要另建，
     不占着 fork 时正在运行的任务所用的任务目录；macOS 上导入本库之后 fork 出的子进程不能使用本库（系统框架在 fork
     之后不可用），开始操作时抛 `RuntimeError`，要用 multiprocessing 的 spawn 方式。在 atexit 处理里第一次导入本库时，
     退出前不会关闭运行时，那样开始的任务要在处理返回前等它结束。
@@ -297,10 +297,28 @@ class Engine:
         r"""
         `max_requests` 见类的说明；小于 1 时抛 `InvalidInputError`。
         """
+    async def discard(self, work_dir: builtins.str | os.PathLike[str], *, unsettled: Unsettled = ...) -> builtins.tuple[Leftover, ...]:
+        r"""
+        放弃任务：删除任务目录 `work_dir`（相对路径按当前目录补全），只删本库写的文件。先按其中的记录收拾写到
+        一半的输出：删掉临时输出，挪开的旧输出按开始任务时的规则放回或删掉。返回留下的东西，记录已随任务目录删掉，
+        要用户处理：原处是别的东西而没放回的旧输出各一项；收拾不了的（盘读不到或收拾出错），`unsettled` 为默认的
+        `Unsettled.Fail()` 时报错，为 `Unsettled.Report()` 时记下；任务目录没删干净（里面有不是本库写的文件，或
+        删除出错）时一项 `LeftoverKind.WorkDir`。目录不存在时什么也不做。协程被取消时放弃照样做完才抛出
+        `CancelledError`（它持着任务目录的锁），随后用这个目录不会遇到它还被占着。
+        
+        路径为空或不合要求时抛 `InvalidInputError`。任务目录正被任务使用时抛 `WorkDirError`
+        （`WorkDirProblem.Locked`），不是本库的任务目录时为 `WorkDirProblem.NotEmpty`。记录是另一个格式版本写的
+        （`UnsupportedVersion`）或无法解析（`Corrupt`）时什么也不动：不知道它记着什么就不收拾，可用写下它的版本
+        放弃，或由用户删掉记录（`outputs.json`；写了一半的临时输出与没能放回的旧输出以 `hsdl-` 开头，留在输出旁）
+        后再放弃。
+        """
     async def probe(self, source: Source) -> Probe:
         r"""
         拉取来源并按偏好选轨，不下载分片、不碰任务目录；请求与回调同下载。用于开始下载前列出可选的清晰度与音轨、
-        查看时长与是否直播。失败时抛 `HsM3u8Error` 的子类。
+        查看时长与是否直播。失败时抛 `HsM3u8Error` 的子类。协程被取消时探测随之取消、立即抛出 `CancelledError`。
+        
+        简化：正在执行的回调在后台跑完（探测不碰任务目录，不影响随后的操作）；要等回调返回再抛时，给 core 的探测加
+        可协作的取消。
         """
     def start(self, request: JobRequest) -> Job:
         r"""
@@ -313,20 +331,6 @@ class Engine:
         分片数、字节数与时长，阶段先为 `Stage.Preparing`、写出时为 `Stage.Writing`；开始写出前可取消，停止不起作用。
         参数错误立即抛出。目录里是点播的下载时抛 `WorkDirError`（`WorkDirProblem.NotLiveRecording`；点播用同样的请求
         再次运行即可续传）；目录不存在或没有已完成的分片时抛 `NothingRecordedError`。结果的 `LiveReport.end` 为 None。
-        """
-    async def discard(self, work_dir: builtins.str | os.PathLike[str], *, unsettled: Unsettled = ...) -> builtins.tuple[Leftover, ...]:
-        r"""
-        放弃任务：删除任务目录 `work_dir`（相对路径按当前目录补全），只删本库写的文件。先按其中的记录收拾写到一半的
-        输出：删掉临时输出，挪开的旧输出按开始任务时的规则放回或删掉。返回留下的东西，记录已随任务目录删掉，要用户
-        处理：原处是别的东西而没放回的旧输出各一项；收拾不了的（盘读不到或收拾出错），`unsettled` 为默认的
-        `Unsettled.Fail()` 时报错，为 `Unsettled.Report()` 时记下；任务目录没删干净（里面有不是本库写的文件，或删除
-        出错）时一项 `LeftoverKind.WorkDir`。目录不存在时什么也不做。协程被取消时，已开始的收拾与删除做完当前一步才停，
-        再次放弃即可接着做。
-        
-        路径为空或不合要求时抛 `InvalidInputError`。任务目录正被任务使用时抛 `WorkDirError`
-        （`WorkDirProblem.Locked`），不是本库的任务目录时为 `WorkDirProblem.NotEmpty`。记录是另一个格式版本写的
-        （`UnsupportedVersion`）或无法解析（`Corrupt`）时什么也不动：不知道它记着什么就不收拾，可用写下它的版本放弃，
-        或由用户删掉记录（`outputs.json`；写了一半的临时输出与没能放回的旧输出以 `hsdl-` 开头，留在输出旁）后再放弃。
         """
 
 class FetchErrorKind:
@@ -1039,6 +1043,13 @@ class Job:
     运行中的任务（`Engine.start`、`Engine.merge_recorded` 返回）。不再被引用、也没有在等它时（被回收）取消任务。异步方法
     返回协程，在 asyncio 事件循环里 await（在别处驱动时抛 `RuntimeError`）。只能在建立它的进程里使用。
     """
+    async def wait(self) -> Output:
+        r"""
+        等任务结束，返回输出；失败时抛 `HsM3u8Error` 的子类，本库内部出错时抛 `pyo3_runtime.PanicException`，
+        解释器正在退出（运行时已关闭）时抛 `RuntimeError`。可多次等待，得到同一结果或同一异常。等待的协程被取消时
+        任务也取消，等任务真正结束（任务目录放开、在执行的回调返回）才抛出 `CancelledError`，随后用同一任务目录不会
+        遇到它还被占着；写出时换上输出的几步不中断，取消晚于它们时任务照常成功。
+        """
     def progress(self) -> Progress:
         r"""
         当前的进度快照。每读到一块数据更新一次，要显示进度就定时取；任务结束后仍取得到最后一份。
@@ -1053,11 +1064,6 @@ class Job:
         直播：停止刷新，把已拉到的播放列表处理完、已列出的分片下完后写出，`wait` 返回录到的部分。续录刚开始、还没确定
         能否接上之前录到的内容时停止，不录新的分片，只写出之前录到的。写出完成之前进程退出时，任务目录里不记停止：用
         同样的请求再次开始会接着录，只写出已录到的用 `Engine.merge_recorded`。点播与只合并不受影响。
-        """
-    async def wait(self) -> Output:
-        r"""
-        等任务结束，返回输出；失败时抛 `HsM3u8Error` 的子类，本库内部出错时抛 `pyo3_runtime.PanicException`，解释器
-        正在退出（运行时已关闭）时抛 `RuntimeError`。可多次等待，得到同一结果或同一异常；等待的协程被取消时任务也取消。
         """
 
 @typing.final

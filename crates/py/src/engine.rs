@@ -3,6 +3,7 @@
 use std::num::NonZeroUsize;
 
 use hs_m3u8_core as core;
+use pyo3::coroutine::CancelHandle;
 use pyo3::prelude::*;
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
@@ -15,7 +16,7 @@ use crate::request::{JobRequest, OutputOptions, Source, Unsettled};
 use crate::runtime::{self, Owned};
 
 /// 下载引擎：所有任务共用一个在途请求上限。异步方法返回协程，在 asyncio 事件循环里 await（在别处驱动时抛
-/// `RuntimeError`，不开始操作）；协程被取消时，所等的操作随之取消。只能在建立它的进程里使用：fork 出的子进程要另建，
+/// `RuntimeError`，不开始操作）；协程被取消时的处理见各方法。只能在建立它的进程里使用：fork 出的子进程要另建，
 /// 不占着 fork 时正在运行的任务所用的任务目录；macOS 上导入本库之后 fork 出的子进程不能使用本库（系统框架在 fork
 /// 之后不可用），开始操作时抛 `RuntimeError`，要用 multiprocessing 的 spawn 方式。在 atexit 处理里第一次导入本库时，
 /// 退出前不会关闭运行时，那样开始的任务要在处理返回前等它结束。
@@ -29,15 +30,33 @@ pub struct Engine {
     inner: Owned<core::Engine>,
 }
 
-// 签名手写，默认值写 `...`，见 crate 文档
+// 签名手写：默认值写 `...`（见 crate 文档）；`discard` 的 `cancel_handle` 参数不是 Python 参数，存根生成认不出它，
+// 说明与方法的文档注释逐字相同
 pyo3_stub_gen::inventory::submit! {
     pyo3_stub_gen::derive::gen_methods_from_python! {
         r#"
         import builtins
+        import os
 
         class Engine:
             def __new__(cls, *, max_requests: builtins.int = ...) -> Engine:
                 """`max_requests` 见类的说明；小于 1 时抛 `InvalidInputError`。"""
+
+            async def discard(
+                self, work_dir: builtins.str | os.PathLike[str], *, unsettled: Unsettled = ...
+            ) -> builtins.tuple[Leftover, ...]:
+                """放弃任务：删除任务目录 `work_dir`（相对路径按当前目录补全），只删本库写的文件。先按其中的记录收拾写到
+                一半的输出：删掉临时输出，挪开的旧输出按开始任务时的规则放回或删掉。返回留下的东西，记录已随任务目录删掉，
+                要用户处理：原处是别的东西而没放回的旧输出各一项；收拾不了的（盘读不到或收拾出错），`unsettled` 为默认的
+                `Unsettled.Fail()` 时报错，为 `Unsettled.Report()` 时记下；任务目录没删干净（里面有不是本库写的文件，或
+                删除出错）时一项 `LeftoverKind.WorkDir`。目录不存在时什么也不做。协程被取消时放弃照样做完才抛出
+                `CancelledError`（它持着任务目录的锁），随后用这个目录不会遇到它还被占着。
+
+                路径为空或不合要求时抛 `InvalidInputError`。任务目录正被任务使用时抛 `WorkDirError`
+                （`WorkDirProblem.Locked`），不是本库的任务目录时为 `WorkDirProblem.NotEmpty`。记录是另一个格式版本写的
+                （`UnsupportedVersion`）或无法解析（`Corrupt`）时什么也不动：不知道它记着什么就不收拾，可用写下它的版本
+                放弃，或由用户删掉记录（`outputs.json`；写了一半的临时输出与没能放回的旧输出以 `hsdl-` 开头，留在输出旁）
+                后再放弃。"""
         "#
     }
 }
@@ -55,7 +74,10 @@ impl Engine {
     }
 
     /// 拉取来源并按偏好选轨，不下载分片、不碰任务目录；请求与回调同下载。用于开始下载前列出可选的清晰度与音轨、
-    /// 查看时长与是否直播。失败时抛 `HsM3u8Error` 的子类。
+    /// 查看时长与是否直播。失败时抛 `HsM3u8Error` 的子类。协程被取消时探测随之取消、立即抛出 `CancelledError`。
+    ///
+    /// 简化：正在执行的回调在后台跑完（探测不碰任务目录，不影响随后的操作）；要等回调返回再抛时，给 core 的探测加
+    /// 可协作的取消。
     async fn probe(&self, source: Py<Source>) -> PyResult<Probe> {
         let engine = self.inner.get("Engine")?.clone();
         runtime::require_event_loop()?;
@@ -84,24 +106,40 @@ impl Engine {
         start_job(py, || engine.merge_recorded(output.to_core()))
     }
 
-    /// 放弃任务：删除任务目录 `work_dir`（相对路径按当前目录补全），只删本库写的文件。先按其中的记录收拾写到一半的
-    /// 输出：删掉临时输出，挪开的旧输出按开始任务时的规则放回或删掉。返回留下的东西，记录已随任务目录删掉，要用户
-    /// 处理：原处是别的东西而没放回的旧输出各一项；收拾不了的（盘读不到或收拾出错），`unsettled` 为默认的
-    /// `Unsettled.Fail()` 时报错，为 `Unsettled.Report()` 时记下；任务目录没删干净（里面有不是本库写的文件，或删除
-    /// 出错）时一项 `LeftoverKind.WorkDir`。目录不存在时什么也不做。协程被取消时，已开始的收拾与删除做完当前一步才停，
-    /// 再次放弃即可接着做。
+    /// 放弃任务：删除任务目录 `work_dir`（相对路径按当前目录补全），只删本库写的文件。先按其中的记录收拾写到
+    /// 一半的输出：删掉临时输出，挪开的旧输出按开始任务时的规则放回或删掉。返回留下的东西，记录已随任务目录删掉，
+    /// 要用户处理：原处是别的东西而没放回的旧输出各一项；收拾不了的（盘读不到或收拾出错），`unsettled` 为默认的
+    /// `Unsettled.Fail()` 时报错，为 `Unsettled.Report()` 时记下；任务目录没删干净（里面有不是本库写的文件，或
+    /// 删除出错）时一项 `LeftoverKind.WorkDir`。目录不存在时什么也不做。协程被取消时放弃照样做完才抛出
+    /// `CancelledError`（它持着任务目录的锁），随后用这个目录不会遇到它还被占着。
     ///
     /// 路径为空或不合要求时抛 `InvalidInputError`。任务目录正被任务使用时抛 `WorkDirError`
     /// （`WorkDirProblem.Locked`），不是本库的任务目录时为 `WorkDirProblem.NotEmpty`。记录是另一个格式版本写的
-    /// （`UnsupportedVersion`）或无法解析（`Corrupt`）时什么也不动：不知道它记着什么就不收拾，可用写下它的版本放弃，
-    /// 或由用户删掉记录（`outputs.json`；写了一半的临时输出与没能放回的旧输出以 `hsdl-` 开头，留在输出旁）后再放弃。
+    /// （`UnsupportedVersion`）或无法解析（`Corrupt`）时什么也不动：不知道它记着什么就不收拾，可用写下它的版本
+    /// 放弃，或由用户删掉记录（`outputs.json`；写了一半的临时输出与没能放回的旧输出以 `hsdl-` 开头，留在输出旁）
+    /// 后再放弃。
+    #[gen_stub(skip)]
     #[pyo3(signature = (work_dir, *, unsettled = Unsettled::Fail {}))]
-    async fn discard(&self, work_dir: PyPath, unsettled: Unsettled) -> PyResult<Seq<Leftover>> {
+    async fn discard(
+        &self,
+        work_dir: PyPath,
+        unsettled: Unsettled,
+        #[pyo3(cancel_handle)] mut cancelled: CancelHandle,
+    ) -> PyResult<Seq<Leftover>> {
         let engine = self.inner.get("Engine")?.clone();
         runtime::require_event_loop()?;
         let unsettled = core::Unsettled::from(&unsettled);
-        let discarded =
-            runtime::spawn(async move { engine.discard(&work_dir.0, unsettled).await })?.await?;
+        let mut discarding =
+            runtime::spawn(async move { engine.discard(&work_dir.0, unsettled).await })?;
+        let discarded = tokio::select! {
+            biased;
+            discarded = &mut discarding => discarded?,
+            exception = cancelled.cancelled() => {
+                // 放弃持着任务目录的锁：做完才抛，随后用这个目录不会遇到它还被占着；结果不在这里用，要抛的是取消
+                let _done = discarding.await;
+                return Err(Python::attach(|py| PyErr::from_value(exception.into_bound(py))));
+            }
+        };
         match discarded {
             Ok(leftovers) => Ok(leftovers.into_iter().map(Leftover::from).collect()),
             Err(error) => Err(Python::attach(|py| to_pyerr(py, error))),
