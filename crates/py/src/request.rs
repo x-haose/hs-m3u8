@@ -232,8 +232,9 @@ pub struct HttpOptions {
 #[pymethods]
 impl HttpOptions {
     /// `headers` 为 None 时没有附加的请求头；`proxy`、`timeouts`、`retry` 默认取 `Proxy.System()`、`Timeouts()`、
-    /// `RetryPolicy()`。请求头的名或值放不进 HTTP 请求、Cookie 不是 `名=值; 名=值` 的写法、代理的协议不支持或主机名
-    /// 不合法时抛 `InvalidInputError`。
+    /// `RetryPolicy()`。请求头的名或值放不进 HTTP 请求、是本库控制的头（Accept-Encoding、Range 与条件请求的
+    /// If-*：它们决定响应体是什么、怎么编码）、Cookie 不是 `名=值; 名=值` 的写法、代理的协议不支持或主机名不合法时抛
+    /// `InvalidInputError`。
     #[new]
     #[pyo3(signature = (
         *,

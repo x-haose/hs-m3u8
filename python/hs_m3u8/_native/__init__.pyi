@@ -486,7 +486,8 @@ class Hooks:
     def on_request(self, purpose: Purpose, request: RequestParts, /) -> RequestParts:
         r"""
         发出请求前修改地址与请求头（如签名），返回改过的请求（`RequestParts` 不可变，改时新建一个）。每次尝试（含
-        重试）调用一次；改后的请求不合法时任务失败。
+        重试）调用一次；改后的请求不合法（不是 http/https，请求头放不进请求或是本库控制的头，见 `HttpOptions`）时任务
+        失败。
         """
     def on_key(self, url: builtins.str, data: bytes, /) -> typing.Optional[bytes]:
         r"""
@@ -738,8 +739,9 @@ class HttpOptions:
     def __new__(cls, *, headers: typing.Optional[collections.abc.Mapping[builtins.str, builtins.str] | collections.abc.Iterable[tuple[builtins.str, builtins.str]]] = None, proxy: Proxy = ..., insecure: builtins.bool = False, timeouts: Timeouts = ..., retry: RetryPolicy = ...) -> HttpOptions:
         r"""
         `headers` 为 None 时没有附加的请求头；`proxy`、`timeouts`、`retry` 默认取 `Proxy.System()`、`Timeouts()`、
-        `RetryPolicy()`。请求头的名或值放不进 HTTP 请求、Cookie 不是 `名=值; 名=值` 的写法、代理的协议不支持或主机名
-        不合法时抛 `InvalidInputError`。
+        `RetryPolicy()`。请求头的名或值放不进 HTTP 请求、是本库控制的头（Accept-Encoding、Range 与条件请求的
+        If-*：它们决定响应体是什么、怎么编码）、Cookie 不是 `名=值; 名=值` 的写法、代理的协议不支持或主机名不合法时抛
+        `InvalidInputError`。
         """
     def __repr__(self) -> builtins.str: ...
 

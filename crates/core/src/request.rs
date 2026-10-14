@@ -84,7 +84,8 @@ pub struct HttpOptions {
 
 impl HttpOptions {
     /// 校验请求头、超时（[`Timeouts::validate`]）与代理，不合要求时报 [`Error::InvalidInput`]：请求头的名或值放不进
-    /// HTTP 请求，Cookie 不是 `名=值; 名=值` 的写法，或给了 Cookie 存储又在请求头里带 Cookie。
+    /// HTTP 请求，是本库控制的头（Accept-Encoding、Range 与条件请求的 If-*），Cookie 不是 `名=值; 名=值` 的写法，或
+    /// 给了 Cookie 存储又在请求头里带 Cookie。
     pub fn validate(&self) -> Result<(), Error> {
         for (name, value) in &self.headers {
             check_header(name, value).map_err(Error::InvalidInput)?;
@@ -182,6 +183,18 @@ impl JobRequest {
     }
 }
 
+/// 本库控制的请求头（`name` 为小写）及不能另给的原因：它们决定响应体是什么、怎么编码。从浏览器复制的请求头常带着。
+fn controlled(name: &str) -> Option<&'static str> {
+    match name {
+        "accept-encoding" => Some("本库不解压，服务器按它压缩的内容读不了"),
+        "range" => Some("要取的字节范围由播放列表决定"),
+        "if-none-match" | "if-modified-since" | "if-match" | "if-unmodified-since" | "if-range" => {
+            Some("条件请求会让服务器不返回内容（304、412）")
+        }
+        _ => None,
+    }
+}
+
 /// Cookie 请求头 `value` 里的各项（`名=值`），按分号分开、去掉两边的空白；名为空或没有等号的项为 None。
 pub(crate) fn cookie_pairs(value: &str) -> impl Iterator<Item = Option<&str>> {
     value
@@ -195,10 +208,13 @@ pub(crate) fn cookie_pairs(value: &str) -> impl Iterator<Item = Option<&str>> {
         })
 }
 
-/// 请求头名与值能否放进 HTTP 请求；不能时返回原因。
+/// 请求头名与值能否放进 HTTP 请求、且不是本库控制的头；不能时返回原因。
 pub(crate) fn check_header(name: &str, value: &str) -> Result<(), String> {
-    reqwest::header::HeaderName::from_bytes(name.as_bytes())
+    let parsed = reqwest::header::HeaderName::from_bytes(name.as_bytes())
         .map_err(|_| format!("请求头名不合法：{name:?}"))?;
+    if let Some(why) = controlled(parsed.as_str()) {
+        return Err(format!("请求头 {name} 由本库控制，不能另给：{why}"));
+    }
     reqwest::header::HeaderValue::from_str(value)
         .map_err(|_| format!("请求头 {name} 的值不合法"))?;
     Ok(())
@@ -311,5 +327,33 @@ impl Default for Timeouts {
             read_idle: Duration::from_secs(30),
             request: Duration::from_secs(600),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn headers_the_library_controls_are_rejected_in_any_case() {
+        for name in [
+            "Accept-Encoding",
+            "range",
+            "If-None-Match",
+            "IF-MODIFIED-SINCE",
+        ] {
+            assert!(check_header(name, "x").is_err(), "{name}");
+        }
+        for name in ["Referer", "Cookie", "Authorization", "X-Token"] {
+            assert_eq!(check_header(name, "x"), Ok(()), "{name}");
+        }
+    }
+
+    #[test]
+    fn cookie_headers_split_into_name_value_pairs() {
+        let pairs: Vec<_> = cookie_pairs(" a=1; b=x=y ;; c= ").collect();
+        assert_eq!(pairs, [Some("a=1"), Some("b=x=y"), Some("c=")]);
+        let pairs: Vec<_> = cookie_pairs("a=1; HttpOnly; =2").collect();
+        assert_eq!(pairs, [Some("a=1"), None, None]);
     }
 }
