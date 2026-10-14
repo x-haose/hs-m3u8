@@ -258,10 +258,10 @@ impl Direct {
                 let content = |e: ContentError| e.into_error(&init.uri);
                 let mut data = match key {
                     Some((key, iv)) => decrypt(body, &key, &iv)
-                        .map_err(|e| content(decrypt_failure(e, &Container::Init)))?,
+                        .map_err(|e| content(decrypt_failure(e, &Container::Fmp4Init)))?,
                     None => body,
                 };
-                check(&mut data, &Container::Init).map_err(content)?;
+                check(&mut data, &Container::Fmp4Init).map_err(content)?;
                 Ok(data)
             })
             .await

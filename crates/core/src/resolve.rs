@@ -167,7 +167,7 @@ async fn load_playlist(
             Error::Unsupported(match what {
                 hls::Feature::Encryption(what) => Unsupported::Encryption { url, line, what },
                 hls::Feature::IFramesOnly => Unsupported::IFramesOnly { url, line },
-                hls::Feature::Skip => Unsupported::DeltaUpdate { url, line },
+                hls::Feature::DeltaUpdate => Unsupported::DeltaUpdate { url, line },
             })
         }
     })

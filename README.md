@@ -14,13 +14,13 @@ HLS（m3u8）下载器。本分支是 Rust 重写：Rust 库、Python 包（`hs-
 
 ## 能力
 
-- 点播：TS、fMP4 与打包音频分片，AES-128、字节范围、不连续段，视频与独立音频 rendition 合并为一个 MP4，不重编码（fMP4 里 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、MP3、MP2、FLAC、Opus、ALAC 音频，TS 与打包音频里 H.264、HEVC 视频与 AAC、AC-3、E-AC-3、MP3、MP2 音频；MP3 采样率不低于 16 kHz，TS 与打包音频里的 E-AC-3 每帧 6 块、只有一个独立子流）；也可输出可直接播放的本地 HLS 目录，或两者都要。MP4 里的 MP3、MP2 音轨，苹果基于 AVFoundation 的播放器（QuickTime Player、Safari 等）认不出。
+- 点播：TS、fMP4 与打包音频分片，AES-128（含加密的 init 段）、字节范围、不连续段，视频与独立音频 rendition 合并为一个 MP4，不重编码（fMP4 里 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、MP3、MP2、FLAC、Opus、ALAC 音频，TS 与打包音频里 H.264、HEVC 视频与 AAC、AC-3、E-AC-3、MP3、MP2 音频；MP3 采样率不低于 16 kHz，TS 与打包音频里的 E-AC-3 每帧 6 块、只有一个独立子流）；也可输出可直接播放的本地 HLS 目录，或两者都要。MP4 里的 MP3、MP2 音轨，苹果基于 AVFoundation 的播放器（QuickTime Player、Safari 等）认不出。来源标了 EXT-X-GAP 的分片不取，在结果里如实报告。
 - 续传：分片落盘即完整，中断后再次运行只补缺的；播放列表变了时明确拒绝。
 - 下载时校验分片：解密失败、不是媒体数据的内容拒收；空的响应、fMP4 的顶层 box 或 moof 里声明的样本数据超出数据、TS 或打包音频截在包或帧中间（加密的看解出的内容）时，按没写完重新取，直播里仍没写完的记为缺失。恰好截在 TS 包、音频帧或两组 moof/mdat 之间的看不出，合并出的内容比声明的时长短。
 - 直播录制：按 RFC 8216 的节奏刷新，窗口滑过或取不到的分片在结果里如实报告；只录一条轨时编码器重启（序号回退）后另起会话接着录；中断后续录，或不联网只合并已录到的。
-- 站点适配回调：改写播放列表、修改请求、变换 key、变换分片；也可直接给出 key 与 IV。
+- 站点适配回调：改写播放列表、修改请求、变换 key、变换分片；也可直接给出 key 与 IV（EXT-X-KEY 没写 URI 时要靠它）。
 - 失败按处理方式分类：改请求再试、来源本身不行、可稍后重试的网络故障等，异常带类型化的原因。
-- DRM、SAMPLE-AES 与用绝对位置寻址的 fMP4（tfhd 写了 base_data_offset，RFC 8216 不允许）不支持，遇到即明确报错。
+- DRM、SAMPLE-AES、用绝对位置寻址的 fMP4（tfhd 写了 base_data_offset，RFC 8216 不允许）、只有关键帧的播放列表（EXT-X-I-FRAMES-ONLY）、增量更新（EXT-X-SKIP）与 TS 的 init 段不支持，遇到即明确报错。
 
 ## 用法（Python）
 

@@ -60,7 +60,7 @@ pub enum Feature {
     #[error(
         "EXT-X-SKIP：增量更新略去了前面的分片，去掉地址里的 _HLS_skip 参数即可拿到完整的播放列表"
     )]
-    Skip,
+    DeltaUpdate,
 }
 
 /// 内容不是合法的播放列表。

@@ -12,8 +12,8 @@ use crate::{Error, Integrity, Unsupported};
 
 /// 取到的内容的格式。
 pub(crate) enum Container {
-    /// init 段，须为 fMP4（按它自己的 trex 核对）
-    Init,
+    /// fMP4 的 init 段（按它自己的 trex 核对）
+    Fmp4Init,
     /// fMP4 的分片：`trex` 为所用 init 段里各轨的默认样本长度（见 [`fmp4::trex_sample_sizes`]）
     Fmp4 { trex: HashMap<u32, u32> },
     /// 没有 init 段的分片：TS 或打包音频
@@ -70,7 +70,7 @@ impl ContentError {
 /// [`standalone::read_head`]），截在 TS 包、帧或标签中间的为没写完（见 [`standalone::truncated`]）。
 pub(crate) fn check(data: &mut [u8], container: &Container) -> Result<(), ContentError> {
     match container {
-        Container::Init => {
+        Container::Fmp4Init => {
             let trex = fmp4::trex_sample_sizes(data).map_err(|p| init_problem(p, data))?;
             fmp4::seal(data, &trex).map_err(|p| init_problem(p, data))
         }
@@ -87,15 +87,20 @@ pub(crate) fn check(data: &mut [u8], container: &Container) -> Result<(), Conten
     }
 }
 
-/// init 段 `data` 的结构问题：不是 fMP4 而是 TS 的为 [`ContentError::TsInit`]。
+/// init 段 `data` 的结构问题：不是 fMP4 而是 TS 的节目表的为 [`ContentError::TsInit`]。节目表的 PAT 与 PMT 各占至少
+/// 一个包，要前两个包的起点都是同步字：只看第一个字节，碰巧以 0x47 起头的（如 GIF 的 `G`）会被认成 TS。
 fn init_problem(problem: Problem, data: &[u8]) -> ContentError {
+    let ts = data.len() >= 2 * TS_PACKET
+        && data[TS_PACKET] == 0x47
+        && standalone_head(data).is_some_and(|h| h.format == Format::Ts);
     match problem {
-        Problem::NotFmp4 if standalone_head(data).is_some_and(|h| h.format == Format::Ts) => {
-            ContentError::TsInit
-        }
+        Problem::NotFmp4 if ts => ContentError::TsInit,
         problem => ContentError::of_fmp4(problem, data),
     }
 }
+
+/// TS 包的字节数。
+const TS_PACKET: usize = 188;
 
 /// 没有 fMP4 结构的 `data` 开头的信息；认不出格式时为 None（见 [`standalone::read_head`]）。
 fn standalone_head(data: &[u8]) -> Option<standalone::Head> {
@@ -162,6 +167,18 @@ mod tests {
             )))
         );
         assert!(check(Vec::new()).is_err());
+    }
+
+    #[test]
+    fn only_a_ts_program_table_is_reported_as_a_ts_init_section() {
+        let check = |mut data: Vec<u8>| check(&mut data, &Container::Fmp4Init);
+        assert_eq!(check(ts_packets(2)), Err(ContentError::TsInit));
+        // 以 0x47 起头而不足两个包（如伪装成 GIF 的错误内容）：不是 fMP4，不当作 TS
+        let gif = [&b"GIF89a"[..], &[0; 94]].concat();
+        assert!(matches!(
+            check(gif),
+            Err(ContentError::Invalid(Integrity::NotFmp4(_)))
+        ));
     }
 
     fn boxed(size: u32, kind: &[u8; 4], payload: usize) -> Vec<u8> {

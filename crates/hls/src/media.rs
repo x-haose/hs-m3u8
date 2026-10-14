@@ -180,7 +180,7 @@ impl Parser<'_> {
             "EXT-X-SKIP" => {
                 return Err(Error::Unsupported {
                     line,
-                    what: Feature::Skip,
+                    what: Feature::DeltaUpdate,
                 });
             }
             "EXT-X-PLAYLIST-TYPE" => {

@@ -203,7 +203,7 @@ fn i_frames_only_and_delta_updates_are_unsupported() {
         delta,
         Error::Unsupported {
             line: 4,
-            what: Feature::Skip
+            what: Feature::DeltaUpdate
         }
     );
 }
