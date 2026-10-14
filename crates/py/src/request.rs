@@ -193,8 +193,9 @@ variants! {
     /// 请求经不经代理、经哪个。
     pub enum Proxy {
         /// 按系统代理设置：先看环境变量（规则同 curl，另认大写的 `HTTP_PROXY`；`no_proxy` 对系统设置的代理同样起作
-        /// 用），没设代理时看 macOS 的系统设置或 Windows 的 Internet 选项，其他平台即直连。探测与开始任务时读取；值用不
-        /// 了（写错、用了 PAC 等）或读不出时抛 `SystemProxyError`，可改用 `Proxy.Direct()` 或 `Proxy.Url(...)`
+        /// 用），没设代理时看 macOS 的系统设置或 Windows 的 Internet 选项，其他平台即直连。探测与开始任务时读取，任务中
+        /// 每隔几秒重读，设置改了之后的请求照新设置走；值用不了（写错、用了 PAC 等）或读不出时抛 `SystemProxyError`，
+        /// 可改用 `Proxy.Direct()` 或 `Proxy.Url(...)`
         System {},
         /// 不经代理，系统设置了代理也直连
         Direct {},

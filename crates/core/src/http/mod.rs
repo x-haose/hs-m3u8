@@ -1,5 +1,7 @@
 //! 带重试、超时、取消、全局并发上限与请求回调的 HTTP GET。
 
+mod client;
+
 use std::hash::BuildHasher;
 use std::io;
 use std::sync::Arc;
@@ -12,11 +14,11 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use self::client::{Clients, Cookies};
 use crate::cookies::Provider;
 use crate::hooks::{HookKind, Hooks, Purpose, RequestParts, run_hook};
 use crate::ident::bare_url;
-use crate::proxy;
-use crate::request::{Proxy, RetryPolicy, Source, check_header, cookie_pairs};
+use crate::request::{RetryPolicy, Source, check_header, cookie_pairs};
 use crate::{Error, HttpError, Integrity};
 
 /// 请求是否计入引擎的在途上限。
@@ -30,7 +32,7 @@ pub(crate) enum Permit {
 }
 
 pub(crate) struct Http {
-    client: reqwest::Client,
+    clients: Clients,
     /// 附加到所有请求的请求头（调用方给的，Cookie 与 Authorization 除外）
     headers: Vec<(String, String)>,
     /// 调用方给的 Authorization，只附加到与来源地址同源（协议、主机、端口都相同）的请求
@@ -64,18 +66,9 @@ impl Http {
         on_received: Option<OnReceived>,
     ) -> Result<Self, Error> {
         let options = &source.http;
-        let t = options.timeouts;
         let is = |name: &str, wanted: &str| name.eq_ignore_ascii_case(wanted);
-        // 不自动写 Referer：开着时 reqwest 跟随重定向会把它换成上一跳的地址，盖掉调用方给的
-        let mut builder = reqwest::Client::builder()
-            .user_agent(concat!("hs-m3u8/", env!("CARGO_PKG_VERSION")))
-            .referer(false)
-            .connect_timeout(t.connect)
-            .read_timeout(t.read_idle)
-            .timeout(t.request)
-            .tls_danger_accept_invalid_certs(options.insecure);
-        builder = match &options.cookies {
-            Some(store) => builder.cookie_provider(Arc::new(Provider(store.clone()))),
+        let cookies: Box<dyn reqwest::cookie::CookieStore> = match &options.cookies {
+            Some(store) => Box::new(Provider(store.clone())),
             None => {
                 let jar = reqwest::cookie::Jar::default();
                 for (_, value) in options.headers.iter().filter(|(n, _)| is(n, "cookie")) {
@@ -83,33 +76,10 @@ impl Http {
                         jar.add_cookie_str(&format!("{pair}; Path=/"), &source.url);
                     }
                 }
-                builder.cookie_provider(Arc::new(jar))
+                Box::new(jar)
             }
         };
-        match &options.proxy {
-            Proxy::System => {
-                builder = match proxy::system_proxy()? {
-                    None => builder.no_proxy(),
-                    Some(system) => builder.proxy(reqwest::Proxy::custom(move |url| {
-                        system.proxy_for(url).cloned()
-                    })),
-                };
-            }
-            Proxy::Direct => builder = builder.no_proxy(),
-            Proxy::Url(proxy) => {
-                let proxy = reqwest::Proxy::all(proxy.as_str()).map_err(|e| {
-                    Error::InvalidInput(format!(
-                        "代理地址不可用 {}：{}",
-                        bare_url(proxy),
-                        e.without_url()
-                    ))
-                })?;
-                builder = builder.proxy(proxy);
-            }
-        }
-        let client = builder
-            .build()
-            .map_err(|e| Error::InvalidInput(format!("无法创建 HTTP 客户端：{e}")))?;
+        let clients = Clients::new(options, Cookies(cookies))?;
         let (credentials, headers) = options
             .headers
             .iter()
@@ -117,7 +87,7 @@ impl Http {
             .cloned()
             .partition(|(name, _)| is(name, "authorization"));
         Ok(Http {
-            client,
+            clients,
             headers,
             credentials,
             source: source.url.origin(),
@@ -238,7 +208,7 @@ impl Http {
         range: Option<ByteRange>,
         cancel: &CancellationToken,
     ) -> Result<reqwest::Response, Error> {
-        let mut builder = self.client.get(parts.url.as_str());
+        let mut builder = self.clients.get()?.get(parts.url.as_str());
         for (name, value) in &parts.headers {
             builder = builder.header(name, value);
         }
