@@ -57,7 +57,7 @@ jobs:
 
       - name: 全部检查（Linux）
         if: runner.os == 'Linux'
-        run: make rs_check py_check
+        run: make rs_check py_check py_cov
 
       # abi3 的 wheel 在更新的 Python 上也要能用
       - name: 最新版 Python 上的测试（Linux）

@@ -1,6 +1,6 @@
 .PHONY: check ffmpeg ffmpeg_present licenses \
 	rs_check rs_fmt rs_lint rs_clippy rs_doc rs_test rs_cov \
-	py_check py_env py_develop py_stubs py_test
+	py_check py_cov py_env py_develop py_stubs py_test
 
 FFMPEG_DIST := third_party/ffmpeg/dist
 
@@ -16,7 +16,7 @@ export PYO3_PYTHON := $(PYTHON)
 # README 里的 Python 示例抽成文件（每个代码块一个）放在这里做类型检查
 README_EXAMPLES := target/readme-examples
 
-check: rs_check py_check
+check: rs_check py_check py_cov
 
 # Rust 的全部检查；CI 按平台调用其中的子目标
 rs_check: rs_fmt rs_lint rs_clippy rs_doc rs_test rs_cov
@@ -75,16 +75,36 @@ py_env:
 py_develop: py_env ffmpeg_present
 	uv run --no-sync maturin develop --uv
 
-# 由 crates/py 的定义重新生成存根与 __init__.py。stub_gen 内嵌 Python 解释器：PYTHONHOME 指明标准库的位置，
-# LD_LIBRARY_PATH 让 Linux 上找得到 libpython（uv 装的 Python 不在系统的库路径里）
-py_stubs: py_env ffmpeg_present
-	PYTHONHOME="$$($(PYTHON) -c 'import sys; print(sys.base_prefix)')" \
+# 运行 stub_gen：内嵌 Python 解释器，PYTHONHOME 指明标准库的位置，LD_LIBRARY_PATH 让 Linux 上找得到 libpython（uv 装的
+# Python 不在系统的库路径里）
+STUB_GEN = PYTHONHOME="$$($(PYTHON) -c 'import sys; print(sys.base_prefix)')" \
 	LD_LIBRARY_PATH="$$($(PYTHON) -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')" \
 	cargo run --locked -q -p hs-m3u8-py --bin stub_gen
+
+# 由 crates/py 的定义重新生成存根与 __init__.py
+py_stubs: py_env ffmpeg_present
+	$(STUB_GEN)
 
 # 构建扩展模块并跑 Python 的端到端测试
 py_test: py_develop
 	uv run --no-sync pytest
+
+# Python 绑定（对外契约）的覆盖率，行覆盖不低于 80%：插桩构建后生成一遍存根、把扩展模块打成 wheel 装进单独的 venv
+# 跑一遍 Python 的端到端测试，两者即这个 crate 的全部用途。插桩产物与 venv 都在 PY_COV 下：maturin develop 会把扩展
+# 模块就地放进 python/hs_m3u8，不用它，免得插桩版顶替开发环境里的那份
+PY_COV := $(abspath target/py-cov)
+py_cov: py_env ffmpeg_present
+	@cargo llvm-cov --version >/dev/null 2>&1 || { echo "缺少 cargo-llvm-cov，版本见 .github/workflows/rust.yml"; exit 1; }
+	rm -rf $(PY_COV)/dist $(PY_COV)/venv
+	UV_PROJECT_ENVIRONMENT=$(PY_COV)/venv uv sync --locked
+	export CARGO_TARGET_DIR=$(PY_COV)/target UV_PROJECT_ENVIRONMENT=$(PY_COV)/venv && \
+	eval "$$(cargo llvm-cov show-env --sh)" && \
+	cargo llvm-cov clean --workspace && \
+	$(STUB_GEN) && \
+	uv run --no-sync maturin build --locked --out $(PY_COV)/dist && \
+	uv pip install --python $(PY_COV)/venv/bin/python $(PY_COV)/dist/*.whl && \
+	uv run --no-sync pytest -p no:cacheprovider && \
+	cargo llvm-cov report -p hs-m3u8-py --fail-under-lines 80 --summary-only
 
 # Python 绑定的全部检查
 py_check: py_stubs py_develop
