@@ -11,8 +11,9 @@ use url::Url;
 use super::session::Start;
 use super::window::{InitsToFetch, NewInits, Scope, Update, Window};
 use crate::ident::Fingerprint;
+use crate::workdir::SessionStart;
 use crate::{
-    Error, FetchFailure, HttpError, HttpFailure, LiveEnd, RefreshCause, StallCause, StallError,
+    Error, FetchFailure, HttpError, HttpFailure, RefreshCause, SourceBreak, StallCause, StallError,
     Unsupported,
 };
 
@@ -193,7 +194,7 @@ impl LiveTrack {
         self.last_refresh_error.as_ref()
     }
 
-    /// 出现了 EXT-X-ENDLIST，或这条轨不再刷新、不再处理（判定期间看起来已结束、服务器前后矛盾、编码器重启）。
+    /// 出现了 EXT-X-ENDLIST，或这条轨不再刷新、不再处理（判定期间看起来已结束、接不上而结束录制）。
     pub(super) fn is_ended(&self) -> bool {
         matches!(self.refresh, Refresh::Ended)
     }
@@ -347,10 +348,26 @@ impl LiveTrack {
         !self.pending.is_empty() || self.preparing.is_some()
     }
 
-    /// 之后不再刷新、不再处理这条轨（服务器前后矛盾、编码器重启）。
+    /// 之后不再刷新、不再处理这条轨（接不上而结束录制）。
     pub(super) fn stop_processing(&mut self) {
         self.refresh = Refresh::Ended;
         self.pending.clear();
+    }
+
+    /// 播放列表 `fetched` 与之前刷新得到的接不上（`cause`）后另起会话：序号回退时从新窗口的起点录，矛盾时跳过已
+    /// 处理到的序号；已录到的时长沿用。`fetched` 排在暂存的最前面，按新窗口重新准备、处理。停滞的计时不重新起算：
+    /// 来源反复接不上而一直录不到分片时照样判为停滞。
+    pub(super) fn restart(&mut self, cause: SourceBreak, fetched: Fetched) {
+        let Role::Decided(window) = &self.role else {
+            panic!("只有按定下的会话录的轨才会接不上");
+        };
+        let start = match (cause, window.processed_through()) {
+            (SourceBreak::Inconsistent { .. }, Some(through)) => SessionStart::After(through),
+            _ => SessionStart::Fresh,
+        };
+        let window = Window::new(Start::New(start), window.recorded_us());
+        self.role = Role::Decided(Box::new(window));
+        self.pending.push_front(fetched);
     }
 
     /// 按定下的会话处理一份播放列表并安排下次刷新；`started` 为这次拉取开始的时刻。见 [`Window::update`]。
@@ -361,12 +378,12 @@ impl LiveTrack {
         fetched: NewInits,
         started: Instant,
         now: Instant,
-    ) -> Result<ControlFlow<LiveEnd, Update>, Error> {
+    ) -> Result<ControlFlow<SourceBreak, Update>, Error> {
         let Role::Decided(window) = &mut self.role else {
             panic!("只有按定下的会话录的轨才处理播放列表");
         };
         let update = match window.update(scope, playlist, fetched)? {
-            ControlFlow::Break(end) => return Ok(ControlFlow::Break(end)),
+            ControlFlow::Break(cause) => return Ok(ControlFlow::Break(cause)),
             ControlFlow::Continue(update) => update,
         };
         if let Some(target) = target(playlist) {

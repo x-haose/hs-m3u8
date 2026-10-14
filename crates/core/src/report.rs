@@ -181,8 +181,10 @@ pub struct LiveReport {
     /// 本次运行的录制如何结束；只合并（[`crate::Engine::merge_recorded`]）时为 None
     pub end: Option<LiveEnd>,
     /// 合并进输出的录制会话数。会话是一段时间线连续的录制：中断后续录时，若各轨都与之前录到的内容接得上，
-    /// 仍是同一个会话；否则另起一个，与之前的首尾相接
+    /// 仍是同一个会话；否则另起一个，与之前的首尾相接。录制中途另起的（见 `new_sessions`）也算
     pub session_count: usize,
+    /// 本次运行录制中途另起的会话，按先后；只合并时为空
+    pub new_sessions: Vec<NewSession>,
     /// 不在输出中的分片，按会话、轨道、序号排列，相接且原因相同的合成一个区间。不含之前的运行里、
     /// 某个会话第一个已完成分片之前或最后一个之后缺的（原因与范围随那次运行一起丢了）
     pub missed: Vec<Missed>,
@@ -200,11 +202,27 @@ pub enum LiveEnd {
     /// 第 `track` 条轨停滞（见 [`crate::LiveOptions`]），且看起来是直播已结束：它与其他轨都不再出新分片；
     /// 故障导致的停滞是 [`crate::Error::LiveStalled`]
     Stalled { track: usize, cause: StallCause },
-    /// 第 `track` 条轨的媒体序号回退、且与上次的窗口没有重叠（多为编码器重启）；之后的分片未录
-    Restarted { track: usize },
-    /// 第 `track` 条轨在序号 `sequence` 处与之前刷新得到的播放列表矛盾：同一序号换了分片，或不连续段编号
-    /// 对不上（服务器错误，RFC 8216 6.2.2）；之后的分片未录
-    Inconsistent { track: usize, sequence: u64 },
+    /// 第 `track` 条轨的播放列表与之前刷新得到的接不上，且录的不止一条轨：其他轨从哪里起与它对得上不知道，不另起
+    /// 会话，之后的分片未录。只录一条轨时另起会话接着录（见 [`NewSession`]）
+    Broken { track: usize, cause: SourceBreak },
+}
+
+/// 媒体播放列表与之前刷新得到的接不上的方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceBreak {
+    /// 媒体序号回退、且与上次的窗口没有重叠，连续两次刷新都如此（多为编码器重启；只一次多为 CDN 的旧缓存，不算）
+    Restarted,
+    /// 在序号 `sequence` 处矛盾：同一序号换了分片，或不连续段编号对不上（服务器错误，RFC 8216 6.2.2）
+    Inconsistent { sequence: u64 },
+}
+
+/// 录制中途另起的会话：只录一条轨时，它的播放列表与之前刷新得到的接不上，不结束录制，另起会话接着录。序号回退时
+/// 从新窗口的起点录；矛盾时跳过已处理到的序号，只录更新的分片。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NewSession {
+    /// 另起的会话编号
+    pub session: u32,
+    pub cause: SourceBreak,
 }
 
 /// 一条轨停滞时看起来已结束的原因：用于 [`LiveEnd::Stalled`]（各轨都已结束），也用于

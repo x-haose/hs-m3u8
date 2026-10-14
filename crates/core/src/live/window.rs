@@ -10,7 +10,7 @@ use crate::fetch::Item;
 use crate::ident::Fingerprint;
 use crate::workdir::SessionStart;
 use crate::workdir::{Layout, SegmentName};
-use crate::{Error, FetchFailure, LiveEnd, MissReason, Missed, Unsupported};
+use crate::{Error, FetchFailure, MissReason, Missed, SourceBreak, Unsupported};
 
 /// 媒体序号回退且与上次窗口没有重叠，连续出现这么多次才认定编码器重启；一次多半是 CDN 返回了旧缓存。
 const RESTART_CONFIRMATIONS: u32 = 2;
@@ -68,8 +68,8 @@ enum Alignment {
     Proceed,
     /// 疑似编码器重启但还没确认：这份不处理
     Skip,
-    /// 应结束录制
-    End(LiveEnd),
+    /// 接不上
+    Break(SourceBreak),
 }
 
 /// 处理一份播放列表需要的外部信息。
@@ -218,6 +218,11 @@ impl Window {
         self.recorded_us
     }
 
+    /// 已处理（排入下载或记为缺失）的最大序号；还没处理过分片时为 None。
+    pub(super) fn processed_through(&self) -> Option<u64> {
+        self.processed.last
+    }
+
     /// 处理下一份播放列表前要拉哪些新 init 段。
     pub(super) fn inits_to_fetch(&self) -> InitsToFetch {
         InitsToFetch {
@@ -227,31 +232,31 @@ impl Window {
     }
 
     /// 处理一份播放列表：与上一份比对，新分片排入下载或记为缺失。`fetched` 为新分片引用的新 init 段。
-    /// `Break` 为服务器前后矛盾或编码器重启，应结束录制；`Err` 为任务失败。
+    /// `Break` 为与之前刷新得到的接不上（这份一个分片也没处理，已处理到的序号不变）；`Err` 为任务失败。
     pub(super) fn update(
         &mut self,
         scope: &Scope<'_>,
         playlist: &MediaPlaylist,
         fetched: NewInits,
-    ) -> Result<ControlFlow<LiveEnd, Update>, Error> {
+    ) -> Result<ControlFlow<SourceBreak, Update>, Error> {
         // 空的播放列表（服务器还没写完）不带任何信息：不改比对基准，也不算序号回退
         if playlist.segments.is_empty() {
             return Ok(ControlFlow::Continue(Update::unchanged(playlist.ended)));
         }
-        match self.align(scope.track, playlist) {
+        match self.align(playlist) {
             Alignment::Proceed => {}
             Alignment::Skip => return Ok(ControlFlow::Continue(Update::unchanged(false))),
-            Alignment::End(end) => return Ok(ControlFlow::Break(end)),
+            Alignment::Break(cause) => return Ok(ControlFlow::Break(cause)),
+        }
+        if let Some(sequence) = self.ungroupable(playlist) {
+            return Ok(ControlFlow::Break(SourceBreak::Inconsistent { sequence }));
         }
         let window_moved =
             playlist.segments.first().map(|s| s.sequence) != self.previous.keys().min().copied();
         let mut update = Update::unchanged(playlist.ended);
         update.expired = self.expired(scope, playlist);
         let (ready, failed) = split_fetched(fetched)?;
-        let listing = match self.walk(scope, playlist, &ready, &failed, &mut update)? {
-            ControlFlow::Break(end) => return Ok(ControlFlow::Break(end)),
-            ControlFlow::Continue(listing) => listing,
-        };
+        let listing = self.walk(scope, playlist, &ready, &failed, &mut update)?;
         for r in ready {
             if listing.inits.iter().any(|(i, _)| *i == r.init) {
                 update.init_files.push((r.fingerprint, r.data));
@@ -264,6 +269,18 @@ impl Window {
         Ok(ControlFlow::Continue(update))
     }
 
+    /// 第一个要录、而按本次的编号偏移得出的不连续段编号为负（与之前的对不上）的分片的序号；没有时为 None。在处理
+    /// 之前查出：接不上时这份一个分片也不处理。
+    fn ungroupable(&self, playlist: &MediaPlaylist) -> Option<u64> {
+        playlist
+            .segments
+            .iter()
+            .find(|s| {
+                self.processed.is_new(s.sequence) && i128::from(s.discontinuity) + self.offset < 0
+            })
+            .map(|s| s.sequence)
+    }
+
     /// 逐个分片记下身份与内容已知的 init 段，新分片排入下载或记为缺失（写进 `update`）。
     fn walk(
         &mut self,
@@ -272,7 +289,7 @@ impl Window {
         ready: &[ReadyInit],
         failed: &[FailedInit],
         update: &mut Update,
-    ) -> Result<ControlFlow<LiveEnd, Listing>, Error> {
+    ) -> Result<Listing, Error> {
         let mut listing = Listing {
             listed: HashMap::with_capacity(playlist.segments.len()),
             inits: Vec::new(),
@@ -294,33 +311,29 @@ impl Window {
                 .last
                 .map_or(s.sequence, |l| l.max(s.sequence));
             self.processed.last = Some(last);
-            let Ok(discontinuity) = u64::try_from(number) else {
-                return Ok(ControlFlow::Break(LiveEnd::Inconsistent {
-                    track: scope.track,
-                    sequence: s.sequence,
-                }));
-            };
+            let discontinuity = u64::try_from(number)
+                .expect("要录的分片编号为负时在处理之前已查出（见 ungroupable）");
             let init = new_segment_init(s, &listing.inits, failed);
             self.record_new(scope, s, discontinuity, init, update)?;
         }
-        Ok(ControlFlow::Continue(listing))
+        Ok(listing)
     }
 
     /// 与上一份比对并确定本次的编号偏移。
-    fn align(&mut self, track: usize, playlist: &MediaPlaylist) -> Alignment {
+    fn align(&mut self, playlist: &MediaPlaylist) -> Alignment {
         match compare(&self.previous, self.processed.last, playlist) {
             Overlap::Matched(offset) => self.offset = offset,
             Overlap::Disjoint => self.offset = self.disjoint_offset(playlist),
             Overlap::Regressed => {
                 self.regressions += 1;
                 return if self.regressions >= RESTART_CONFIRMATIONS {
-                    Alignment::End(LiveEnd::Restarted { track })
+                    Alignment::Break(SourceBreak::Restarted)
                 } else {
                     Alignment::Skip
                 };
             }
             Overlap::Inconsistent(sequence) => {
-                return Alignment::End(LiveEnd::Inconsistent { track, sequence });
+                return Alignment::Break(SourceBreak::Inconsistent { sequence });
             }
         }
         self.regressions = 0;

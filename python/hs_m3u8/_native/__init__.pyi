@@ -50,6 +50,7 @@ __all__ = [
     "Mp4Output",
     "Mp4Unsupported",
     "Mp4UnsupportedError",
+    "NewSession",
     "NotMediaPlaylistError",
     "NothingRecordedError",
     "Output",
@@ -75,6 +76,7 @@ __all__ = [
     "Selected",
     "Shape",
     "Source",
+    "SourceBreak",
     "SourceError",
     "SourceUnsupported",
     "SourceUnsupportedError",
@@ -1212,36 +1214,23 @@ class LiveEnd:
         def __new__(cls, *, track: builtins.int, cause: StallCause) -> LiveEnd.Stalled: ...
     
     @typing.final
-    class Restarted(LiveEnd):
+    class Broken(LiveEnd):
         r"""
-        一条轨的媒体序号回退、且与上次的窗口没有重叠（多为编码器重启）；之后的分片未录
+        一条轨的播放列表与之前刷新得到的接不上，且录的不止一条轨：其他轨从哪里起与它对得上不知道，不另起会话，
+        之后的分片未录。只录一条轨时另起会话接着录（见 `NewSession`）
         """
-        __match_args__ = ("track",)
-        @property
-        def track(self) -> builtins.int:
-            r"""
-            第几条轨
-            """
-        def __new__(cls, track: builtins.int) -> LiveEnd.Restarted: ...
-    
-    @typing.final
-    class Inconsistent(LiveEnd):
-        r"""
-        一条轨在某个序号处与之前刷新得到的播放列表矛盾：同一序号换了分片，或不连续段编号对不上（服务器错误）；
-        之后的分片未录
-        """
-        __match_args__ = ("track", "sequence",)
+        __match_args__ = ("track", "cause",)
         @property
         def track(self) -> builtins.int:
             r"""
             第几条轨
             """
         @property
-        def sequence(self) -> builtins.int:
+        def cause(self) -> SourceBreak.Restarted | SourceBreak.Inconsistent:
             r"""
-            矛盾处的媒体序号
+            接不上的方式
             """
-        def __new__(cls, *, track: builtins.int, sequence: builtins.int) -> LiveEnd.Inconsistent: ...
+        def __new__(cls, *, track: builtins.int, cause: SourceBreak) -> LiveEnd.Broken: ...
     
 
 @typing.final
@@ -1265,8 +1254,9 @@ class LiveOptions:
     直播的录制方式。
     
     录制从当前播放列表里的全部分片开始，按 RFC 8216 6.3.4 的节奏刷新，直到所有轨出现 EXT-X-ENDLIST、调用
-    `Job.stop`、各轨都录满 `max_duration`、任一轨停滞，或服务器的播放列表前后矛盾（序号回退、同一序号换了分片）。
-    结束后把已拉到的播放列表处理完、已列出的分片下完再合并，结束原因见 `LiveEnd`。
+    `Job.stop`、各轨都录满 `max_duration`、任一轨停滞，或录的不止一条轨时某条轨的播放列表前后接不上（序号回退、
+    同一序号换了分片；只录一条轨时另起会话接着录，见 `NewSession`）。结束后把已拉到的播放列表处理完、已列出的分片
+    下完再合并，结束原因见 `LiveEnd`。
     
     停滞：任一轨持续 `stall_timeout` 没有录到新分片（有分片还在排队或下载时不算）。播放列表不再出新分片或已被删除
     （404/410），且其他轨也不再出，视为直播已结束，照常合并；刷新一直失败、一直不返回，仍在出新分片却一个都下载
@@ -1305,7 +1295,7 @@ class LiveReport:
     直播的录制结果。
     """
     @property
-    def end(self) -> typing.Optional[LiveEnd.EndList | LiveEnd.Stopped | LiveEnd.DurationReached | LiveEnd.Stalled | LiveEnd.Restarted | LiveEnd.Inconsistent]:
+    def end(self) -> typing.Optional[LiveEnd.EndList | LiveEnd.Stopped | LiveEnd.DurationReached | LiveEnd.Stalled | LiveEnd.Broken]:
         r"""
         本次运行的录制如何结束；只合并（`Engine.merge_recorded`）时为 None
         """
@@ -1313,7 +1303,12 @@ class LiveReport:
     def session_count(self) -> builtins.int:
         r"""
         合并进输出的录制会话数。会话是一段时间线连续的录制：中断后续录时，若各轨都与之前录到的内容接得上，仍是
-        同一个会话；否则另起一个，与之前的首尾相接
+        同一个会话；否则另起一个，与之前的首尾相接。录制中途另起的（见 `new_sessions`）也算
+        """
+    @property
+    def new_sessions(self) -> builtins.tuple[NewSession, ...]:
+        r"""
+        本次运行录制中途另起的会话，按先后；只合并时为空
         """
     @property
     def missed(self) -> builtins.tuple[Missed, ...]:
@@ -1323,7 +1318,7 @@ class LiveReport:
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, end: typing.Optional[LiveEnd], session_count: builtins.int, missed: collections.abc.Sequence[Missed]) -> LiveReport:
+    def __new__(cls, *, end: typing.Optional[LiveEnd], session_count: builtins.int, new_sessions: collections.abc.Sequence[NewSession], missed: collections.abc.Sequence[Missed]) -> LiveReport:
         r"""
         各参数即同名属性。
         """
@@ -1960,6 +1955,30 @@ class Mp4UnsupportedError(RequestError):
         r"""
         同构造函数：把说明放进 `args`。
         """
+
+@typing.final
+class NewSession:
+    r"""
+    录制中途另起的会话：只录一条轨时，它的播放列表与之前刷新得到的接不上，不结束录制，另起会话接着录。序号回退时
+    从新窗口的起点录；矛盾时跳过已处理到的序号，只录更新的分片。
+    """
+    @property
+    def session(self) -> builtins.int:
+        r"""
+        另起的会话编号
+        """
+    @property
+    def cause(self) -> SourceBreak.Restarted | SourceBreak.Inconsistent:
+        r"""
+        接不上的方式
+        """
+    def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
+    def __hash__(self) -> builtins.int: ...
+    def __new__(cls, *, session: builtins.int, cause: SourceBreak) -> NewSession:
+        r"""
+        各参数即同名属性。
+        """
+    def __repr__(self) -> builtins.str: ...
 
 @typing.final
 class NotMediaPlaylistError(SourceError):
@@ -2803,6 +2822,33 @@ class Source:
         `InvalidInputError`。
         """
     def __repr__(self) -> builtins.str: ...
+
+class SourceBreak:
+    r"""
+    媒体播放列表与之前刷新得到的接不上的方式。
+    """
+    def __repr__(self) -> builtins.str: ...
+    @typing.final
+    class Restarted(SourceBreak):
+        r"""
+        媒体序号回退、且与上次的窗口没有重叠，连续两次刷新都如此（多为编码器重启；只一次多为 CDN 的旧缓存，不算）
+        """
+        __match_args__ = ()
+        def __new__(cls) -> SourceBreak.Restarted: ...
+    
+    @typing.final
+    class Inconsistent(SourceBreak):
+        r"""
+        在某个序号处矛盾：同一序号换了分片，或不连续段编号对不上（服务器错误）
+        """
+        __match_args__ = ("sequence",)
+        @property
+        def sequence(self) -> builtins.int:
+            r"""
+            矛盾处的媒体序号
+            """
+        def __new__(cls, sequence: builtins.int) -> SourceBreak.Inconsistent: ...
+    
 
 class SourceError(HsM3u8Error):
     r"""

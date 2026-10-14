@@ -2,9 +2,12 @@
 
 use std::time::Duration;
 
-use hs_m3u8_core::{LiveEnd, MissReason};
+use hs_m3u8_core::{LiveEnd, LiveReport, MissReason, NewSession, SourceBreak};
 
-use super::{STALL, interrupt, live_request, missed, playlist, put_long, report, slow_retry};
+use super::{
+    STALL, expected_split_long, interrupt, live_request, missed, playlist, playlist_in, put_long,
+    put_split_master, report, slow_retry,
+};
 use crate::server::Server;
 use crate::{assert_output, expected_long, fixture, run, test_dir};
 
@@ -102,27 +105,80 @@ async fn stale_older_window_is_not_inconsistent() {
     assert_eq!(server.hits("seg0.ts"), 0);
 }
 
-/// 媒体序号回退且与上次窗口不重叠，连续两次即认定编码器重启：结束录制，合并重启前的部分。
+/// 只有一条轨的报告：另起的会话为 `new_sessions`，没有缺失。
+fn report_with(
+    end: LiveEnd,
+    session_count: usize,
+    new_sessions: Vec<NewSession>,
+) -> Option<LiveReport> {
+    Some(LiveReport {
+        end: Some(end),
+        session_count,
+        new_sessions,
+        missed: vec![],
+    })
+}
+
+/// 媒体序号回退且与上次窗口不重叠，连续两次即认定编码器重启：只录一条轨，另起会话 1 从新窗口的起点接着录，
+/// 两个会话首尾相接。
 #[tokio::test(flavor = "multi_thread")]
-async fn sequence_regression_ends_as_restarted() {
+async fn sequence_regression_starts_a_new_session() {
     let dir = test_dir("live_restart");
     let server = Server::start().await;
     put_long(&server, "", &[0, 1, 2, 3]);
     server.put_sequence(
         "live.m3u8",
-        vec![playlist(&[2, 3], false), playlist(&[0], false)],
+        vec![
+            playlist(&[2, 3], false),
+            playlist(&[0], false),
+            playlist(&[0], false),
+            playlist(&[0, 1], true),
+        ],
     );
 
     let output = run(live_request(server.url("live.m3u8"), &dir, STALL))
         .await
         .unwrap();
 
-    assert_output(&output, &expected_long(&dir, &[2, 3], &[2]));
+    assert_output(&output, &expected_long(&dir, &[2, 3, 0, 1], &[2, 2]));
+    let restarted = NewSession {
+        session: 1,
+        cause: SourceBreak::Restarted,
+    };
     assert_eq!(
-        output.live.unwrap().end,
-        Some(LiveEnd::Restarted { track: 0 })
+        output.live,
+        report_with(LiveEnd::EndList, 2, vec![restarted])
     );
-    assert_eq!(server.hits("seg0.ts"), 0);
+}
+
+/// 录两条轨时视频的序号回退：音频从哪里起与重启后的视频对得上不知道，不另起会话，结束录制，合并之前的部分。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_while_recording_two_tracks_ends_recording() {
+    let dir = test_dir("live_restart_split");
+    let server = Server::start().await;
+    put_split_master(&server);
+    put_long(&server, "v/", &[0, 1, 2, 3]);
+    put_long(&server, "a/", &[0, 1, 2, 3]);
+    server.put_sequence(
+        "video.m3u8",
+        vec![
+            playlist_in("v/", &[2, 3], false),
+            playlist_in("v/", &[0], false),
+        ],
+    );
+    server.put("audio.m3u8", playlist_in("a/", &[2, 3], false));
+
+    let output = run(live_request(server.url("master.m3u8"), &dir, STALL))
+        .await
+        .unwrap();
+
+    assert_output(&output, &expected_split_long(&dir, &[(&[2, 3], &[2, 3])]));
+    let end = LiveEnd::Broken {
+        track: 0,
+        cause: SourceBreak::Restarted,
+    };
+    assert_eq!(output.live, report(end, 1, vec![]));
+    assert_eq!(server.hits("v/seg0.ts"), 0);
 }
 
 /// 只回退一次（多为 CDN 的旧缓存）：不算重启，之后的正常窗口照常录。
@@ -174,36 +230,40 @@ async fn empty_refreshes_are_waited_out() {
     assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
 }
 
-/// 同一序号的分片在两次刷新之间换了文件：服务器错误，结束录制并合并之前的部分。
+/// 同一序号的分片在两次刷新之间换了文件（服务器错误）：只录一条轨，另起会话 1，跳过已处理到的序号 1，之后的
+/// 分片接着录。
 #[tokio::test(flavor = "multi_thread")]
-async fn changed_segment_ends_recording() {
+async fn a_changed_segment_starts_a_new_session_after_what_was_processed() {
     let dir = test_dir("live_changed");
     let server = Server::start().await;
-    put_long(&server, "", &[0, 1, 2]);
+    put_long(&server, "", &[0, 1, 2, 3]);
     let changed = "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg2.ts\n";
+    let continued = format!("{changed}#EXTINF:1,\nseg3.ts\n#EXT-X-ENDLIST\n");
     server.put_sequence(
         "live.m3u8",
-        vec![playlist(&[0, 1], false), changed.to_owned()],
+        vec![playlist(&[0, 1], false), changed.to_owned(), continued],
     );
 
     let output = run(live_request(server.url("live.m3u8"), &dir, STALL))
         .await
         .unwrap();
 
-    assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
+    assert_output(&output, &expected_long(&dir, &[0, 1, 3], &[2, 1]));
+    let contradicted = NewSession {
+        session: 1,
+        cause: SourceBreak::Inconsistent { sequence: 1 },
+    };
     assert_eq!(
-        output.live.unwrap().end,
-        Some(LiveEnd::Inconsistent {
-            track: 0,
-            sequence: 1
-        })
+        output.live,
+        report_with(LiveEnd::EndList, 2, vec![contradicted])
     );
+    assert_eq!(server.hits("seg2.ts"), 0);
 }
 
-/// 判定期间暂存的第二份播放列表与第一份矛盾（同一序号换了分片）：会话定下后处理到它即结束录制，
-/// 合并之前的部分，不卡住。
+/// 判定期间暂存的第二份播放列表与第一份矛盾（同一序号换了分片）：会话定下后处理到它即另起会话 1，跳过已处理到的
+/// 序号，之后的分片接着录，不卡住。
 #[tokio::test(flavor = "multi_thread")]
-async fn a_held_playlist_that_contradicts_ends_recording() {
+async fn a_held_playlist_that_contradicts_starts_a_new_session() {
     let dir = test_dir("live_held_inconsistent");
     let server = Server::start().await;
     put_long(&server, "", &[0, 1, 2, 3]);
@@ -217,19 +277,24 @@ async fn a_held_playlist_that_contradicts_ends_recording() {
     server.put("other2.ts", fixture("ts_long/seg2.ts"));
     let contradicting = "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MEDIA-SEQUENCE:0\n\
                          #EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n#EXTINF:1,\nother2.ts\n";
+    let continued = format!("{contradicting}#EXTINF:1,\nseg3.ts\n#EXT-X-ENDLIST\n");
     server.put_sequence(
         "live.m3u8",
-        vec![playlist(&[0, 1, 2], false), contradicting.into()],
+        vec![playlist(&[0, 1, 2], false), contradicting.into(), continued],
     );
     let output = tokio::time::timeout(Duration::from_secs(10), run(req))
         .await
-        .expect("处理到矛盾的播放列表应结束录制")
+        .expect("处理到矛盾的播放列表应另起会话接着录")
         .unwrap();
 
-    assert_output(&output, &expected_long(&dir, &[0, 1, 2], &[3]));
-    let end = LiveEnd::Inconsistent {
-        track: 0,
-        sequence: 2,
+    assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[3, 1]));
+    let contradicted = NewSession {
+        session: 1,
+        cause: SourceBreak::Inconsistent { sequence: 2 },
     };
-    assert_eq!(output.live, report(end, 1, vec![]));
+    assert_eq!(
+        output.live,
+        report_with(LiveEnd::EndList, 2, vec![contradicted])
+    );
+    assert_eq!(server.hits("other2.ts"), 0);
 }

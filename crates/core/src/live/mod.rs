@@ -8,7 +8,8 @@
 //! 作为事件交回，循环从不等某一个网络请求；新录齐的组能否放进 MP4（见 [`Mp4Check`]）只读两组开头的分片，在循环里
 //! 做完。拉到的播放列表先暂存在各轨，会话定下后逐份拉好 init 段、按顺序处理。
 //! 定下结束原因后不再刷新，把暂存的处理完才结束；停止（[`crate::JobControl::stop`]）也是如此，但会话定下之前停止
-//! 立即结束，不录新的分片。
+//! 立即结束，不录新的分片。只录一条轨时，它的播放列表与之前刷新得到的接不上就另起会话接着录（见
+//! [`crate::NewSession`]）。
 //!
 //! 轨道编号：第 0 条为所选变体（或来源本身的媒体播放列表），第 1 条（若有）为独立的音频 rendition。
 
@@ -42,8 +43,8 @@ use crate::request::LiveOptions;
 use crate::resolve::ResolvedTrack;
 use crate::workdir::{self, Stored, StoredInit, WorkDir};
 use crate::{
-    Error, LiveEnd, MissReason, Missed, Mp4Unsupported, Progress, RefreshCause, Stage,
-    WorkDirProblem,
+    Error, LiveEnd, MissReason, Missed, Mp4Unsupported, NewSession, Progress, RefreshCause,
+    SourceBreak, Stage, WorkDirProblem,
 };
 
 /// 本次运行的录制结果。
@@ -51,6 +52,8 @@ pub(crate) struct Outcome {
     pub end: LiveEnd,
     /// 本次运行中记下原因的缺失（未合并成区间）
     pub missed: Vec<Missed>,
+    /// 本次运行录制中途另起的会话
+    pub new_sessions: Vec<NewSession>,
 }
 
 /// 录制用到的共享对象。
@@ -100,6 +103,8 @@ struct Recorder<'a> {
     tracks: Vec<LiveTrack>,
     /// 本次运行中记下原因的缺失
     missed: Vec<Missed>,
+    /// 本次运行录制中途另起的会话
+    new_sessions: Vec<NewSession>,
     tasks: Tasks,
     /// 核对内容用的直接拉取
     direct: Direct,
@@ -149,6 +154,7 @@ pub(crate) async fn record(
         options,
         tracks: live_tracks(&tracks, &stored, now)?,
         missed: Vec::new(),
+        new_sessions: Vec::new(),
         tasks: Tasks::new(ctx.cancel),
         direct: ctx.fetcher.direct(),
         phase,
@@ -527,8 +533,8 @@ impl Recorder<'_> {
         }
     }
 
-    /// 按定下的会话处理第 `track` 条轨的一份播放列表：新 init 段落盘后再把新分片排入下载。服务器前后矛盾或
-    /// 编码器重启时定下结束原因，这条轨暂存的不再处理。
+    /// 按定下的会话处理第 `track` 条轨的一份播放列表：新 init 段落盘后再把新分片排入下载。与之前刷新得到的接不上时
+    /// 见 [`Recorder::source_broke`]。
     async fn process(
         &mut self,
         track: usize,
@@ -546,10 +552,8 @@ impl Recorder<'_> {
         let now = Instant::now();
         let Fetched { playlist, started } = fetched;
         let update = match self.tracks[track].apply(&scope, &playlist, inits, started, now)? {
-            ControlFlow::Break(end) => {
-                self.tracks[track].stop_processing();
-                self.end(end);
-                return Ok(());
+            ControlFlow::Break(cause) => {
+                return self.source_broke(track, cause, Fetched { playlist, started });
             }
             ControlFlow::Continue(update) => update,
         };
@@ -575,6 +579,37 @@ impl Recorder<'_> {
             fetcher.push(item);
         }
         Ok(())
+    }
+
+    /// 第 `track` 条轨的播放列表 `fetched` 与之前刷新得到的接不上。只录这一条轨时另起会话接着录（见
+    /// [`LiveTrack::restart`]）；录的不止一条轨时其他轨从哪里起与它对得上不知道，定下结束原因，这条轨暂存的不再处理。
+    fn source_broke(
+        &mut self,
+        track: usize,
+        cause: SourceBreak,
+        fetched: Fetched,
+    ) -> Result<(), Error> {
+        if self.tracks.len() > 1 {
+            self.tracks[track].stop_processing();
+            self.end(LiveEnd::Broken { track, cause });
+            return Ok(());
+        }
+        let session = self
+            .session()
+            .checked_add(1)
+            .ok_or_else(|| self.sessions_exhausted())?;
+        self.phase = Phase::Decided { session };
+        self.tracks[track].restart(cause, fetched);
+        self.new_sessions.push(NewSession { session, cause });
+        Ok(())
+    }
+
+    /// 另起会话而会话编号已达上限：目录无法再用。
+    fn sessions_exhausted(&self) -> Error {
+        Error::WorkDir {
+            path: self.dir.layout().root().to_path_buf(),
+            problem: WorkDirProblem::Corrupt("会话编号已达上限".into()),
+        }
     }
 
     /// 录制中的会话编号。
@@ -623,6 +658,7 @@ impl Recorder<'_> {
                 Ok(Outcome {
                     end,
                     missed: self.missed,
+                    new_sessions: self.new_sessions,
                 })
             }
             Err(e) => {

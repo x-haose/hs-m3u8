@@ -386,6 +386,7 @@ async fn merge_recorded_merges_without_the_network() {
     let want = LiveReport {
         end: None,
         session_count: 1,
+        new_sessions: vec![],
         missed: vec![],
     };
     assert_eq!(output.live, Some(want));

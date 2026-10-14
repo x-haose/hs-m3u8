@@ -95,6 +95,7 @@ fn report(end: LiveEnd, session_count: usize, missed: Vec<Missed>) -> Option<Liv
     Some(LiveReport {
         end: Some(end),
         session_count,
+        new_sessions: vec![],
         missed,
     })
 }

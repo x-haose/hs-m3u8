@@ -230,13 +230,14 @@ fn merge_live(
     if plan.groups.is_empty() {
         return Err(Error::NothingRecorded);
     }
-    let (end, known) = match recording {
-        Some(r) => (Some(r.end), r.missed),
-        None => (None, Vec::new()),
+    let (end, known, new_sessions) = match recording {
+        Some(r) => (Some(r.end), r.missed, r.new_sessions),
+        None => (None, Vec::new(), Vec::new()),
     };
     let report = LiveReport {
         end,
         session_count: plan.sessions,
+        new_sessions,
         missed: live::report_missed(&plan, known),
     };
     Ok(Content {

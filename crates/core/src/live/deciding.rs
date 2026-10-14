@@ -120,10 +120,9 @@ impl Recorder<'_> {
         if !verdicts.is_complete() {
             return Ok(());
         }
-        let decision = verdicts.decide().ok_or_else(|| Error::WorkDir {
-            path: self.dir.layout().root().to_path_buf(),
-            problem: WorkDirProblem::Corrupt("会话编号已达上限".into()),
-        })?;
+        let Some(decision) = verdicts.decide() else {
+            return Err(self.sessions_exhausted());
+        };
         self.enter_session(decision).await
     }
 
