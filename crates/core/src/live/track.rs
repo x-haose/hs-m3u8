@@ -79,8 +79,9 @@ pub(super) struct LiveTrack {
     preparing: Option<Instant>,
     /// 之前各会话已录到的时长，微秒
     recorded_us: u64,
-    /// 最近一次有分片下载成功或列出 EXT-X-GAP 的新分片（直播还在，只是这段没有内容）的时刻，或录制开始、会话定下的时刻
-    last_recorded: Instant,
+    /// 最近一次有分片下载成功、或一份播放列表列出的新分片全是 EXT-X-GAP（直播还在，只是这段没有内容）的时刻，或录制
+    /// 开始、会话定下的时刻
+    last_progress: Instant,
     /// 最近一次发起的刷新的发起时刻
     last_started: Option<Instant>,
     /// 最近一次返回的刷新（成功或失败）的发起时刻
@@ -119,7 +120,7 @@ impl LiveTrack {
             pending: VecDeque::new(),
             preparing: None,
             recorded_us,
-            last_recorded: now,
+            last_progress: now,
             last_started: None,
             last_returned: None,
             last_listed: now,
@@ -142,7 +143,7 @@ impl LiveTrack {
                 Role::Idle
             }
         };
-        self.last_recorded = now;
+        self.last_progress = now;
         self.last_listed = now;
     }
 
@@ -418,8 +419,8 @@ impl LiveTrack {
         if update.any_new {
             self.last_listed = now;
         }
-        if !update.gaps.is_empty() {
-            self.last_recorded = now;
+        if !update.gaps.is_empty() && update.items.is_empty() && update.init_failed.is_empty() {
+            self.last_progress = now;
         }
         if let Some(failure) = &update.init_failure {
             self.last_download_failure = Some(failure.clone());
@@ -432,7 +433,7 @@ impl LiveTrack {
     /// 本轨排入下载的一个分片下载成功。
     pub(super) fn segment_recorded(&mut self, now: Instant) {
         self.outstanding -= 1;
-        self.last_recorded = now;
+        self.last_progress = now;
     }
 
     /// 本轨排入下载的一个分片取不到，记为缺失。
@@ -482,7 +483,7 @@ impl LiveTrack {
         if waiting {
             return None;
         }
-        self.last_recorded
+        self.last_progress
             .checked_add(stall_timeout.max(self.target.saturating_mul(STALL_TARGETS)))
     }
 

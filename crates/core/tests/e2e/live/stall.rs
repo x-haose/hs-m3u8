@@ -138,6 +138,47 @@ async fn continuous_gaps_are_not_a_stall() {
     assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![gaps]));
 }
 
+/// 每次刷新都列出一个 EXT-X-GAP 与一个取不到的分片：有要取的新分片一个也录不到，照样判为停滞（GAP 只在一次列出的
+/// 新分片全是 GAP 时推迟停滞）。
+#[tokio::test(flavor = "multi_thread")]
+async fn gaps_listed_with_unrecordable_segments_still_stall() {
+    let dir = test_dir("live_gap_404");
+    let server = Server::start().await;
+    put_long(&server, "", &[0]);
+    let window = |count: u64| {
+        let mut text =
+            "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1,\nseg0.ts\n"
+                .to_owned();
+        for i in 1..=count {
+            text += &format!("#EXT-X-GAP\n#EXTINF:1,\ngap{i}.ts\n#EXTINF:1,\nmissing{i}.ts\n");
+        }
+        text
+    };
+    server.put_sequence("live.m3u8", (0..200).map(window).collect());
+
+    let err = run(live_request(
+        server.url("live.m3u8"),
+        &dir,
+        Duration::from_millis(500),
+    ))
+    .await
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::LiveStalled {
+                track: 0,
+                cause: StallError::Unrecordable(FetchFailure::Http(HttpFailure {
+                    kind: HttpError::Status(404),
+                    ..
+                }))
+            }
+        ),
+        "{err}"
+    );
+}
+
 /// 音频轨的播放列表在首次之后被删除、视频轨照常：按音频轨的直播已结束收尾。
 #[tokio::test(flavor = "multi_thread")]
 async fn one_track_whose_playlist_is_removed_ends_the_recording() {

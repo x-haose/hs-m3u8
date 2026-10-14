@@ -63,7 +63,7 @@ impl Processed {
 
     /// 分片 `segment` 要不要去取：要录，且来源没有标 EXT-X-GAP（RFC 8216 4.4.4.7：客户端不取它）。拉新 init 段与
     /// 处理播放列表都按它：拉的正是这些分片引用的 init 段。
-    pub(super) fn fetches(&self, segment: &Segment) -> bool {
+    pub(super) fn should_fetch(&self, segment: &Segment) -> bool {
         !segment.gap && self.is_new(segment.sequence)
     }
 }
@@ -90,7 +90,7 @@ pub(super) struct Scope<'a> {
 /// 新分片引用、上一份播放列表里没有的 init 段，及其拉取结果。
 pub(super) type NewInits = Vec<(InitSection, Result<Vec<u8>, Error>)>;
 
-/// 拉哪些新 init 段：要去取的分片（见 [`Processed::fetches`]）引用、又不在 `known` 中的。
+/// 拉哪些新 init 段：要去取的分片（见 [`Processed::should_fetch`]）引用、又不在 `known` 中的。
 pub(super) struct InitsToFetch {
     /// 上一份播放列表引用、内容已知的 init 段
     pub known: Vec<InitSection>,
@@ -319,12 +319,14 @@ impl Window {
                 .processed
                 .last
                 .map_or(s.sequence, |l| l.max(s.sequence));
-            let fetches = self.processed.fetches(s);
+            let init = self
+                .processed
+                .should_fetch(s)
+                .then(|| new_segment_init(s, &listing.inits, failed));
             self.processed.last = Some(last);
             let discontinuity = u64::try_from(number)
                 .expect("要录的分片编号为负时在处理之前已查出（见 ungroupable）");
-            let init = || new_segment_init(s, &listing.inits, failed);
-            self.record_new(scope, s, discontinuity, fetches.then_some(init), update)?;
+            self.record_new(scope, s, discontinuity, init, update)?;
         }
         Ok(listing)
     }
@@ -403,14 +405,14 @@ impl Window {
         }
     }
 
-    /// 一个新分片：录满 max_duration 后不再录；不去取（`init` 为 None，来源标了 EXT-X-GAP，见
-    /// [`Processed::fetches`]）、init 段取不到时记为缺失；其余排入下载。`init` 给出要去取的分片的 init 段的状态。
+    /// 一个新分片：录满 max_duration 后不再录；不去取（`init` 为 None：来源标了 EXT-X-GAP，见
+    /// [`Processed::should_fetch`]）、init 段取不到时记为缺失；其余排入下载。`init` 为要去取的分片的 init 段的状态。
     fn record_new(
         &mut self,
         scope: &Scope<'_>,
         segment: &Segment,
         discontinuity: u64,
-        init: Option<impl FnOnce() -> InitState>,
+        init: Option<InitState>,
         update: &mut Update,
     ) -> Result<(), Error> {
         if scope.max_us.is_some_and(|max| self.recorded_us >= max) {
@@ -427,7 +429,7 @@ impl Window {
             });
             return Ok(());
         };
-        let init = match init() {
+        let init = match init {
             InitState::Absent => None,
             InitState::Ready(fingerprint) => Some(fingerprint),
             InitState::Failed(failure) => {

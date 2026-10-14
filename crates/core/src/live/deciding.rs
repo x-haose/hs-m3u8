@@ -93,8 +93,8 @@ impl Recorder<'_> {
         self.tracks[track].hold(fetched);
     }
 
-    /// 核对第 `track` 条轨的 `playlist` 能否接着它最近的会话录；没有录过分片时没有可核对的，没有重叠时直接得出：要录
-    /// 的轨接不上，已录满的轨核对不了。
+    /// 核对第 `track` 条轨的 `playlist` 能否接着它最近的会话录；没有录过分片时没有可核对的，没有可核对的重叠（见
+    /// [`overlaps`]）时直接得出：要录的轨接不上，已录满的轨核对不了。
     fn check(&mut self, track: usize, playlist: &MediaPlaylist) {
         let dir: &WorkDir = self.dir;
         let verdicts = self.verdicts();
