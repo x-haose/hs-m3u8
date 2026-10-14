@@ -71,8 +71,9 @@ pub trait Hooks: Send + Sync {
         Ok(None)
     }
 
-    /// 发出请求前修改地址与请求头（如签名）。每次尝试（含重试）调用一次；改后的请求不合法（不是 http/https，请求头
-    /// 放不进请求或是本库控制的头，见 [`crate::HttpOptions::validate`]）时任务失败。
+    /// 发出请求前修改地址与请求头（如签名）。每次尝试（含重试）调用一次，在拿到引擎的请求名额之后、调完立即发出，
+    /// 签名不在排队中过期；改后的请求不合法（不是 http/https，请求头放不进请求或是本库控制的头，见
+    /// [`crate::HttpOptions::validate`]）时任务失败。
     fn on_request(&self, purpose: Purpose, request: &mut RequestParts) -> Result<(), HookError> {
         let _ = (purpose, request);
         Ok(())

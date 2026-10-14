@@ -486,8 +486,8 @@ class Hooks:
     def on_request(self, purpose: Purpose, request: RequestParts, /) -> RequestParts:
         r"""
         发出请求前修改地址与请求头（如签名），返回改过的请求（`RequestParts` 不可变，改时新建一个）。每次尝试（含
-        重试）调用一次；改后的请求不合法（不是 http/https，请求头放不进请求或是本库控制的头，见 `HttpOptions`）时任务
-        失败。
+        重试）调用一次，在拿到引擎的请求名额之后、调完立即发出，签名不在排队中过期；改后的请求不合法（不是
+        http/https，请求头放不进请求或是本库控制的头，见 `HttpOptions`）时任务失败。
         """
     def on_key(self, url: builtins.str, data: bytes, /) -> typing.Optional[bytes]:
         r"""

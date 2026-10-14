@@ -39,7 +39,7 @@ pub(crate) struct Http {
     source: url::Origin,
     retry: RetryPolicy,
     hooks: Arc<dyn Hooks>,
-    /// 引擎内所有任务共享；[`Permit::Required`] 的每次尝试从发出请求到读完响应体占用一个名额
+    /// 引擎内所有任务共享；[`Permit::Required`] 的每次尝试从调用 `on_request` 回调到读完响应体占用一个名额
     requests: Arc<Semaphore>,
     /// 每读到一块响应体，以它的字节数调用；不需要计数（探测）时为 None
     on_received: Option<OnReceived>,
@@ -177,7 +177,8 @@ impl Http {
         }
     }
 
-    /// GET `url` 一次，不重试（要重试的连同对内容的处理一起交给 [`Http::retrying`]）。
+    /// GET `url` 一次，不重试（要重试的连同对内容的处理一起交给 [`Http::retrying`]）。先拿到名额，再经 `on_request`
+    /// 回调、立即发出：回调做的签名不在排队中过期。
     pub(crate) async fn get_once(
         &self,
         purpose: Purpose,
@@ -186,7 +187,6 @@ impl Http {
         permit: Permit,
         cancel: &CancellationToken,
     ) -> Result<Response, Error> {
-        let parts = self.prepare(purpose, url).await?;
         let _permit = match permit {
             Permit::Exempt => None,
             Permit::Required => Some(tokio::select! {
@@ -194,6 +194,7 @@ impl Http {
                 permit = self.requests.acquire() => permit.expect("引擎的信号量从不关闭"),
             }),
         };
+        let parts = self.prepare(purpose, url).await?;
         let response = self.send(&parts, range, cancel).await?;
         self.read(response, &parts.url, purpose, range, cancel)
             .await
