@@ -130,10 +130,12 @@ impl<'a> Muxer<'a> {
     }
 
     /// 写出一组（各输入已读到每路流的第一个包）：各输入按回绕对齐（见 [`align_wraps`]），再按全组共用的偏移平移时间戳，
-    /// 按 DTS 交错写出。
+    /// 按 DTS 交错写出，写出前核对时间戳没有往前跳（见 [`Source::check_jump`]）。
     fn write_group(&mut self, group: usize, mut sources: Vec<Source>) -> Result<(), Error> {
         align_wraps(&mut sources);
         let offset_us = self.offset_of(group, &sources)?;
+        // 全组已写出的最大 DTS，输入时间线上（对齐回绕后）的微秒
+        let mut clock_us: Option<i64> = None;
         loop {
             for source in &mut sources {
                 if source.queue.is_empty()
@@ -149,9 +151,11 @@ impl<'a> Muxer<'a> {
                 .enumerate()
                 .filter_map(|(i, s)| s.front_dts_us().map(|dts| (i, dts)))
                 .min_by_key(|&(_, dts)| dts);
-            let Some((i, _)) = next else { break };
+            let Some((i, dts_us)) = next else { break };
             let source = &mut sources[i];
             let (packet, mapping) = source.queue.pop_front().expect("next 只指向有待写包的输入");
+            source.check_jump(&packet, mapping, dts_us, clock_us)?;
+            clock_us = Some(clock_us.map_or(dts_us, |clock| clock.max(dts_us)));
             let at = Placed {
                 group,
                 track: source.track,

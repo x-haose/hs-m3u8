@@ -1124,6 +1124,69 @@ fn a_forward_timestamp_jump_within_a_group_is_rejected() {
     .unwrap();
 }
 
+/// 时间戳在一个分片里面往前跳了约 1000 秒（两段内容拼成一片、声明 2 秒）：同样报 TimestampJump，跳变处在第 0 片。
+#[test]
+fn a_timestamp_jump_inside_a_segment_is_rejected() {
+    let dir = work_dir("timestamp_jump_inside");
+    let jump = track("ts_jump");
+    let joined = dir.join("joined.ts");
+    let data: Vec<u8> = jump
+        .segments
+        .iter()
+        .flat_map(|s| std::fs::read(&s.path).unwrap())
+        .collect();
+    std::fs::write(&joined, data).unwrap();
+    let one = TrackSegments {
+        segments: vec![Segment {
+            path: joined,
+            duration_us: 2_000_000,
+        }],
+        ..jump
+    };
+
+    let err = remux(
+        &[Streams::All],
+        &[group([one])],
+        &dir.join("out.mp4"),
+        &Cancel::never(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::TimestampJump {
+                segment: 0,
+                jump_us,
+                ..
+            }) if (999_000_000..1_001_000_000).contains(&jump_us)
+        ),
+        "{err:?}"
+    );
+}
+
+/// 独立的音频轨单独断了约 2 秒（第 1、2 片不在、没标缺片），视频轨照常连续：一路流单独中断不是时间戳跳变，照常合并，
+/// 音频中间留空档。
+#[test]
+fn one_stream_pausing_alone_is_not_a_timestamp_jump() {
+    let dir = work_dir("one_stream_pausing");
+    let video = track("ts_long");
+    let audio = TrackSegments {
+        segments: vec![video.segments[0].clone(), video.segments[3].clone()],
+        ..video.clone()
+    };
+
+    let report = remux(
+        &[Streams::Video, Streams::Audio],
+        &[group([video, audio])],
+        &dir.join("out.mp4"),
+        &Cancel::never(),
+    )
+    .unwrap();
+
+    assert_eq!(report.streams.len(), 2);
+}
+
 /// 从 GOP 中间开始的组：第一个关键帧之前的视频包参考的帧不在输出里，不写出、计数，输出的视频每个包都解得出。
 #[test]
 fn video_before_the_first_keyframe_of_a_group_is_dropped_and_counted() {

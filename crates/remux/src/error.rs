@@ -209,18 +209,18 @@ pub enum Unsupported {
         track: usize,
         kind: StreamKind,
     },
-    /// 一路流进到后面的分片（中间没有缺片）时时间戳往前跳，输出里会留下比一个最长的声明时长（见
-    /// [`crate::Segment::duration_us`]）还长的空档：多为来源在时间戳重新开始处漏标了 `EXT-X-DISCONTINUITY`
+    /// 组内时间戳往前跳，输出里会留下整组都没有内容、比一个最长的声明时长（见 [`crate::Segment::duration_us`]）还长
+    /// 的空档：多为来源在时间戳重新开始处漏标了 `EXT-X-DISCONTINUITY`。一路流单独中断不算；其间有缺片时不核对
     #[error(
-        "第 {group} 组第 {track} 条轨的{kind}时间戳在第 {segment} 个分片开头往前跳，输出里会留下 {jump_us} 微秒的空档，无法放进同一条 MP4 轨"
+        "第 {group} 组第 {track} 条轨的{kind}时间戳在第 {segment} 个分片里往前跳，输出里会留下 {jump_us} 微秒的空档，无法放进同一条 MP4 轨"
     )]
     TimestampJump {
         group: usize,
         track: usize,
         kind: StreamKind,
-        /// 跳变后的第一个分片在这一组这条轨里的下标
+        /// 跳变后的第一个包所在的分片在这一组这条轨里的下标
         segment: usize,
-        /// 空档的长度，微秒：与这路流上一个包的 DTS 之差，减去其间整片都没有这路流的包的那几片声明的时长
+        /// 空档的长度，微秒：与全组已写出的最大 DTS 之差，减去其间整片都没有这条轨的包的那几片声明的时长
         jump_us: u64,
     },
     /// 这一组里这条轨的视频没有关键帧（随机访问点；不带 recovery point SEI 的 H.264 开放 GOP 里非 IDR 的 I 帧不算：

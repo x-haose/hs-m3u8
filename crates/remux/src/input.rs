@@ -178,16 +178,21 @@ impl SegmentMap {
             .checked_sub(1)
     }
 
-    /// 第 `from` 片与第 `to` 片（`from` < `to`）之间各片声明的时长之和，微秒（不含这两片）。其间有缺片（缺了的那几片
-    /// 时长不知道）时为 None，不核对。
-    pub(crate) fn declared_between(&self, from: usize, to: usize) -> Option<u64> {
-        if self.gaps.iter().any(|&gap| from < gap && gap <= to) {
+    /// 第 `from` 片与第 `to` 片之间各片声明的时长之和，微秒（不含这两片；`from` 为 None 时从第 0 片算起；`from` 不
+    /// 早于 `to` 时为 0）。其间有缺片（缺了的那几片时长不知道）时为 None，不核对。
+    pub(crate) fn declared_between(&self, from: Option<usize>, to: usize) -> Option<u64> {
+        let first = from.map_or(0, |from| from + 1);
+        if self
+            .gaps
+            .iter()
+            .any(|&gap| from.is_none_or(|from| from < gap) && gap <= to)
+        {
             return None;
         }
-        Some(self.durations_us[from + 1..to].iter().sum())
+        Some(self.durations_us[first.min(to)..to].iter().sum())
     }
 
-    /// 输出里一路流的空档多长以内算正常：这一组里最长的声明时长，微秒。RFC 8216 要求 EXTINF 不超过目标时长
+    /// 输出里整组都没有内容的空档多长以内算正常：这一组里最长的声明时长，微秒。RFC 8216 要求 EXTINF 不超过目标时长
     /// （4.3.3.1），容差取一个目标时长量级；调用方只给各分片的声明时长（见 [`crate::Segment`]），没有目标时长，取最长的
     /// 代替。声明的时长都为 0 时为 None，判断不了，不核对。
     pub(crate) fn tolerance_us(&self) -> Option<u64> {

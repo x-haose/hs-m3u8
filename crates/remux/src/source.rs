@@ -46,8 +46,8 @@ pub(crate) struct Source {
     hevc: Vec<Option<Framing>>,
     /// 按输入流下标：视频流在这一组里读到的第一个能开始解码的帧的 PTS（没有 PTS 时为 DTS），还没读到时为 None
     keyframe_pts: Vec<Option<i64>>,
-    /// 按输入流下标：上一个要写出的包所在的分片与它的 DTS（微秒），见 [`Source::check_advance`]
-    last_written: Vec<Option<(usize, i64)>>,
+    /// 上一个写出的包所在的分片（见 [`Source::check_jump`]）
+    last_segment: Option<usize>,
     /// 已读出、待写入的包及其映射；包一定带 DTS
     pub(crate) queue: VecDeque<(Packet, Mapping)>,
     /// 读到了末尾（见 [`Source::read_next`]）
@@ -94,7 +94,7 @@ impl Source {
             dropped: vec![Dropped::default(); streams],
             hevc,
             keyframe_pts: vec![None; streams],
-            last_written: vec![None; streams],
+            last_segment: None,
             queue: VecDeque::new(),
             finished: false,
             wrap_us: 0,
@@ -102,9 +102,8 @@ impl Source {
     }
 
     /// 读下一个要写出的包。跳过未映射流的包；没有 DTS 的包、组开头解不出的视频包（见 [`Source::decodable`]）与损坏（读
-    /// 不出帧头或帧长与包长对不上）的音频包记入 `dropped`；参数随帧携带的包核对参数，分片之间核对时间戳推进。读到末尾返
-    /// 回 `None` 并记下 `finished`，打包音频丢弃的损坏字节这时才是全部（见 [`Input::discarded`]），一并记入 `dropped`；
-    /// 之后不再调用。
+    /// 不出帧头或帧长与包长对不上）的音频包记入 `dropped`；参数随帧携带的包核对参数。读到末尾返回 `None` 并记下
+    /// `finished`，打包音频丢弃的损坏字节这时才是全部（见 [`Input::discarded`]），一并记入 `dropped`；之后不再调用。
     pub(crate) fn read_next(&mut self) -> Result<Option<(Packet, Mapping)>, Error> {
         loop {
             let mut packet = Packet::empty();
@@ -161,39 +160,35 @@ impl Source {
                     return Err(Error::Unsupported(unsupported));
                 }
             }
-            self.check_advance(&packet, mapping)?;
             return Ok(Some((packet, mapping)));
         }
     }
 
-    /// 要写出的包 `packet` 进到后面的分片时，输出里这路流的空档不超过容差（见 [`crate::input::SegmentMap`]），否则报
-    /// [`Unsupported::TimestampJump`]。空档为它与这路流上一个包的 DTS 之差，减去其间整片都没有这路流的包的那几片声明的
-    /// 时长：连续的内容在相邻分片之间只差一帧，与 EXTINF 准不准无关。没有位置的包（解析器从一个 PES 拆出的后几帧）归在
-    /// 这路流上一个包所在的分片；其间有缺片或声明的时长判断不了时不核对。往回跳的由写出时的 DTS 严格递增拦下。
-    fn check_advance(&mut self, packet: &Packet, mapping: Mapping) -> Result<(), Error> {
+    /// 写出前核对：包 `packet`（对齐回绕后的 DTS 为 `dts_us`，微秒）比全组已写出的最大 DTS `clock_us` 超出的部分，减去
+    /// 这个输入其间整片都没有包的那几片声明的时长，即输出里整组都没有内容的空档，超过容差（见
+    /// [`crate::input::SegmentMap::tolerance_us`]）时报 [`Unsupported::TimestampJump`]。一路流单独中断、帧稀疏时别的流
+    /// 推着时钟走，不算；片内的跳变照样量得到。没有位置的包（解析器从一个 PES 拆出的后几帧）归在这个输入上一个写出的包
+    /// 所在的分片；其间有缺片或声明的时长判断不了时不核对。往回跳的由写出时的 DTS 严格递增拦下。
+    pub(crate) fn check_jump(
+        &mut self,
+        packet: &Packet,
+        mapping: Mapping,
+        dts_us: i64,
+        clock_us: Option<i64>,
+    ) -> Result<(), Error> {
         let segments = self.input.segments();
-        let last = self.last_written[packet.stream()];
-        let Some(segment) = segments
-            .segment_at(packet.position())
-            .or(last.map(|(segment, _)| segment))
-        else {
+        let Some(segment) = segments.segment_at(packet.position()).or(self.last_segment) else {
             return Ok(());
         };
-        let dts_us = packet
-            .dts()
-            .expect("要写出的包都带 DTS")
-            .rescale(mapping.time_base, MICROS);
-        self.last_written[packet.stream()] = Some((segment, dts_us));
-        let Some((previous, previous_us)) = last.filter(|&(previous, _)| previous < segment) else {
-            return Ok(());
-        };
-        let (Some(declared), Some(tolerance)) = (
+        let previous = self.last_segment.replace(segment);
+        let (Some(clock_us), Some(skipped), Some(tolerance)) = (
+            clock_us,
             segments.declared_between(previous, segment),
             segments.tolerance_us(),
         ) else {
             return Ok(());
         };
-        let hole = (dts_us - previous_us).saturating_sub_unsigned(declared);
+        let hole = (dts_us - clock_us).saturating_sub_unsigned(skipped);
         match u64::try_from(hole) {
             Ok(jump_us) if jump_us > tolerance => {
                 Err(Error::Unsupported(Unsupported::TimestampJump {

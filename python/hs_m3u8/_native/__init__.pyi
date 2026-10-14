@@ -1891,8 +1891,8 @@ class Mp4Unsupported:
     @typing.final
     class TimestampJump(Mp4Unsupported):
         r"""
-        进到后面的分片（中间没有缺片）时时间戳往前跳，输出里会留下比一个最长的声明时长还长的空档：多为来源在时间戳
-        重新开始处漏标了 EXT-X-DISCONTINUITY
+        组内时间戳往前跳，输出里会留下整组都没有内容、比一个最长的声明时长还长的空档：多为来源在时间戳重新开始处
+        漏标了 EXT-X-DISCONTINUITY。一路流单独中断不算；其间有缺片时不核对
         """
         __match_args__ = ("group", "track", "kind", "segment", "jump",)
         @property
@@ -1913,12 +1913,12 @@ class Mp4Unsupported:
         @property
         def segment(self) -> builtins.int:
             r"""
-            跳变后的第一个分片在这一组这条轨里是第几个
+            跳变后的第一个包所在的分片在这一组这条轨里是第几个
             """
         @property
         def jump(self) -> datetime.timedelta:
             r"""
-            空档的长度：与这路流上一个包的时间戳之差，减去其间整片都没有这路流的包的那几片声明的时长
+            空档的长度：与全组已写出的最大时间戳之差，减去其间整片都没有这条轨的包的那几片声明的时长
             """
         def __new__(cls, *, group: builtins.int, track: builtins.int, kind: StreamKind, segment: builtins.int, jump: datetime.timedelta) -> Mp4Unsupported.TimestampJump: ...
     
