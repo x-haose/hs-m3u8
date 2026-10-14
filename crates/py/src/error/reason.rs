@@ -471,9 +471,17 @@ variants! {
         PlanChanged {},
         /// 记录的变体或音频已不在主播放列表中：已录的直播可用 `Engine.merge_recorded` 合并，或换一个任务目录重新开始
         SelectionGone {},
-        /// 直播：地址与记录的不同（如换了令牌），且有轨接不上之前录到的内容，无法确认是同一个直播。可用原来的地址
-        /// 续录、用 `Engine.merge_recorded` 合并已录的部分，或换一个任务目录重新录
+        /// 直播：地址与记录的不同（如换了令牌），且接不上之前录到的（有轨内容不同，或没有一条轨核对一致，见
+        /// `LiveOptions`），无法确认是同一个直播。可用原来的地址续录、用 `Engine.merge_recorded` 合并已录的部分，或换
+        /// 一个任务目录重新录
         SourceUnverified {},
+        /// 直播续录：之前录到的接不上（要另起会话），而这条轨这次不录（已录满 max_duration，或这次没有内容）：另起的
+        /// 会话里它没有分片，各轨都有的组才合并得了，录到的合并不进去。可调大 max_duration 后续录、用
+        /// `Engine.merge_recorded` 合并已录的部分，或换一个任务目录重新录
+        Unaligned {
+            /// 第几条轨
+            track: usize,
+        },
     }
 }
 
@@ -718,6 +726,7 @@ impl From<core::WorkDirProblem> for WorkDirProblem {
             W::PlanChanged => WorkDirProblem::PlanChanged {},
             W::SelectionGone => WorkDirProblem::SelectionGone {},
             W::SourceUnverified => WorkDirProblem::SourceUnverified {},
+            W::Unaligned { track } => WorkDirProblem::Unaligned { track },
         }
     }
 }

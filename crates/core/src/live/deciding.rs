@@ -5,8 +5,8 @@
 use hs_m3u8_hls::MediaPlaylist;
 use tokio::time::Instant;
 
-use super::session::{Decision, NewUrl, Verdict, Verdicts};
-use super::tasks::StoredOverlap;
+use super::session::{Decision, NewUrl, Undecided, Verdict, Verdicts};
+use super::tasks::{Overlap, StoredOverlap};
 use super::track::Fetched;
 use super::window::overlaps;
 use super::{Phase, Recorder};
@@ -14,8 +14,8 @@ use crate::workdir::WorkDir;
 use crate::{Error, WorkDirProblem};
 
 impl Recorder<'_> {
-    /// 开始录制，`first` 为各轨首次拉到的播放列表。目录里没有录过的分片时直接定下第 0 个会话；否则开始判定，
-    /// 已录满的轨不参与，其余以 `first` 作为判定期间拉到的第一份。
+    /// 开始录制，`first` 为各轨首次拉到的播放列表。目录里没有录过的分片时直接定下第 0 个会话；否则开始判定：
+    /// 已录满的轨这次不录，拿它核对作证据，其余以 `first` 作为判定期间拉到的第一份。
     pub(super) async fn start(&mut self, first: Vec<Fetched>) -> Result<(), Error> {
         if matches!(self.phase, Phase::Decided { .. }) {
             let tracks = first.len();
@@ -27,7 +27,8 @@ impl Recorder<'_> {
         let max_us = self.max_us();
         for (track, fetched) in first.into_iter().enumerate() {
             if self.tracks[track].is_full(max_us) {
-                self.verdicts().conclude(track, Verdict::Full);
+                self.verdicts().mark_full(track);
+                self.check(track, &fetched.playlist);
             } else {
                 self.note(track, fetched);
             }
@@ -41,9 +42,16 @@ impl Recorder<'_> {
         self.decide_if_complete().await
     }
 
-    /// 第 `track` 条轨核对完。
-    pub(super) async fn checked(&mut self, track: usize, verdict: Verdict) -> Result<(), Error> {
-        self.verdicts().conclude(track, verdict);
+    /// 第 `track` 条轨重叠的分片核对完：都已取不到时，要录的轨按接不上算（它们也录不到，另起会话不会重复），已录满
+    /// 的轨为核对不了。
+    pub(super) async fn checked(&mut self, track: usize, overlap: Overlap) -> Result<(), Error> {
+        let verdicts = self.verdicts();
+        let verdict = match overlap {
+            Overlap::Same => Verdict::Matches,
+            Overlap::Gone if verdicts.is_full(track) => Verdict::Unverifiable,
+            Overlap::Different | Overlap::Gone => Verdict::Differs,
+        };
+        verdicts.conclude(track, verdict);
         self.decide_if_complete().await
     }
 
@@ -85,8 +93,8 @@ impl Recorder<'_> {
         self.tracks[track].hold(fetched);
     }
 
-    /// 核对第 `track` 条轨的候选 `playlist` 能否接着它最近的会话录；没有录过分片时没有可核对的，没有重叠时直接
-    /// 得出接不上。
+    /// 核对第 `track` 条轨的 `playlist` 能否接着它最近的会话录；没有录过分片时没有可核对的，没有重叠时直接得出：要录
+    /// 的轨接不上，已录满的轨核对不了。
     fn check(&mut self, track: usize, playlist: &MediaPlaylist) {
         let dir: &WorkDir = self.dir;
         let verdicts = self.verdicts();
@@ -106,13 +114,18 @@ impl Recorder<'_> {
             })
             .collect();
         if found.is_empty() {
-            verdicts.conclude(track, Verdict::Differs);
+            let verdict = if verdicts.is_full(track) {
+                Verdict::Unverifiable
+            } else {
+                Verdict::Differs
+            };
+            verdicts.conclude(track, verdict);
         } else {
             self.tasks.check(self.direct.clone(), track, found);
         }
     }
 
-    /// 各轨都有结论时定下会话；会话编号已达上限时目录无法再用。
+    /// 各轨都有结论时定下会话；会话编号已达上限时目录无法再用，另起的会话合并不进去时报错（见 [`Undecided`]）。
     async fn decide_if_complete(&mut self) -> Result<(), Error> {
         let Phase::Deciding(verdicts) = &mut self.phase else {
             return Ok(());
@@ -120,8 +133,15 @@ impl Recorder<'_> {
         if !verdicts.is_complete() {
             return Ok(());
         }
-        let Some(decision) = verdicts.decide() else {
-            return Err(self.sessions_exhausted());
+        let decision = match verdicts.decide() {
+            Ok(decision) => decision,
+            Err(Undecided::SessionsExhausted) => return Err(self.sessions_exhausted()),
+            Err(Undecided::Unaligned(track)) => {
+                return Err(Error::WorkDir {
+                    path: self.dir.layout().root().to_path_buf(),
+                    problem: WorkDirProblem::Unaligned { track },
+                });
+            }
         };
         self.enter_session(decision).await
     }

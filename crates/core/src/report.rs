@@ -181,8 +181,8 @@ pub struct Mp4Output {
 pub struct LiveReport {
     /// 本次运行的录制如何结束；只合并（[`crate::Engine::merge_recorded`]）时为 None
     pub end: Option<LiveEnd>,
-    /// 合并进输出的录制会话数。会话是一段时间线连续的录制：中断后续录时，若各轨都与之前录到的内容接得上，
-    /// 仍是同一个会话；否则另起一个，与之前的首尾相接。录制中途另起的（见 `new_sessions`）也算
+    /// 合并进输出的录制会话数。会话是一段时间线连续的录制：中断后续录时接得上（见 [`crate::LiveOptions`]）仍是同一个
+    /// 会话，否则另起一个，与之前的首尾相接。录制中途另起的（见 `new_sessions`）也算
     pub session_count: usize,
     /// 本次运行录制中途另起的会话，按先后；只合并时为空
     pub new_sessions: Vec<NewSession>,

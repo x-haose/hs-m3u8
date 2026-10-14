@@ -1301,10 +1301,12 @@ class LiveOptions:
     窗口已滑过或取不到（404/410、重试后仍失败的临时故障）的分片记为缺失，录制继续；成片保留原时间戳，缺失处时间线
     留空，各轨同步不受影响。其他失败（如 403、key 失败、校验失败）使任务失败。
     
-    续录：任务中断后用同样的请求再次运行。各轨当前的窗口都与各自之前录到的接得上时，接着录，并补上窗口内之前没录完
-    的分片，时间线连续；否则另起一段，与之前的首尾相接，之前录过的分片不重录。来源相同而完整地址与记录的不同（如换
-    了令牌）时，要录的各轨都接得上才续录并改记新地址，否则报 `WorkDirProblem.SourceUnverified`。不联网、只合并已录到
-    的部分用 `Engine.merge_recorded`。
+    续录：任务中断后用同样的请求再次运行。至少一条轨当前的窗口与之前录到的接得上（重叠的分片重新下载后内容相同；
+    已录满、这次不录的轨同样核对），且没有一条轨内容不同时，接着录：补上窗口内之前没录完的分片，时间线连续，之前
+    没录到的轨从窗口起点并入；否则另起一段，与之前的首尾相接（中断期间的内容不在输出中），之前录过的分片不重录，
+    另起的一段里有轨这次不录（已录满或没有内容）时报 `WorkDirProblem.Unaligned`。最后一并合并。来源相同而完整地址
+    与记录的不同（如换了令牌）时，接着录才改记新地址，另起一段报 `WorkDirProblem.SourceUnverified`；这次没有要录的
+    轨时不改记，直接合并。不联网、只合并已录到的部分用 `Engine.merge_recorded`。
     """
     @property
     def max_duration(self) -> typing.Optional[datetime.timedelta]:
@@ -1338,8 +1340,8 @@ class LiveReport:
     @property
     def session_count(self) -> builtins.int:
         r"""
-        合并进输出的录制会话数。会话是一段时间线连续的录制：中断后续录时，若各轨都与之前录到的内容接得上，仍是
-        同一个会话；否则另起一个，与之前的首尾相接。录制中途另起的（见 `new_sessions`）也算
+        合并进输出的录制会话数。会话是一段时间线连续的录制：中断后续录时接得上（见 `LiveOptions`）仍是同一个会话，
+        否则另起一个，与之前的首尾相接。录制中途另起的（见 `new_sessions`）也算
         """
     @property
     def new_sessions(self) -> builtins.tuple[NewSession, ...]:
@@ -3518,7 +3520,7 @@ class WorkDirError(HsM3u8Error):
         任务目录
         """
     @property
-    def problem(self) -> WorkDirProblem.NotEmpty | WorkDirProblem.Locked | WorkDirProblem.Corrupt | WorkDirProblem.UnsupportedVersion | WorkDirProblem.KindMismatch | WorkDirProblem.NotLiveRecording | WorkDirProblem.SourceMismatch | WorkDirProblem.TracksMismatch | WorkDirProblem.PlanChanged | WorkDirProblem.SelectionGone | WorkDirProblem.SourceUnverified:
+    def problem(self) -> WorkDirProblem.NotEmpty | WorkDirProblem.Locked | WorkDirProblem.Corrupt | WorkDirProblem.UnsupportedVersion | WorkDirProblem.KindMismatch | WorkDirProblem.NotLiveRecording | WorkDirProblem.SourceMismatch | WorkDirProblem.TracksMismatch | WorkDirProblem.PlanChanged | WorkDirProblem.SelectionGone | WorkDirProblem.SourceUnverified | WorkDirProblem.Unaligned:
         r"""
         不能使用的原因
         """
@@ -3652,10 +3654,26 @@ class WorkDirProblem:
     @typing.final
     class SourceUnverified(WorkDirProblem):
         r"""
-        直播：地址与记录的不同（如换了令牌），且有轨接不上之前录到的内容，无法确认是同一个直播。可用原来的地址
-        续录、用 `Engine.merge_recorded` 合并已录的部分，或换一个任务目录重新录
+        直播：地址与记录的不同（如换了令牌），且接不上之前录到的（有轨内容不同，或没有一条轨核对一致，见
+        `LiveOptions`），无法确认是同一个直播。可用原来的地址续录、用 `Engine.merge_recorded` 合并已录的部分，或换
+        一个任务目录重新录
         """
         __match_args__ = ()
         def __new__(cls) -> WorkDirProblem.SourceUnverified: ...
+    
+    @typing.final
+    class Unaligned(WorkDirProblem):
+        r"""
+        直播续录：之前录到的接不上（要另起会话），而这条轨这次不录（已录满 max_duration，或这次没有内容）：另起的
+        会话里它没有分片，各轨都有的组才合并得了，录到的合并不进去。可调大 max_duration 后续录、用
+        `Engine.merge_recorded` 合并已录的部分，或换一个任务目录重新录
+        """
+        __match_args__ = ("track",)
+        @property
+        def track(self) -> builtins.int:
+            r"""
+            第几条轨
+            """
+        def __new__(cls, track: builtins.int) -> WorkDirProblem.Unaligned: ...
     
 

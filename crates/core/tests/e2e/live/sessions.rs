@@ -146,25 +146,35 @@ async fn a_track_never_recorded_joins_the_session() {
     assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
 }
 
-/// 视频已录满 max_duration、音频一个分片都没录到，换了令牌续录：这次只有音频要录，它没有可核对的，没有一条轨
-/// 核对过内容，无法确认是同一个直播。
-#[tokio::test(flavor = "multi_thread")]
-async fn a_new_token_needs_a_verified_track() {
-    let dir = test_dir("sessions_needs_verified");
-    let server = Server::start().await;
-    put_split_master(&server);
-    put_long(&server, "v/", &[0, 1]);
+/// 第一次运行：视频录到序号 0、1，音频的分片都取不到。返回带令牌 `token`、录制上限 `max` 秒的请求。
+fn video_only_first_run(
+    server: &Server,
+    dir: &std::path::Path,
+) -> impl Fn(u32, Option<u64>) -> hs_m3u8_core::JobRequest {
+    put_split_master(server);
+    put_long(server, "v/", &[0, 1, 2, 3]);
     server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
     server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
-    let with_token = |token: u32, max: Option<u64>| {
-        let url = Url::parse(&format!("{}?token={token}", server.url("master.m3u8"))).unwrap();
+    let master = server.url("master.m3u8");
+    let dir = dir.to_path_buf();
+    move |token: u32, max: Option<u64>| {
+        let url = Url::parse(&format!("{master}?token={token}")).unwrap();
         let mut req = live_request(url, &dir, STALL);
         req.live = Some(LiveOptions {
             max_duration: max.map(Duration::from_secs),
             ..req.live.unwrap()
         });
         req
-    };
+    }
+}
+
+/// 视频已录满 max_duration、音频一个分片都没录到，换了令牌续录：已录满的视频这次不录，照样核对，内容一致即确认是
+/// 同一个直播，改记新地址，音频从窗口起点并入原会话。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_full_track_that_matches_verifies_a_new_token() {
+    let dir = test_dir("sessions_full_verifies");
+    let server = Server::start().await;
+    let with_token = video_only_first_run(&server, &dir);
     interrupt(&with_token(1, None), |p| {
         p.segments_done == 2 && p.segments_failed == 2
     })
@@ -172,7 +182,28 @@ async fn a_new_token_needs_a_verified_track() {
 
     // 视频已录到 2 秒，满了；音频这次取得到
     put_long(&server, "a/", &[0, 1]);
-    let err = run(with_token(2, Some(2))).await.unwrap_err();
+    let output = run(with_token(2, Some(2))).await.unwrap();
+
+    let want = expected_split_long(&dir, &[(&[0, 1], &[0, 1])]);
+    assert_output(&output, &want);
+    assert_eq!(output.live, report(LiveEnd::DurationReached, 1, vec![]));
+}
+
+/// 换了令牌续录、视频的窗口已前移（与录到的没有重叠）、音频之前没录到：没有一条轨核对一致，无法确认是同一个直播。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_token_needs_a_verified_track() {
+    let dir = test_dir("sessions_needs_verified");
+    let server = Server::start().await;
+    let with_token = video_only_first_run(&server, &dir);
+    interrupt(&with_token(1, None), |p| {
+        p.segments_done == 2 && p.segments_failed == 2
+    })
+    .await;
+
+    put_long(&server, "a/", &[2, 3]);
+    server.put("video.m3u8", playlist_in("v/", &[2, 3], false));
+    server.put("audio.m3u8", playlist_in("a/", &[2, 3], false));
+    let err = run(with_token(2, None)).await.unwrap_err();
     assert!(
         matches!(
             err,
@@ -183,6 +214,35 @@ async fn a_new_token_needs_a_verified_track() {
         ),
         "{err}"
     );
+}
+
+/// 视频已录满、窗口已前移（核对不了），音频之前没录到：要另起会话，而视频在其中不录，录到的音频合并不进去；判定时
+/// 即报错，一个分片也不录。
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unverifiable_full_track_fails_before_recording() {
+    let dir = test_dir("sessions_full_unverifiable");
+    let server = Server::start().await;
+    let with_token = video_only_first_run(&server, &dir);
+    interrupt(&with_token(1, None), |p| {
+        p.segments_done == 2 && p.segments_failed == 2
+    })
+    .await;
+
+    put_long(&server, "a/", &[2, 3]);
+    server.put("video.m3u8", playlist_in("v/", &[2, 3], false));
+    server.put("audio.m3u8", playlist_in("a/", &[2, 3], false));
+    let err = run(with_token(1, Some(2))).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::WorkDir {
+                problem: WorkDirProblem::Unaligned { track: 0 },
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert_eq!(server.hits("a/seg2.ts"), 0);
 }
 
 /// 令牌 1 录满 max_duration；中断期间换成了另一个直播。令牌 2、同样的上限：各轨都已录满、这次不录，不改记地址，

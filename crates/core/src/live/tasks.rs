@@ -12,7 +12,6 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::mp4_check::Batch;
-use super::session::Verdict;
 use super::track::{Fetched, RefreshRequest};
 use super::window::{InitsToFetch, NewInits};
 use crate::error::io_error;
@@ -37,13 +36,22 @@ pub(super) enum Done {
         fetched: Fetched,
         result: Result<NewInits, Error>,
     },
-    /// 续录时能否接着最近的会话录
+    /// 续录时重叠的分片核对的结果
     Checked {
         track: usize,
-        result: Result<Verdict, Error>,
+        result: Result<Overlap, Error>,
     },
     /// 之前录齐的组能否放进 MP4
     Mp4Checked { result: Result<(), Error> },
+}
+
+/// 重叠的分片重新下载后与已存的比较的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Overlap {
+    Same,
+    Different,
+    /// 都已取不到（404/410），无从核对
+    Gone,
 }
 
 /// 核对用的一个重叠分片与它已存的文件，`init` 为它所用的 init 段的文件（见 [`crate::fetch::Item`]）。
@@ -178,14 +186,13 @@ async fn check_mp4(
 
 /// 重叠的分片从新到旧逐个试，用第一个取得到的重新下载后与已存的比较（有无 init 段与已存的不同的不必取，即是不同）；
 /// 取不到的（404/410，或重试后仍失败的临时故障）换更旧的试。都取不到时，有临时故障则如实上抛（可重试）；全是
-/// 404/410 则无从核对，按接不上算（它们也录不到，另起会话不会重复）。其余失败（403 等、key、校验、回调）如实上抛，
-/// 与录制时一样。
+/// 404/410 则为 [`Overlap::Gone`]。其余失败（403 等、key、校验、回调）如实上抛，与录制时一样。
 async fn check(
     direct: &Direct,
     track: usize,
     overlaps: Vec<StoredOverlap>,
     cancel: &CancellationToken,
-) -> Result<Verdict, Error> {
+) -> Result<Overlap, Error> {
     // 最近一次重试后仍失败的临时故障
     let mut transient = None;
     for StoredOverlap {
@@ -195,7 +202,7 @@ async fn check(
     } in overlaps
     {
         if segment.init.is_some() != init.is_some() {
-            return Ok(Verdict::Differs);
+            return Ok(Overlap::Different);
         }
         let data = match direct.fetch(track, &segment, init.as_deref(), cancel).await {
             Ok(data) => data,
@@ -212,14 +219,14 @@ async fn check(
             },
         };
         return Ok(if same_file(stored, data).await? {
-            Verdict::Matches
+            Overlap::Same
         } else {
-            Verdict::Differs
+            Overlap::Different
         });
     }
     match transient {
         Some(error) => Err(error),
-        None => Ok(Verdict::Differs),
+        None => Ok(Overlap::Gone),
     }
 }
 
