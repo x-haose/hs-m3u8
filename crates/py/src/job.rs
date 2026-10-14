@@ -152,6 +152,16 @@ struct CancelOnDrop {
     armed: bool,
 }
 
+impl CancelOnDrop {
+    /// 立即取消任务（在 fork 出的子进程里除外）并解除。
+    fn cancel_now(&mut self) {
+        if let Some(control) = self.control.here() {
+            control.cancel();
+        }
+        self.armed = false;
+    }
+}
+
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         if self.armed
@@ -171,7 +181,8 @@ pyo3_stub_gen::inventory::submit! {
                 """等任务结束，返回输出；失败时抛 `HsM3u8Error` 的子类，本库内部出错时抛 `pyo3_runtime.PanicException`，
                 解释器正在退出（运行时已关闭）时抛 `RuntimeError`。可多次等待，得到同一结果或同一异常。等待的协程被取消时
                 任务也取消，等任务真正结束（任务目录放开、在执行的回调返回）才抛出 `CancelledError`，随后用同一任务目录不会
-                遇到它还被占着；写出时换上输出的几步不中断，取消晚于它们时任务照常成功。"""
+                遇到它还被占着；写出时换上输出的几步不中断，取消晚于它们时任务照常成功，这次等待仍抛 `CancelledError`，
+                再次等待得到输出。开始等待之前就被取消的（如 `wait_for` 的超时为 0）直接抛出，不取消任务。"""
         "#
     }
 }
@@ -203,15 +214,18 @@ impl Job {
     /// 等任务结束，返回输出；失败时抛 `HsM3u8Error` 的子类，本库内部出错时抛 `pyo3_runtime.PanicException`，
     /// 解释器正在退出（运行时已关闭）时抛 `RuntimeError`。可多次等待，得到同一结果或同一异常。等待的协程被取消时
     /// 任务也取消，等任务真正结束（任务目录放开、在执行的回调返回）才抛出 `CancelledError`，随后用同一任务目录不会
-    /// 遇到它还被占着；写出时换上输出的几步不中断，取消晚于它们时任务照常成功。
+    /// 遇到它还被占着；写出时换上输出的几步不中断，取消晚于它们时任务照常成功，这次等待仍抛 `CancelledError`，
+    /// 再次等待得到输出。开始等待之前就被取消的（如 `wait_for` 的超时为 0）直接抛出，不取消任务。
     #[gen_stub(skip)]
     async fn wait(&self, #[pyo3(cancel_handle)] mut cancelled: CancelHandle) -> PyResult<Output> {
         let running = self.running.get("Job")?;
         runtime::require_event_loop()?;
-        let control = running.control.clone();
+        if cancelled.is_cancelled() {
+            return Err(runtime::thrown(cancelled.cancelled().await));
+        }
         let mut finished = running.finished.clone();
         let mut cancel_on_drop = CancelOnDrop {
-            control: Owned::new(control.clone()),
+            control: Owned::new(running.control.clone()),
             armed: true,
         };
         // 在运行时上等，协程只持有句柄：它在 fork 出的子进程里被回收时，不碰父进程的同步原语
@@ -223,11 +237,10 @@ impl Job {
             biased;
             finished = &mut waiting => finished?,
             exception = cancelled.cancelled() => {
-                control.cancel();
+                cancel_on_drop.cancel_now();
                 // 任务的结果不在这里用：要抛的是取消，再次等待仍拿得到它
                 let _ended = waiting.await;
-                cancel_on_drop.armed = false;
-                return Err(Python::attach(|py| PyErr::from_value(exception.into_bound(py))));
+                return Err(runtime::thrown(exception));
             }
         };
         cancel_on_drop.armed = false;

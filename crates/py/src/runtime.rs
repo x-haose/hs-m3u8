@@ -187,6 +187,11 @@ impl<T> Future for Spawned<T> {
     }
 }
 
+/// 协程收到的、要抛出的异常（取消时 `CancelHandle` 交来的那个）。
+pub(crate) fn thrown(exception: Py<PyAny>) -> PyErr {
+    Python::attach(|py| PyErr::from_value(exception.into_bound(py)))
+}
+
 /// 运行时已关闭（解释器正在退出），等的结果不会来了。
 pub(crate) fn closed_error() -> PyErr {
     PyRuntimeError::new_err("解释器正在退出，运行时已关闭，等不到结果")

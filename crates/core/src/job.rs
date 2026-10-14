@@ -199,8 +199,13 @@ pub(crate) async fn merge_recorded(
     finish(dir, content, &output, &cancel, &progress).await
 }
 
-/// 放弃任务（见 [`crate::Engine::discard`]）：加锁，按记录收拾写到一半的输出，再删除任务目录。
-pub(crate) async fn discard(root: PathBuf, unsettled: Unsettled) -> Result<Vec<Leftover>, Error> {
+/// 放弃任务（见 [`crate::Engine::discard`]）：加锁，按记录收拾写到一半的输出，再删除任务目录（见
+/// [`workdir::remove`]）。`cancel` 在步与步之间取消时停下，报 [`Error::Cancelled`]，锁随即放开。
+pub(crate) async fn discard(
+    root: PathBuf,
+    unsettled: Unsettled,
+    cancel: &CancellationToken,
+) -> Result<Vec<Leftover>, Error> {
     let lock = match WorkDir::lock_existing(root.clone()).await {
         Ok(Some(lock)) => lock,
         Ok(None) => return Ok(Vec::new()),
@@ -213,13 +218,19 @@ pub(crate) async fn discard(root: PathBuf, unsettled: Unsettled) -> Result<Vec<L
         }
         Err(failure) => return Err(failure),
     };
+    if cancel.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
     let work_dir = root.clone();
     // 锁随收拾进阻塞线程：调用方中途丢弃这个 future 时，收拾照常做完才放锁，别的任务不会与它同时收拾
     let (mut leftovers, lock) = blocking(move || {
         output::recover_recorded(&work_dir, unsettled).map(|leftovers| (leftovers, lock))
     })
     .await??;
-    leftovers.extend(workdir::remove(root, lock).await);
+    if cancel.is_cancelled() {
+        return Err(Error::Cancelled);
+    }
+    leftovers.extend(workdir::remove(root, lock, cancel).await?);
     Ok(leftovers)
 }
 

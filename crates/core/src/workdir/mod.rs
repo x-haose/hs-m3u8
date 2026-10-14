@@ -38,6 +38,8 @@ use self::record::{decode, encode};
 use crate::entries::{self, is_canonical_number};
 use crate::error::io_error;
 use crate::ident::Fingerprint;
+use tokio_util::sync::CancellationToken;
+
 use crate::{Error, Leftover, LeftoverKind, WorkDirProblem, blocking, busy, volume};
 
 const JOB_FILE: &str = "job.json";
@@ -259,34 +261,76 @@ impl WorkDir {
     /// std 打开文件时允许删除，Windows 上持有句柄也能删。
     pub(crate) async fn remove(self) -> Option<Leftover> {
         let WorkDir { layout, lock, .. } = self;
-        remove(layout.root, lock).await
+        remove_steps(layout.root, lock, None)
+            .await
+            .expect("不取消时删除做完才返回")
     }
 }
 
-/// 持着 `lock` 删除任务目录 `root`，同 [`WorkDir::remove`]；用于不打开任务、直接放弃它。
-pub(crate) async fn remove(root: PathBuf, lock: Lock) -> Option<Leftover> {
-    let removed = blocking({
+/// 持着 `lock` 删除任务目录 `root`，同 [`WorkDir::remove`]；用于不打开任务、直接放弃它。分两步：先删各轨的分片与
+/// init 段，`cancel` 这时已取消即停下、放开锁，报 [`Error::Cancelled`]（记录还在，再放弃即可接着删）；再删记录、锁
+/// 文件与目录本身。
+pub(crate) async fn remove(
+    root: PathBuf,
+    lock: Lock,
+    cancel: &CancellationToken,
+) -> Result<Option<Leftover>, Error> {
+    remove_steps(root, lock, Some(cancel)).await
+}
+
+/// 见 [`remove`]；`cancel` 为 None 时不停下。没删干净时为留下的原因。
+async fn remove_steps(
+    root: PathBuf,
+    lock: Lock,
+    cancel: Option<&CancellationToken>,
+) -> Result<Option<Leftover>, Error> {
+    let tracks = blocking({
         let root = root.clone();
-        move || remove_locked(&root, lock)
+        move || (remove_tracks_of(&root), lock)
     })
     .await;
+    let removed = match tracks {
+        Ok((Ok(kept), lock)) => {
+            if cancel.is_some_and(CancellationToken::is_cancelled) {
+                return Err(Error::Cancelled);
+            }
+            let root = root.clone();
+            blocking(move || remove_locked(&root, lock, kept)).await
+        }
+        Ok((Err(failure), _)) => Err(failure),
+        Err(failure) => Err(failure),
+    };
     let cause = match removed.and_then(|r| r) {
         Ok(kept) => match kept.first() {
             Some(first) => format!("留有不是本库写的文件：{}", first.display()),
-            None => return None,
+            None => return Ok(None),
         },
         Err(e) => e.to_string(),
     };
-    Some(Leftover {
+    Ok(Some(Leftover {
         path: root,
         kind: LeftoverKind::WorkDir,
         cause,
-    })
+    }))
 }
 
-/// [`WorkDir::remove`]：持着 `lock` 删除，返回不是本库写的、留下的文件。
-fn remove_locked(root: &Path, lock: Lock) -> Result<Vec<PathBuf>, Error> {
-    let (mut kept, mut system) = (Vec::new(), Vec::new());
+/// 删掉任务目录 `root` 下各轨的分片与 init 段（见 [`remove_tracks`]），返回认不得、留下的文件。
+fn remove_tracks_of(root: &Path) -> Result<Vec<PathBuf>, Error> {
+    let tracks = root.join(TRACKS_DIR);
+    let mut kept = Vec::new();
+    match fs::symlink_metadata(&tracks) {
+        Ok(meta) if meta.is_dir() => remove_tracks(&tracks, &mut kept)?,
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(io_error("读取", &tracks)(e)),
+    }
+    Ok(kept)
+}
+
+/// [`WorkDir::remove`] 的第二步：持着 `lock` 删除各轨之外的内容，`kept` 为第一步留下的；返回不是本库写的、留下的
+/// 文件。
+fn remove_locked(root: &Path, lock: Lock, mut kept: Vec<PathBuf>) -> Result<Vec<PathBuf>, Error> {
+    let mut system = Vec::new();
     let mut job = None;
     for entry in entries::list(root)? {
         let (path, kind) = (&entry.path, entry.kind);
@@ -299,7 +343,8 @@ fn remove_locked(root: &Path, lock: Lock) -> Result<Vec<PathBuf>, Error> {
         match entry.name.to_str() {
             Some(LOCK_FILE) => {}
             Some(JOB_FILE) if kind.is_file() => job = Some(entry.path),
-            Some(TRACKS_DIR) if kind.is_dir() => remove_tracks(path, &mut kept)?,
+            // 第一步已删过，还在即里面有留下的（已在 kept 中）
+            Some(TRACKS_DIR) if kind.is_dir() => {}
             _ if entry.is_system_file() => system.push(entry),
             _ if ours => {
                 busy::retrying(|| fs::remove_file(path)).map_err(io_error("删除", path))?

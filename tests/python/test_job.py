@@ -334,6 +334,25 @@ def test_a_cancelled_wait_raises_once_the_job_has_ended(server: Server, tmp_path
     asyncio.run(main())
 
 
+def test_waits_and_discards_cancelled_before_they_start_do_nothing(server: Server, tmp_path: Path) -> None:
+    put_media(server, VOD)
+    gate = server.gate("seg1.ts")
+    request = one_at_a_time(server, Target.Mp4(tmp_path / "out.mp4"))
+
+    async def main() -> Output:
+        job = Engine().start(request)
+        await arrived(gate)
+        # 超时为 0：协程第一步就被取消。等待不取消任务；放弃不去碰正被使用的任务目录（碰了会报 WorkDirError）
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(job.wait(), 0)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(Engine().discard(request.output.resolved_work_dir()), 0)
+        gate.release()
+        return await job.wait()
+
+    assert asyncio.run(main()).segments == 2
+
+
 def test_jobs_no_longer_referenced_are_cancelled(server: Server, tmp_path: Path) -> None:
     put_media(server, VOD)
     gate = server.gate("seg1.ts")

@@ -43,7 +43,7 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::sync::DropGuard;
 
 pub use cookies::{CookieHeader, CookieStore};
 pub use error::{
@@ -65,6 +65,7 @@ pub use report::{
 pub use request::{
     HttpOptions, JobRequest, KeyOverride, LiveOptions, Proxy, RetryPolicy, Source, Timeouts,
 };
+pub use tokio_util::sync::CancellationToken;
 pub use url::Url;
 pub use workdir::{ForkGuard, LockFiles, close_inherited_locks, prepare_fork};
 
@@ -165,15 +166,20 @@ impl Engine {
     /// 不知道它记着什么就不收拾，可用写下它的版本放弃，或由用户删掉记录（写了一半的临时输出与没能放回的旧输出以
     /// `hsdl-` 开头，留在输出旁）后再放弃。`job.json` 不读：它是另一个版本写的也照常删除。不在 tokio 运行时内调用会
     /// panic。
+    ///
+    /// 分几步做：收拾输出、删各轨的分片、删记录与目录本身。`cancel` 取消时做完进行中的一步就停下、放开锁，报
+    /// [`Error::Cancelled`]：记录还在，再放弃即可接着做、照样报出留下的东西；取消晚于最后一步开始时照常做完。丢弃
+    /// 这个 future 同样停在步与步之间，但进行中的一步在后台做完才放开锁。
     pub async fn discard(
         &self,
         work_dir: &Path,
         unsettled: Unsettled,
+        cancel: &CancellationToken,
     ) -> Result<Vec<Leftover>, Error> {
         if work_dir.as_os_str().is_empty() {
             return Err(Error::InvalidInput("任务目录路径为空".to_owned()));
         }
-        job::discard(output::absolute_path(work_dir)?, unsettled).await
+        job::discard(output::absolute_path(work_dir)?, unsettled, cancel).await
     }
 }
 

@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
-use hs_m3u8_core::{Error, LeftoverKind, Unsettled, WorkDirProblem};
+use hs_m3u8_core::{CancellationToken, Error, Leftover, LeftoverKind, Unsettled, WorkDirProblem};
 
 use crate::server::Server;
 #[cfg(unix)]
@@ -16,6 +16,13 @@ const TWO_SEGMENTS: &str =
 
 /// 记录里的任务目录指纹；保留名由输出路径与它定下。
 const FINGERPRINT: &str = "0123456789abcdef";
+
+/// 放弃任务目录 `work`，不取消。
+async fn discard(work: &Path, unsettled: Unsettled) -> Result<Vec<Leftover>, Error> {
+    engine()
+        .discard(work, unsettled, &CancellationToken::new())
+        .await
+}
 
 /// 下载失败留下的任务目录（输出为 `dir` 下的 out.mp4）。
 async fn failed_job(dir: &Path) -> PathBuf {
@@ -52,7 +59,7 @@ async fn discarding_restores_outputs_and_removes_only_library_files() {
     std::fs::write(&aside, "旧").unwrap();
     std::fs::write(work.join("notes.txt"), "别人的文件").unwrap();
 
-    let leftovers = engine().discard(&work, Unsettled::Fail).await.unwrap();
+    let leftovers = discard(&work, Unsettled::Fail).await.unwrap();
 
     let [leftover] = &leftovers[..] else {
         panic!("应留下别人的文件：{leftovers:?}");
@@ -70,6 +77,27 @@ async fn discarding_restores_outputs_and_removes_only_library_files() {
         .collect();
     left.sort();
     assert_eq!(left, ["job.json", "notes.txt"]);
+}
+
+/// 放弃时已取消：加了锁就停下，什么也不动、放开锁；再放弃照常收拾并报出留下的东西。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_discard_stops_between_steps_and_can_be_repeated() {
+    let dir = test_dir("discard_cancelled");
+    let work = failed_job(&dir).await;
+    let target = dir.join("out.mp4");
+    let (temp, aside) = record_unfinished(&work, &target);
+    std::fs::write(&temp, "写了一半").unwrap();
+    std::fs::write(&aside, "旧").unwrap();
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+
+    let stopped = engine().discard(&work, Unsettled::Fail, &cancelled).await;
+
+    assert!(matches!(stopped, Err(Error::Cancelled)), "{stopped:?}");
+    assert!(temp.exists() && aside.exists() && work.join("outputs.json").exists());
+    assert_eq!(discard(&work, Unsettled::Fail).await.unwrap(), []);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "旧");
+    assert!(!work.exists());
 }
 
 /// 收拾不了记录里的输出（这里是输出所在的目录没有写权限，临时输出删不掉）：从严时报错，任务目录与记录留着；记为
@@ -93,13 +121,13 @@ async fn outputs_that_cannot_be_settled_fail_or_are_reported_as_asked() {
     std::fs::write(&aside, "旧").unwrap();
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-    match engine().discard(&work, Unsettled::Fail).await {
+    match discard(&work, Unsettled::Fail).await {
         Err(Error::Io { path, .. }) => assert_eq!(path, temp),
         other => panic!("应报删不掉临时输出：{other:?}"),
     }
     assert!(work.join("outputs.json").is_file());
 
-    let leftovers = engine().discard(&work, Unsettled::Report).await.unwrap();
+    let leftovers = discard(&work, Unsettled::Report).await.unwrap();
     let kinds: Vec<_> = leftovers.iter().map(|l| (&l.path, &l.kind)).collect();
     let displaced = LeftoverKind::Displaced { target };
     assert_eq!(
@@ -126,11 +154,8 @@ async fn missing_drives_fail_or_are_reported_as_asked() {
     };
 
     let missing_work = drive.join("jobs").join("a");
-    assert_unavailable(engine().discard(&missing_work, Unsettled::Fail).await);
-    let leftovers = engine()
-        .discard(&missing_work, Unsettled::Report)
-        .await
-        .unwrap();
+    assert_unavailable(discard(&missing_work, Unsettled::Fail).await);
+    let leftovers = discard(&missing_work, Unsettled::Report).await.unwrap();
     let [leftover] = &leftovers[..] else {
         panic!("应报任务目录没删干净：{leftovers:?}");
     };
@@ -142,10 +167,10 @@ async fn missing_drives_fail_or_are_reported_as_asked() {
     let work = failed_job(&test_dir("discard_missing_drive")).await;
     let target = drive.join("movies").join("a.mp4");
     let (temp, aside) = record_unfinished(&work, &target);
-    assert_unavailable(engine().discard(&work, Unsettled::Fail).await);
+    assert_unavailable(discard(&work, Unsettled::Fail).await);
     assert!(work.join("outputs.json").is_file());
 
-    let leftovers = engine().discard(&work, Unsettled::Report).await.unwrap();
+    let leftovers = discard(&work, Unsettled::Report).await.unwrap();
     let kinds: Vec<_> = leftovers.iter().map(|l| (&l.path, &l.kind)).collect();
     let displaced = LeftoverKind::Displaced { target };
     assert_eq!(
@@ -163,9 +188,9 @@ async fn discarding_leaves_directories_in_use_or_not_from_the_library() {
     std::fs::create_dir(&other).unwrap();
     std::fs::write(other.join("notes.txt"), "别人的文件").unwrap();
     for unsettled in [Unsettled::Fail, Unsettled::Report] {
-        let missing = engine().discard(&dir.join("missing"), unsettled).await;
+        let missing = discard(&dir.join("missing"), unsettled).await;
         assert_eq!(missing.unwrap(), []);
-        match engine().discard(&other, unsettled).await {
+        match discard(&other, unsettled).await {
             Err(Error::WorkDir {
                 problem: WorkDirProblem::NotEmpty,
                 ..
@@ -185,7 +210,7 @@ async fn discarding_leaves_directories_in_use_or_not_from_the_library() {
     let job = engine().start(req).unwrap();
     gate.arrived.notified().await;
     for unsettled in [Unsettled::Fail, Unsettled::Report] {
-        match engine().discard(&work, unsettled).await {
+        match discard(&work, unsettled).await {
             Err(Error::WorkDir {
                 problem: WorkDirProblem::Locked,
                 ..
