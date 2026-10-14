@@ -38,6 +38,7 @@ from hs_m3u8 import (
     SelectFailure,
     Source,
     SourceUnsupported,
+    SourceUnsupportedError,
     Target,
     Timeouts,
     VariantChoice,
@@ -298,6 +299,9 @@ def test_malformed_playlists_and_impossible_selections_are_reported(server: Serv
     server.put("text.m3u8", "hello")
     # 截在多字节字符中间：服务器还没写完，可重试
     server.put("cut.m3u8", (MEDIA + "#EXTINF:1,\n第2段.ts\n").encode()[:-6])
+    # 只有关键帧的、增量更新的：照常解析会得到错的结果
+    server.put("iframes.m3u8", MEDIA.replace("#EXTINF:1,", "#EXT-X-I-FRAMES-ONLY\n#EXTINF:1,", 1))
+    server.put("delta.m3u8", MEDIA.replace("#EXTINF:1,", "#EXT-X-SKIP:SKIPPED-SEGMENTS=6\n#EXTINF:1,", 1))
     put_master(server)
 
     with pytest.raises(PlaylistError) as malformed:
@@ -306,8 +310,14 @@ def test_malformed_playlists_and_impossible_selections_are_reported(server: Serv
         probe(Source(server.url("cut.m3u8")))
     with pytest.raises(SelectError) as unselectable:
         probe(Source(server.url("master.m3u8"), preference=Preference(variant=VariantChoice.Index(5))))
+    with pytest.raises(SourceUnsupportedError) as i_frames:
+        probe(Source(server.url("iframes.m3u8")))
+    with pytest.raises(SourceUnsupportedError) as delta:
+        probe(Source(server.url("delta.m3u8")))
 
     assert malformed.value.reason == Malformed.NotAPlaylist()
+    assert i_frames.value.reason == SourceUnsupported.IFramesOnly(url=server.url("iframes.m3u8"), line=3)
+    assert delta.value.reason == SourceUnsupported.DeltaUpdate(url=server.url("delta.m3u8"), line=3)
     assert truncated.value.retryable
     assert truncated.value.url == server.url("cut.m3u8")
     assert unselectable.value.reason == SelectFailure.VariantIndexOutOfRange(index=5, count=2)

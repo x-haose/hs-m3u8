@@ -3073,6 +3073,43 @@ class SourceUnsupported:
         def __new__(cls, *, url: builtins.str, line: builtins.int, encryption: Encryption) -> SourceUnsupported.Encrypted: ...
     
     @typing.final
+    class IFramesOnly(SourceUnsupported):
+        r"""
+        EXT-X-I-FRAMES-ONLY：只有关键帧的播放列表，供快进时预览，不是正常播放的内容；来源应为主播放列表或正常的
+        媒体播放列表
+        """
+        __match_args__ = ("url", "line",)
+        @property
+        def url(self) -> builtins.str:
+            r"""
+            播放列表的地址
+            """
+        @property
+        def line(self) -> builtins.int:
+            r"""
+            EXT-X-I-FRAMES-ONLY 所在的行，从 1 起
+            """
+        def __new__(cls, *, url: builtins.str, line: builtins.int) -> SourceUnsupported.IFramesOnly: ...
+    
+    @typing.final
+    class DeltaUpdate(SourceUnsupported):
+        r"""
+        EXT-X-SKIP：增量更新略去了前面的分片。服务器只在地址里请求了 `_HLS_skip` 时才这样给，去掉这个参数即可
+        """
+        __match_args__ = ("url", "line",)
+        @property
+        def url(self) -> builtins.str:
+            r"""
+            播放列表的地址
+            """
+        @property
+        def line(self) -> builtins.int:
+            r"""
+            EXT-X-SKIP 所在的行，从 1 起
+            """
+        def __new__(cls, *, url: builtins.str, line: builtins.int) -> SourceUnsupported.DeltaUpdate: ...
+    
+    @typing.final
     class InitChangesWithinGroup(SourceUnsupported):
         r"""
         同一不连续段内 EXT-X-MAP 发生变化
@@ -3139,7 +3176,7 @@ class SourceUnsupportedError(SourceError):
     来源用到了不支持的特性。
     """
     @property
-    def reason(self) -> SourceUnsupported.EmptyPlaylist | SourceUnsupported.NoTargetDuration | SourceUnsupported.Encrypted | SourceUnsupported.InitChangesWithinGroup | SourceUnsupported.DiscontinuityMismatch | SourceUnsupported.Fmp4BaseDataOffset:
+    def reason(self) -> SourceUnsupported.EmptyPlaylist | SourceUnsupported.NoTargetDuration | SourceUnsupported.Encrypted | SourceUnsupported.IFramesOnly | SourceUnsupported.DeltaUpdate | SourceUnsupported.InitChangesWithinGroup | SourceUnsupported.DiscontinuityMismatch | SourceUnsupported.Fmp4BaseDataOffset:
         r"""
         哪个特性
         """

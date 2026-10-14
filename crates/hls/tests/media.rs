@@ -1,8 +1,8 @@
 //! 媒体播放列表的解析与规范化。
 
 use hs_m3u8_hls::{
-    ByteRange, Encryption, Error, InitSection, Malformed, MediaPlaylist, Playlist, PlaylistType,
-    SegmentKey, SyntaxError, Url, parse, parse_bytes,
+    ByteRange, Encryption, Error, Feature, InitSection, Malformed, MediaPlaylist, Playlist,
+    PlaylistType, SegmentKey, SyntaxError, Url, parse, parse_bytes,
 };
 
 fn url(s: &str) -> Url {
@@ -151,9 +151,9 @@ fn drm_only_and_sample_aes_are_unsupported() {
         drm,
         Error::Unsupported {
             line: 2,
-            what: Encryption::Drm {
+            what: Feature::Encryption(Encryption::Drm {
                 keyformat: "com.apple.streamingkeydelivery".into()
-            }
+            })
         }
     );
     let sample_aes = error("#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"k\"\n#EXTINF:4,\na.ts\n");
@@ -161,7 +161,32 @@ fn drm_only_and_sample_aes_are_unsupported() {
         sample_aes,
         Error::Unsupported {
             line: 2,
-            what: Encryption::SampleAes
+            what: Feature::Encryption(Encryption::SampleAes)
+        }
+    );
+}
+
+/// 只有关键帧的播放列表与增量更新：照常解析会得到错的结果（只有关键帧的成片、序号偏移的分片），明确报不支持。
+#[test]
+fn i_frames_only_and_delta_updates_are_unsupported() {
+    let i_frames = error(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-I-FRAMES-ONLY\n#EXT-X-BYTERANGE:1000@0\n#EXTINF:4,\na.ts\n",
+    );
+    assert_eq!(
+        i_frames,
+        Error::Unsupported {
+            line: 3,
+            what: Feature::IFramesOnly
+        }
+    );
+    let delta = error(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:100\n#EXT-X-SKIP:SKIPPED-SEGMENTS=6\n#EXTINF:4,\na.ts\n",
+    );
+    assert_eq!(
+        delta,
+        Error::Unsupported {
+            line: 4,
+            what: Feature::Skip
         }
     );
 }

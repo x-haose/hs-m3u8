@@ -31,7 +31,7 @@ pub enum Playlist {
     Media(MediaPlaylist),
 }
 
-/// 解析失败：内容不是合法的播放列表、结尾截断，或用了不支持的加密。
+/// 解析失败：内容不是合法的播放列表、结尾截断，或用了不支持的特性。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
@@ -40,8 +40,25 @@ pub enum Error {
     /// 唯一的非 ASCII 字符恰在结尾、又能当 UTF-8 多字节字符的开头时（如 Latin-1 的 `é`），也是这样，分不开
     #[error("播放列表在结尾的字符中间截断")]
     Truncated,
-    #[error("第 {line} 行的 EXT-X-KEY：{what}")]
-    Unsupported { line: usize, what: Encryption },
+    #[error("第 {line} 行：{what}")]
+    Unsupported { line: usize, what: Feature },
+}
+
+/// 媒体播放列表用到的、本库不支持的特性。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Feature {
+    #[error("EXT-X-KEY：{0}")]
+    Encryption(Encryption),
+    /// EXT-X-I-FRAMES-ONLY：只有关键帧的播放列表，供快进时预览，不是正常播放的内容（主播放列表里
+    /// EXT-X-I-FRAME-STREAM-INF 指向的那种）
+    #[error("EXT-X-I-FRAMES-ONLY：只有关键帧的播放列表，不是正常播放的内容")]
+    IFramesOnly,
+    /// EXT-X-SKIP：增量更新，略去了前面的分片，要与之前拉到的完整播放列表合起来才完整；服务器只在地址里请求了
+    /// `_HLS_skip` 时才这样给
+    #[error(
+        "EXT-X-SKIP：增量更新略去了前面的分片，去掉地址里的 _HLS_skip 参数即可拿到完整的播放列表"
+    )]
+    Skip,
 }
 
 /// 内容不是合法的播放列表。

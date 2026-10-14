@@ -595,6 +595,22 @@ fn exception(
                 encryption: what.into(),
             },
         )?,
+        E::Unsupported(U::IFramesOnly { url, line }) => unsupported_source(
+            py,
+            base,
+            SourceUnsupported::IFramesOnly {
+                url: Address(*url),
+                line,
+            },
+        )?,
+        E::Unsupported(U::DeltaUpdate { url, line }) => unsupported_source(
+            py,
+            base,
+            SourceUnsupported::DeltaUpdate {
+                url: Address(*url),
+                line,
+            },
+        )?,
         E::Unsupported(U::InitChangesWithinGroup {
             track,
             discontinuity,

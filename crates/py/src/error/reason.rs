@@ -130,6 +130,23 @@ variants! {
             /// 加密方式
             encryption: Encryption,
         },
+        /// EXT-X-I-FRAMES-ONLY：只有关键帧的播放列表，供快进时预览，不是正常播放的内容；来源应为主播放列表或正常的
+        /// 媒体播放列表
+        #[pyo3(constructor = (*, url, line))]
+        IFramesOnly {
+            /// 播放列表的地址
+            url: Address,
+            /// EXT-X-I-FRAMES-ONLY 所在的行，从 1 起
+            line: usize,
+        },
+        /// EXT-X-SKIP：增量更新略去了前面的分片。服务器只在地址里请求了 `_HLS_skip` 时才这样给，去掉这个参数即可
+        #[pyo3(constructor = (*, url, line))]
+        DeltaUpdate {
+            /// 播放列表的地址
+            url: Address,
+            /// EXT-X-SKIP 所在的行，从 1 起
+            line: usize,
+        },
         /// 同一不连续段内 EXT-X-MAP 发生变化
         #[pyo3(constructor = (*, track, discontinuity))]
         InitChangesWithinGroup {

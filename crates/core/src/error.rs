@@ -46,7 +46,7 @@ pub enum Error {
         path: PathBuf,
         ancestor: Option<PathBuf>,
     },
-    /// 内容不是合法的播放列表；用了不支持的加密是 [`Unsupported::Encryption`]，结尾截断的是 [`Error::Incomplete`]
+    /// 内容不是合法的播放列表；用了不支持的特性是 [`Error::Unsupported`]，结尾截断的是 [`Error::Incomplete`]
     #[error("解析播放列表 {} 失败：{cause}", bare_url(.url))]
     Playlist {
         url: Box<Url>,
@@ -283,6 +283,14 @@ pub enum Unsupported {
         line: usize,
         what: hs_m3u8_hls::Encryption,
     },
+    /// 播放列表 `url` 第 `line` 行的 EXT-X-I-FRAMES-ONLY：只有关键帧的播放列表，供快进时预览，不是正常播放的内容；
+    /// 来源应为主播放列表或正常的媒体播放列表
+    #[error("播放列表 {} 第 {line} 行：EXT-X-I-FRAMES-ONLY，只有关键帧，不是正常播放的内容", bare_url(.url))]
+    IFramesOnly { url: Box<Url>, line: usize },
+    /// 播放列表 `url` 第 `line` 行的 EXT-X-SKIP：增量更新略去了前面的分片。服务器只在地址里请求了 `_HLS_skip` 时才
+    /// 这样给，去掉这个参数即可
+    #[error("播放列表 {} 第 {line} 行：EXT-X-SKIP，增量更新略去了前面的分片，去掉地址里的 _HLS_skip 参数即可", bare_url(.url))]
+    DeltaUpdate { url: Box<Url>, line: usize },
     /// 内容放不进 MP4，可只输出本地 HLS（[`crate::Target::Hls`]）：它原样保留分片，不受这些限制。下到（直播为录到）
     /// 各组各轨的第一个分片时先核对其中判断得了的：编码，各组的流种类、编码参数与解码配置，E-AC-3 的帧结构；组内中途
     /// 的变化、后面分片里的问题，以及只靠第一个分片判断不了的，合并时读到才报。原因里的组号为合并时的：直播为各轨

@@ -162,10 +162,13 @@ async fn load_playlist(
         hls::Error::Truncated => Error::Incomplete {
             url: Box::new(final_url.clone()),
         },
-        hls::Error::Unsupported { line, what } => Error::Unsupported(Unsupported::Encryption {
-            url: Box::new(final_url.clone()),
-            line,
-            what,
-        }),
+        hls::Error::Unsupported { line, what } => {
+            let url = Box::new(final_url.clone());
+            Error::Unsupported(match what {
+                hls::Feature::Encryption(what) => Unsupported::Encryption { url, line, what },
+                hls::Feature::IFramesOnly => Unsupported::IFramesOnly { url, line },
+                hls::Feature::Skip => Unsupported::DeltaUpdate { url, line },
+            })
+        }
     })
 }

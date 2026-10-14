@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use url::Url;
 
 use crate::line::{Attributes, LineKind, lines};
-use crate::{Encryption, Error, Malformed, SyntaxError, parse_seconds_us, parse_u64, resolve};
+use crate::{
+    Encryption, Error, Feature, Malformed, SyntaxError, parse_seconds_us, parse_u64, resolve,
+};
 
 /// 媒体播放列表。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,6 +155,18 @@ impl Parser<'_> {
                 self.playlist.target_duration_us = Some(us);
             }
             "EXT-X-ENDLIST" => self.playlist.ended = true,
+            "EXT-X-I-FRAMES-ONLY" => {
+                return Err(Error::Unsupported {
+                    line,
+                    what: Feature::IFramesOnly,
+                });
+            }
+            "EXT-X-SKIP" => {
+                return Err(Error::Unsupported {
+                    line,
+                    what: Feature::Skip,
+                });
+            }
             "EXT-X-PLAYLIST-TYPE" => {
                 self.playlist.playlist_type = match value.map(str::to_ascii_uppercase).as_deref() {
                     Some("VOD") => Some(PlaylistType::Vod),
@@ -299,16 +313,16 @@ fn segment_key(
         return match keys.iter().next() {
             Some((format, tag)) => Err(Error::Unsupported {
                 line: tag.line,
-                what: Encryption::Drm {
+                what: Feature::Encryption(Encryption::Drm {
                     keyformat: format.clone(),
-                },
+                }),
             }),
             None => Ok(None),
         };
     };
     let unsupported = |what| Error::Unsupported {
         line: identity.line,
-        what,
+        what: Feature::Encryption(what),
     };
     match identity.method.as_str() {
         "AES-128" => Ok(Some(SegmentKey {
