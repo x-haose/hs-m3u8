@@ -205,6 +205,21 @@ pub enum Unsupported {
         track: usize,
         kind: StreamKind,
     },
+    /// 一路流在相邻两个分片（中间没有缺片）的第一个 DTS 相差得比这几片声明的时长多出一个以上最长的声明时长（见
+    /// [`crate::Segment::duration_us`]）：多为来源在时间戳重新开始处漏标了 `EXT-X-DISCONTINUITY`，照写会在输出里留下
+    /// 一大段空档
+    #[error(
+        "第 {group} 组第 {track} 条轨的{kind}时间戳在第 {segment} 个分片处往前跳了 {jump_us} 微秒，比声明的时长多出一截，无法放进同一条 MP4 轨"
+    )]
+    TimestampJump {
+        group: usize,
+        track: usize,
+        kind: StreamKind,
+        /// 跳变后的第一个分片在这一组这条轨里的下标
+        segment: usize,
+        /// 两片第一个 DTS 之差超出声明的时长之和的部分，微秒
+        jump_us: u64,
+    },
     /// 第 `track` 条轨是打包音频，这一组有分片没有 ID3 时间戳（RFC 8216 3.4 要求每片都有），而这一组还有别的轨：
     /// 不知道它与别的轨怎样对齐。只有它一条轨时按样本数从头接续
     #[error(

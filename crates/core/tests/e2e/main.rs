@@ -15,7 +15,7 @@ use std::time::Duration;
 use hs_m3u8_core::{
     Engine, Error, JobRequest, Output, OutputOptions, RetryPolicy, Source, Target, Url,
 };
-use hs_m3u8_remux::{DiscontinuityGroup, Streams, TrackSegments, remux};
+use hs_m3u8_remux::{DiscontinuityGroup, Segment, Streams, TrackSegments, remux};
 
 // ---------- 样本 ----------
 
@@ -27,12 +27,19 @@ fn fixture(path: &str) -> Vec<u8> {
     std::fs::read(fixtures().join(path)).unwrap()
 }
 
-/// 样本目录中的一条轨：`init` 为 init 段文件名，`segments` 为分片文件名。
+/// 样本目录中的一条轨：`init` 为 init 段文件名，`segments` 为分片文件名。用于算期望输出：输出只取决于分片的内容，声明的
+/// 时长取 0（不核对时间戳推进）。
 fn track(dir: &str, init: Option<&str>, segments: &[&str]) -> TrackSegments {
     let dir = fixtures().join(dir);
     TrackSegments {
         init: init.map(|i| dir.join(i)),
-        segments: segments.iter().map(|s| dir.join(s)).collect(),
+        segments: segments
+            .iter()
+            .map(|s| Segment {
+                path: dir.join(s),
+                duration_us: 0,
+            })
+            .collect(),
         gaps: Vec::new(),
     }
 }

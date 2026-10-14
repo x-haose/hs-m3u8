@@ -7,7 +7,7 @@ mod options;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use hs_m3u8_remux::{DiscontinuityGroup, Report, Streams, TrackSegments};
+use hs_m3u8_remux::{DiscontinuityGroup, Report, Segment, Streams, TrackSegments};
 
 pub(crate) use self::commit::recover_recorded;
 pub use self::options::{OutputOptions, Target};
@@ -267,7 +267,14 @@ fn remux_group(tracks: &[GroupTrack]) -> DiscontinuityGroup {
             .iter()
             .map(|t| TrackSegments {
                 init: t.init.clone(),
-                segments: t.segments.iter().map(|s| s.path.clone()).collect(),
+                segments: t
+                    .segments
+                    .iter()
+                    .map(|s| Segment {
+                        path: s.path.clone(),
+                        duration_us: s.duration_us,
+                    })
+                    .collect(),
                 gaps: t.gaps.clone(),
             })
             .collect(),

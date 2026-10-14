@@ -1,5 +1,7 @@
 //! 异常里的原因与位置：出错的分片、选不出轨、播放列表不合法等的类型，及由 core 的对应类型转换。
 
+use std::time::Duration;
+
 use hs_m3u8_core as core;
 use pyo3::prelude::*;
 
@@ -343,6 +345,21 @@ variants! {
             /// 流的种类
             kind: StreamKind,
         },
+        /// 相邻两个分片（中间没有缺片）的时间戳往前跳得比声明的时长多出一截：多为来源在时间戳重新开始处漏标了
+        /// EXT-X-DISCONTINUITY，照写会在输出里留下一大段空档
+        #[pyo3(constructor = (*, group, track, kind, segment, jump))]
+        TimestampJump {
+            /// 第几个不连续段组
+            group: usize,
+            /// 第几条轨
+            track: usize,
+            /// 流的种类
+            kind: StreamKind,
+            /// 跳变后的第一个分片在这一组这条轨里是第几个
+            segment: usize,
+            /// 前后两片的时间戳之差超出声明的时长之和的部分
+            jump: Duration,
+        },
         /// 这条轨是打包音频，这一组有分片没有 ID3 时间戳，而这一组还有别的轨：不知道怎样与它们对齐
         #[pyo3(constructor = (*, group, track))]
         UntimedPackedAudio {
@@ -607,6 +624,19 @@ impl From<core::Mp4Unsupported> for Mp4Unsupported {
                 group,
                 track,
                 kind: kind.into(),
+            },
+            U::TimestampJump {
+                group,
+                track,
+                kind,
+                segment,
+                jump_us,
+            } => Mp4Unsupported::TimestampJump {
+                group,
+                track,
+                kind: kind.into(),
+                segment,
+                jump: Duration::from_micros(jump_us),
             },
             U::UntimedPackedAudio { group, track } => {
                 Mp4Unsupported::UntimedPackedAudio { group, track }

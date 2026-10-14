@@ -22,6 +22,7 @@ pub(crate) enum Input {
         failure: chain::Failure,
         /// 有 init 段（fMP4）：编码参数都在 init 段里，不随帧携带
         init: bool,
+        segments: SegmentMap,
     },
     Packed(Box<Packed>),
 }
@@ -39,7 +40,7 @@ impl Input {
             let heads = segments
                 .segments
                 .iter()
-                .map(|path| segment_head(path))
+                .map(|segment| segment_head(&segment.path))
                 .collect::<Result<Vec<_>, Error>>()?;
             if heads.iter().any(|h| h.format != heads[0].format) {
                 return Err(Error::Unsupported(Unsupported::FormatChangedInGroup {
@@ -53,13 +54,28 @@ impl Input {
             }
         }
         let trex = segments.init.as_deref().map(init_trex).transpose()?;
+        let paths = segments
+            .init
+            .iter()
+            .chain(segments.segments.iter().map(|s| &s.path));
         let mut files = Vec::with_capacity(segments.segments.len() + 1);
-        for path in segments.init.iter().chain(&segments.segments) {
+        for path in paths {
             let len = match &trex {
                 Some(trex) => fmp4_len(path, trex)?,
                 None => std::fs::metadata(path).map_err(read_error(path))?.len(),
             };
             files.push((path.clone(), 0..len));
+        }
+        let mut starts: Vec<u64> = files
+            .iter()
+            .scan(0u64, |at, (_, range)| {
+                let start = *at;
+                *at = at.saturating_add(range.end - range.start);
+                Some(start)
+            })
+            .collect();
+        if init {
+            starts.remove(0);
         }
         let (chain, failure) = new_chain(files)?;
         let ictx = open_chain(chain, &failure, group, track)?;
@@ -67,6 +83,7 @@ impl Input {
             ictx,
             failure,
             init,
+            segments: SegmentMap::new(starts, segments),
         })
     }
 
@@ -104,9 +121,67 @@ impl Input {
         }
     }
 
+    /// 各分片在输入里的位置与声明的时长。
+    pub(crate) fn segments(&self) -> &SegmentMap {
+        match self {
+            Input::Chain { segments, .. } => segments,
+            Input::Packed(packed) => packed.segments(),
+        }
+    }
+
     /// 打包音频，而这一组有分片没有时间戳。
     pub(crate) fn untimed(&self) -> bool {
         matches!(self, Input::Packed(packed) if !packed.timed())
+    }
+}
+
+/// 一条轨在一组里的各分片在输入里的位置与声明的时长：把读出的包按字节位置归到所在的分片，核对相邻分片之间的时间戳
+/// 推进（见 [`crate::Unsupported::TimestampJump`]）。
+pub(crate) struct SegmentMap {
+    /// 各分片在输入里的起点，字节；升序，与分片一一对应
+    starts: Vec<u64>,
+    /// 各分片声明的时长，微秒
+    durations_us: Vec<u64>,
+    /// 与前一个分片之间缺了分片的分片下标（见 [`TrackSegments::gaps`]）
+    gaps: Vec<usize>,
+    /// 这一组里最长的声明时长，微秒
+    longest_us: u64,
+}
+
+impl SegmentMap {
+    /// `starts` 为 `segments` 的各分片在输入里的起点。
+    pub(crate) fn new(starts: Vec<u64>, segments: &TrackSegments) -> SegmentMap {
+        let durations_us: Vec<u64> = segments.segments.iter().map(|s| s.duration_us).collect();
+        SegmentMap {
+            starts,
+            longest_us: durations_us.iter().copied().max().unwrap_or(0),
+            durations_us,
+            gaps: segments.gaps.clone(),
+        }
+    }
+
+    /// 输入里第 `position` 字节所在的分片；位置未知（负数）或在第一个分片之前（fMP4 的 init 段里）时为 None。
+    pub(crate) fn segment_at(&self, position: isize) -> Option<usize> {
+        let position = u64::try_from(position).ok()?;
+        self.starts
+            .partition_point(|&start| start <= position)
+            .checked_sub(1)
+    }
+
+    /// 第 `from` 片到第 `to` 片（`from` < `to`）的起点之间时间戳应推进多少：其间各片声明的时长之和，微秒；与实际推进之差
+    /// 不超过容差（见 [`SegmentMap::tolerance_us`]）。其间有缺片（缺了的那几片时长不知道）时为 None，不核对。
+    pub(crate) fn declared_between(&self, from: usize, to: usize) -> Option<u64> {
+        if self.gaps.iter().any(|&gap| from < gap && gap <= to) {
+            return None;
+        }
+        Some(self.durations_us[from..to].iter().sum())
+    }
+
+    /// 相邻分片之间时间戳推进超出声明的时长多少以内算正常：这一组里最长的声明时长，微秒。RFC 8216 要求 EXTINF 准确、
+    /// 不超过目标时长（4.3.3.1），容差取一个目标时长量级；任务目录里只有各分片的声明时长，没有目标时长，取最长的代替。
+    /// 声明的时长都为 0 时为 None，判断不了，不核对。
+    pub(crate) fn tolerance_us(&self) -> Option<u64> {
+        (self.longest_us > 0).then_some(self.longest_us)
     }
 }
 

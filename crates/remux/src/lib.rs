@@ -9,7 +9,7 @@
 //! - 每条轨按调用方指定的 [`Streams`] 贡献第一路视频和（或）第一路音频，没有这类流的轨不贡献（各轨合起来至少
 //!   一路），未指定种类的流不进输出、不检查编码；同一类流只能来自一条轨；编码参数须探测得出；后续组的流布局、编码
 //!   参数与解码配置必须与第一组一致，参数随帧携带的（TS 与打包音频）在组内也不能变，分片格式与 PID 也不能换；每路流
-//!   的解码时间戳必须严格递增（组内不能往回跳或重复）。TS 里损坏的音频包、打包音频里的损坏处跳过并计数（见
+//!   的解码时间戳必须严格递增（组内不能往回跳或重复），相邻分片之间也不能往前跳得比声明的时长多出一截。TS 里损坏的音频包、打包音频里的损坏处跳过并计数（见
 //!   [`StreamReport::discarded_corrupt_bytes`]）；每组开头解不出的视频包不写出并计数（见
 //!   [`StreamReport::skipped_before_keyframe`]）。
 //! - 只接受 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、MP3、FLAC、Opus、ALAC 音频，与 FFmpeg 构建启用的组件
@@ -54,10 +54,18 @@ use crate::write::write_verified;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackSegments {
     pub init: Option<PathBuf>,
-    pub segments: Vec<PathBuf>,
+    pub segments: Vec<Segment>,
     /// 与前一个分片之间缺了分片（来源里有、没取到）的分片下标，升序，在 1 到分片数减 1 之间。打包音频片内损坏之后的
     /// 帧要按下一片的时间戳定时，下一片之前缺了分片时定不了（见 [`StreamReport::discarded_corrupt_bytes`]）
     pub gaps: Vec<usize>,
+}
+
+/// 一个分片：文件与播放列表为它声明的时长。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Segment {
+    pub path: PathBuf,
+    /// EXTINF 声明的时长，微秒；相邻分片之间的时间戳推进按它核对（见 [`Unsupported::TimestampJump`]）
+    pub duration_us: u64,
 }
 
 /// 一个不连续段组；`tracks` 的顺序在各组之间一致，下标即轨道号。

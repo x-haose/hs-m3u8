@@ -163,6 +163,14 @@ change_enc=(-c:v libx264 -preset veryfast -bf 0 -g 10 -b:v 150k "${aac[@]}" -f m
 "${ff[@]}" -f lavfi -i testsrc2=size=160x90:rate=10 -f lavfi -i sine=frequency=440:sample_rate=44100 -t 1 \
   -output_ts_offset 1.1 "${change_enc[@]}" "$DIR/ts_param_change/seg1.ts"
 
+# 组内时间戳往前跳（来源在时间戳重新开始处漏标 EXT-X-DISCONTINUITY）：两个各 1 秒的分片，第二个晚 1000 秒开始
+rm -rf -- "${DIR:?}/ts_jump"
+mkdir -p "$DIR/ts_jump"
+"${ff[@]}" -f lavfi -i testsrc2=size=320x180:rate=10 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 1 \
+  "${change_enc[@]}" "$DIR/ts_jump/seg0.ts"
+"${ff[@]}" -f lavfi -i testsrc2=size=320x180:rate=10 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 1 \
+  -output_ts_offset 1001 "${change_enc[@]}" "$DIR/ts_jump/seg1.ts"
+
 # 组内换音频 PID：两个时间戳相接的分片，第二个的音频 PID 从 0x101 换成 0x102
 rm -rf -- "${DIR:?}/ts_pid_change"
 mkdir -p "$DIR/ts_pid_change"

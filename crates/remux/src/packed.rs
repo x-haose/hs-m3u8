@@ -7,7 +7,7 @@ use std::ops::Range;
 use ffmpeg::{Packet, Rational, Rescale, format, media};
 use ffmpeg_next as ffmpeg;
 
-use crate::input::{new_chain, open_chain, read_packet};
+use crate::input::{SegmentMap, new_chain, open_chain, read_packet};
 use crate::standalone::{Format, Head, Item, is_id3v1, item};
 use crate::{Error, TrackSegments, chain, frame};
 
@@ -28,8 +28,8 @@ pub(crate) struct Packed {
     ictx: format::context::Input,
     /// 读分片文件出错时的路径与原因
     failure: chain::Failure,
-    /// 各分片的音频帧在相连之后的输入里的起点，字节；升序，第一项为 0
-    starts: Vec<u64>,
+    /// 各分片的音频帧在相连之后的输入里的位置；第一片起点为 0
+    segments: SegmentMap,
     /// 各分片第一处损坏之后的第一帧在输入里的起点，字节；没有时为 None
     resumes: Vec<Option<u64>>,
     /// 各分片的下一片在输入里、且与它之间没有缺片
@@ -63,7 +63,7 @@ impl Packed {
         let mut total = 0;
         let mut discarded = 0;
         let mut reference = None;
-        for (path, head) in segments.segments.iter().zip(heads) {
+        for (path, head) in segments.segments.iter().map(|s| &s.path).zip(heads) {
             let read_failed = |cause| Error::Io {
                 action: "读取",
                 path: path.clone(),
@@ -105,7 +105,7 @@ impl Packed {
         Ok(Packed {
             ictx,
             failure,
-            starts,
+            segments: SegmentMap::new(starts, segments),
             resumes,
             followed,
             timestamps: heads.iter().map(|h| h.timestamp).collect(),
@@ -124,6 +124,10 @@ impl Packed {
 
     pub(crate) fn context(&self) -> &format::context::Input {
         &self.ictx
+    }
+
+    pub(crate) fn segments(&self) -> &SegmentMap {
+        &self.segments
     }
 
     /// 各分片都有时间戳。
@@ -156,10 +160,12 @@ impl Packed {
             let Some(dts) = packet.dts().filter(|_| Some(packet.stream()) == self.audio) else {
                 return Ok(true);
             };
-            let position = u64::try_from(packet.position())
-                .map_err(|_| Error::UnplacedPacket { group, track })?;
-            // 第一个分片从 0 起，位置总能归到某一片
-            let segment = self.starts.partition_point(|&start| start <= position) - 1;
+            // 第一个分片从 0 起，位置已知时总能归到某一片
+            let segment = self
+                .segments
+                .segment_at(packet.position())
+                .ok_or(Error::UnplacedPacket { group, track })?;
+            let position = u64::try_from(packet.position()).expect("归得到分片的位置非负");
             if self.resumes[segment].is_some_and(|resume| position >= resume) {
                 // 上一片损坏之后暂存的包读完了（这一片从开头就在损坏之后时，中间没有不暂存的包）
                 if let Some((earlier, packets)) =

@@ -4,17 +4,24 @@
 
 use std::path::{Path, PathBuf};
 
-use hs_m3u8_remux::{DiscontinuityGroup, Streams, TrackSegments, remux};
+use hs_m3u8_remux::{DiscontinuityGroup, Segment, Streams, TrackSegments, remux};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/media/ts_long")
 }
 
+/// 一组一条轨；分片声明的时长取 0（不核对时间戳推进，只看文件描述符）。
 fn single_group(segments: Vec<PathBuf>) -> Vec<DiscontinuityGroup> {
     vec![DiscontinuityGroup {
         tracks: vec![TrackSegments {
             init: None,
-            segments,
+            segments: segments
+                .into_iter()
+                .map(|path| Segment {
+                    path,
+                    duration_us: 0,
+                })
+                .collect(),
             gaps: Vec::new(),
         }],
     }]

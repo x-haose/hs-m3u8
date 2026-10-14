@@ -10,7 +10,7 @@ use hs_m3u8_core::{
     Error, HlsUnsupported, JobRequest, LiveOptions, Mp4Unsupported, Target, Unsupported, Url,
 };
 use hs_m3u8_hls::{MediaPlaylist, Playlist, parse};
-use hs_m3u8_remux::{DiscontinuityGroup, Streams, TrackSegments, remux};
+use hs_m3u8_remux::{DiscontinuityGroup, Segment, Streams, TrackSegments, remux};
 
 use crate::server::Server;
 #[cfg(unix)]
@@ -73,8 +73,10 @@ fn media_groups(media: &MediaPlaylist) -> Vec<TrackSegments> {
                 gaps: Vec::new(),
             });
         }
-        let path = segment.uri.to_file_path().unwrap();
-        groups.last_mut().unwrap().segments.push(path);
+        groups.last_mut().unwrap().segments.push(Segment {
+            path: segment.uri.to_file_path().unwrap(),
+            duration_us: segment.duration_us,
+        });
     }
     groups
 }

@@ -43,6 +43,8 @@ pub(crate) struct Source {
     pub(crate) dropped: Vec<Dropped>,
     /// 按输入流下标：视频流在这一组里读到的第一个关键帧的 PTS（没有 PTS 时为 DTS），还没读到时为 None
     keyframe_pts: Vec<Option<i64>>,
+    /// 按输入流下标：要写出的包最近所在的分片与这路流在其中的第一个 DTS（微秒），见 [`Source::check_advance`]
+    segment_starts: Vec<Option<(usize, i64)>>,
     /// 已读出、待写入的包及其映射；包一定带 DTS
     pub(crate) queue: VecDeque<(Packet, Mapping)>,
     /// 读到了末尾（见 [`Source::read_next`]）
@@ -85,6 +87,7 @@ impl Source {
             inband,
             dropped: vec![Dropped::default(); streams],
             keyframe_pts: vec![None; streams],
+            segment_starts: vec![None; streams],
             queue: VecDeque::new(),
             finished: false,
             wrap_us: 0,
@@ -92,7 +95,7 @@ impl Source {
     }
 
     /// 读下一个要写出的包。跳过未映射流的包；没有 DTS 的包、组开头解不出的视频包（见 [`Source::decodable`]）与损坏
-    /// （读不出帧头或帧长与包长对不上）的音频包记入 `dropped`；参数随帧携带的包核对参数。读到末尾返回 `None` 并记下 `finished`，打包音频丢弃的损坏字节这时才是
+    /// （读不出帧头或帧长与包长对不上）的音频包记入 `dropped`；参数随帧携带的包核对参数，分片之间核对时间戳推进。读到末尾返回 `None` 并记下 `finished`，打包音频丢弃的损坏字节这时才是
     /// 全部（见 [`Input::discarded`]），一并记入 `dropped`；之后不再调用。
     pub(crate) fn read_next(&mut self) -> Result<Option<(Packet, Mapping)>, Error> {
         loop {
@@ -150,7 +153,50 @@ impl Source {
                     return Err(Error::Unsupported(unsupported));
                 }
             }
+            self.check_advance(&packet, mapping)?;
             return Ok(Some((packet, mapping)));
+        }
+    }
+
+    /// 要写出的包 `packet` 进到下一个分片时，这路流在前后两片的第一个 DTS 之差不超过其间各片声明的时长加容差（见
+    /// [`crate::input::SegmentMap`]），否则报 [`Unsupported::TimestampJump`]。位置未知的包、其间有缺片或声明的时长判断
+    /// 不了时不核对。往回跳的由写出时的 DTS 严格递增拦下。
+    fn check_advance(&mut self, packet: &Packet, mapping: Mapping) -> Result<(), Error> {
+        let segments = self.input.segments();
+        let Some(segment) = segments.segment_at(packet.position()) else {
+            return Ok(());
+        };
+        let dts_us = packet
+            .dts()
+            .expect("要写出的包都带 DTS")
+            .rescale(mapping.time_base, MICROS);
+        let start = &mut self.segment_starts[packet.stream()];
+        let previous = match *start {
+            Some((previous, _)) if previous >= segment => return Ok(()),
+            previous => previous,
+        };
+        *start = Some((segment, dts_us));
+        let Some((previous, previous_us)) = previous else {
+            return Ok(());
+        };
+        let (Some(declared), Some(tolerance)) = (
+            segments.declared_between(previous, segment),
+            segments.tolerance_us(),
+        ) else {
+            return Ok(());
+        };
+        let excess = (dts_us - previous_us).saturating_sub_unsigned(declared);
+        match u64::try_from(excess) {
+            Ok(jump_us) if jump_us > tolerance => {
+                Err(Error::Unsupported(Unsupported::TimestampJump {
+                    group: self.group,
+                    track: self.track,
+                    kind: mapping.kind,
+                    segment,
+                    jump_us,
+                }))
+            }
+            _ => Ok(()),
         }
     }
 
