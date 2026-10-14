@@ -1,6 +1,6 @@
 [package]
 name = "hs-m3u8-py"
-version = "0.0.0"
+version.workspace = true
 description = "Python bindings (PyO3) for the hs-m3u8 download engine"
 edition.workspace = true
 rust-version.workspace = true

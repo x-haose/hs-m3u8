@@ -1,6 +1,6 @@
 [package]
 name = "hs-m3u8-core"
-version = "0.0.0"
+version.workspace = true
 description = "HLS download engine: planning, concurrent segment fetching, AES-128 decryption with verification, resumable work directories and MP4 remuxing"
 edition.workspace = true
 rust-version.workspace = true

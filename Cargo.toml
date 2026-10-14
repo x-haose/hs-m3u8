@@ -3,6 +3,8 @@ resolver = "3"
 members = ["crates/core", "crates/hls", "crates/py", "crates/remux", "crates/sysproxy"]
 
 [workspace.package]
+# 发布的版本（SemVer）；Python 包的版本由 maturin 按 PEP 440 换写，如 1.0.0-dev.0 即 1.0.0.dev0
+version = "1.0.0-dev.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"

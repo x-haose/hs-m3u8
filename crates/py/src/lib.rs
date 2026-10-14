@@ -35,6 +35,7 @@ pyo3_stub_gen::reexport_module_members!("hs_m3u8", "hs_m3u8._native");
 // `download` 写成 Python 的协程（python/hs_m3u8/_download.py）：它是最常用的入口，忘了 await 时 Python 给出「never
 // awaited」警告，PyO3 的协程没有这个警告
 pyo3_stub_gen::reexport_module_members!("hs_m3u8" from "hs_m3u8._download"; "download");
+pyo3_stub_gen::reexport_module_members!("hs_m3u8" from "hs_m3u8._version"; "__version__");
 
 /// 生成存根所需的类型信息；pyproject.toml 在仓库根。
 pub fn stub_info() -> pyo3_stub_gen::Result<pyo3_stub_gen::StubInfo> {

@@ -1,6 +1,6 @@
 [package]
 name = "hs-m3u8-sysproxy"
-version = "0.0.0"
+version.workspace = true
 description = "Read the operating system's proxy settings as stored: macOS SystemConfiguration, Windows Internet Settings"
 edition.workspace = true
 rust-version.workspace = true

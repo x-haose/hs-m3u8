@@ -93,7 +93,6 @@ wheels = [
 
 [[package]]
 name = "hs-m3u8"
-version = "1.0.0.dev0"
 source = { virtual = "." }
 
 [package.dev-dependencies]

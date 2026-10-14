@@ -3,6 +3,7 @@
 
 from hs_m3u8._download import download
 from hs_m3u8._native import AudioChoice, AudioInfo, AudioKey, Encryption, Engine, FetchErrorKind, FetchFailure, FileCount, FileError, HlsUnsupported, HlsUnsupportedError, HookError, HookKind, Hooks, HsM3u8Error, HttpClientInitError, HttpError, HttpErrorKind, HttpFailure, HttpOptions, IncompleteError, IntegrityError, IntegrityFailure, InvalidInputError, Job, JobCancelledError, JobRequest, JobType, KeyLengthError, KeyOverride, Leftover, LeftoverKind, LiveEnd, LiveNotEnabledError, LiveOptions, LiveReport, LiveStalledError, Malformed, MasterInfo, MediaReport, MissReason, Missed, Mp4Output, Mp4Unsupported, Mp4UnsupportedError, NewSession, NotMediaPlaylistError, NothingRecordedError, Output, OutputExistsError, OutputOccupiedError, OutputOptions, PlaylistError, Preference, Probe, Progress, Proxy, Purpose, RefreshCause, RefreshReason, RemuxError, RequestError, RequestParts, Resolution, ResponseTooLargeError, RetryPolicy, Retrying, SegmentCounts, SegmentRef, SelectError, SelectFailure, Selected, Shape, Source, SourceBreak, SourceError, SourceUnsupported, SourceUnsupportedError, Stage, StallCause, StallReason, StreamKind, StreamReport, SystemProxyError, Target, Timeouts, TrackInfo, Unsettled, VariantChoice, VariantInfo, VariantKey, VolumeUnavailableError, WorkDirError, WorkDirProblem, Writing
+from hs_m3u8._version import __version__
 __all__ = [
     "AudioChoice",
     "AudioInfo",
@@ -99,5 +100,6 @@ __all__ = [
     "WorkDirError",
     "WorkDirProblem",
     "Writing",
+    "__version__",
     "download",
 ]
