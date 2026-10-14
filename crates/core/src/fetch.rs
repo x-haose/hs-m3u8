@@ -136,6 +136,11 @@ impl Fetcher {
         }
     }
 
+    /// 同时下载的分片数上限（任务的并发数）。
+    pub(crate) fn limit(&self) -> usize {
+        self.limit
+    }
+
     pub(crate) fn push(&mut self, item: Item) {
         self.pending.push_back(item);
         self.fill();

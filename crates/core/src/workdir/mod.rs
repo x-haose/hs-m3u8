@@ -189,7 +189,7 @@ impl WorkDir {
 
     /// 打开或新建任务目录并加锁；`lock` 为 [`WorkDir::lock_existing`] 已加上的锁。
     ///
-    /// 已有 `job.json` 时其记录须与 `record` 相符（见 [`JobRecord::conflict`]，直播的完整地址不比较，见
+    /// 已有 `job.json` 时其记录须与 `record` 相符（见 [`JobRecord::conflict`]，地址不比较，见
     /// [`WorkDir::url_changed`]），不符时报那个原因；但目录里还没有已完成的分片时，直接改为当前任务：删掉之前的 init
     /// 段，不是本库写的文件留下。没有 `job.json` 时目录必须不存在或为空（`.part` 残留与锁文件除外），以免把别人的
     /// 目录当成任务目录（成功后会整个删除）。
@@ -210,14 +210,14 @@ impl WorkDir {
         &self.record
     }
 
-    /// 沿用了目录里原有的直播记录，而其中的完整来源地址与打开时给的不同（换了令牌、主机或路径）；记录的其余各项
-    /// [`WorkDir::open`] 已核对一致。录制确认接得上之后用 [`WorkDir::adopt_url`] 改记。新建、改为当前任务与点播时为
-    /// false。
+    /// 沿用了目录里原有的记录，而其中的完整来源地址与打开时给的不同（换了令牌、主机或路径）；记录的其余各项
+    /// [`WorkDir::open`] 已核对一致。核对过这次取到的是同一份内容（点播见 [`crate::vod::download`]，直播见
+    /// [`crate::LiveOptions`]）之后用 [`WorkDir::adopt_url`] 改记。新建或改为当前任务时为 false。
     pub(crate) fn url_changed(&self) -> bool {
         self.url_changed
     }
 
-    /// 把 `job.json` 中的记录换成本次的：直播确认是同一个直播后，改记当前的地址。
+    /// 把 `job.json` 中的记录换成本次的：核对过这次取到的是同一份内容后，改记当前的地址。
     pub(crate) async fn adopt_url(&self) -> Result<(), Error> {
         let path = self.layout.root.join(JOB_FILE);
         let bytes = encode(&self.record);
@@ -453,7 +453,7 @@ fn open(root: PathBuf, record: JobRecord, lock: Option<Lock>) -> Result<WorkDir,
         }
         write_atomic(&job_path, &encode(&record))?;
     }
-    let url_changed = previous.is_some_and(|p| p.url_digest() != record.url_digest());
+    let url_changed = previous.is_some_and(|p| p.url_digest != record.url_digest);
     Ok(WorkDir {
         layout,
         record,

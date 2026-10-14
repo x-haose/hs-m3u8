@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use axum::http::StatusCode;
 use hs_m3u8_core::{
     Error, HlsUnsupported, JobRequest, LiveOptions, Mp4Unsupported, Target, Unsupported, Url,
+    WorkDirProblem,
 };
 use hs_m3u8_hls::{MediaPlaylist, Playlist, parse};
 use hs_m3u8_remux::{Cancel, DiscontinuityGroup, Segment, Streams, TrackSegments, remux};
@@ -267,7 +268,8 @@ async fn existing_hls_directories_are_replaced_only_when_written_by_the_library(
 }
 
 /// 两者都要时，HLS 目录在下载期间被别人放进了文件：写出前的检查发现后报错，MP4 与 HLS 都没有写出、
-/// 也不留临时文件，任务目录保留；腾出来后再运行，分片都已下完、只差合并，不核对也不重下，分片地址已经过期也照常合并。
+/// 也不留临时文件，任务目录保留；腾出来后用同样的请求再运行，分片都已下完、只差合并，不核对也不重下，分片地址已经
+/// 过期也照常合并。换一个地址则照常核对。
 #[tokio::test(flavor = "multi_thread")]
 async fn outputs_taken_during_the_download_leave_nothing_behind() {
     let dir = test_dir("output_taken");
@@ -295,6 +297,21 @@ async fn outputs_taken_during_the_download_leave_nothing_behind() {
     assert_eq!(names_in(&dir), ["out", "out.hsdl"]);
 
     std::fs::remove_dir_all(dir.join("out")).unwrap();
+    // 另一个地址列出的分片名、时长都相同，内容不同：分片虽已下完也要核对，不把上一个视频当成它输出
+    server.put("b/seg0.ts", fixture("ts_b/seg0.ts"));
+    server.put(
+        "b/index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n",
+    );
+    let other = request_to(server.url("b/index.m3u8"), &dir, both(&dir));
+    match run(other).await {
+        Err(Error::WorkDir {
+            problem: WorkDirProblem::SourceUnverified,
+            ..
+        }) => {}
+        other => panic!("应报核对不上：{other:?}"),
+    }
+
     server.status("seg0.ts", axum::http::StatusCode::FORBIDDEN);
     let output = run(req).await.unwrap();
     assert_hls_matches(&dir.join("out"), &output.mp4.unwrap().path);

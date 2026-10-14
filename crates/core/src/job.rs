@@ -69,7 +69,7 @@ pub(crate) async fn run(
     }
     let continuing_live = recorded
         .as_ref()
-        .is_some_and(|r| matches!(r.kind, RecordKind::Live { .. }));
+        .is_some_and(|r| matches!(r.kind, RecordKind::Live));
     let selection = recorded.as_ref().and_then(|r| r.selection.as_ref());
     let resolved = resolve::resolve(&task.http, &request.source, selection, &task.cancel)
         .await?
@@ -111,10 +111,9 @@ async fn run_live(
     let options = task.request.live.ok_or(Error::LiveNotEnabled)?;
     let record = JobRecord {
         preference_digest,
+        url_digest: url_digest(&task.request.source.url),
         selection: resolved.selection_key(),
-        kind: RecordKind::Live {
-            url_digest: url_digest(&task.request.source.url),
-        },
+        kind: RecordKind::Live,
     };
     let dir = WorkDir::open(task.output.work_dir.clone(), record, lock).await?;
     let mut fetcher = task.fetcher(&dir, Permit::Live);
@@ -150,6 +149,7 @@ async fn run_vod(
     let plan = Plan::new(resolved.tracks)?;
     let record = JobRecord {
         preference_digest,
+        url_digest: url_digest(&task.request.source.url),
         selection,
         kind: RecordKind::Vod {
             plan_digest: plan.digest(),

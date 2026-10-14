@@ -8,6 +8,7 @@ use std::ops::Range;
 use hs_m3u8_hls::Segment;
 use hs_m3u8_remux::Streams;
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use self::plan::Plan;
@@ -23,10 +24,11 @@ use crate::{Error, Progress, Stage, WorkDirProblem, blocking};
 /// `mp4` 为各轨的取流方式：先下各组各轨的第一个分片，核对能否放进 MP4（见 [`output::check_mp4`]），放不进的不必下完
 /// 才报。
 ///
-/// 任务目录里有已完成的分片、这次还有要下载的时，先核对这次取到的是同一份内容（见 [`to_verify`]）：要核对的各组里
-/// 已完成的分片重新下载第一个取得到的，与已存的比较（见 [`recheck`]，重试后仍是临时故障即如实上抛）。有组不同或都已
-/// 取不到报 [`WorkDirProblem::SourceUnverified`]。分片名与时长相同的两个视频（只靠查询串区分的、同一视频的另一档、
-/// 同一地址换了内容的）计划摘要相同，只能这样分开；按组核对，各视频共用的片头片尾（单独的组）不会让别的组蒙混过关。
+/// 任务目录里有已完成的分片时，先核对这次取到的是同一份内容（要核对哪些见 [`to_verify`]）：要核对的各组里已完成的分片重
+/// 新下载第一个取得到的，与已存的比较（见 [`recheck`]，重试后仍是临时故障即如实上抛）。有组不同或都已取不到报
+/// [`WorkDirProblem::SourceUnverified`]，都相同而地址变了时改记新地址。分片名与时长相同的两个视频（只靠查询串区分的、同
+/// 一视频的另一档、同一地址换了内容的）计划摘要相同，只能这样分开；按组核对，各视频共用的片头片尾（单独的组）不会让别的
+/// 组蒙混过关。
 ///
 /// init 段每次都重新拉取（地址常带每次会话不同的签名，内容决定文件名）；任一项失败时取消其余项并返回该错误，
 /// 任务被取消时返回 [`Error::Cancelled`]。
@@ -47,7 +49,7 @@ pub(crate) async fn download(
     let inits = store_inits(&fetcher.direct(), plan, layout, progress, cancel).await?;
     plan.check_inits(&inits)?;
     let names = names(plan, &inits);
-    verify_completed(fetcher, plan, &names, layout, cancel).await?;
+    verify_completed(fetcher, plan, &names, dir, cancel).await?;
 
     let mut items: Vec<Vec<Option<Item>>> = plan
         .tracks
@@ -93,20 +95,23 @@ pub(crate) async fn download(
 }
 
 /// 核对已完成的分片时每条轨最多核对几组：取已完成的字节数最多的，主体内容在其中，各视频共用的片头片尾这类小组排在
-/// 后面；每片一组的播放列表不必把已完成的都重下一遍。
-const RECHECK_GROUPS: usize = 3;
+/// 后面；有十几个以上共用组、每个都比主体已完成的部分大的播放列表实际上没有，而每片一组的播放列表不必把已完成的都
+/// 重下一遍。
+const RECHECK_GROUPS: usize = 16;
 
 /// 每组最多试几个已完成的分片：取不到（404/410）的才换下一个，一次很快的请求；滚动删除旧分片的回看源可能要多试几个。
 const RECHECK_TRIES: usize = 16;
 
-/// 见 [`download`]：要核对的组里已完成的分片重新下载，与已存的比较。
+/// 见 [`download`]：要核对的组里已完成的分片重新下载，与已存的比较，各组并发（至多任务的并发数个）；都相同而地址
+/// 变了时改记新地址。
 async fn verify_completed(
     fetcher: &Fetcher,
     plan: &Plan,
     names: &[Vec<SegmentName>],
-    layout: &Layout,
+    dir: &WorkDir,
     cancel: &CancellationToken,
 ) -> Result<(), Error> {
+    let layout = dir.layout();
     let groups: Vec<Group> = plan
         .groups
         .iter()
@@ -123,13 +128,31 @@ async fn verify_completed(
                 .collect(),
         })
         .collect();
-    let tracks = plan.tracks.len();
-    let Some(picked) = blocking(move || to_verify(groups, tracks)).await?? else {
+    let (tracks, url_changed) = (plan.tracks.len(), dir.url_changed());
+    let Some(picked) = blocking(move || to_verify(groups, tracks, url_changed)).await?? else {
         return Ok(());
     };
     let direct = fetcher.direct();
-    for Group { track, candidates } in picked {
-        match recheck(&direct, track, candidates, OnTransient::Fail, cancel).await? {
+    let mut pending = picked.into_iter();
+    let mut running = JoinSet::new();
+    loop {
+        while running.len() < fetcher.limit()
+            && let Some(Group { track, candidates }) = pending.next()
+        {
+            let (direct, cancel) = (direct.clone(), cancel.clone());
+            running.spawn(async move {
+                recheck(&direct, track, candidates, OnTransient::Fail, &cancel).await
+            });
+        }
+        let Some(joined) = running.join_next().await else {
+            break;
+        };
+        let checked = match joined {
+            Ok(checked) => checked,
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(_) => unreachable!("核对的任务不会被单独中止，运行时关闭时这里也不再被轮询"),
+        };
+        match checked? {
             Recheck::Same => {}
             Recheck::Different | Recheck::Gone => {
                 return Err(Error::WorkDir {
@@ -138,6 +161,9 @@ async fn verify_completed(
                 });
             }
         }
+    }
+    if url_changed {
+        dir.adopt_url().await?;
     }
     Ok(())
 }
@@ -148,10 +174,15 @@ struct Group {
     candidates: Vec<Candidate>,
 }
 
-/// `groups`（各组各轨的分片，`tracks` 为轨数）里要核对的：计划里的分片都已完成时为 None（这次不下载，拼不进别的
-/// 内容）；否则每条轨已完成的字节数最多的至多 [`RECHECK_GROUPS`] 组，各组已完成的分片按字节数从大到小、至多
-/// [`RECHECK_TRIES`] 个（大的不像黑场、静音那样容易彼此相同）。
-fn to_verify(groups: Vec<Group>, tracks: usize) -> Result<Option<Vec<Group>>, Error> {
+/// `groups`（各组各轨的分片，`tracks` 为轨数）里要核对的：计划里的分片都已完成、地址也与记录的相同（`url_changed`
+/// 为 false）时为 None：这次不下载，又是上次那个请求，没有可核对的必要；否则每条轨已完成的字节数最多的至多
+/// [`RECHECK_GROUPS`] 组，各组已完成的分片按字节数从大到小、至多 [`RECHECK_TRIES`] 个（大的不像黑场、静音那样容易
+/// 彼此相同）。
+fn to_verify(
+    groups: Vec<Group>,
+    tracks: usize,
+    url_changed: bool,
+) -> Result<Option<Vec<Group>>, Error> {
     let mut all_done = true;
     // 各轨各组：(已完成的字节数, 按字节数从大到小的已完成分片)
     let mut by_track: Vec<Vec<(u64, Vec<Candidate>)>> = (0..tracks).map(|_| Vec::new()).collect();
@@ -171,7 +202,7 @@ fn to_verify(groups: Vec<Group>, tracks: usize) -> Result<Option<Vec<Group>>, Er
         let largest = sized.into_iter().take(RECHECK_TRIES).map(|(_, c)| c);
         by_track[track].push((total, largest.collect()));
     }
-    if all_done {
+    if all_done && !url_changed {
         return Ok(None);
     }
     let mut picked = Vec::new();
