@@ -85,6 +85,8 @@ fn a_segment_shrinking_during_the_merge_is_reported() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_full_disk_while_writing_is_reported_as_a_file_error() {
+    use std::path::Path;
+
     let err = remux(
         &[Streams::All],
         &[group([track("ts_long")])],
