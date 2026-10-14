@@ -342,6 +342,86 @@ async fn gap_segments_are_skipped_and_reported() {
     );
 }
 
+/// 独立音频有一整段都标了 EXT-X-GAP（音频编码器中断）：这段合并不了，两条轨这段的分片都不取，报为缺失，其余照常
+/// 合并；音频全部标了 GAP 时没有一段合并得了，下载前报出是哪条播放列表。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_group_with_only_gaps_in_one_track_is_left_out() {
+    let dir = test_dir("vod_gap_group");
+    let server = Server::start().await;
+    for kind in ["video", "audio"] {
+        for name in ["init.mp4", "seg0.m4s", "seg1.m4s"] {
+            server.put(
+                &format!("fmp4_a/{kind}/{name}"),
+                fixture(&format!("fmp4_a/{kind}/{name}")),
+            );
+        }
+    }
+    let media = |kind: &str, gap: &str| {
+        format!(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"fmp4_a/{kind}/init.mp4\"\n\
+             {gap}#EXTINF:1,\nfmp4_a/{kind}/seg0.m4s\n{gap}#EXTINF:1,\nfmp4_a/{kind}/seg1.m4s\n\
+             #EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"fmp4_b/{kind}/init.mp4\"\n\
+             #EXTINF:1,\nfmp4_b/{kind}/seg0.m4s\n#EXT-X-ENDLIST\n"
+        )
+    };
+    let audio_gaps =
+        media("audio", "").replace("#EXTINF:1,\nfmp4_b", "#EXT-X-GAP\n#EXTINF:1,\nfmp4_b");
+    server.put("video.m3u8", media("video", ""));
+    server.put("audio.m3u8", audio_gaps);
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"x\",URI=\"audio.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO=\"a\"\nvideo.m3u8\n",
+    );
+
+    let output = run(request(server.url("master.m3u8"), &dir)).await.unwrap();
+
+    let group = DiscontinuityGroup {
+        tracks: vec![
+            track("fmp4_a/video", Some("init.mp4"), &["seg0.m4s", "seg1.m4s"]),
+            track("fmp4_a/audio", Some("init.mp4"), &["seg0.m4s", "seg1.m4s"]),
+        ],
+    };
+    let want = expected(&dir, &[Streams::Video, Streams::Audio], &[group]);
+    assert_output(&output, &want);
+    let missed = |track, reason| Missed {
+        session: 0,
+        track,
+        first: 2,
+        last: 2,
+        reason,
+    };
+    assert_eq!(
+        output.missed,
+        [
+            missed(0, MissReason::Unmergeable),
+            missed(1, MissReason::Gap)
+        ]
+    );
+    assert_eq!(
+        server.hits("fmp4_b/video/init.mp4") + server.hits("fmp4_b/video/seg0.m4s"),
+        0
+    );
+
+    let dir = test_dir("vod_gap_track");
+    server.put(
+        "audio.m3u8",
+        media("audio", "#EXT-X-GAP\n")
+            .replace("#EXTINF:1,\nfmp4_b", "#EXT-X-GAP\n#EXTINF:1,\nfmp4_b"),
+    );
+    let err = run(request(server.url("master.m3u8"), &dir))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            Error::Unsupported(Unsupported::NoMergeableGroup(url)) if **url == server.url("audio.m3u8")
+        ),
+        "{err}"
+    );
+    assert!(!dir.join("out.hsdl").exists());
+}
+
 /// 500 按重试策略重试后成功。
 #[tokio::test(flavor = "multi_thread")]
 async fn retries_server_errors() {

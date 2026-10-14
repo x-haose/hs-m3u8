@@ -1,4 +1,4 @@
-//! 点播计划与摘要（纯计算）：每条轨要下载的分片、init 段、不连续段组与来源标了 EXT-X-GAP 的分片。
+//! 点播计划与摘要（纯计算）：每条轨要下载的分片与 init 段、不连续段组，以及不下载的分片。
 
 use std::ops::Range;
 
@@ -13,28 +13,14 @@ use crate::{Error, MissReason, Missed, Unsupported};
 pub(crate) struct Track {
     /// 要下载的分片，按播放顺序
     pub segments: Vec<Segment>,
-    /// 来源标了 EXT-X-GAP 的分片（没有内容，不取），按播放顺序
-    pub gaps: Vec<Segment>,
-    /// 要下载的分片用到的 init 段，按完整地址与字节范围去重、按首次出现排序
+    /// 不下载的分片的序号与原因，按播放顺序：来源标了 EXT-X-GAP 的（[`MissReason::Gap`]），所在的不连续段有轨只有
+    /// GAP 分片、合并不进输出的（[`MissReason::Unmergeable`]）
+    pub skipped: Vec<(u64, MissReason)>,
+    /// 要下载的分片用到的 init 段，按首次出现排序、不重复
     pub inits: Vec<InitSection>,
 }
 
 impl Track {
-    fn new(all: Vec<Segment>) -> Self {
-        let (gaps, segments): (Vec<Segment>, Vec<Segment>) = all.into_iter().partition(|s| s.gap);
-        let mut inits: Vec<InitSection> = Vec::new();
-        for init in segments.iter().filter_map(|s| s.init.as_ref()) {
-            if !inits.contains(init) {
-                inits.push(init.clone());
-            }
-        }
-        Track {
-            segments,
-            gaps,
-            inits,
-        }
-    }
-
     /// 分片所用 init 段在 `inits` 中的下标；无 init 段时为 None。
     pub(crate) fn init_index(&self, segment: &Segment) -> Option<usize> {
         let init = segment.init.as_ref()?;
@@ -47,26 +33,77 @@ pub(crate) struct Plan {
     pub tracks: Vec<Track>,
     /// 不连续段组，按播放顺序；每组为各轨在组内的分片下标范围（轨道顺序同 `tracks`），范围都不为空
     pub groups: Vec<Vec<Range<usize>>>,
+    /// 见 [`Plan::digest`]
+    digest: String,
 }
 
 impl Plan {
-    /// 点播计划；每条轨都必须有要下载的分片，各轨要下载的分片的不连续段序列必须相同（有轨一整段都标了 EXT-X-GAP 时
-    /// 报 [`Unsupported::DiscontinuityMismatch`]）。
+    /// 点播计划。各轨的不连续段序列须相同（含标了 EXT-X-GAP 的分片），否则报
+    /// [`Unsupported::DiscontinuityMismatch`]；有轨在某段里只有 GAP 分片时这段合并不了，各轨在这段的分片都不下载；
+    /// 没有一段合并得了时报 [`Unsupported::NoMergeableGroup`]。
     pub(crate) fn new(tracks: Vec<ResolvedTrack>) -> Result<Self, Error> {
-        let tracks = tracks
-            .into_iter()
-            .map(|t| {
-                let track = Track::new(t.playlist.segments);
-                if track.segments.is_empty() {
-                    return Err(Error::Unsupported(Unsupported::EmptyPlaylist(Box::new(
-                        t.url,
-                    ))));
+        if let Some(t) = tracks.iter().find(|t| t.playlist.segments.is_empty()) {
+            return Err(Error::Unsupported(Unsupported::EmptyPlaylist(Box::new(
+                t.url.clone(),
+            ))));
+        }
+        let all: Vec<&[Segment]> = tracks.iter().map(|t| &t.playlist.segments[..]).collect();
+        let runs = check_discontinuities(&all)?;
+        // 各段合并得了：每条轨在这段里都有没标 GAP 的分片
+        let has_content = |track: usize, group: usize| {
+            all[track][runs[track][group].clone()]
+                .iter()
+                .any(|s| !s.gap)
+        };
+        let mergeable: Vec<bool> = (0..runs[0].len())
+            .map(|group| (0..all.len()).all(|track| has_content(track, group)))
+            .collect();
+        if !mergeable.contains(&true) {
+            let track = (0..all.len())
+                .find(|&track| !has_content(track, 0))
+                .expect("第一段合并不了，即有轨在其中只有 GAP 分片");
+            return Err(Error::Unsupported(Unsupported::NoMergeableGroup(Box::new(
+                tracks[track].url.clone(),
+            ))));
+        }
+        let mut groups: Vec<Vec<Range<usize>>> = Vec::new();
+        let mut planned = Vec::with_capacity(all.len());
+        for (segments, runs) in all.iter().zip(&runs) {
+            let mut track = Track {
+                segments: Vec::new(),
+                skipped: Vec::new(),
+                inits: Vec::new(),
+            };
+            let mut ranges = Vec::new();
+            for (run, &mergeable) in runs.iter().zip(&mergeable) {
+                let start = track.segments.len();
+                for s in &segments[run.clone()] {
+                    match (s.gap, mergeable) {
+                        (true, _) => track.skipped.push((s.sequence, MissReason::Gap)),
+                        (false, false) => track.skipped.push((s.sequence, MissReason::Unmergeable)),
+                        (false, true) => track.segments.push(s.clone()),
+                    }
                 }
-                Ok(track)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let groups = groups(&tracks)?;
-        Ok(Plan { tracks, groups })
+                if mergeable {
+                    ranges.push(start..track.segments.len());
+                }
+            }
+            for init in track.segments.iter().filter_map(|s| s.init.as_ref()) {
+                if !track.inits.contains(init) {
+                    track.inits.push(init.clone());
+                }
+            }
+            groups.resize_with(ranges.len(), Vec::new);
+            for (group, range) in groups.iter_mut().zip(ranges) {
+                group.push(range);
+            }
+            planned.push(track);
+        }
+        Ok(Plan {
+            digest: digest(&all),
+            tracks: planned,
+            groups,
+        })
     }
 
     /// 要下载的分片数，各轨合计。
@@ -76,7 +113,13 @@ impl Plan {
 
     /// 来源标了 EXT-X-GAP 的分片数，各轨合计。
     pub(crate) fn gap_count(&self) -> usize {
-        self.tracks.iter().map(|t| t.gaps.len()).sum()
+        let gaps = |t: &Track| {
+            t.skipped
+                .iter()
+                .filter(|(_, r)| *r == MissReason::Gap)
+                .count()
+        };
+        self.tracks.iter().map(gaps).sum()
     }
 
     /// 检查同一组内每条轨的 init 段内容不变（地址可以不同）。`inits[t][i]` 为第 t 条轨
@@ -101,42 +144,33 @@ impl Plan {
 
     /// 续传校验用的摘要（SHA-256 十六进制），写进 job.json，口径改变须升格式版本。
     ///
-    /// 只覆盖分片的身份：轨道、序号、时长、不连续段序号、分片与 init 段的身份（见
-    /// [`Fingerprint::of_segment`]，与直播比对分片用同一口径），以及哪些标了 EXT-X-GAP。不含 key 地址与 IV：任务目录
-    /// 里存的是已解密的分片；不含主机、路径前段与查询串：CDN 常在其中放每次会话不同的令牌。每条轨先列要下载的，有
-    /// EXT-X-GAP 的再列它们，各一行，同样的写法。
+    /// 只覆盖播放列表里全部分片的身份：轨道、序号、时长、不连续段序号、分片与 init 段的身份（见
+    /// [`Fingerprint::of_segment`]，与直播比对分片用同一口径）。不含 key 地址与 IV：任务目录里存的是已解密的分片；不含
+    /// 主机、路径前段与查询串：CDN 常在其中放每次会话不同的令牌；不含 EXT-X-GAP 标记：它只决定这次取哪些，不改已完成
+    /// 分片的身份。
     pub(crate) fn digest(&self) -> String {
-        let mut hasher = Sha256::new();
-        for (index, track) in self.tracks.iter().enumerate() {
-            hasher.update(format!("track {index} {}\n", track.segments.len()));
-            for s in &track.segments {
-                hasher.update(segment_line(s));
-            }
-            if !track.gaps.is_empty() {
-                hasher.update(format!("gaps {}\n", track.gaps.len()));
-                for s in &track.gaps {
-                    hasher.update(segment_line(s));
-                }
-            }
-        }
-        hex(&hasher.finalize())
+        self.digest.clone()
     }
 
-    /// 来源标了 EXT-X-GAP 的分片，按轨道、序号排列，相接的合成一个区间（会话为 0）。
+    /// 不下载的分片，按轨道、序号排列，相接且原因相同的合成一个区间（会话为 0）。
     pub(crate) fn missed(&self) -> Vec<Missed> {
         let mut missed: Vec<Missed> = Vec::new();
         for (track, t) in self.tracks.iter().enumerate() {
-            for s in &t.gaps {
+            for (sequence, reason) in &t.skipped {
                 match missed.last_mut() {
-                    Some(m) if m.track == track && m.last.checked_add(1) == Some(s.sequence) => {
-                        m.last = s.sequence;
+                    Some(m)
+                        if m.track == track
+                            && m.reason == *reason
+                            && m.last.checked_add(1) == Some(*sequence) =>
+                    {
+                        m.last = *sequence;
                     }
                     _ => missed.push(Missed {
                         session: 0,
                         track,
-                        first: s.sequence,
-                        last: s.sequence,
-                        reason: MissReason::Gap,
+                        first: *sequence,
+                        last: *sequence,
+                        reason: reason.clone(),
                     }),
                 }
             }
@@ -145,25 +179,32 @@ impl Plan {
     }
 }
 
-/// 摘要里一个分片的写法，见 [`Plan::digest`]。
-fn segment_line(s: &Segment) -> String {
-    let init = s
-        .init
-        .as_ref()
-        .map(|i| Fingerprint::of_segment(&i.uri, i.byte_range).to_string())
-        .unwrap_or_default();
-    format!(
-        "{} {} {} {} {init}\n",
-        s.sequence,
-        Fingerprint::of_segment(&s.uri, s.byte_range),
-        s.duration_us,
-        s.discontinuity,
-    )
+/// 见 [`Plan::digest`]：`tracks` 为各轨播放列表里的全部分片。
+fn digest(tracks: &[&[Segment]]) -> String {
+    let mut hasher = Sha256::new();
+    for (index, segments) in tracks.iter().enumerate() {
+        hasher.update(format!("track {index} {}\n", segments.len()));
+        for s in *segments {
+            let init = s
+                .init
+                .as_ref()
+                .map(|i| Fingerprint::of_segment(&i.uri, i.byte_range).to_string())
+                .unwrap_or_default();
+            hasher.update(format!(
+                "{} {} {} {} {init}\n",
+                s.sequence,
+                Fingerprint::of_segment(&s.uri, s.byte_range),
+                s.duration_us,
+                s.discontinuity,
+            ));
+        }
+    }
+    hex(&hasher.finalize())
 }
 
-/// 按不连续段序号切分各轨，并检查各轨的不连续段序列相同。
-fn groups(tracks: &[Track]) -> Result<Vec<Vec<Range<usize>>>, Error> {
-    let runs: Vec<Vec<(u64, Range<usize>)>> = tracks.iter().map(runs).collect();
+/// 各轨按不连续段序号切成的连续区间（分片下标）；各轨的不连续段序列须相同。
+fn check_discontinuities(tracks: &[&[Segment]]) -> Result<Vec<Vec<Range<usize>>>, Error> {
+    let runs: Vec<Vec<(u64, Range<usize>)>> = tracks.iter().map(|s| runs(s)).collect();
     let numbers = |runs: &[(u64, Range<usize>)]| runs.iter().map(|(d, _)| *d).collect::<Vec<_>>();
     let first = numbers(&runs[0]);
     for (track, track_runs) in runs.iter().enumerate().skip(1) {
@@ -176,15 +217,16 @@ fn groups(tracks: &[Track]) -> Result<Vec<Vec<Range<usize>>>, Error> {
             }));
         }
     }
-    Ok((0..first.len())
-        .map(|group| runs.iter().map(|r| r[group].1.clone()).collect())
+    Ok(runs
+        .into_iter()
+        .map(|runs| runs.into_iter().map(|(_, range)| range).collect())
         .collect())
 }
 
 /// 一条轨按不连续段序号切成的连续区间。播放列表中的不连续段序号只增不减，所以各区间的序号互不相同。
-fn runs(track: &Track) -> Vec<(u64, Range<usize>)> {
+fn runs(segments: &[Segment]) -> Vec<(u64, Range<usize>)> {
     let mut runs: Vec<(u64, Range<usize>)> = Vec::new();
-    for (i, s) in track.segments.iter().enumerate() {
+    for (i, s) in segments.iter().enumerate() {
         match runs.last_mut() {
             Some((discontinuity, range)) if *discontinuity == s.discontinuity => range.end = i + 1,
             _ => runs.push((s.discontinuity, i..i + 1)),
@@ -222,15 +264,22 @@ mod tests {
             "9709cf9cb7943aae405f447022a77b9764cd6b8dca71c76e459631f92ccb162f"
         );
 
-        let gap = "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\nseg0.ts\n\
-                   #EXT-X-GAP\n#EXTINF:10,\nseg1.ts\n#EXT-X-ENDLIST\n";
-        let Ok(Playlist::Media(playlist)) = parse(gap, &url) else {
-            panic!("应解析为媒体播放列表");
+        // EXT-X-GAP 标记不算：标了与没标的同一份播放列表摘要相同
+        let digest_of = |text: &str| {
+            let Ok(Playlist::Media(playlist)) = parse(text, &url) else {
+                panic!("应解析为媒体播放列表");
+            };
+            let track = ResolvedTrack {
+                url: url.clone(),
+                playlist,
+            };
+            Plan::new(vec![track]).unwrap().digest()
         };
-        let plan = Plan::new(vec![ResolvedTrack { url, playlist }]).unwrap();
+        let plain =
+            "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\nseg0.ts\n#EXTINF:10,\nseg1.ts\n";
         assert_eq!(
-            plan.digest(),
-            "aceef0f11d5959d61cdeede59c33c99607694bf79974a2cbe395a79d343a8c1d"
+            digest_of(plain),
+            digest_of(&plain.replace("#EXTINF:10,\nseg1", "#EXT-X-GAP\n#EXTINF:10,\nseg1"))
         );
     }
 }

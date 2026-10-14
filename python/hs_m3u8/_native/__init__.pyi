@@ -1592,7 +1592,7 @@ class MissReason:
     @typing.final
     class Unmergeable(MissReason):
         r"""
-        所在不连续段不是每条轨都录到，无法合并
+        所在不连续段不是每条轨都有内容（直播为有轨没录到，点播为有轨只有标了 EXT-X-GAP 的分片），无法合并
         """
         __match_args__ = ()
         def __new__(cls) -> MissReason.Unmergeable: ...
@@ -2159,9 +2159,10 @@ class Output:
     @property
     def missed(self) -> builtins.tuple[Missed, ...]:
         r"""
-        不在输出中的分片（输出里那段时间留空、保留原时间戳），按会话、轨道、序号排列，相接且原因相同的合成一个区间：
-        点播只有来源标了 EXT-X-GAP 的；直播另有窗口滑过、取不到等（见 `MissReason`），不含之前的运行里、某个会话
-        第一个已完成分片之前或最后一个之后缺的（原因与范围随那次运行一起丢了）
+        不在输出中的分片，按会话、轨道、序号排列，相接且原因相同的合成一个区间：点播有来源标了 EXT-X-GAP 的及因此合
+        并不了的；直播另有窗口滑过、取不到等（见 `MissReason`），不含之前的运行里、某个会话第一个已完成分片之前或最
+        后一个之后缺的（原因与范围随那次运行一起丢了）。组内两个已有分片之间缺的，输出里那段留空、保留原时间戳；组首
+        尾缺的、整组不在输出中的不占时间（各组首尾相接）
         """
     @property
     def live(self) -> typing.Optional[LiveReport]:
@@ -3168,6 +3169,20 @@ class SourceUnsupported:
         def __new__(cls, *, track: builtins.int, first: collections.abc.Sequence[builtins.int], found: collections.abc.Sequence[builtins.int]) -> SourceUnsupported.DiscontinuityMismatch: ...
     
     @typing.final
+    class NoMergeableGroup(SourceUnsupported):
+        r"""
+        点播没有一个不连续段合并得了：每段都有轨只有来源标了 EXT-X-GAP 的分片（合并要各轨都有内容），如某条轨全部
+        标了 GAP
+        """
+        __match_args__ = ("url",)
+        @property
+        def url(self) -> builtins.str:
+            r"""
+            第一段里只有 GAP 分片的一条轨的播放列表的地址
+            """
+        def __new__(cls, url: builtins.str) -> SourceUnsupported.NoMergeableGroup: ...
+    
+    @typing.final
     class Fmp4BaseDataOffset(SourceUnsupported):
         r"""
         fMP4 的 moof 用了绝对位置（tfhd 的 base_data_offset）：RFC 8216 3.3 要求按 moof 相对寻址，分片单独存放、
@@ -3214,7 +3229,7 @@ class SourceUnsupportedError(SourceError):
     来源用到了不支持的特性。
     """
     @property
-    def reason(self) -> SourceUnsupported.EmptyPlaylist | SourceUnsupported.NoTargetDuration | SourceUnsupported.Encrypted | SourceUnsupported.IFramesOnly | SourceUnsupported.DeltaUpdate | SourceUnsupported.InitChangesWithinGroup | SourceUnsupported.DiscontinuityMismatch | SourceUnsupported.Fmp4BaseDataOffset | SourceUnsupported.KeyWithoutUri | SourceUnsupported.TsInit:
+    def reason(self) -> SourceUnsupported.EmptyPlaylist | SourceUnsupported.NoTargetDuration | SourceUnsupported.Encrypted | SourceUnsupported.IFramesOnly | SourceUnsupported.DeltaUpdate | SourceUnsupported.InitChangesWithinGroup | SourceUnsupported.DiscontinuityMismatch | SourceUnsupported.NoMergeableGroup | SourceUnsupported.Fmp4BaseDataOffset | SourceUnsupported.KeyWithoutUri | SourceUnsupported.TsInit:
         r"""
         哪个特性
         """

@@ -165,6 +165,12 @@ variants! {
             /// 这条轨的各不连续段编号
             found: Seq<u64>,
         },
+        /// 点播没有一个不连续段合并得了：每段都有轨只有来源标了 EXT-X-GAP 的分片（合并要各轨都有内容），如某条轨全部
+        /// 标了 GAP
+        NoMergeableGroup {
+            /// 第一段里只有 GAP 分片的一条轨的播放列表的地址
+            url: Address,
+        },
         /// fMP4 的 moof 用了绝对位置（tfhd 的 base_data_offset）：RFC 8216 3.3 要求按 moof 相对寻址，分片单独存放、
         /// 接起来合并时绝对位置都对不上
         #[pyo3(constructor = (*, url, at))]

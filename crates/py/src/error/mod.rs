@@ -635,6 +635,11 @@ fn exception(
                 found: Seq(found),
             },
         )?,
+        E::Unsupported(U::NoMergeableGroup(url)) => unsupported_source(
+            py,
+            base,
+            SourceUnsupported::NoMergeableGroup { url: Address(*url) },
+        )?,
         E::Unsupported(U::Fmp4BaseDataOffset { url, at }) => unsupported_source(
             py,
             base,

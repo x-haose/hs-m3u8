@@ -312,6 +312,10 @@ pub enum Unsupported {
         first: Vec<u64>,
         found: Vec<u64>,
     },
+    /// 点播没有一个不连续段合并得了：每段都有轨只有来源标了 EXT-X-GAP 的分片（合并要各轨都有内容），如某条轨全部
+    /// 标了 GAP。`0` 为第一段里这样一条轨的播放列表
+    #[error("播放列表 {} 在第一个不连续段里只有 EXT-X-GAP，没有一段各轨都有内容、合并得了", bare_url(.0))]
+    NoMergeableGroup(Box<Url>),
     /// fMP4 分片或 init 段 `url` 从第 `at` 字节起的 moof 用了绝对位置（tfhd 的 base_data_offset）：RFC 8216 3.3 要求
     /// 按 moof 相对寻址，分片单独存放、接起来合并时绝对位置都对不上
     #[error("{} {}", bare_url(.url), base_data_offset_text(*.at))]
