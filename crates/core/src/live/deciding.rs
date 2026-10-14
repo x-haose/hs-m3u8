@@ -6,10 +6,10 @@ use hs_m3u8_hls::MediaPlaylist;
 use tokio::time::Instant;
 
 use super::session::{Decision, NewUrl, Undecided, Verdict, Verdicts};
-use super::tasks::{Overlap, StoredOverlap};
 use super::track::Fetched;
 use super::window::overlaps;
 use super::{Phase, Recorder};
+use crate::recheck::{Candidate, Recheck};
 use crate::workdir::WorkDir;
 use crate::{Error, WorkDirProblem};
 
@@ -44,12 +44,12 @@ impl Recorder<'_> {
 
     /// 第 `track` 条轨重叠的分片核对完：都已取不到时，要录的轨按接不上算（它们也录不到，另起会话不会重复），已录满
     /// 的轨为核对不了。
-    pub(super) async fn checked(&mut self, track: usize, overlap: Overlap) -> Result<(), Error> {
+    pub(super) async fn checked(&mut self, track: usize, overlap: Recheck) -> Result<(), Error> {
         let verdicts = self.verdicts();
         let verdict = match overlap {
-            Overlap::Same => Verdict::Matches,
-            Overlap::Gone if verdicts.is_full(track) => Verdict::Unverifiable,
-            Overlap::Different | Overlap::Gone => Verdict::Differs,
+            Recheck::Same => Verdict::Matches,
+            Recheck::Gone if verdicts.is_full(track) => Verdict::Unverifiable,
+            Recheck::Different | Recheck::Gone => Verdict::Differs,
         };
         verdicts.conclude(track, verdict);
         self.decide_if_complete().await
@@ -102,11 +102,11 @@ impl Recorder<'_> {
             verdicts.conclude(track, Verdict::Unrecorded);
             return;
         };
-        let found: Vec<StoredOverlap> = overlaps(recorded, playlist)
+        let found: Vec<Candidate> = overlaps(recorded, playlist)
             .into_iter()
             .map(|segment| {
                 let name = &recorded.segments()[&segment.sequence];
-                StoredOverlap {
+                Candidate {
                     stored: dir.layout().segment(track, name),
                     init: dir.layout().segment_init(track, name),
                     segment: segment.clone(),

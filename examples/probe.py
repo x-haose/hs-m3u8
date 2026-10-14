@@ -27,16 +27,16 @@ async def main() -> None:
     print("默认会选：", probe.master.selected.variant)
 
     fits = [
-        (v.bandwidth, v.index)
+        (v.bandwidth, v)
         for v in probe.master.variants
         if v.resolution is not None and v.resolution.height <= MAX_HEIGHT and v.bandwidth is not None
     ]
     if not fits:
         print(f"没有写了码率、高度不超过 {MAX_HEIGHT} 的变体")
         return
-    _, index = max(fits)
+    _, best = max(fits, key=lambda fit: fit[0])
     # 按身份选：探测之后主播放列表重排了变体也选到这一个
-    source = Source(URL, preference=Preference(variant=probe.master.variants[index].choice()))
+    source = Source(URL, preference=Preference(variant=best.choice()))
     output = await engine.start(JobRequest(source, OutputOptions(Target.Mp4("downloads/bipbop.mp4")))).wait()
     print("已保存到", output.mp4.path if output.mp4 else None)
 

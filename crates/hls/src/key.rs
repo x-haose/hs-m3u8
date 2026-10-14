@@ -3,12 +3,14 @@
 
 use crate::{MasterPlaylist, Rendition, Resolution, Variant, audio_renditions};
 
-/// 变体的身份。
+/// 变体的身份。各项取自 [`Variant`] 的同名属性（`audio_group` 即 [`Variant::audio`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariantKey {
+    /// BANDWIDTH，bit/s
     pub bandwidth: Option<u64>,
     pub resolution: Option<Resolution>,
     pub codecs: Vec<String>,
+    /// 引用的音频组（AUDIO 属性）
     pub audio_group: Option<String>,
     /// 主播放列表中上面几项与它完全相同的变体里排第几（从 0 起）；冗余流（RFC 8216 6.2.3）的属性完全相同
     pub occurrence: usize,
@@ -44,19 +46,29 @@ impl VariantKey {
     }
 
     fn same_attributes(&self, variant: &Variant) -> bool {
-        variant.bandwidth == self.bandwidth
-            && variant.resolution == self.resolution
-            && variant.codecs == self.codecs
-            && variant.audio == self.audio_group
+        let VariantKey {
+            bandwidth,
+            resolution,
+            codecs,
+            audio_group,
+            occurrence: _,
+        } = self;
+        variant.bandwidth == *bandwidth
+            && variant.resolution == *resolution
+            && variant.codecs == *codecs
+            && variant.audio == *audio_group
     }
 }
 
-/// 音频 rendition 的身份。
+/// 音频 rendition 的身份。各项取自 [`Rendition`] 的同名属性（`group` 即 [`Rendition::group_id`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioKey {
-    pub group_id: String,
-    pub language: Option<String>,
+    /// GROUP-ID
+    pub group: String,
+    /// NAME
     pub name: Option<String>,
+    /// LANGUAGE
+    pub language: Option<String>,
     /// 主播放列表中上面几项与它完全相同的音频 rendition 里排第几（从 0 起）；同组同语言同名的音频（违反 RFC 8216
     /// 4.3.4.1.1 的 NAME 唯一，但确有其事）只能这样区分
     pub occurrence: usize,
@@ -67,9 +79,9 @@ impl AudioKey {
     pub fn of(master: &MasterPlaylist, index: usize) -> Option<AudioKey> {
         let (_, rendition) = audio_renditions(master).nth(index)?;
         let mut key = AudioKey {
-            group_id: rendition.group_id.clone(),
-            language: rendition.language.clone(),
+            group: rendition.group_id.clone(),
             name: rendition.name.clone(),
+            language: rendition.language.clone(),
             occurrence: 0,
         };
         key.occurrence = audio_renditions(master)
@@ -88,8 +100,12 @@ impl AudioKey {
     }
 
     fn same_attributes(&self, rendition: &Rendition) -> bool {
-        rendition.group_id == self.group_id
-            && rendition.language == self.language
-            && rendition.name == self.name
+        let AudioKey {
+            group,
+            name,
+            language,
+            occurrence: _,
+        } = self;
+        rendition.group_id == *group && rendition.name == *name && rendition.language == *language
     }
 }

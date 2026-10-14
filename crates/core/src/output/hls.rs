@@ -461,9 +461,9 @@ mod tests {
                 occurrence: 0,
             },
             audio: Some(AudioKey {
-                group_id: "source-group".into(),
-                language: language.map(str::to_owned),
+                group: "source-group".into(),
                 name: name.map(str::to_owned),
+                language: language.map(str::to_owned),
                 occurrence: 0,
             }),
         }

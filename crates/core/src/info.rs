@@ -9,7 +9,8 @@ use hs_m3u8_hls::{
 /// 一个变体的属性。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariantInfo {
-    /// 主播放列表里第几个变体，即 [`crate::hls::VariantChoice::Index`] 用的，也是在 [`MasterInfo::variants`] 里的位置
+    /// 主播放列表里第几个变体，也是在 [`MasterInfo::variants`] 里的位置；只对这一份主播放列表有效，开始任务按
+    /// [`VariantInfo::choice`] 选
     pub index: usize,
     /// BANDWIDTH，bit/s；来源没写时为 None
     pub bandwidth: Option<u64>,
@@ -23,7 +24,8 @@ pub struct VariantInfo {
 }
 
 impl VariantInfo {
-    /// 按身份选这个变体（[`VariantChoice::Matching`]）：探测之后主播放列表增删重排了变体，开始任务时也选到它。
+    /// 按身份选这个变体（[`VariantChoice::Matching`]）：探测之后主播放列表增删重排了变体，开始任务时也选到它。续传
+    /// 时给当初得到的那个，不要重新探测再取。
     pub fn choice(&self) -> VariantChoice {
         VariantChoice::Matching(VariantKey {
             bandwidth: self.bandwidth,
@@ -38,8 +40,8 @@ impl VariantInfo {
 /// 一个音频 rendition 的属性。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioInfo {
-    /// 主播放列表里第几个音频 rendition（只数音频），即 [`crate::hls::AudioChoice::Index`] 用的，也是在
-    /// [`MasterInfo::audio`] 里的位置
+    /// 主播放列表里第几个音频 rendition（只数音频），也是在 [`MasterInfo::audio`] 里的位置；只对这一份主播放列表
+    /// 有效，开始任务按 [`AudioInfo::choice`] 选
     pub index: usize,
     pub group: String,
     pub name: Option<String>,
@@ -56,9 +58,9 @@ impl AudioInfo {
     /// 按身份选这个音频 rendition（[`AudioChoice::Matching`]），同 [`VariantInfo::choice`]。
     pub fn choice(&self) -> AudioChoice {
         AudioChoice::Matching(AudioKey {
-            group_id: self.group.clone(),
-            language: self.language.clone(),
+            group: self.group.clone(),
             name: self.name.clone(),
+            language: self.language.clone(),
             occurrence: self.occurrence,
         })
     }
@@ -154,7 +156,7 @@ fn audio_info(master: &MasterPlaylist, index: usize) -> AudioInfo {
     let key = AudioKey::of(master, index).expect("下标在范围内");
     AudioInfo {
         index,
-        group: key.group_id,
+        group: key.group,
         name: key.name,
         language: key.language,
         default: rendition.default,

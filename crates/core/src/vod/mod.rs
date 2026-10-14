@@ -14,11 +14,18 @@ use crate::fetch::{Fetcher, Item, ItemInfo, count_done, fetch_init};
 use crate::http::{Http, Permit};
 use crate::ident::Fingerprint;
 use crate::output::{self, GroupTrack};
-use crate::workdir::{self, Layout, SegmentName, SessionStart};
-use crate::{Error, Progress, Stage, blocking};
+use crate::recheck::{Candidate, Recheck, recheck};
+use crate::workdir::{self, Layout, SegmentName, SessionStart, WorkDir};
+use crate::{Error, Progress, Stage, WorkDirProblem, blocking};
 
-/// 下载计划中的 init 段与尚未完成的分片，返回合并输入；返回 `Ok` 即全部已在任务目录中。合并 MP4 时 `mp4` 为各轨的
-/// 取流方式：先下各组各轨的第一个分片，核对能否放进 MP4（见 [`output::check_mp4`]），放不进的不必下完才报。
+/// 下载计划中的 init 段与尚未完成的分片到任务目录 `dir`，返回合并输入；返回 `Ok` 即全部已在任务目录中。合并 MP4 时
+/// `mp4` 为各轨的取流方式：先下各组各轨的第一个分片，核对能否放进 MP4（见 [`output::check_mp4`]），放不进的不必下完
+/// 才报。
+///
+/// 完整来源地址与记录的不同（见 [`WorkDir::url_changed`]）时，先核对取到的是同一份内容：各轨已完成的分片从新到旧，按新
+/// 地址重新下载第一个取得到的，与已存的比较（见 [`recheck`]），都相同才改记新地址；有轨不同或都已取不到（404/410）报
+/// [`WorkDirProblem::SourceUnverified`]，记录不变。分片名与时长相同的两个视频（只靠查询串区分的、同一视频的另一档）计划
+/// 摘要相同，只能这样分开。
 ///
 /// init 段每次都重新拉取（地址常带每次会话不同的签名，内容决定文件名）；任一项失败时取消其余项并返回该错误，
 /// 任务被取消时返回 [`Error::Cancelled`]。
@@ -26,7 +33,7 @@ pub(crate) async fn download(
     http: &Http,
     fetcher: &mut Fetcher,
     plan: &Plan,
-    layout: &Layout,
+    dir: &WorkDir,
     mp4: Option<&[Streams]>,
     progress: &watch::Sender<Progress>,
     cancel: &CancellationToken,
@@ -35,9 +42,14 @@ pub(crate) async fn download(
         p.stage = Stage::Downloading;
         p.segments_total = plan.segment_count();
     });
+    let layout = dir.layout();
     let inits = store_inits(http, plan, layout, progress, cancel).await?;
     plan.check_inits(&inits)?;
     let names = names(plan, &inits);
+    if dir.url_changed() {
+        verify_new_url(fetcher, plan, &names, dir, cancel).await?;
+        dir.adopt_url().await?;
+    }
 
     let mut items: Vec<Vec<Option<Item>>> = plan
         .tracks
@@ -80,6 +92,69 @@ pub(crate) async fn download(
     let rest = items.into_iter().flatten().flatten().collect();
     fetch(fetcher, rest, progress).await?;
     Ok(group_input(plan, &names, layout, Range::clone))
+}
+
+/// 见 [`download`]：各轨已完成的分片按新地址重新下载，与已存的比较。
+async fn verify_new_url(
+    fetcher: &Fetcher,
+    plan: &Plan,
+    names: &[Vec<SegmentName>],
+    dir: &WorkDir,
+    cancel: &CancellationToken,
+) -> Result<(), Error> {
+    let layout = dir.layout();
+    let tracks: Vec<Vec<Candidate>> = plan
+        .tracks
+        .iter()
+        .zip(names)
+        .enumerate()
+        .map(|(track, (t, names))| {
+            t.segments
+                .iter()
+                .zip(names)
+                .rev()
+                .map(|(segment, name)| Candidate {
+                    segment: segment.clone(),
+                    stored: layout.segment(track, name),
+                    init: layout.segment_init(track, name),
+                })
+                .collect()
+        })
+        .collect();
+    let tracks = blocking(move || {
+        tracks
+            .into_iter()
+            .map(completed)
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .await??;
+    let direct = fetcher.direct();
+    for (track, candidates) in tracks.into_iter().enumerate() {
+        if candidates.is_empty() {
+            continue;
+        }
+        match recheck(&direct, track, candidates, cancel).await? {
+            Recheck::Same => {}
+            Recheck::Different | Recheck::Gone => {
+                return Err(Error::WorkDir {
+                    path: layout.root().to_path_buf(),
+                    problem: WorkDirProblem::SourceUnverified,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `candidates` 里已在任务目录中的，顺序不变。
+fn completed(candidates: Vec<Candidate>) -> Result<Vec<Candidate>, Error> {
+    let mut kept = Vec::new();
+    for candidate in candidates {
+        if workdir::completed_len(&candidate.stored)?.is_some() {
+            kept.push(candidate);
+        }
+    }
+    Ok(kept)
 }
 
 /// 下载 `items` 中尚未在任务目录里的，已在的计入进度；任一项失败时取消其余项并返回该错误。

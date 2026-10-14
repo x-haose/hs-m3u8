@@ -25,7 +25,8 @@ variants! {
         /// 画质最高者：确定是纯音频的变体（写了 CODECS 且全是音频或字幕编码）在有别的变体时不考虑；其余各变体都写了
         /// RESOLUTION 时取分辨率最高、同分辨率取带宽最高，有没写的（分辨率比不了）时取带宽最高；都相同时取靠后的
         Best {},
-        /// 主播放列表里第几个变体（从 0 起，见 `VariantInfo.index`）
+        /// 主播放列表里第几个变体（从 0 起，见 `VariantInfo.index`）；只对同一份主播放列表有效，探测之后开始任务用
+        /// `VariantInfo.choice()`
         Index {
             /// 下标
             index: Count<usize>,
@@ -64,7 +65,8 @@ variants! {
             /// 语言，如 `en`、`zh-Hans`
             language: String,
         },
-        /// 主播放列表里第几个音频（只数音频，从 0 起，见 `AudioInfo.index`）；须在所选变体的音频组里
+        /// 主播放列表里第几个音频（只数音频，从 0 起，见 `AudioInfo.index`）；须在所选变体的音频组里。只对同一份主播放
+        /// 列表有效，探测之后开始任务用 `AudioInfo.choice()`
         Index {
             /// 下标
             index: Count<usize>,
@@ -93,8 +95,9 @@ record! {
 
 record! {
     @custom_new
-    /// 选轨偏好，属于任务的身份（见 `Source.url`）：任务目录里有已完成的分片时按记录的变体与音频找回同一条轨，不按
-    /// 偏好重新选。
+    /// 选轨偏好。来源是主播放列表时，与任务目录记录的不同抛 `WorkDirError`（`WorkDirProblem.PreferenceChanged`）；
+    /// 任务目录里有已完成的分片时按记录的变体与音频找回同一条轨，不按偏好重新选。按身份选的（`Matching`）续传时要给
+    /// 当初那个，重新探测后再 `choice()` 得到的属性可能变了。
     pub struct Preference {
         /// 选哪个变体
         pub variant: VariantChoice,
@@ -341,10 +344,9 @@ impl HttpOptions {
 #[pyclass(module = "hs_m3u8._native", frozen, eq, hash, get_all)]
 pub struct Source {
     /// 主播放列表或媒体播放列表的地址，只支持 http/https；读到的是解析后的规范写法（主机名小写、补上路径 `/`、
-    /// 百分号编码等），可能与传入的不同。它去掉用户名、密码、查询串与片段后称为来源地址，连同 `preference` 是任务的
-    /// 身份：任务目录记录的来源地址不同报 `WorkDirProblem.AddressChanged`（确是同一个任务时见
-    /// `JobRequest.adopt_address`），选轨偏好不同报 `WorkDirProblem.PreferenceChanged`；只是查询串不同（如换了令牌）
-    /// 时照常续传，直播续录见 `LiveOptions`
+    /// 百分号编码等），可能与传入的不同。与任务目录记录的不同（换了令牌、主机或路径）时，先核对新地址取到的与已下载
+    /// 的是同一份内容才续传，并改记新地址：点播为每条轨最近的一个已完成的分片（取不到的换前一个）按新地址重新下载后
+    /// 与已存的逐字节相同，直播见 `LiveOptions`；不是时报 `WorkDirProblem.SourceUnverified`
     pub url: Address,
     /// 选轨偏好
     pub preference: Preference,
@@ -600,10 +602,9 @@ record! {
     /// 续录：任务中断后用同样的请求再次运行。至少一条轨当前的窗口与之前录到的接得上（重叠的分片重新下载后内容相同；已录
     /// 满、这次不录的轨同样核对），且没有一条轨内容不同时，接着录：补上窗口内之前没录完的分片，时间线连续，之前没录到的
     /// 轨从窗口起点并入；否则另起一段，与之前的首尾相接（中断期间的内容不在输出中），之前录过的分片不重录，另起的一段里
-    /// 有轨这次不录（已录满或没有内容）时报 `WorkDirProblem.Unaligned`。最后一并合并。完整地址与记录的不同（查询串变
-    /// 了，或设了 `JobRequest.adopt_address` 而来源地址变了）时，接着录才改记新地址，另起一段报
-    /// `WorkDirProblem.SourceUnverified`；这次没有要录的轨时不改记，直接合并。不联网、只合并已录到的部分用
-    /// `Engine.merge_recorded`。
+    /// 有轨这次不录（已录满或没有内容）时报 `WorkDirProblem.Unaligned`。最后一并合并。地址与记录的不同时，接着录才改记
+    /// 新地址，另起一段报 `WorkDirProblem.SourceUnverified`；这次没有要录的轨时不改记，直接合并。不联网、只合并已录到的
+    /// 部分用 `Engine.merge_recorded`。
     pub struct LiveOptions {
         /// 每条轨的分片声明时长之和达到此值后不再录，各轨都达到即结束；计入之前各会话已录到的、本次排入下载的、本次
         /// 列出了但取不到的，不计窗口已滑过的与之前运行里缺失的。None 不限，不能为 0
@@ -662,10 +663,6 @@ pub struct JobRequest {
     pub concurrency: Positive<NonZeroUsize>,
     /// 直播的录制方式；None 时遇到直播抛 `LiveNotEnabledError`
     pub live: Option<LiveOptions>,
-    /// 来源地址（见 `Source.url`）与任务目录记录的不同时，仍当作同一个任务续传并改记新地址，用于重新获取的地址换了
-    /// 主机或路径里的令牌：点播要求播放列表的分片与记录的一致（否则 `WorkDirProblem.PlanChanged`），直播要求接得上
-    /// 之前录到的（见 `LiveOptions`）。默认 False，地址不同时报 `WorkDirProblem.AddressChanged`
-    pub adopt_address: bool,
 }
 
 impl PartialEq for JobRequest {
@@ -675,7 +672,6 @@ impl PartialEq for JobRequest {
             && self.key == other.key
             && self.concurrency == other.concurrency
             && self.live == other.live
-            && self.adopt_address == other.adopt_address
     }
 }
 
@@ -688,7 +684,6 @@ impl Hash for JobRequest {
         self.key.hash(state);
         self.concurrency.hash(state);
         self.live.hash(state);
-        self.adopt_address.hash(state);
     }
 }
 
@@ -708,7 +703,6 @@ pyo3_stub_gen::inventory::submit! {
                 key: typing.Optional[KeyOverride] = None,
                 concurrency: builtins.int = ...,
                 live: typing.Optional[LiveOptions] = ...,
-                adopt_address: builtins.bool = False,
             ) -> JobRequest:
                 """`concurrency` 默认 16，小于 1 时抛 `InvalidInputError`；`live` 默认 `LiveOptions()`。"""
         "#
@@ -727,7 +721,6 @@ impl JobRequest {
         key = None,
         concurrency = Positive(core::JobRequest::DEFAULT_CONCURRENCY),
         live = Some(LiveOptions::from(core::LiveOptions::default())),
-        adopt_address = false,
     ))]
     fn new(
         source: Py<Source>,
@@ -735,7 +728,6 @@ impl JobRequest {
         key: Option<KeyOverride>,
         concurrency: Positive<NonZeroUsize>,
         live: Option<LiveOptions>,
-        adopt_address: bool,
     ) -> Self {
         JobRequest {
             source,
@@ -743,7 +735,6 @@ impl JobRequest {
             key,
             concurrency,
             live,
-            adopt_address,
         }
     }
 
@@ -752,10 +743,8 @@ impl JobRequest {
         let output = Bound::new(py, self.output.clone())?.repr()?;
         let key = self.key.clone().into_pyobject(py)?.repr()?;
         let live = self.live.clone().into_pyobject(py)?.repr()?;
-        let adopt_address = self.adopt_address.into_pyobject(py)?.repr()?;
         Ok(format!(
-            "JobRequest(source={source}, output={output}, key={key}, concurrency={}, live={live}, \
-             adopt_address={adopt_address})",
+            "JobRequest(source={source}, output={output}, key={key}, concurrency={}, live={live})",
             self.concurrency.0
         ))
     }
@@ -772,7 +761,6 @@ impl JobRequest {
                 key,
                 concurrency,
                 live,
-                adopt_address,
             }),
         )
     }
@@ -876,7 +864,6 @@ impl JobRequest {
             max_duration: live.max_duration,
             stall_timeout: live.stall_timeout,
         });
-        request.adopt_address = self.adopt_address;
         Ok(request)
     }
 }
@@ -1010,7 +997,7 @@ impl VariantKey {
 impl From<core::hls::AudioKey> for AudioKey {
     fn from(key: core::hls::AudioKey) -> Self {
         AudioKey {
-            group: key.group_id,
+            group: key.group,
             name: key.name,
             language: key.language,
             occurrence: Count(key.occurrence),
@@ -1021,9 +1008,9 @@ impl From<core::hls::AudioKey> for AudioKey {
 impl AudioKey {
     fn to_core(&self) -> core::hls::AudioKey {
         core::hls::AudioKey {
-            group_id: self.group.clone(),
-            language: self.language.clone(),
+            group: self.group.clone(),
             name: self.name.clone(),
+            language: self.language.clone(),
             occurrence: self.occurrence.0,
         }
     }

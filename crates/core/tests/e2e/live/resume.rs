@@ -296,7 +296,7 @@ async fn continue_finds_the_recorded_variant() {
     );
 }
 
-/// 来源地址只有查询串（令牌）变了：窗口与已录的接得上才续录；接不上时无法确认是同一个直播，明确失败。
+/// 地址只有查询串（令牌）变了：窗口与已录的接得上才续录；接不上时无法确认是同一个直播，明确失败。
 #[tokio::test(flavor = "multi_thread")]
 async fn new_token_continues_only_when_the_window_overlaps() {
     let dir = test_dir("resume_token");
@@ -331,11 +331,10 @@ async fn new_token_continues_only_when_the_window_overlaps() {
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
 }
 
-/// 来源地址变了（路径里的令牌）：不设 adopt_address 时联网之前就报 AddressChanged；设了时同只换查询串，窗口接得上即
-/// 续录。
+/// 地址的路径变了（路径里的令牌）：同只换查询串，窗口与已录的接得上即续录。
 #[tokio::test(flavor = "multi_thread")]
-async fn a_new_address_continues_only_when_adopted() {
-    let dir = test_dir("resume_new_address");
+async fn a_new_path_continues_when_the_window_overlaps() {
+    let dir = test_dir("live_new_path");
     let server = Server::start().await;
     put_long(&server, "tok1/", &[0, 1]);
     put_long(&server, "tok2/", &[0, 1, 2, 3]);
@@ -347,21 +346,7 @@ async fn a_new_address_continues_only_when_adopted() {
     .await;
 
     server.put("tok2/live.m3u8", playlist(&[1, 2, 3], true));
-    let mut req = live_request(server.url("tok2/live.m3u8"), &dir, STALL);
-    let err = run(req.clone()).await.unwrap_err();
-    assert!(
-        matches!(
-            err,
-            Error::WorkDir {
-                problem: WorkDirProblem::AddressChanged,
-                ..
-            }
-        ),
-        "{err}"
-    );
-    assert_eq!(server.hits("tok2/live.m3u8"), 0);
-
-    req.adopt_address = true;
+    let req = live_request(server.url("tok2/live.m3u8"), &dir, STALL);
     let output = run(req).await.unwrap();
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
 }
@@ -497,15 +482,19 @@ async fn merge_recorded_rejects_a_vod_directory() {
     );
 }
 
-/// 选轨偏好变了即是另一个任务：有已录内容时拒绝，不混进同一个目录。
+/// 来源是主播放列表时，选轨偏好变了即是另一个任务：有已录内容时拒绝，不混进同一个目录。来源是媒体播放列表时偏好不
+/// 起作用，变了照常续录。
 #[tokio::test(flavor = "multi_thread")]
-async fn changed_preference_is_rejected() {
+async fn changed_preference_is_rejected_for_master_playlists_only() {
     let dir = test_dir("resume_preference");
     let server = Server::start().await;
-    put_long(&server, "", &[0, 1]);
-    server.put("live.m3u8", playlist(&[0, 1], false));
-    let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 2).await;
+    put_split_master(&server);
+    put_long(&server, "v/", &[0, 1]);
+    put_long(&server, "a/", &[0, 1]);
+    server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
+    server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
+    let req = live_request(server.url("master.m3u8"), &dir, STALL);
+    interrupt(&req, |p| p.segments_done == 4).await;
 
     let mut other = req;
     other.source.preference.audio = AudioChoice::Language("en".into());
@@ -520,6 +509,17 @@ async fn changed_preference_is_rejected() {
         ),
         "{err}"
     );
+
+    let media_dir = test_dir("resume_preference_media");
+    put_long(&server, "", &[0, 1]);
+    server.put("live.m3u8", playlist(&[0, 1], false));
+    let req = live_request(server.url("live.m3u8"), &media_dir, STALL);
+    interrupt(&req, |p| p.segments_done == 2).await;
+    server.put("live.m3u8", playlist(&[0, 1], true));
+    let mut other = req;
+    other.source.preference.audio = AudioChoice::Language("en".into());
+    let output = run(other).await.unwrap();
+    assert_output(&output, &expected_long(&media_dir, &[0, 1], &[2]));
 }
 
 /// 中断期间编码器重启，序号与文件名都从 0 重来、内容换了：与已录的「同序号、同文件名」，但重新下载核对内容不同，

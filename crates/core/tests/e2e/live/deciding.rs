@@ -352,7 +352,7 @@ async fn an_older_overlap_is_checked_when_the_newest_keeps_failing() {
     assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
 }
 
-/// 同上，来源地址还换了令牌：报的是取分片的故障（可重试），不是「无法确认是同一个直播」。
+/// 同上，地址还换了令牌：报的是取分片的故障（可重试），不是「无法确认是同一个直播」。
 #[tokio::test(flavor = "multi_thread")]
 async fn transient_failure_with_a_new_token_is_not_unverified() {
     let dir = test_dir("deciding_token_500");

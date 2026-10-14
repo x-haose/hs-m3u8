@@ -129,7 +129,8 @@ class AudioChoice:
     @typing.final
     class Index(AudioChoice):
         r"""
-        主播放列表里第几个音频（只数音频，从 0 起，见 `AudioInfo.index`）；须在所选变体的音频组里
+        主播放列表里第几个音频（只数音频，从 0 起，见 `AudioInfo.index`）；须在所选变体的音频组里。只对同一份主播放
+        列表有效，探测之后开始任务用 `AudioInfo.choice()`
         """
         __match_args__ = ("index",)
         @property
@@ -161,8 +162,8 @@ class AudioInfo:
     @property
     def index(self) -> builtins.int:
         r"""
-        主播放列表里第几个音频 rendition（只数音频，从 0 起），即 `AudioChoice.Index` 用的，也是在
-        `MasterInfo.audio` 里的位置
+        主播放列表里第几个音频 rendition（只数音频，从 0 起），也是在 `MasterInfo.audio` 里的位置；只对这一份主
+        播放列表有效，开始任务按 `choice()` 选
         """
     @property
     def group(self) -> builtins.str:
@@ -1104,16 +1105,9 @@ class JobRequest:
         r"""
         直播的录制方式；None 时遇到直播抛 `LiveNotEnabledError`
         """
-    @property
-    def adopt_address(self) -> builtins.bool:
-        r"""
-        来源地址（见 `Source.url`）与任务目录记录的不同时，仍当作同一个任务续传并改记新地址，用于重新获取的地址换了
-        主机或路径里的令牌：点播要求播放列表的分片与记录的一致（否则 `WorkDirProblem.PlanChanged`），直播要求接得上
-        之前录到的（见 `LiveOptions`）。默认 False，地址不同时报 `WorkDirProblem.AddressChanged`
-        """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, source: Source, output: OutputOptions, *, key: typing.Optional[KeyOverride] = None, concurrency: builtins.int = ..., live: typing.Optional[LiveOptions] = ..., adopt_address: builtins.bool = False) -> JobRequest:
+    def __new__(cls, source: Source, output: OutputOptions, *, key: typing.Optional[KeyOverride] = None, concurrency: builtins.int = ..., live: typing.Optional[LiveOptions] = ...) -> JobRequest:
         r"""
         `concurrency` 默认 16，小于 1 时抛 `InvalidInputError`；`live` 默认 `LiveOptions()`。
         """
@@ -1369,10 +1363,9 @@ class LiveOptions:
     续录：任务中断后用同样的请求再次运行。至少一条轨当前的窗口与之前录到的接得上（重叠的分片重新下载后内容相同；已录
     满、这次不录的轨同样核对），且没有一条轨内容不同时，接着录：补上窗口内之前没录完的分片，时间线连续，之前没录到的
     轨从窗口起点并入；否则另起一段，与之前的首尾相接（中断期间的内容不在输出中），之前录过的分片不重录，另起的一段里
-    有轨这次不录（已录满或没有内容）时报 `WorkDirProblem.Unaligned`。最后一并合并。完整地址与记录的不同（查询串变
-    了，或设了 `JobRequest.adopt_address` 而来源地址变了）时，接着录才改记新地址，另起一段报
-    `WorkDirProblem.SourceUnverified`；这次没有要录的轨时不改记，直接合并。不联网、只合并已录到的部分用
-    `Engine.merge_recorded`。
+    有轨这次不录（已录满或没有内容）时报 `WorkDirProblem.Unaligned`。最后一并合并。地址与记录的不同时，接着录才改记
+    新地址，另起一段报 `WorkDirProblem.SourceUnverified`；这次没有要录的轨时不改记，直接合并。不联网、只合并已录到的
+    部分用 `Engine.merge_recorded`。
     """
     @property
     def max_duration(self) -> typing.Optional[datetime.timedelta]:
@@ -2282,8 +2275,9 @@ class PlaylistError(SourceError):
 @typing.final
 class Preference:
     r"""
-    选轨偏好，属于任务的身份（见 `Source.url`）：任务目录里有已完成的分片时按记录的变体与音频找回同一条轨，不按
-    偏好重新选。
+    选轨偏好。来源是主播放列表时，与任务目录记录的不同抛 `WorkDirError`（`WorkDirProblem.PreferenceChanged`）；
+    任务目录里有已完成的分片时按记录的变体与音频找回同一条轨，不按偏好重新选。按身份选的（`Matching`）续传时要给
+    当初那个，重新探测后再 `choice()` 得到的属性可能变了。
     """
     @property
     def variant(self) -> VariantChoice.Best | VariantChoice.Index | VariantChoice.Matching:
@@ -2949,10 +2943,9 @@ class Source:
     def url(self) -> builtins.str:
         r"""
         主播放列表或媒体播放列表的地址，只支持 http/https；读到的是解析后的规范写法（主机名小写、补上路径 `/`、
-        百分号编码等），可能与传入的不同。它去掉用户名、密码、查询串与片段后称为来源地址，连同 `preference` 是任务的
-        身份：任务目录记录的来源地址不同报 `WorkDirProblem.AddressChanged`（确是同一个任务时见
-        `JobRequest.adopt_address`），选轨偏好不同报 `WorkDirProblem.PreferenceChanged`；只是查询串不同（如换了令牌）
-        时照常续传，直播续录见 `LiveOptions`
+        百分号编码等），可能与传入的不同。与任务目录记录的不同（换了令牌、主机或路径）时，先核对新地址取到的与已下载
+        的是同一份内容才续传，并改记新地址：点播为每条轨最近的一个已完成的分片（取不到的换前一个）按新地址重新下载后
+        与已存的逐字节相同，直播见 `LiveOptions`；不是时报 `WorkDirProblem.SourceUnverified`
         """
     @property
     def preference(self) -> Preference:
@@ -3557,7 +3550,8 @@ class VariantChoice:
     @typing.final
     class Index(VariantChoice):
         r"""
-        主播放列表里第几个变体（从 0 起，见 `VariantInfo.index`）
+        主播放列表里第几个变体（从 0 起，见 `VariantInfo.index`）；只对同一份主播放列表有效，探测之后开始任务用
+        `VariantInfo.choice()`
         """
         __match_args__ = ("index",)
         @property
@@ -3589,7 +3583,8 @@ class VariantInfo:
     @property
     def index(self) -> builtins.int:
         r"""
-        主播放列表里第几个变体（从 0 起），即 `VariantChoice.Index` 用的，也是在 `MasterInfo.variants` 里的位置
+        主播放列表里第几个变体（从 0 起），也是在 `MasterInfo.variants` 里的位置；只对这一份主播放列表有效，开始
+        任务按 `choice()` 选
         """
     @property
     def bandwidth(self) -> typing.Optional[builtins.int]:
@@ -3625,7 +3620,8 @@ class VariantInfo:
     def __repr__(self) -> builtins.str: ...
     def choice(self) -> VariantChoice.Matching:
         r"""
-        按身份选这个变体：探测之后主播放列表增删重排了变体，开始任务时也选到它。
+        按身份选这个变体：探测之后主播放列表增删重排了变体，开始任务时也选到它。续传时给当初得到的那个，不要重新
+        探测再取。
         """
 
 @typing.final
@@ -3703,7 +3699,7 @@ class WorkDirError(HsM3u8Error):
         任务目录
         """
     @property
-    def problem(self) -> WorkDirProblem.NotEmpty | WorkDirProblem.Locked | WorkDirProblem.Corrupt | WorkDirProblem.UnsupportedVersion | WorkDirProblem.KindMismatch | WorkDirProblem.NotLiveRecording | WorkDirProblem.AddressChanged | WorkDirProblem.PreferenceChanged | WorkDirProblem.TracksMismatch | WorkDirProblem.PlanChanged | WorkDirProblem.SelectionGone | WorkDirProblem.SourceUnverified | WorkDirProblem.Unaligned:
+    def problem(self) -> WorkDirProblem.NotEmpty | WorkDirProblem.Locked | WorkDirProblem.Corrupt | WorkDirProblem.UnsupportedVersion | WorkDirProblem.KindMismatch | WorkDirProblem.NotLiveRecording | WorkDirProblem.PreferenceChanged | WorkDirProblem.TracksMismatch | WorkDirProblem.PlanChanged | WorkDirProblem.SelectionGone | WorkDirProblem.SourceUnverified | WorkDirProblem.Unaligned:
         r"""
         不能使用的原因
         """
@@ -3803,18 +3799,10 @@ class WorkDirProblem:
         def __new__(cls) -> WorkDirProblem.NotLiveRecording: ...
     
     @typing.final
-    class AddressChanged(WorkDirProblem):
-        r"""
-        来源地址（见 `Source.url`）与记录的不同。确是同一个任务（如重新获取的地址换了主机或路径里的令牌）时设
-        `JobRequest.adopt_address` 续传；否则换一个任务目录，或放弃任务（`Engine.discard`）
-        """
-        __match_args__ = ()
-        def __new__(cls) -> WorkDirProblem.AddressChanged: ...
-    
-    @typing.final
     class PreferenceChanged(WorkDirProblem):
         r"""
-        选轨偏好与记录的不同：换了选轨即是另一个任务，换一个任务目录，或放弃任务（`Engine.discard`）
+        来源是主播放列表，选轨偏好与记录的不同：换了选轨即是另一个任务，换一个任务目录，或放弃任务
+        （`Engine.discard`）
         """
         __match_args__ = ()
         def __new__(cls) -> WorkDirProblem.PreferenceChanged: ...
@@ -3822,7 +3810,8 @@ class WorkDirProblem:
     @typing.final
     class TracksMismatch(WorkDirProblem):
         r"""
-        来源的轨道（所选变体、有无独立音频）与记录的不同
+        来源的轨道（所选变体、有无独立音频）与记录的不同；地址的种类与记录的不同（原来是主播放列表、这次是某一档
+        的媒体播放列表，或反过来）也是这样，换回同类的地址即可
         """
         __match_args__ = ()
         def __new__(cls) -> WorkDirProblem.TracksMismatch: ...
@@ -3846,9 +3835,10 @@ class WorkDirProblem:
     @typing.final
     class SourceUnverified(WorkDirProblem):
         r"""
-        直播：完整地址与记录的不同，且接不上之前录到的（有轨内容不同，或没有一条轨核对一致，见 `LiveOptions`），
-        无法确认是同一个直播。可用原来的地址续录、用 `Engine.merge_recorded` 合并已录的部分，或换
-        一个任务目录重新录
+        地址与记录的不同，且核对不上新地址取到的与已下载的是同一份内容：点播为有轨已完成的分片按新地址重新下载后
+        内容不同或都已取不到（见 `Source.url`），多为另一个视频或同一视频的另一档；直播为接不上之前录到的（有轨内容
+        不同，或没有一条轨核对一致，见 `LiveOptions`）。记录不变：可用原来的地址续传、（直播）用
+        `Engine.merge_recorded` 合并已录的部分，或换一个任务目录、放弃任务
         """
         __match_args__ = ()
         def __new__(cls) -> WorkDirProblem.SourceUnverified: ...

@@ -19,9 +19,9 @@ pub enum VariantChoice {
     /// RESOLUTION 时取分辨率最高、同分辨率取带宽最高，有没写的（分辨率比不了）时取带宽最高；都相同时取靠后的
     #[default]
     Best,
-    /// `MasterPlaylist::variants` 中的下标
+    /// `MasterPlaylist::variants` 中的下标；只对同一份主播放列表有效，之后拉到的增删重排了变体时选到的是别的
     Index(usize),
-    /// 身份相同的变体（见 [`VariantKey`]）：探测与开始之间主播放列表增删重排了变体也选到同一个
+    /// 身份相同的变体（见 [`VariantKey`]）：之后拉到的主播放列表增删重排了变体，也选到同一个
     Matching(VariantKey),
 }
 
@@ -32,7 +32,8 @@ pub enum AudioChoice {
     Default,
     /// 组内第一个 LANGUAGE 与它相同（不区分大小写）的
     Language(String),
-    /// 主播放列表里第几个音频 rendition（只数 TYPE=AUDIO 的，按出现顺序，从 0 起）；须在所选变体的音频组里
+    /// 主播放列表里第几个音频 rendition（只数 TYPE=AUDIO 的，按出现顺序，从 0 起）；须在所选变体的音频组里。只对同一
+    /// 份主播放列表有效，同 [`VariantChoice::Index`]
     Index(usize),
     /// 身份相同的音频 rendition（见 [`AudioKey`]）；须在所选变体的音频组里
     Matching(AudioKey),

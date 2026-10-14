@@ -30,13 +30,11 @@ async def lowest(engine: Engine, url: str) -> Preference:
     probe = await engine.probe(Source(url))
     if probe.master is None:
         return Preference()
-    video = [
-        (v.bandwidth, v.index) for v in probe.master.variants if v.resolution is not None and v.bandwidth is not None
-    ]
+    video = [(v.bandwidth, v) for v in probe.master.variants if v.resolution is not None and v.bandwidth is not None]
     if not video:
         return Preference()
-    _, index = min(video)
-    return Preference(variant=probe.master.variants[index].choice())
+    _, lowest = min(video, key=lambda pair: pair[0])
+    return Preference(variant=lowest.choice())
 
 
 async def download_one(engine: Engine, name: str, url: str) -> str:

@@ -1,15 +1,13 @@
-//! 身份与摘要：判定「是不是同一个来源、同一个分片、同一个 init 段」，以及错误信息里地址的写法。
+//! 分片与 init 段的身份（指纹），摘要的写法，以及错误信息里地址的写法。
 //!
-//! 指纹与摘要都基于 SHA-256，写进 job.json 与文件名，属于任务目录格式：算法或输入的编码改变时，
-//! 必须同时升 job.json 的格式版本。
+//! 指纹与摘要都基于 SHA-256，写进任务目录的文件名与 job.json，属于任务目录格式：算法或输入的编码改变时，必须同时升
+//! 任务目录的格式版本。
 
 use std::fmt;
 
-use hs_m3u8_hls::{AudioChoice, ByteRange, Preference, VariantChoice};
+use hs_m3u8_hls::ByteRange;
 use sha2::{Digest, Sha256};
 use url::Url;
-
-use crate::workdir::{audio_json, variant_json};
 
 /// 64 位指纹：SHA-256 的前 8 字节，文件名中写作 16 位小写十六进制。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -47,47 +45,8 @@ impl fmt::Display for Fingerprint {
     }
 }
 
-/// 来源地址的摘要（SHA-256 十六进制），见 [`source_address`]。
-pub(crate) fn address_digest(url: &Url) -> String {
-    digest_hex(source_address(url))
-}
-
-/// 选轨偏好的摘要（SHA-256 十六进制）。语言代码与选轨一样不区分 ASCII 大小写；按身份选的写成 job.json 里同样的
-/// JSON（其中换行已转义）。每项一行；语言里不会有换行（由 [`crate::Source`] 的校验保证），编码没有歧义。
-pub(crate) fn preference_digest(preference: &Preference) -> String {
-    let variant = match &preference.variant {
-        VariantChoice::Best => "best".to_owned(),
-        VariantChoice::Index(index) => format!("index {index}"),
-        VariantChoice::Matching(key) => format!("matching {}", variant_json(key)),
-    };
-    let audio = match &preference.audio {
-        AudioChoice::Default => "default".to_owned(),
-        AudioChoice::Language(language) => format!("language {}", language.to_ascii_lowercase()),
-        AudioChoice::Index(index) => format!("index {index}"),
-        AudioChoice::Matching(key) => format!("matching {}", audio_json(key)),
-    };
-    digest_hex(format!("variant {variant}\naudio {audio}\n"))
-}
-
-/// 来源地址：去掉用户名、密码、查询串与片段，这些部分常带每次会话不同的凭据或令牌。属于任务目录格式，输出改变须升
-/// job.json 的格式版本。
-fn source_address(url: &Url) -> String {
-    match url.host_str() {
-        Some(host) => {
-            let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
-            format!("{}://{host}{port}{}", url.scheme(), url.path())
-        }
-        None => format!("{}:{}", url.scheme(), url.path()),
-    }
-}
-
-/// 完整地址（含查询串）的摘要（SHA-256 十六进制）。
-pub(crate) fn url_digest(url: &Url) -> String {
-    digest_hex(url.as_str())
-}
-
 /// SHA-256 的十六进制。
-fn digest_hex(data: impl AsRef<[u8]>) -> String {
+pub(crate) fn digest_hex(data: impl AsRef<[u8]>) -> String {
     hex(&Sha256::digest(data))
 }
 
@@ -116,8 +75,6 @@ fn file_name(url: &Url) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use hs_m3u8_hls::{AudioKey, Resolution, VariantKey};
-
     use super::*;
 
     #[test]
@@ -159,10 +116,10 @@ mod tests {
         );
     }
 
-    /// 指纹与摘要写在文件名与 job.json 里，值变了即任务目录格式变了，须升格式版本。期望值是按各函数文档
-    /// 所述的编码，用另一个 SHA-256 实现算出的。
+    /// 指纹写在文件名里，值变了即任务目录格式变了，须升格式版本。期望值是按各函数文档所述的编码，用另一个 SHA-256
+    /// 实现算出的。
     #[test]
-    fn fingerprints_and_digests_are_fixed() {
+    fn fingerprints_are_fixed() {
         let segment = Url::parse("https://edge.cdn/tok/v/seg100.ts?sig=1").unwrap();
         let range = ByteRange {
             offset: 0,
@@ -176,56 +133,6 @@ mod tests {
             Fingerprint::of_segment(&segment, Some(range)).to_string(),
             "9d32d5f86c96c5d9"
         );
-
-        let source = Url::parse("https://user:pw@a.example:8443/live.m3u8?token=1").unwrap();
-        assert_eq!(
-            address_digest(&source),
-            "d1b44fe15e4e8518281ca728a3234e973fffea2d5cb09d1a2e4e63bfa5824e75"
-        );
-        let best = Preference {
-            variant: VariantChoice::Best,
-            audio: AudioChoice::Language("EN".into()),
-        };
-        assert_eq!(
-            preference_digest(&best),
-            "aa17c2345a7d79ea2ddd8272b3b49122c3ec2f442df4591cac5b68ba9a56501c"
-        );
-        let index = Preference {
-            variant: VariantChoice::Index(2),
-            audio: AudioChoice::Default,
-        };
-        assert_eq!(
-            preference_digest(&index),
-            "9f08ffbf33ebf4575933b5c13a4429b0263dbb652e42f3396f8ffcd2d6a10c6e"
-        );
-        let matching = Preference {
-            variant: VariantChoice::Matching(VariantKey {
-                bandwidth: Some(2000),
-                resolution: Some(Resolution {
-                    width: 1280,
-                    height: 720,
-                }),
-                codecs: vec!["avc1.640020".into(), "mp4a.40.2".into()],
-                audio_group: Some("aud".into()),
-                occurrence: 1,
-            }),
-            audio: AudioChoice::Matching(AudioKey {
-                group_id: "aud".into(),
-                language: Some("en".into()),
-                name: Some("Eng\n\"lish\"".into()),
-                occurrence: 0,
-            }),
-        };
-        assert_eq!(
-            preference_digest(&matching),
-            "a5365611d46baa11482543112e12f2603d178d19052f8522f3a3a33826240ccf"
-        );
-
-        let live = Url::parse("https://a.example:8443/live.m3u8?token=1").unwrap();
-        assert_eq!(
-            url_digest(&live),
-            "afd3a584486c3d8f1240bf03a547070da7f147f4a8dd68e49a419956c1b2e743"
-        );
     }
 
     #[test]
@@ -236,36 +143,5 @@ mod tests {
         assert_eq!(bare_url(&default_port), "http://a.example/x");
         let ipv6 = Url::parse("http://[::1]:9/x?k=v").unwrap();
         assert_eq!(bare_url(&ipv6), "http://[::1]:9/x");
-    }
-
-    #[test]
-    fn address_digest_ignores_credentials_query_and_fragment_only() {
-        let digest = |s: &str| address_digest(&Url::parse(s).unwrap());
-        let base = digest("https://a.example/v/live.m3u8?token=1");
-        assert_eq!(base, digest("https://u:p@a.example/v/live.m3u8?token=2#t"));
-        for other in [
-            "https://b.example/v/live.m3u8",
-            "https://a.example/w/live.m3u8",
-            "http://a.example/v/live.m3u8",
-        ] {
-            assert_ne!(base, digest(other), "{other}");
-        }
-    }
-
-    #[test]
-    fn preference_digest_ignores_language_case_only() {
-        let digest = |variant, audio| preference_digest(&Preference { variant, audio });
-        let base = digest(VariantChoice::Best, AudioChoice::Language("EN".into()));
-        assert_eq!(
-            base,
-            digest(VariantChoice::Best, AudioChoice::Language("en".into()))
-        );
-        for other in [
-            digest(VariantChoice::Index(0), AudioChoice::Language("en".into())),
-            digest(VariantChoice::Best, AudioChoice::Default),
-            digest(VariantChoice::Best, AudioChoice::Index(0)),
-        ] {
-            assert_ne!(base, other);
-        }
     }
 }

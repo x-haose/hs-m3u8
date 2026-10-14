@@ -27,6 +27,7 @@ mod live;
 mod output;
 mod probe;
 mod proxy;
+mod recheck;
 mod report;
 mod request;
 mod resolve;

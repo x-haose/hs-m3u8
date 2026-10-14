@@ -33,7 +33,7 @@ use self::outputs::OUTPUTS_FILE;
 pub(crate) use self::outputs::{
     OutputKind, PendingOutput, clear_outputs, outputs_file, read_outputs, record_outputs,
 };
-pub(crate) use self::record::{JobRecord, RecordKind, SourceId, audio_json, variant_json};
+pub(crate) use self::record::{JobRecord, RecordKind, preference_digest, url_digest};
 use self::record::{decode, encode};
 use crate::entries::{self, is_canonical_number};
 use crate::error::io_error;
@@ -189,18 +189,16 @@ impl WorkDir {
 
     /// 打开或新建任务目录并加锁；`lock` 为 [`WorkDir::lock_existing`] 已加上的锁。
     ///
-    /// 已有 `job.json` 时其记录须与 `record` 相符（见 [`JobRecord::conflict`]，`adopt_address` 即
-    /// [`crate::JobRequest::adopt_address`]），不符时报那个原因；但目录里还没有已完成的分片时，直接改为当前任务：删掉
-    /// 之前的 init 段，不是本库写的文件留下。沿用的点播记录地址不同时当即改记（计划相同即同一内容），直播的见
-    /// [`WorkDir::url_changed`]。没有 `job.json` 时目录必须不存在或为空（`.part` 残留与锁文件除外），以免把别人的
+    /// 已有 `job.json` 时其记录须与 `record` 相符（见 [`JobRecord::conflict`]，地址不比较，见
+    /// [`WorkDir::url_changed`]），不符时报那个原因；但目录里还没有已完成的分片时，直接改为当前任务：删掉之前的 init
+    /// 段，不是本库写的文件留下。没有 `job.json` 时目录必须不存在或为空（`.part` 残留与锁文件除外），以免把别人的
     /// 目录当成任务目录（成功后会整个删除）。
     pub(crate) async fn open(
         root: PathBuf,
         record: JobRecord,
-        adopt_address: bool,
         lock: Option<Lock>,
     ) -> Result<WorkDir, Error> {
-        blocking(move || open(root, record, adopt_address, lock)).await?
+        blocking(move || open(root, record, lock)).await?
     }
 
     pub(crate) fn layout(&self) -> &Layout {
@@ -212,14 +210,14 @@ impl WorkDir {
         &self.record
     }
 
-    /// 沿用了目录里原有的直播记录，而其中的地址（来源地址或完整地址）与打开时给的不同；记录的其余各项
-    /// [`WorkDir::open`] 已核对一致。录制确认接得上之后用 [`WorkDir::adopt_url`] 改记。新建、改为当前任务与点播时为
-    /// false。
+    /// 沿用了目录里原有的记录，而其中的完整来源地址与打开时给的不同（换了令牌、主机或路径）；记录的其余各项
+    /// [`WorkDir::open`] 已核对一致。取到的是不是同一份内容还要核对（点播见 [`crate::vod::download`]，直播见
+    /// [`crate::LiveOptions`]），确认后用 [`WorkDir::adopt_url`] 改记。新建或改为当前任务时为 false。
     pub(crate) fn url_changed(&self) -> bool {
         self.url_changed
     }
 
-    /// 把 `job.json` 中的记录换成本次的：直播确认是同一个直播后，改记当前的地址。
+    /// 把 `job.json` 中的记录换成本次的：确认新地址取到的是同一份内容后，改记当前的地址。
     pub(crate) async fn adopt_url(&self) -> Result<(), Error> {
         let path = self.layout.root.join(JOB_FILE);
         let bytes = encode(&self.record);
@@ -421,12 +419,7 @@ fn read_job(root: &Path) -> Result<Option<JobRecord>, Error> {
     }
 }
 
-fn open(
-    root: PathBuf,
-    record: JobRecord,
-    adopt_address: bool,
-    lock: Option<Lock>,
-) -> Result<WorkDir, Error> {
+fn open(root: PathBuf, record: JobRecord, lock: Option<Lock>) -> Result<WorkDir, Error> {
     let job_path = root.join(JOB_FILE);
     let lock = match lock {
         Some(lock) => lock,
@@ -441,7 +434,7 @@ fn open(
     let layout = Layout { root: root.clone() };
     let previous = match read_job(&root)? {
         None => None,
-        Some(recorded) => match recorded.conflict(&record, adopt_address) {
+        Some(recorded) => match recorded.conflict(&record) {
             None => Some(recorded),
             Some(_) if !has_completed_segments(&layout)? => None,
             Some(problem) => {
@@ -452,23 +445,15 @@ fn open(
             }
         },
     };
-    let url_changed = match previous {
-        None => {
-            // 不是本库写的文件（如删除任务目录时留下的）不影响读写，删除任务目录时照常指出
-            let tracks = root.join(TRACKS_DIR);
-            if exists(&tracks)? {
-                remove_tracks(&tracks, &mut Vec::new())?;
-            }
-            write_atomic(&job_path, &encode(&record))?;
-            false
+    if previous.is_none() {
+        // 不是本库写的文件（如删除任务目录时留下的）不影响读写，删除任务目录时照常指出
+        let tracks = root.join(TRACKS_DIR);
+        if exists(&tracks)? {
+            remove_tracks(&tracks, &mut Vec::new())?;
         }
-        Some(previous) if previous == record => false,
-        Some(_) if record.url_digest().is_none() => {
-            write_atomic(&job_path, &encode(&record))?;
-            false
-        }
-        Some(_) => true,
-    };
+        write_atomic(&job_path, &encode(&record))?;
+    }
+    let url_changed = previous.is_some_and(|p| p.url_digest != record.url_digest);
     Ok(WorkDir {
         layout,
         record,

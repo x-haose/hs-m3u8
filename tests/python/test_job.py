@@ -358,22 +358,21 @@ def test_failed_segments_say_which_and_the_task_can_be_discarded(server: Server,
     assert not work_dir.exists()
 
 
-def test_a_new_address_resumes_only_when_adopted(server: Server, tmp_path: Path) -> None:
-    for token in ["tok1", "tok2"]:
+def test_a_new_address_resumes_only_with_the_same_content(server: Server, tmp_path: Path) -> None:
+    # 两个地址列出的分片名、时长相同；tok2 的 seg0 内容不同
+    for token, first in [("tok1", "ts_a"), ("tok2", "ts_b"), ("tok3", "ts_a")]:
         server.put(f"{token}/index.m3u8", VOD)
-        server.put(f"{token}/seg0.ts", fixture("ts_a/seg0.ts"))
-    server.put("tok2/seg1.ts", fixture("ts_a/seg1.ts"))
+        server.put(f"{token}/seg0.ts", fixture(f"{first}/seg0.ts"))
+    server.put("tok3/seg1.ts", fixture("ts_a/seg1.ts"))
     output = OutputOptions(Target.Mp4(tmp_path / "out.mp4"))
     with pytest.raises(HttpError):
         run(JobRequest(Source(server.url("tok1/index.m3u8")), output, concurrency=1))
-    # 重新获取的地址换了路径里的令牌
-    source = Source(server.url("tok2/index.m3u8"))
 
-    with pytest.raises(WorkDirError) as changed:
-        run(JobRequest(source, output))
-    assert changed.value.problem == WorkDirProblem.AddressChanged()
-    assert run(JobRequest(source, output, adopt_address=True)).segments == 2
-    assert server.hits("tok2/seg0.ts") == 0
+    with pytest.raises(WorkDirError) as other:
+        run(JobRequest(Source(server.url("tok2/index.m3u8")), output))
+    assert other.value.problem == WorkDirProblem.SourceUnverified()
+    assert run(JobRequest(Source(server.url("tok3/index.m3u8")), output)).segments == 2
+    assert server.hits("tok3/seg0.ts") == 1
 
 
 def test_live_recordings_stop_on_request_and_merge_what_was_recorded(server: Server, tmp_path: Path) -> None:
@@ -715,7 +714,6 @@ def test_requests_survive_pickle_by_value(tmp_path: Path) -> None:
         key=KeyOverride(bytes(range(16)), iv=bytes(16)),
         concurrency=3,
         live=LiveOptions(max_duration=timedelta(minutes=5)),
-        adopt_address=True,
     )
 
     for value in (request, Unsettled.Report(), RequestParts("https://example.com/a.ts", headers={"a": "b"})):

@@ -403,17 +403,22 @@ async fn resume_survives_tokens_in_the_path() {
     assert_eq!(server.hits("tok2/seg0.ts"), 0);
 }
 
-/// 重新获取的地址换了路径里的令牌（来源地址变了）：不设 adopt_address 时联网之前就报 AddressChanged；设了且分片与
-/// 记录的一致时续传，只补缺的分片，并改记新地址，之后用新地址不必再设。
+/// 两个分片、各声明 1 秒的点播播放列表，分片地址为 `<dir>/seg<i>.ts`。
+fn two_segments_in(dir: &str) -> String {
+    format!(
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\n{dir}/seg0.ts\n\
+         #EXTINF:1,\n{dir}/seg1.ts\n#EXT-X-ENDLIST\n"
+    )
+}
+
+/// 重新获取的地址换了路径里的令牌：每条轨最近的一个已完成分片按新地址重新下载，与已存的相同，续传并改记新地址；之后
+/// 用新地址不再核对，已完成的不重新下载。
 #[tokio::test(flavor = "multi_thread")]
-async fn a_new_address_resumes_only_when_adopted() {
+async fn a_new_address_with_the_same_content_resumes() {
     let dir = test_dir("resume_new_address");
     let server = Server::start().await;
     for token in ["tok1", "tok2"] {
-        server.put(
-            &format!("{token}/index.m3u8"),
-            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n#EXT-X-ENDLIST\n",
-        );
+        server.put(&format!("{token}/index.m3u8"), two_segments_in("."));
         server.put(&format!("{token}/seg0.ts"), fixture("ts_a/seg0.ts"));
     }
     assert!(
@@ -422,28 +427,50 @@ async fn a_new_address_resumes_only_when_adopted() {
             .is_err()
     );
 
+    // seg1 仍取不到：这次失败，但核对过、已改记新地址
     let req = request(server.url("tok2/index.m3u8"), &dir);
     let err = run(req.clone()).await.unwrap_err();
+    assert!(matches!(err, Error::Segment { sequence: 1, .. }), "{err}");
+    assert_eq!(server.hits("tok2/seg0.ts"), 1);
+
+    server.put("tok2/seg1.ts", fixture("ts_a/seg1.ts"));
+    let output = run(req).await.unwrap();
+    assert_output(&output, &expected_ts_a(&dir));
+    assert_eq!(server.hits("tok2/seg0.ts"), 1);
+}
+
+/// 地址变了（这里只是查询串），新地址列出的分片名、时长都与记录的相同，内容却不同（只靠查询串区分的另一个视频，或
+/// 同一视频的另一档）：计划摘要相同也不续传，报 SourceUnverified，别的分片一个也不下；记录不变，原来的地址照常续传。
+#[tokio::test(flavor = "multi_thread")]
+async fn different_content_at_a_new_address_is_not_resumed() {
+    let dir = test_dir("resume_other_content");
+    let server = Server::start().await;
+    let url = |id: u32| Url::parse(&format!("{}?id={id}", server.url("index.m3u8"))).unwrap();
+    server.put("v1/seg0.ts", fixture("ts_a/seg0.ts"));
+    server.put("index.m3u8", two_segments_in("v1"));
+    assert!(run(request(url(1), &dir)).await.is_err());
+
+    server.put("v2/seg0.ts", fixture("ts_b/seg0.ts"));
+    server.put("v2/seg1.ts", fixture("ts_a/seg1.ts"));
+    server.put("index.m3u8", two_segments_in("v2"));
+    let err = run(request(url(2), &dir)).await.unwrap_err();
     assert!(
         matches!(
             err,
             Error::WorkDir {
-                problem: WorkDirProblem::AddressChanged,
+                problem: WorkDirProblem::SourceUnverified,
                 ..
             }
         ),
         "{err}"
     );
-    assert_eq!(server.hits("tok2/index.m3u8"), 0);
-    // seg1 仍取不到：这次失败，但新地址已改记
-    let mut adopted = req.clone();
-    adopted.adopt_address = true;
-    assert!(run(adopted).await.is_err());
+    assert_eq!(server.hits("v2/seg1.ts"), 0);
 
-    server.put("tok2/seg1.ts", fixture("ts_a/seg1.ts"));
-    let output = run(req).await.unwrap();
+    server.put("v1/seg1.ts", fixture("ts_a/seg1.ts"));
+    server.put("index.m3u8", two_segments_in("v1"));
+    let output = run(request(url(1), &dir)).await.unwrap();
     assert_output(&output, &expected_ts_a(&dir));
-    assert_eq!(server.hits("tok2/seg0.ts"), 0);
+    assert_eq!(server.hits("v1/seg0.ts"), 1);
 }
 
 /// 主播放列表里有两个属性完全相同的变体（冗余流）：续传按排位选回上次那个。两者分片文件名相同、计划摘要
@@ -1055,7 +1082,7 @@ async fn inits_differing_only_in_query_are_distinct() {
     );
 }
 
-/// 来源地址带用户名、密码与令牌时，错误信息与调试输出里都不出现它们（`unwrap` 与日志会打印后者）。
+/// 地址带用户名、密码与令牌时，错误信息与调试输出里都不出现它们（`unwrap` 与日志会打印后者）。
 #[tokio::test(flavor = "multi_thread")]
 async fn errors_do_not_reveal_credentials_or_tokens() {
     let dir = test_dir("redaction");

@@ -23,7 +23,8 @@ record! {
 record! {
     /// 主播放列表里的一个变体。
     pub struct VariantInfo {
-        /// 主播放列表里第几个变体（从 0 起），即 `VariantChoice.Index` 用的，也是在 `MasterInfo.variants` 里的位置
+        /// 主播放列表里第几个变体（从 0 起），也是在 `MasterInfo.variants` 里的位置；只对这一份主播放列表有效，开始
+        /// 任务按 `choice()` 选
         pub index: usize,
         /// BANDWIDTH，bit/s；来源没写时为 None
         pub bandwidth: Option<u64>,
@@ -41,7 +42,8 @@ record! {
 #[gen_stub_pymethods]
 #[pymethods]
 impl VariantInfo {
-    /// 按身份选这个变体：探测之后主播放列表增删重排了变体，开始任务时也选到它。
+    /// 按身份选这个变体：探测之后主播放列表增删重排了变体，开始任务时也选到它。续传时给当初得到的那个，不要重新
+    /// 探测再取。
     #[gen_stub(override_return_type(type_repr = "VariantChoice.Matching"))]
     fn choice(&self) -> VariantChoice {
         VariantChoice::Matching {
@@ -59,8 +61,8 @@ impl VariantInfo {
 record! {
     /// 主播放列表里的一个音频 rendition。
     pub struct AudioInfo {
-        /// 主播放列表里第几个音频 rendition（只数音频，从 0 起），即 `AudioChoice.Index` 用的，也是在
-        /// `MasterInfo.audio` 里的位置
+        /// 主播放列表里第几个音频 rendition（只数音频，从 0 起），也是在 `MasterInfo.audio` 里的位置；只对这一份主
+        /// 播放列表有效，开始任务按 `choice()` 选
         pub index: usize,
         /// GROUP-ID
         pub group: String,

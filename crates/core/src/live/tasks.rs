@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use hs_m3u8_hls::{MediaPlaylist, Segment};
+use hs_m3u8_hls::MediaPlaylist;
 use hs_m3u8_remux::Streams;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
@@ -14,13 +14,13 @@ use tokio_util::sync::CancellationToken;
 use super::mp4_check::Batch;
 use super::track::{Fetched, RefreshRequest};
 use super::window::{InitsToFetch, NewInits};
-use crate::error::io_error;
 use crate::fetch::{self, Direct};
 use crate::hooks::Hooks;
 use crate::http::{Http, Permit};
 use crate::output;
+use crate::recheck::{Candidate, Recheck, recheck};
 use crate::resolve::Attempts;
-use crate::{Error, FetchFailure, HttpError, HttpFailure, blocking, resolve};
+use crate::{Error, blocking, resolve};
 
 /// 一个后台任务的结果。
 pub(super) enum Done {
@@ -39,26 +39,10 @@ pub(super) enum Done {
     /// 续录时重叠的分片核对的结果
     Checked {
         track: usize,
-        result: Result<Overlap, Error>,
+        result: Result<Recheck, Error>,
     },
     /// 之前录齐的组能否放进 MP4
     Mp4Checked { result: Result<(), Error> },
-}
-
-/// 重叠的分片重新下载后与已存的比较的结果。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Overlap {
-    Same,
-    Different,
-    /// 都已取不到（404/410），无从核对
-    Gone,
-}
-
-/// 核对用的一个重叠分片与它已存的文件，`init` 为它所用的 init 段的文件（见 [`crate::fetch::Item`]）。
-pub(super) struct StoredOverlap {
-    pub segment: Segment,
-    pub stored: PathBuf,
-    pub init: Option<PathBuf>,
 }
 
 /// 在途的后台任务。
@@ -125,11 +109,12 @@ impl Tasks {
         });
     }
 
-    /// 核对第 `track` 条轨能否接着最近的会话录：`overlaps` 为窗口与已录分片重叠的部分，序号从大到小。
-    pub(super) fn check(&mut self, direct: Direct, track: usize, overlaps: Vec<StoredOverlap>) {
+    /// 核对第 `track` 条轨能否接着最近的会话录：`overlaps` 为窗口与已录分片重叠的部分，序号从大到小（见
+    /// [`recheck`]）。
+    pub(super) fn check(&mut self, direct: Direct, track: usize, overlaps: Vec<Candidate>) {
         let cancel = self.cancel.clone();
         self.set.spawn(async move {
-            let result = check(&direct, track, overlaps, &cancel).await;
+            let result = recheck(&direct, track, overlaps, &cancel).await;
             Done::Checked { track, result }
         });
     }
@@ -182,62 +167,6 @@ async fn check_mp4(
         blocking(move || output::check_mp4(&streams, &batch, &root)).await??;
     }
     Ok(())
-}
-
-/// 重叠的分片从新到旧逐个试，用第一个取得到的重新下载后与已存的比较（有无 init 段与已存的不同的不必取，即是不同）；
-/// 取不到的（404/410，或重试后仍失败的临时故障）换更旧的试。都取不到时，有临时故障则如实上抛（可重试）；全是
-/// 404/410 则为 [`Overlap::Gone`]。其余失败（403 等、key、校验、回调）如实上抛，与录制时一样。
-async fn check(
-    direct: &Direct,
-    track: usize,
-    overlaps: Vec<StoredOverlap>,
-    cancel: &CancellationToken,
-) -> Result<Overlap, Error> {
-    // 最近一次重试后仍失败的临时故障
-    let mut transient = None;
-    for StoredOverlap {
-        segment,
-        stored,
-        init,
-    } in overlaps
-    {
-        if segment.init.is_some() != init.is_some() {
-            return Ok(Overlap::Different);
-        }
-        let data = match direct.fetch(track, &segment, init.as_deref(), cancel).await {
-            Ok(data) => data,
-            Err(e) => match e.missable() {
-                Some(FetchFailure::Http(HttpFailure {
-                    kind: HttpError::Status(404 | 410),
-                    ..
-                })) => continue,
-                Some(_) => {
-                    transient = Some(e);
-                    continue;
-                }
-                None => return Err(e),
-            },
-        };
-        return Ok(if same_file(stored, data).await? {
-            Overlap::Same
-        } else {
-            Overlap::Different
-        });
-    }
-    match transient {
-        Some(error) => Err(error),
-        None => Ok(Overlap::Gone),
-    }
-}
-
-/// `data` 与目录中已存的 `stored` 逐字节相同。
-async fn same_file(stored: PathBuf, data: Vec<u8>) -> Result<bool, Error> {
-    blocking(move || {
-        std::fs::read(&stored)
-            .map(|existing| existing == data)
-            .map_err(io_error("读取", &stored))
-    })
-    .await?
 }
 
 /// 拉取 `inits` 所说的新 init 段；各自的失败随结果返回，只有取消中止。它们是刷新的一部分，不占名额（见

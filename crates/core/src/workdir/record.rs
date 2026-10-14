@@ -1,67 +1,39 @@
-//! `job.json`：任务目录记录的任务，及其序列化格式（契约）。
+//! `job.json`：任务目录记录的任务，及其序列化格式与其中摘要的编码（契约）。
 
-use hs_m3u8_hls::{AudioKey, Resolution, VariantKey};
+use hs_m3u8_hls::{AudioChoice, AudioKey, Preference, Resolution, VariantChoice, VariantKey};
 use hs_m3u8_remux::Streams;
 use serde::{Deserialize, Serialize};
+use url::Url;
 
-use crate::ident::{address_digest, preference_digest};
+use crate::ident::digest_hex;
 use crate::selection::{SelectionKey, track_streams};
-use crate::{JobType, Source, WorkDirProblem};
+use crate::{JobType, WorkDirProblem};
 
 /// 任务目录格式的版本：job.json 与 outputs.json 的字段，分片与 init 段的文件名、其中指纹与摘要的编码，以及下载时对
 /// 文件内容的改写（fMP4 长度写 0 的最后一个 box 改为实际长度）。任何一项改变都要升；两个文件都带它，读到别的版本
 /// 一律拒绝。
-pub(super) const FORMAT_VERSION: u32 = 9;
+pub(super) const FORMAT_VERSION: u32 = 10;
 
 /// 任务目录记录的任务；续传、续录时须与当前请求相符。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct JobRecord {
-    pub source: SourceId,
+    /// 见 [`preference_digest`]；来源是媒体播放列表（`selection` 为 None）时选轨偏好不起作用，不核对
+    pub preference_digest: String,
+    /// 见 [`url_digest`]。地址变了仍可沿用目录：核对过已下载的内容与新地址取到的相同之后，用
+    /// [`super::WorkDir::adopt_url`] 改记
+    pub url_digest: String,
     /// 所选的变体与音频；来源本身是媒体播放列表时为 None
     pub selection: Option<SelectionKey>,
     pub kind: RecordKind,
 }
 
-/// 任务的身份：来源地址与选轨偏好（见 [`crate::Source::url`]）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SourceId {
-    /// 见 [`address_digest`]
-    pub address_digest: String,
-    /// 见 [`preference_digest`]
-    pub preference_digest: String,
-}
-
-impl SourceId {
-    pub(crate) fn of(source: &Source) -> Self {
-        SourceId {
-            address_digest: address_digest(&source.url),
-            preference_digest: preference_digest(&source.preference),
-        }
-    }
-
-    /// 记录的身份 `self` 与当前的 `current` 不符之处；`adopt_address` 见 [`crate::JobRequest::adopt_address`]。
-    pub(crate) fn mismatch(
-        &self,
-        current: &SourceId,
-        adopt_address: bool,
-    ) -> Option<WorkDirProblem> {
-        if self.preference_digest != current.preference_digest {
-            Some(WorkDirProblem::PreferenceChanged)
-        } else if self.address_digest != current.address_digest && !adopt_address {
-            Some(WorkDirProblem::AddressChanged)
-        } else {
-            None
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RecordKind {
     /// 点播：计划摘要（见 [`crate::vod::Plan::digest`]）相同才能续传
-    Vod { plan_digest: String },
-    /// 直播：完整来源地址（含查询串）的摘要。地址变了仍可沿用目录，由录制确认窗口与已录内容衔接后
-    /// 再用 [`super::WorkDir::adopt_url`] 更新
-    Live { url_digest: String },
+    Vod {
+        plan_digest: String,
+    },
+    Live,
 }
 
 impl JobRecord {
@@ -70,29 +42,23 @@ impl JobRecord {
         track_streams(self.selection.as_ref())
     }
 
-    /// 直播记录的完整来源地址摘要；点播为 None。
-    pub(super) fn url_digest(&self) -> Option<&str> {
-        match &self.kind {
-            RecordKind::Vod { .. } => None,
-            RecordKind::Live { url_digest } => Some(url_digest),
-        }
-    }
-
     fn job_type(&self) -> JobType {
         match self.kind {
             RecordKind::Vod { .. } => JobType::Vod,
-            RecordKind::Live { .. } => JobType::Live,
+            RecordKind::Live => JobType::Live,
         }
     }
 
-    /// 记录为 `self` 的目录不能用于当前请求 `current` 的原因；`adopt_address` 见
-    /// [`crate::JobRequest::adopt_address`]。来源地址（允许不同时）与直播的完整地址不比较。
-    pub(super) fn conflict(
-        &self,
-        current: &JobRecord,
-        adopt_address: bool,
-    ) -> Option<WorkDirProblem> {
-        if let Some(problem) = self.source.mismatch(&current.source, adopt_address) {
+    /// 选轨偏好的摘要为 `current` 的请求能否沿用这个目录：来源是主播放列表（记录了选轨）而偏好不同时为
+    /// [`WorkDirProblem::PreferenceChanged`]。
+    pub(crate) fn preference_conflict(&self, current: &str) -> Option<WorkDirProblem> {
+        (self.selection.is_some() && self.preference_digest != current)
+            .then_some(WorkDirProblem::PreferenceChanged)
+    }
+
+    /// 记录为 `self` 的目录不能用于当前请求 `current` 的原因；地址不比较（见 `url_digest`）。
+    pub(super) fn conflict(&self, current: &JobRecord) -> Option<WorkDirProblem> {
+        if let Some(problem) = self.preference_conflict(&current.preference_digest) {
             return Some(problem);
         }
         let (recorded, current_type) = (self.job_type(), current.job_type());
@@ -114,23 +80,49 @@ impl JobRecord {
     }
 }
 
+/// 选轨偏好的摘要（SHA-256 十六进制）。语言代码与选轨一样不区分 ASCII 大小写；按身份选的写成 job.json 里选轨的写法
+/// （JSON，其中换行已转义）。每项一行；语言里不会有换行（由 [`crate::Source`] 的校验保证），编码没有歧义。
+pub(crate) fn preference_digest(preference: &Preference) -> String {
+    let variant = match &preference.variant {
+        VariantChoice::Best => "best".to_owned(),
+        VariantChoice::Index(index) => format!("index {index}"),
+        VariantChoice::Matching(key) => format!("matching {}", json(&VariantFile::from(key))),
+    };
+    let audio = match &preference.audio {
+        AudioChoice::Default => "default".to_owned(),
+        AudioChoice::Language(language) => format!("language {}", language.to_ascii_lowercase()),
+        AudioChoice::Index(index) => format!("index {index}"),
+        AudioChoice::Matching(key) => format!("matching {}", json(&AudioFile::from(key))),
+    };
+    digest_hex(format!("variant {variant}\naudio {audio}\n"))
+}
+
+/// job.json 里选轨的一项的 JSON。
+fn json(file: &impl Serialize) -> String {
+    serde_json::to_string(file).expect("只含数字、字符串与数组，序列化不会失败")
+}
+
+/// 完整来源地址（含用户名、密码、查询串与片段）的摘要（SHA-256 十六进制）。
+pub(crate) fn url_digest(url: &Url) -> String {
+    digest_hex(url.as_str())
+}
+
 /// `job.json` 的写法。`format_version` 不等于 [`FORMAT_VERSION`] 时拒绝。
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 enum JobFile {
     Vod {
         format_version: u32,
-        address_digest: String,
         preference_digest: String,
+        url_digest: String,
         selection: Option<SelectionFile>,
         plan_digest: String,
     },
     Live {
         format_version: u32,
-        address_digest: String,
         preference_digest: String,
-        selection: Option<SelectionFile>,
         url_digest: String,
+        selection: Option<SelectionFile>,
     },
 }
 
@@ -156,9 +148,9 @@ struct VariantFile {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AudioFile {
-    group_id: String,
-    language: Option<String>,
+    group: String,
     name: Option<String>,
+    language: Option<String>,
     occurrence: usize,
 }
 
@@ -185,25 +177,22 @@ pub(super) fn check_version(bytes: &[u8], file: &'static str) -> Result<(), Work
 
 pub(super) fn encode(record: &JobRecord) -> Vec<u8> {
     let format_version = FORMAT_VERSION;
-    let SourceId {
-        address_digest,
-        preference_digest,
-    } = record.source.clone();
+    let preference_digest = record.preference_digest.clone();
+    let url_digest = record.url_digest.clone();
     let selection = record.selection.as_ref().map(SelectionFile::from);
     let file = match &record.kind {
         RecordKind::Vod { plan_digest } => JobFile::Vod {
             format_version,
-            address_digest,
             preference_digest,
+            url_digest,
             selection,
             plan_digest: plan_digest.clone(),
         },
-        RecordKind::Live { url_digest } => JobFile::Live {
+        RecordKind::Live => JobFile::Live {
             format_version,
-            address_digest,
             preference_digest,
+            url_digest,
             selection,
-            url_digest: url_digest.clone(),
         },
     };
     serde_json::to_vec(&file).expect("JobFile 只含字符串、整数、数组与枚举，序列化不会失败")
@@ -213,38 +202,30 @@ pub(super) fn encode(record: &JobRecord) -> Vec<u8> {
 pub(super) fn decode(bytes: &[u8]) -> Result<JobRecord, WorkDirProblem> {
     let unreadable = |e| WorkDirProblem::Corrupt(format!("job.json 无法解析：{e}"));
     check_version(bytes, "job.json")?;
-    let (address_digest, preference_digest, selection, kind) =
+    let (preference_digest, url_digest, selection, kind) =
         match serde_json::from_slice(bytes).map_err(unreadable)? {
             JobFile::Vod {
-                address_digest,
                 preference_digest,
+                url_digest,
                 selection,
                 plan_digest,
                 ..
             } => (
-                address_digest,
                 preference_digest,
+                url_digest,
                 selection,
                 RecordKind::Vod { plan_digest },
             ),
             JobFile::Live {
-                address_digest,
                 preference_digest,
-                selection,
                 url_digest,
-                ..
-            } => (
-                address_digest,
-                preference_digest,
                 selection,
-                RecordKind::Live { url_digest },
-            ),
+                ..
+            } => (preference_digest, url_digest, selection, RecordKind::Live),
         };
     Ok(JobRecord {
-        source: SourceId {
-            address_digest,
-            preference_digest,
-        },
+        preference_digest,
+        url_digest,
         selection: selection.map(SelectionKey::from),
         kind,
     })
@@ -297,9 +278,9 @@ impl From<VariantFile> for VariantKey {
 impl From<&AudioKey> for AudioFile {
     fn from(key: &AudioKey) -> Self {
         AudioFile {
-            group_id: key.group_id.clone(),
-            language: key.language.clone(),
+            group: key.group.clone(),
             name: key.name.clone(),
+            language: key.language.clone(),
             occurrence: key.occurrence,
         }
     }
@@ -308,91 +289,142 @@ impl From<&AudioKey> for AudioFile {
 impl From<AudioFile> for AudioKey {
     fn from(file: AudioFile) -> Self {
         AudioKey {
-            group_id: file.group_id,
-            language: file.language,
+            group: file.group,
             name: file.name,
+            language: file.language,
             occurrence: file.occurrence,
         }
     }
-}
-
-/// 变体身份在 job.json 里的写法（JSON，字段顺序固定），来源摘要也用它编码按身份选的偏好。
-pub(crate) fn variant_json(key: &VariantKey) -> String {
-    serde_json::to_string(&VariantFile::from(key)).expect("只含数字、字符串与数组，序列化不会失败")
-}
-
-/// 音频身份在 job.json 里的写法（JSON，字段顺序固定），来源摘要也用它编码按身份选的偏好。
-pub(crate) fn audio_json(key: &AudioKey) -> String {
-    serde_json::to_string(&AudioFile::from(key)).expect("只含数字、字符串与数组，序列化不会失败")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn variant_key() -> VariantKey {
+        VariantKey {
+            bandwidth: Some(2000),
+            resolution: Some(Resolution {
+                width: 1280,
+                height: 720,
+            }),
+            codecs: vec!["avc1.640020".into(), "mp4a.40.2".into()],
+            audio_group: Some("aud".into()),
+            occurrence: 1,
+        }
+    }
+
+    fn audio_key() -> AudioKey {
+        AudioKey {
+            group: "aud".into(),
+            name: Some("Eng\n\"lish\"".into()),
+            language: Some("en".into()),
+            occurrence: 0,
+        }
+    }
+
     #[test]
     fn job_file_round_trips_and_rejects_other_versions_and_fields() {
-        let source = SourceId {
-            address_digest: "ab".into(),
-            preference_digest: "ef".into(),
-        };
         let live = JobRecord {
-            source: source.clone(),
+            preference_digest: "ab".into(),
+            url_digest: "cd".into(),
             selection: Some(SelectionKey {
-                variant: VariantKey {
-                    bandwidth: Some(2000),
-                    resolution: Some(Resolution {
-                        width: 1280,
-                        height: 720,
-                    }),
-                    codecs: vec!["avc1.640020".into()],
-                    audio_group: Some("aud".into()),
-                    occurrence: 1,
-                },
-                audio: Some(AudioKey {
-                    group_id: "aud".into(),
-                    language: Some("en".into()),
-                    name: None,
-                    occurrence: 2,
-                }),
+                variant: variant_key(),
+                audio: Some(audio_key()),
             }),
-            kind: RecordKind::Live {
-                url_digest: "cd".into(),
-            },
+            kind: RecordKind::Live,
         };
         let bytes = encode(&live);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"kind":"live","format_version":9,"address_digest":"ab","preference_digest":"ef","selection":{"variant":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"],"audio_group":"aud","occurrence":1},"audio":{"group_id":"aud","language":"en","name":null,"occurrence":2}},"url_digest":"cd"}"#
+            r#"{"kind":"live","format_version":10,"preference_digest":"ab","url_digest":"cd","selection":{"variant":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020","mp4a.40.2"],"audio_group":"aud","occurrence":1},"audio":{"group":"aud","name":"Eng\n\"lish\"","language":"en","occurrence":0}}}"#
         );
         assert_eq!(decode(&bytes), Ok(live));
         let vod = JobRecord {
-            source,
+            preference_digest: "ab".into(),
+            url_digest: "cd".into(),
             selection: None,
             kind: RecordKind::Vod {
-                plan_digest: "12".into(),
+                plan_digest: "ef".into(),
             },
         };
         assert_eq!(decode(&encode(&vod)), Ok(vod));
 
         assert_eq!(
-            decode(br#"{"kind":"vod","format_version":10}"#),
+            decode(br#"{"kind":"vod","format_version":11}"#),
             Err(WorkDirProblem::UnsupportedVersion {
                 file: "job.json",
-                found: 10,
-                supported: 9
+                found: 11,
+                supported: 10
             })
         );
         for rejected in [
             r#"{"kind":"vod","format_version":1,"plan_digest":"cd"}"#,
-            r#"{"kind":"vod","format_version":8,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
-            r#"{"kind":"vod","format_version":9,"address_digest":"a","preference_digest":"b","selection":null,"plan_digest":"p","extra":1}"#,
-            r#"{"format_version":9,"address_digest":"a","preference_digest":"b","selection":null,"plan_digest":"p"}"#,
-            r#"{"kind":"vod","format_version":9,"address_digest":"a","preference_digest":"b","selection":null,"url_digest":"u"}"#,
-            r#"{"kind":"vod","format_version":9,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
-            r#"{"kind":"live","format_version":9,"address_digest":"a","preference_digest":"b","selection":{"variant":{"bandwidth":1,"resolution":null,"codecs":[],"audio_group":null,"occurrence":0,"uri":"x"},"audio":null},"url_digest":"u"}"#,
+            r#"{"kind":"vod","format_version":9,"address_digest":"a","preference_digest":"b","selection":null,"plan_digest":"p"}"#,
+            r#"{"kind":"vod","format_version":10,"preference_digest":"a","url_digest":"u","selection":null,"plan_digest":"p","extra":1}"#,
+            r#"{"format_version":10,"preference_digest":"a","url_digest":"u","selection":null,"plan_digest":"p"}"#,
+            r#"{"kind":"vod","format_version":10,"preference_digest":"a","url_digest":"u","selection":null}"#,
+            r#"{"kind":"live","format_version":10,"preference_digest":"a","url_digest":"u","selection":{"variant":{"bandwidth":1,"resolution":null,"codecs":[],"audio_group":null,"occurrence":0,"uri":"x"},"audio":null}}"#,
         ] {
             assert!(decode(rejected.as_bytes()).is_err(), "{rejected}");
+        }
+    }
+
+    /// 摘要写在 job.json 里，值变了即任务目录格式变了，须升格式版本。期望值是按各函数文档所述的编码，用另一个
+    /// SHA-256 实现算出的。
+    #[test]
+    fn digests_are_fixed() {
+        let best = Preference {
+            variant: VariantChoice::Best,
+            audio: AudioChoice::Language("EN".into()),
+        };
+        assert_eq!(
+            preference_digest(&best),
+            "aa17c2345a7d79ea2ddd8272b3b49122c3ec2f442df4591cac5b68ba9a56501c"
+        );
+        let index = Preference {
+            variant: VariantChoice::Index(2),
+            audio: AudioChoice::Default,
+        };
+        assert_eq!(
+            preference_digest(&index),
+            "9f08ffbf33ebf4575933b5c13a4429b0263dbb652e42f3396f8ffcd2d6a10c6e"
+        );
+        let matching = Preference {
+            variant: VariantChoice::Matching(variant_key()),
+            audio: AudioChoice::Matching(audio_key()),
+        };
+        assert_eq!(
+            preference_digest(&matching),
+            "637fe82fd21de8ce7bf46eb87425456eb43b181c20ba3f347dea595db3135250"
+        );
+
+        let url = Url::parse("https://a.example:8443/live.m3u8?token=1").unwrap();
+        assert_eq!(
+            url_digest(&url),
+            "afd3a584486c3d8f1240bf03a547070da7f147f4a8dd68e49a419956c1b2e743"
+        );
+    }
+
+    #[test]
+    fn preference_digest_ignores_language_case_only() {
+        let digest = |variant, audio| preference_digest(&Preference { variant, audio });
+        let base = digest(VariantChoice::Best, AudioChoice::Language("EN".into()));
+        assert_eq!(
+            base,
+            digest(VariantChoice::Best, AudioChoice::Language("en".into()))
+        );
+        for other in [
+            digest(VariantChoice::Index(0), AudioChoice::Language("en".into())),
+            digest(
+                VariantChoice::Matching(variant_key()),
+                AudioChoice::Language("en".into()),
+            ),
+            digest(VariantChoice::Best, AudioChoice::Default),
+            digest(VariantChoice::Best, AudioChoice::Index(0)),
+            digest(VariantChoice::Best, AudioChoice::Matching(audio_key())),
+        ] {
+            assert_ne!(base, other);
         }
     }
 }
