@@ -5,7 +5,7 @@
 //!   [`Error::Select`]（选轨偏好与来源不符）；[`Error::LiveNotEnabled`]（开启直播录制）；[`Unsupported::Mp4`]、
 //!   [`Unsupported::Hls`]（改用另一种输出）；
 //! - 来源本身不行，同样的请求再试也不会成功：[`Error::Playlist`]、[`Error::NotMediaPlaylist`]、[`Error::Unsupported`]
-//!   的其余各项、[`Error::Integrity`]、[`Error::KeyLength`]；
+//!   的其余各项、[`Error::Integrity`]、[`Error::KeyLength`]、[`Error::ResponseTooLarge`]；
 //! - 网络：[`Error::Http`]，看 [`HttpError::retryable`]；
 //! - 源站给出没写完的内容：[`Error::Incomplete`]，可重试；
 //! - 说明出在哪里、看包着的原因：[`Error::Segment`]、[`Error::Key`]（哪个分片或 key）、[`Error::LiveStalled`]（直播
@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use url::Url;
 
-use crate::hooks::{HookError, HookKind};
+use crate::hooks::{HookError, HookKind, Purpose};
 use crate::ident::bare_url;
 use crate::{Leftover, Mp4Unsupported, RefreshCause, StallCause};
 
@@ -84,6 +84,14 @@ pub enum Error {
     /// 拉到的 key 不是 16 字节（`on_key` 回调没有改它）
     #[error("key {} 应为 16 字节，实际 {length} 字节", bare_url(.url))]
     KeyLength { url: Box<Url>, length: usize },
+    /// 用途为 `purpose` 的请求 `url` 的响应体超过这类请求的上限 `limit` 字节，读到即停：地址多半指向了视频文件或
+    /// 直播流，不是播放列表、init 段或 key。分片不设上限
+    #[error("{}{} 的响应体超过 {limit} 字节", purpose_text(*.purpose), bare_url(.url))]
+    ResponseTooLarge {
+        url: Box<Url>,
+        purpose: Purpose,
+        limit: u64,
+    },
     #[error("数据校验失败（{}）：{kind}", bare_url(.url))]
     Integrity { url: Box<Url>, kind: Integrity },
     /// 取到的内容没有写完，多为源站还在写这个文件，可重试：播放列表结尾截在多字节字符中间；分片或 init 段的响应
@@ -420,7 +428,8 @@ pub enum Integrity {
     /// [`Error::Incomplete`]
     #[error("密文长度 {0} 不是 16 的整数倍")]
     CipherLength(usize),
-    #[error("字节范围应为 {expected} 字节，实际 {found}")]
+    /// `found` 为读到的字节数：超出 `expected` 时读到即停，响应体可能更长
+    #[error("字节范围应为 {expected} 字节，读到 {found}")]
     RangeLength { expected: u64, found: usize },
     #[error("不是 TS 或可识别的打包音频（AAC、MP3、AC-3、E-AC-3）（开头 {0}）")]
     UnrecognizedSegment(String),
@@ -479,6 +488,16 @@ impl StallError {
             StallError::Unrecordable(failure) => failure.retry_after(),
             StallError::RefreshPending | StallError::TrackStopped(_) => None,
         }
+    }
+}
+
+/// 请求用途在错误信息里的叫法。
+fn purpose_text(purpose: Purpose) -> &'static str {
+    match purpose {
+        Purpose::Playlist => "播放列表 ",
+        Purpose::Key => "key ",
+        Purpose::Init => "init 段 ",
+        Purpose::Segment => "分片 ",
     }
 }
 

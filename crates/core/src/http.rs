@@ -195,7 +195,8 @@ impl Http {
             }),
         };
         let response = self.send(&parts, range, cancel).await?;
-        self.read(response, &parts.url, range, cancel).await
+        self.read(response, &parts.url, purpose, range, cancel)
+            .await
     }
 
     /// 本次尝试的地址与请求头：经 `on_request` 回调修改，改后不合法时报回调错误（不重试）。
@@ -283,16 +284,23 @@ impl Http {
         backoff_delay(&self.retry, attempt, permille)
     }
 
-    /// 读完响应体，读到的每块计入进度；`url` 为发出请求的地址，用于错误信息。字节范围请求的响应体须恰好是
-    /// 请求的长度。
+    /// 读完响应体，读到的每块计入进度；`url` 为发出请求的地址，用于错误信息。用途为 `purpose` 的响应体超过它的
+    /// 上限（见 [`body_limit`]）、字节范围请求的响应体超过请求的长度时读到即停；字节范围请求的响应体须恰好是请求
+    /// 的长度。
     async fn read(
         &self,
         mut response: reqwest::Response,
         url: &Url,
+        purpose: Purpose,
         range: Option<ByteRange>,
         cancel: &CancellationToken,
     ) -> Result<Response, Error> {
         let final_url = response.url().clone();
+        let wrong_range = |expected: u64, found: usize| Error::Integrity {
+            url: Box::new(final_url.clone()),
+            kind: Integrity::RangeLength { expected, found },
+        };
+        let limit = body_limit(purpose);
         let mut body = Vec::new();
         loop {
             let chunk = tokio::select! {
@@ -304,22 +312,45 @@ impl Http {
                 on_received(chunk.len() as u64);
             }
             body.extend_from_slice(&chunk);
+            let len = body.len() as u64;
+            if let Some(r) = range
+                && len > r.length
+            {
+                return Err(wrong_range(r.length, body.len()));
+            }
+            if let Some(limit) = limit
+                && len > limit
+            {
+                return Err(Error::ResponseTooLarge {
+                    url: Box::new(final_url),
+                    purpose,
+                    limit,
+                });
+            }
         }
         if let Some(r) = range
             && body.len() as u64 != r.length
         {
-            return Err(Error::Integrity {
-                url: Box::new(final_url),
-                kind: Integrity::RangeLength {
-                    expected: r.length,
-                    found: body.len(),
-                },
-            });
+            return Err(wrong_range(r.length, body.len()));
         }
         Ok(Response {
             url: final_url,
             body,
         })
+    }
+}
+
+/// 用途为 `purpose` 的响应体的上限，字节（见 [`Error::ResponseTooLarge`]）。分片不设：合法的分片随码率与时长相差
+/// 很大，由请求的超时限住。
+fn body_limit(purpose: Purpose) -> Option<u64> {
+    match purpose {
+        // 十万个分片、每个带几百字节签名地址的点播播放列表也在这之内
+        Purpose::Playlist => Some(64 << 20),
+        // init 段只有各轨的编码参数，没有样本
+        Purpose::Init => Some(16 << 20),
+        // key 本身 16 字节；交给 on_key 回调换算的原始内容（如 JSON、加了密的）也不会大
+        Purpose::Key => Some(1 << 20),
+        Purpose::Segment => None,
     }
 }
 

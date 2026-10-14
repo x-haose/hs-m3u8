@@ -21,7 +21,7 @@ use self::reason::{
     SourceUnsupported, StallReason, WorkDirProblem,
 };
 use crate::convert::{Address, PyPath, Seq};
-use crate::hooks::PyHookError;
+use crate::hooks::{Purpose, PyHookError};
 use crate::record::{field_names, partial};
 use crate::report::{HttpErrorKind, Leftover};
 
@@ -354,6 +354,18 @@ exception! {
 }
 
 exception! {
+    /// 播放列表、init 段或 key 的响应体超过这类请求的上限，读到即停：地址多半指向了视频文件或直播流。分片不设上限。
+    pub struct ResponseTooLargeError extends SourceError {
+        /// 请求的地址
+        pub url: Address,
+        /// 请求的用途
+        pub purpose: Purpose,
+        /// 这类请求的响应体上限，字节
+        pub limit: u64,
+    }
+}
+
+exception! {
     /// 取到的内容没有写完，多为源站还在写这个文件，稍后重试可能成功：播放列表结尾截在多字节字符中间；分片或 init 段
     /// 的响应为空、fMP4 的 box 或样本数据超出了数据，或 TS、打包音频截在包、帧或标签中间（加密的看解出的内容）。分片
     /// 与 init 段在下载时已按 `RetryPolicy` 重新取过，分片的失败由 `segment` 指出是哪个。
@@ -652,6 +664,21 @@ fn exception(
                 },
             ),
         )?,
+        E::ResponseTooLarge {
+            url,
+            purpose,
+            limit,
+        } => instance(
+            py,
+            SourceError::chain(
+                base,
+                ResponseTooLargeError {
+                    url: Address(*url),
+                    purpose: purpose.into(),
+                    limit,
+                },
+            ),
+        )?,
         E::Incomplete { url } => instance(
             py,
             HsM3u8Error::chain(base, IncompleteError { url: Address(*url) }),
@@ -788,6 +815,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<IntegrityError>()?;
     module.add_class::<IncompleteError>()?;
     module.add_class::<KeyLengthError>()?;
+    module.add_class::<ResponseTooLargeError>()?;
     module.add_class::<HttpError>()?;
     module.add_class::<LiveStalledError>()?;
     module.add_class::<FileError>()?;

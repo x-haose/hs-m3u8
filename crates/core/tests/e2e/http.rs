@@ -1,11 +1,11 @@
 //! HTTP 请求：证书校验失败与重定向失败不重试，原因写在错误里；重定向后保留调用方给的 Referer；HTTP 库用不上的代理
-//! 报参数错误；Cookie 与 Authorization 的发送范围，调用方的 Cookie 存储。
+//! 报参数错误；Cookie 与 Authorization 的发送范围，调用方的 Cookie 存储；响应体的上限。
 
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use hs_m3u8_core::{CookieHeader, CookieStore, Error, HttpError, Proxy, Source, Url};
+use hs_m3u8_core::{CookieHeader, CookieStore, Error, HttpError, Proxy, Purpose, Source, Url};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
@@ -231,4 +231,42 @@ async fn the_callers_cookie_store_is_read_and_written() {
 
     req.source.http.headers = vec![("Cookie".into(), "sid=stale".into())];
     assert!(matches!(engine().start(req), Err(Error::InvalidInput(_))));
+}
+
+/// key 地址返回的内容超过 key 的上限（地址指向了别的东西）：读到上限即停，报响应体过大，不可重试。
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oversized_key_response_is_rejected_without_retrying() {
+    let dir = test_dir("http_oversized_key");
+    let server = Server::start().await;
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n\
+         #EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n",
+    );
+    server.put("seg0.ts", fixture("ts_long/seg0.ts"));
+    server.put("key.bin", vec![0u8; (1 << 20) + 1]);
+
+    let err = run(request(server.url("index.m3u8"), &dir))
+        .await
+        .unwrap_err();
+
+    let Error::Segment { cause, .. } = &err else {
+        panic!("应报分片失败：{err:?}");
+    };
+    let Error::Key { cause, .. } = &**cause else {
+        panic!("应报取 key 失败：{err:?}");
+    };
+    assert!(
+        matches!(
+            &**cause,
+            Error::ResponseTooLarge {
+                purpose: Purpose::Key,
+                limit,
+                ..
+            } if *limit == 1 << 20
+        ),
+        "{err:?}"
+    );
+    assert!(!err.retryable());
+    assert_eq!(server.hits("key.bin"), 1);
 }

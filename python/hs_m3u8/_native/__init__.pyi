@@ -69,6 +69,7 @@ __all__ = [
     "RequestError",
     "RequestParts",
     "Resolution",
+    "ResponseTooLargeError",
     "RetryPolicy",
     "SegmentRef",
     "SelectError",
@@ -830,7 +831,7 @@ class IntegrityFailure:
         @property
         def found(self) -> builtins.int:
             r"""
-            实际的字节数
+            读到的字节数：超出 `expected` 时读到即停，响应体可能更长
             """
         def __new__(cls, *, expected: builtins.int, found: builtins.int) -> IntegrityFailure.RangeLength: ...
     
@@ -2541,6 +2542,36 @@ class Resolution:
         各参数即同名属性。
         """
     def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class ResponseTooLargeError(SourceError):
+    r"""
+    播放列表、init 段或 key 的响应体超过这类请求的上限，读到即停：地址多半指向了视频文件或直播流。分片不设上限。
+    """
+    @property
+    def url(self) -> builtins.str:
+        r"""
+        请求的地址
+        """
+    @property
+    def purpose(self) -> Purpose.Playlist | Purpose.Key | Purpose.Init | Purpose.Segment:
+        r"""
+        请求的用途
+        """
+    @property
+    def limit(self) -> builtins.int:
+        r"""
+        这类请求的响应体上限，字节
+        """
+    def __new__(cls, message: builtins.str, *, url: builtins.str, purpose: Purpose, limit: builtins.int, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> ResponseTooLargeError:
+        r"""
+        `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
+        None 时为空。
+        """
+    def __init__(self, message: builtins.str, *, url: builtins.str, purpose: Purpose, limit: builtins.int, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+        r"""
+        同构造函数：把说明放进 `args`。
+        """
 
 @typing.final
 class RetryPolicy:

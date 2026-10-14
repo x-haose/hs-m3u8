@@ -172,7 +172,7 @@ variants! {
         RangeLength {
             /// 应有的字节数
             expected: u64,
-            /// 实际的字节数
+            /// 读到的字节数：超出 `expected` 时读到即停，响应体可能更长
             found: usize,
         },
         /// 不是 TS 或可识别的打包音频（AAC、MP3、AC-3、E-AC-3）
