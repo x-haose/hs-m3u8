@@ -428,26 +428,38 @@ fn classify(error: reqwest::Error) -> HttpError {
     }
 }
 
-/// 原因链上代理拒绝的那一层的说明：HTTP 代理的 CONNECT 没有成功（要求认证、回了别的非成功状态），或 SOCKS 握手、
-/// 认证、连接请求被拒；连不上代理、与代理之间读写出错的不算。
+/// 原因链上代理拒绝的那一层的说明：确定出在代理的设置或策略上，重试无用。HTTP 代理要求认证（407）；SOCKS 代理认证
+/// 失败、不允许或不支持这次连接、回的不是 SOCKS 协议（多为把别的代理当成了 SOCKS 代理）。CONNECT 回了别的非成功状态
+/// （403 与 502/503/504 分不开）、SOCKS 代理报目标连不上等多为上游的临时故障，与连不上代理、与代理之间读写出错一样
+/// 不算，按连接失败重试。
 ///
 /// 简化：hyper-util 0.1.21 不导出 TunnelError 与 SocksError，按它们的说明文字认（`tunnel error: `、`SOCKS error: `
 /// 起头，见 hyper-util 的 client/legacy/connect/proxy）；它导出这些类型后改按类型认。
 fn proxy_refusal(error: &(dyn std::error::Error + 'static)) -> Option<String> {
-    let transport = [
-        "failed to create underlying connection",
-        "io error establishing tunnel",
-        "unexpected end of file",
-        "io error during SOCKS handshake",
+    const TUNNEL: [&str; 1] = ["proxy authorization required"];
+    const SOCKS: [&str; 11] = [
+        "credentials not accepted",
+        "server does not support user/pass authentication",
+        "server implements authentication incorrectly",
+        "connection not allowed",
+        "command not supported",
+        "address type not supported",
+        "host address is more than 255 characters",
+        "IPV6 is not supported",
+        "server ident service failed",
+        "server ident service did not recognise client identifier",
+        "failed parsing server response",
     ];
     let mut next = error.source();
     while let Some(layer) = next {
         let text = layer.to_string();
-        let detail = text
-            .strip_prefix("tunnel error: ")
-            .or_else(|| text.strip_prefix("SOCKS error: "));
-        if let Some(detail) = detail {
-            return (!transport.contains(&detail)).then(|| detail.to_owned());
+        match (
+            text.strip_prefix("tunnel error: "),
+            text.strip_prefix("SOCKS error: "),
+        ) {
+            (Some(detail), _) if TUNNEL.contains(&detail) => return Some(detail.to_owned()),
+            (_, Some(detail)) if SOCKS.contains(&detail) => return Some(detail.to_owned()),
+            _ => {}
         }
         next = layer.source();
     }

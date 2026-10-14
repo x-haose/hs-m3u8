@@ -4,8 +4,11 @@
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use hs_m3u8_core::{CookieHeader, CookieStore, Error, HttpError, Proxy, Purpose, Source, Url};
+use hs_m3u8_core::{
+    CookieHeader, CookieStore, Error, HttpError, Proxy, Purpose, RetryPolicy, Source, Url,
+};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
@@ -302,31 +305,41 @@ async fn refusing_proxy(status: &'static str) -> (Url, Arc<std::sync::atomic::At
     (url, connections)
 }
 
-/// 经 HTTP 代理访问 https 地址，代理对 CONNECT 回 407（要认证）或 403（不允许）：报代理拒绝，不重试。
+/// 经 HTTP 代理访问 https 地址：代理对 CONNECT 回 407（要认证）报代理拒绝，不重试；回别的非成功状态（403 与上游
+/// 故障的 502、503 分不开）按连接失败重试。
 #[tokio::test(flavor = "multi_thread")]
-async fn a_proxy_refusing_connect_is_reported_without_retrying() {
-    for status in ["407 Proxy Authentication Required", "403 Forbidden"] {
+async fn only_proxy_authentication_is_a_refusal_without_retrying() {
+    for (status, refused) in [
+        ("407 Proxy Authentication Required", true),
+        ("403 Forbidden", false),
+        ("502 Bad Gateway", false),
+        ("503 Service Unavailable", false),
+    ] {
         let (proxy, connections) = refusing_proxy(status).await;
         let mut source = Source::new(Url::parse("https://example.com/index.m3u8").unwrap());
         source.http.proxy = Proxy::Url(proxy);
-        source.http.retry.attempts = NonZeroU32::new(3).unwrap();
+        source.http.retry = RetryPolicy {
+            attempts: NonZeroU32::new(3).unwrap(),
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+        };
 
         let err = engine().probe(&source).await.unwrap_err();
 
-        assert!(
-            matches!(
-                &err,
-                Error::Http {
-                    kind: HttpError::Proxy(_),
-                    ..
-                }
-            ),
-            "{status}：{err:?}"
-        );
-        assert!(!err.retryable(), "{status}");
+        let kind = match &err {
+            Error::Http { kind, .. } => kind,
+            other => panic!("{status}：{other:?}"),
+        };
+        if refused {
+            assert!(matches!(kind, HttpError::Proxy(_)), "{status}：{kind:?}");
+        } else {
+            assert!(matches!(kind, HttpError::Connect(_)), "{status}：{kind:?}");
+        }
+        assert_eq!(err.retryable(), !refused, "{status}");
+        let tries = if refused { 1 } else { 3 };
         assert_eq!(
             connections.load(std::sync::atomic::Ordering::Relaxed),
-            1,
+            tries,
             "{status}"
         );
     }
