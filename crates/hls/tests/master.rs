@@ -1,8 +1,8 @@
 //! 主播放列表解析与选轨。
 
 use hs_m3u8_hls::{
-    AudioChoice, Error, Malformed, MasterPlaylist, Playlist, Preference, RenditionKind, Resolution,
-    SelectError, SyntaxError, Url, VariantChoice, parse, select,
+    AudioChoice, AudioKey, Error, Malformed, MasterPlaylist, Playlist, Preference, RenditionKind,
+    Resolution, SelectError, SyntaxError, Url, VariantChoice, VariantKey, parse, select,
 };
 
 const BASE: &str = "https://video.example.com/ext_tw_video/123/pu/pl/master.m3u8?tag=12";
@@ -239,4 +239,77 @@ fn variant_index_is_bounds_checked() {
         select(&m, &out).unwrap_err(),
         SelectError::VariantIndexOutOfRange { index: 9, count: 3 }
     );
+}
+
+const EN: &str = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"en\",LANGUAGE=\"en\",DEFAULT=YES,URI=\"en.m3u8?t=1\"\n";
+const LOW: &str = "#EXT-X-STREAM-INF:BANDWIDTH=1000,RESOLUTION=640x360,AUDIO=\"a\"\nlow.m3u8?t=1\n";
+
+fn matching(master: &MasterPlaylist, variant: usize, audio: usize) -> Preference {
+    Preference {
+        variant: VariantChoice::Matching(VariantKey::of(master, variant).unwrap()),
+        audio: AudioChoice::Matching(AudioKey::of(master, audio).unwrap()),
+    }
+}
+
+/// 主播放列表前面多了变体与音频、地址换了令牌：按下标会选到别的，按身份仍是原来那两条。
+#[test]
+fn matching_finds_the_same_tracks_after_the_master_changes() {
+    let before = master(&format!("#EXTM3U\n{EN}{LOW}"));
+    let preference = matching(&before, 0, 0);
+    let after = master(&format!(
+        "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"fr\",LANGUAGE=\"fr\",URI=\"fr.m3u8\"\n{}\
+         #EXT-X-STREAM-INF:BANDWIDTH=9000,RESOLUTION=1920x1080,AUDIO=\"a\"\nhigh.m3u8\n{}",
+        EN.replace("t=1", "t=2"),
+        LOW.replace("t=1", "t=2"),
+    ));
+
+    let selected = select(&after, &preference).unwrap();
+    assert_eq!(
+        selected.variant.uri.as_str(),
+        "https://video.example.com/ext_tw_video/123/pu/pl/low.m3u8?t=2"
+    );
+    let audio = selected.audio.unwrap();
+    assert_eq!(audio.index, 1);
+    assert_eq!(
+        audio.uri.as_str(),
+        "https://video.example.com/ext_tw_video/123/pu/pl/en.m3u8?t=2"
+    );
+}
+
+/// 属性变了即不是同一条：报找不到，不退而选别的。
+#[test]
+fn matching_reports_tracks_that_are_gone() {
+    let before = master(&format!("#EXTM3U\n{EN}{LOW}"));
+    let preference = matching(&before, 0, 0);
+    let without_variant = master(&format!(
+        "#EXTM3U\n{EN}{}",
+        LOW.replace("BANDWIDTH=1000", "BANDWIDTH=2000")
+    ));
+    assert_eq!(
+        select(&without_variant, &preference).unwrap_err(),
+        SelectError::VariantNotFound
+    );
+    let without_audio = master(&format!("#EXTM3U\n{}{LOW}", EN.replace("\"en\"", "\"fr\"")));
+    assert_eq!(
+        select(&without_audio, &preference).unwrap_err(),
+        SelectError::AudioNotFound
+    );
+}
+
+/// 属性完全相同的冗余流按排在第几区分。
+#[test]
+fn redundant_variants_are_told_apart_by_position() {
+    let m = master(
+        "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000,RESOLUTION=640x360\na/v.m3u8\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=1000,RESOLUTION=640x360\nb/v.m3u8\n",
+    );
+    for index in [0, 1] {
+        let key = VariantKey::of(&m, index).unwrap();
+        assert_eq!(key.occurrence, index);
+        let preference = Preference {
+            variant: VariantChoice::Matching(key),
+            audio: AudioChoice::Default,
+        };
+        assert_eq!(select(&m, &preference).unwrap().variant_index, index);
+    }
 }

@@ -6,7 +6,7 @@
 
 import asyncio
 
-from hs_m3u8 import Engine, JobRequest, OutputOptions, Preference, Source, Target, VariantChoice
+from hs_m3u8 import Engine, JobRequest, OutputOptions, Preference, Source, Target
 
 URL = "https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_ts/master.m3u8"
 MAX_HEIGHT = 270
@@ -35,7 +35,8 @@ async def main() -> None:
         print(f"没有写了码率、高度不超过 {MAX_HEIGHT} 的变体")
         return
     _, index = max(fits)
-    source = Source(URL, preference=Preference(variant=VariantChoice.Index(index)))
+    # 按身份选：探测之后主播放列表重排了变体也选到这一个
+    source = Source(URL, preference=Preference(variant=probe.master.variants[index].choice()))
     output = await engine.start(JobRequest(source, OutputOptions(Target.Mp4("downloads/bipbop.mp4")))).wait()
     print("已保存到", output.mp4.path if output.mp4 else None)
 

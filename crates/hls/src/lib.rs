@@ -7,11 +7,13 @@
 //! 小数形式的 TARGETDURATION、超出 TARGETDURATION 的分片时长、未知标签。
 //! 影响语义的标签（KEY、MAP、BYTERANGE、STREAM-INF、MEDIA 等）写坏时报错并给出行号，不静默丢弃。
 
+mod key;
 mod line;
 mod master;
 mod media;
 mod select;
 
+pub use key::{AudioKey, VariantKey};
 pub use master::{MasterPlaylist, Rendition, RenditionKind, Resolution, Variant};
 pub use media::{ByteRange, InitSection, MediaPlaylist, PlaylistType, Segment, SegmentKey};
 pub use select::{

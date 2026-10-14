@@ -9,6 +9,8 @@ use hs_m3u8_hls::{AudioChoice, ByteRange, Preference, VariantChoice};
 use sha2::{Digest, Sha256};
 use url::Url;
 
+use crate::workdir::{audio_json, variant_json};
+
 /// 64 位指纹：SHA-256 的前 8 字节，文件名中写作 16 位小写十六进制。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct Fingerprint(u64);
@@ -46,16 +48,19 @@ impl fmt::Display for Fingerprint {
 }
 
 /// 来源摘要（SHA-256 十六进制）：来源地址（见 [`source_address`]）与选轨偏好。语言代码与选轨一样不区分
-/// ASCII 大小写。每项一行；地址与语言里不会有换行（语言由 [`crate::Source`] 的校验保证），编码没有歧义。
+/// ASCII 大小写；按身份选的写成 job.json 里同样的 JSON（换行转义）。每项一行；地址与语言里不会有换行（语言由
+/// [`crate::Source`] 的校验保证），编码没有歧义。
 pub(crate) fn source_digest(url: &Url, preference: &Preference) -> String {
-    let variant = match preference.variant {
+    let variant = match &preference.variant {
         VariantChoice::Best => "best".to_owned(),
         VariantChoice::Index(index) => format!("index {index}"),
+        VariantChoice::Matching(key) => format!("matching {}", variant_json(key)),
     };
     let audio = match &preference.audio {
         AudioChoice::Default => "default".to_owned(),
         AudioChoice::Language(language) => format!("language {}", language.to_ascii_lowercase()),
         AudioChoice::Index(index) => format!("index {index}"),
+        AudioChoice::Matching(key) => format!("matching {}", audio_json(key)),
     };
     digest_hex(format!(
         "url {}\nvariant {variant}\naudio {audio}\n",
@@ -110,6 +115,8 @@ fn file_name(url: &Url) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use hs_m3u8_hls::{AudioKey, Resolution, VariantKey};
+
     use super::*;
 
     #[test]
@@ -185,6 +192,28 @@ mod tests {
         assert_eq!(
             source_digest(&source, &index),
             "0e42d3b0802e2f2d74ae0d8dc420518949c503b570451b6a988c73e8930028d5"
+        );
+        let matching = Preference {
+            variant: VariantChoice::Matching(VariantKey {
+                bandwidth: Some(2000),
+                resolution: Some(Resolution {
+                    width: 1280,
+                    height: 720,
+                }),
+                codecs: vec!["avc1.640020".into(), "mp4a.40.2".into()],
+                audio_group: Some("aud".into()),
+                occurrence: 1,
+            }),
+            audio: AudioChoice::Matching(AudioKey {
+                group_id: "aud".into(),
+                language: Some("en".into()),
+                name: Some("Eng\n\"lish\"".into()),
+                occurrence: 0,
+            }),
+        };
+        assert_eq!(
+            source_digest(&source, &matching),
+            "425ee82b402582123bc6c94953587aa0762fecd6a1bac8c07c7f75fc926955ce"
         );
 
         let live = Url::parse("https://a.example:8443/live.m3u8?token=1").unwrap();

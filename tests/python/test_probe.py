@@ -119,6 +119,36 @@ def test_preferences_choose_the_variant_and_audio(server: Server) -> None:
     assert result.master.selected.audio.language == "ja"
 
 
+def test_choices_by_identity_find_the_same_tracks_after_the_master_changes(server: Server) -> None:
+    put_master(server)
+    probed = probe(Source(server.url("master.m3u8")))
+    assert probed.master is not None
+    preference = Preference(variant=probed.master.variants[0].choice(), audio=probed.master.audio[1].choice())
+    assert_survives_pickle(preference)
+    # 前面多了一个变体与一条音轨：下标都变了，按身份仍选到原来那两条
+    server.put(
+        "master.m3u8",
+        MASTER.replace(
+            "#EXTM3U\n",
+            '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Français",LANGUAGE="fr",URI="audio_fr.m3u8"\n'
+            '#EXT-X-STREAM-INF:BANDWIDTH=400000,RESOLUTION=320x180,AUDIO="aud"\nlowest.m3u8\n',
+        ),
+    )
+
+    moved = probe(Source(server.url("master.m3u8"), preference=preference))
+
+    assert moved.master is not None
+    assert (moved.master.selected.variant.index, moved.master.selected.variant.bandwidth) == (1, 800000)
+    assert moved.master.selected.audio is not None
+    assert (moved.master.selected.audio.index, moved.master.selected.audio.language) == (2, "ja")
+
+    # 属性变了即不是同一条，报找不到
+    server.put("master.m3u8", MASTER.replace("BANDWIDTH=800000", "BANDWIDTH=900000"))
+    with pytest.raises(SelectError) as gone:
+        probe(Source(server.url("master.m3u8"), preference=preference))
+    assert gone.value.reason == SelectFailure.VariantNotFound()
+
+
 def test_media_playlists_have_no_master_and_live_ones_are_reported(server: Server) -> None:
     server.put("media.m3u8", MEDIA)
     server.put("live.m3u8", LIVE)

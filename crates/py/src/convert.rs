@@ -1,6 +1,6 @@
 //! Python 与 core 之间转换的值：路径、序列、请求头、计数、时长与地址。传入时在这里校验，存根的写法也在这里定。
 
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -295,7 +295,7 @@ macro_rules! counts {
     )*};
 }
 
-counts!(u32 => NonZeroU32, usize => NonZeroUsize);
+counts!(u32 => NonZeroU32, u64 => NonZeroU64, usize => NonZeroUsize);
 
 impl<'py, T: IntoPyObject<'py>> IntoPyObject<'py> for Count<T> {
     type Target = T::Target;

@@ -75,7 +75,7 @@ pub(super) fn check_content(
             .flat_map(|g| &g[track].segments)
             .any(|s| s.duration_us > 0)
     });
-    let source = selection.and_then(|s| s.variant.attributes.bandwidth);
+    let source = selection.and_then(|s| s.variant.bandwidth);
     if tracks == 2 && !measurable && source.is_none() {
         return Err(Error::Unsupported(Unsupported::Hls(
             HlsUnsupported::BandwidthUnknown,
@@ -148,7 +148,7 @@ fn fill(
                 .peak_bps
                 .zip(audio.peak_bps)
                 .map(|(v, a)| v.saturating_add(a))
-                .or(selection.variant.attributes.bandwidth)
+                .or(selection.variant.bandwidth)
                 .expect("写出前已确认算得出码率（check_content）");
             write_file(&stage.join(INDEX), &master_playlist(selection, bandwidth))
         }
@@ -309,11 +309,10 @@ fn media_playlist(groups: &[PlaylistGroup], prefix: &str) -> String {
 /// 与编码照抄来源（来源没写的也不写）；音频组固定为 `audio`。名称与语言照抄来源，带有引号或换行（带引号的字符串里不允许）
 /// 时不用：没有可用的名称时名称为 `audio`，语言不写。
 fn master_playlist(selection: &SelectionKey, bandwidth: u64) -> String {
-    let audio = &selection
+    let audio = selection
         .audio
         .as_ref()
-        .expect("两条轨时第 1 条是独立的音频 rendition")
-        .attributes;
+        .expect("两条轨时第 1 条是独立的音频 rendition");
     let quotable = |text: &&str| !text.contains(['"', '\r', '\n']);
     let language = audio.language.as_deref().filter(quotable);
     let name = audio
@@ -328,7 +327,7 @@ fn master_playlist(selection: &SelectionKey, bandwidth: u64) -> String {
     }
     media.push_str(",DEFAULT=YES,AUTOSELECT=YES,URI=\"1/index.m3u8\"\n");
 
-    let variant = &selection.variant.attributes;
+    let variant = &selection.variant;
     let mut attributes = Vec::new();
     attributes.push(format!("BANDWIDTH={bandwidth}"));
     if let Some(r) = variant.resolution {
@@ -389,10 +388,9 @@ fn is_track_file_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use hs_m3u8_hls::{Playlist, Resolution, Url, parse};
+    use hs_m3u8_hls::{AudioKey, Playlist, Resolution, Url, VariantKey, parse};
 
     use super::*;
-    use crate::selection::{AudioAttributes, AudioKey, VariantAttributes, VariantKey};
 
     fn url() -> Url {
         Url::parse("file:///out/index.m3u8").unwrap()
@@ -453,23 +451,19 @@ mod tests {
     fn selection(name: Option<&str>, language: Option<&str>, codecs: &[&str]) -> SelectionKey {
         SelectionKey {
             variant: VariantKey {
-                attributes: VariantAttributes {
-                    bandwidth: Some(2_000_000),
-                    resolution: Some(Resolution {
-                        width: 1280,
-                        height: 720,
-                    }),
-                    codecs: codecs.iter().map(|c| (*c).to_owned()).collect(),
-                    audio_group: Some("source-group".into()),
-                },
+                bandwidth: Some(2_000_000),
+                resolution: Some(Resolution {
+                    width: 1280,
+                    height: 720,
+                }),
+                codecs: codecs.iter().map(|c| (*c).to_owned()).collect(),
+                audio_group: Some("source-group".into()),
                 occurrence: 0,
             },
             audio: Some(AudioKey {
-                attributes: AudioAttributes {
-                    group_id: "source-group".into(),
-                    language: language.map(str::to_owned),
-                    name: name.map(str::to_owned),
-                },
+                group_id: "source-group".into(),
+                language: language.map(str::to_owned),
+                name: name.map(str::to_owned),
                 occurrence: 0,
             }),
         }

@@ -34,6 +34,8 @@ variants! {
             /// 变体个数
             count: usize,
         },
+        /// 主播放列表里没有与 `VariantChoice.Matching` 身份相同的变体
+        VariantNotFound {},
         /// 所选变体的音频组里没有这个语言的音频
         #[pyo3(constructor = (*, group, language, available))]
         AudioLanguageNotFound {
@@ -52,10 +54,12 @@ variants! {
             /// 音频 rendition 的个数
             count: usize,
         },
+        /// 主播放列表里没有与 `AudioChoice.Matching` 身份相同的音频
+        AudioNotFound {},
         /// 指定的音频不在所选变体引用的音频组里
         #[pyo3(constructor = (*, index, group))]
         NotVariantAudio {
-            /// 给的下标
+            /// 音频的下标（见 `AudioInfo.index`）
             index: usize,
             /// 所选变体引用的音频组；变体没有引用音频组时为 None
             group: Option<String>,
@@ -507,6 +511,7 @@ impl From<core::hls::SelectError> for SelectFailure {
             E::VariantIndexOutOfRange { index, count } => {
                 SelectFailure::VariantIndexOutOfRange { index, count }
             }
+            E::VariantNotFound => SelectFailure::VariantNotFound {},
             E::AudioLanguageNotFound {
                 group,
                 language,
@@ -519,6 +524,7 @@ impl From<core::hls::SelectError> for SelectFailure {
             E::AudioIndexOutOfRange { index, count } => {
                 SelectFailure::AudioIndexOutOfRange { index, count }
             }
+            E::AudioNotFound => SelectFailure::AudioNotFound {},
             E::NotVariantAudio { index, group } => SelectFailure::NotVariantAudio { index, group },
         }
     }

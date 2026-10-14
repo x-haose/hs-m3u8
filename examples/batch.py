@@ -16,7 +16,6 @@ from hs_m3u8 import (
     Preference,
     Source,
     Target,
-    VariantChoice,
 )
 
 SOURCES = {
@@ -37,7 +36,7 @@ async def lowest(engine: Engine, url: str) -> Preference:
     if not video:
         return Preference()
     _, index = min(video)
-    return Preference(variant=VariantChoice.Index(index))
+    return Preference(variant=probe.master.variants[index].choice())
 
 
 async def download_one(engine: Engine, name: str, url: str) -> str:

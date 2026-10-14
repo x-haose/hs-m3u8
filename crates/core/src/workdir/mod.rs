@@ -33,7 +33,7 @@ use self::outputs::OUTPUTS_FILE;
 pub(crate) use self::outputs::{
     OutputKind, PendingOutput, clear_outputs, outputs_file, read_outputs, record_outputs,
 };
-pub(crate) use self::record::{JobRecord, RecordKind};
+pub(crate) use self::record::{JobRecord, RecordKind, audio_json, variant_json};
 use self::record::{decode, encode};
 use crate::entries::{self, is_canonical_number};
 use crate::error::io_error;

@@ -2,7 +2,7 @@
 
 use url::Url;
 
-use crate::{MasterPlaylist, Rendition, RenditionKind, Variant};
+use crate::{AudioKey, MasterPlaylist, Rendition, RenditionKind, Variant, VariantKey};
 
 /// 调用方对选轨的要求；默认取最高画质的变体与其音频组里的默认 rendition。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -13,7 +13,7 @@ pub struct Preference {
     pub audio: AudioChoice,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum VariantChoice {
     /// 画质最高者：确定是纯音频的变体（写了 CODECS 且全是音频或字幕编码）在有别的变体时不考虑；其余各变体都写了
     /// RESOLUTION 时取分辨率最高、同分辨率取带宽最高，有没写的（分辨率比不了）时取带宽最高；都相同时取靠后的
@@ -21,6 +21,8 @@ pub enum VariantChoice {
     Best,
     /// `MasterPlaylist::variants` 中的下标
     Index(usize),
+    /// 身份相同的变体（见 [`VariantKey`]）：探测与开始之间主播放列表增删重排了变体也选到同一个
+    Matching(VariantKey),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -32,6 +34,8 @@ pub enum AudioChoice {
     Language(String),
     /// 主播放列表里第几个音频 rendition（只数 TYPE=AUDIO 的，按出现顺序，从 0 起）；须在所选变体的音频组里
     Index(usize),
+    /// 身份相同的音频 rendition（见 [`AudioKey`]）；须在所选变体的音频组里
+    Matching(AudioKey),
 }
 
 /// 选轨结果：所选变体，以及（音频不在变体里时）独立的音频 rendition。
@@ -60,6 +64,9 @@ pub enum SelectError {
     NoVariants,
     #[error("变体下标 {index} 超出范围（共 {count} 个）")]
     VariantIndexOutOfRange { index: usize, count: usize },
+    /// 主播放列表里没有身份与 [`VariantChoice::Matching`] 相同的变体
+    #[error("主播放列表里没有所选的变体（属性相同的已不在）")]
+    VariantNotFound,
     #[error("音频组 {group} 中没有语言为 {language} 的 rendition，可选：{available:?}")]
     AudioLanguageNotFound {
         group: String,
@@ -69,26 +76,34 @@ pub enum SelectError {
     /// 口径同 [`AudioChoice::Index`]，`count` 为音频 rendition 的个数
     #[error("音频下标 {index} 超出范围（共 {count} 个）")]
     AudioIndexOutOfRange { index: usize, count: usize },
+    /// 主播放列表里没有身份与 [`AudioChoice::Matching`] 相同的音频 rendition
+    #[error("主播放列表里没有所选的音频（属性相同的已不在）")]
+    AudioNotFound,
     /// 指定的音频 rendition 不在所选变体引用的音频组里（变体没有引用音频组时 `group` 为 None）
     #[error("第 {index} 个音频不在所选变体的音频组（{}）里", group.as_deref().unwrap_or("无"))]
     NotVariantAudio { index: usize, group: Option<String> },
 }
 
 pub fn select(master: &MasterPlaylist, preference: &Preference) -> Result<Selection, SelectError> {
-    let variant_index = match preference.variant {
-        VariantChoice::Index(index) if index < master.variants.len() => index,
-        VariantChoice::Index(index) => {
+    let variant_index = match &preference.variant {
+        &VariantChoice::Index(index) if index < master.variants.len() => index,
+        &VariantChoice::Index(index) => {
             return Err(SelectError::VariantIndexOutOfRange {
                 index,
                 count: master.variants.len(),
             });
         }
+        VariantChoice::Matching(key) => key.find(master).ok_or(SelectError::VariantNotFound)?,
         VariantChoice::Best => best_variant(master).ok_or(SelectError::NoVariants)?,
     };
     let variant = &master.variants[variant_index];
     let group = variant.audio.as_deref();
     let audio = match (&preference.audio, group) {
         (AudioChoice::Index(index), group) => Some(audio_by_index(master, *index, group)?),
+        (AudioChoice::Matching(key), group) => {
+            let index = key.find(master).ok_or(SelectError::AudioNotFound)?;
+            Some(audio_by_index(master, index, group)?)
+        }
         (AudioChoice::Language(language), Some(group)) => {
             Some(audio_by_language(master, group, language)?)
         }

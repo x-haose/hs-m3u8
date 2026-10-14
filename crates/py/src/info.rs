@@ -4,17 +4,19 @@ use std::time::Duration;
 
 use hs_m3u8_core as core;
 use pyo3::prelude::*;
+use pyo3_stub_gen::derive::gen_stub_pymethods;
 
-use crate::convert::Seq;
+use crate::convert::{Count, Seq};
 use crate::record::record;
+use crate::request::{AudioChoice, VariantChoice};
 
 record! {
     /// 分辨率（RESOLUTION 属性）。
     pub struct Resolution {
         /// 宽，像素
-        pub width: u32,
+        pub width: Count<u32>,
         /// 高，像素
-        pub height: u32,
+        pub height: Count<u32>,
     }
 }
 
@@ -31,6 +33,26 @@ record! {
         pub codecs: Seq<String>,
         /// 引用的音频组（AUDIO 属性）；没有时为 None
         pub audio_group: Option<String>,
+        /// 下标以外的上面几项完全相同的变体里排第几（从 0 起）
+        pub occurrence: usize,
+    }
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl VariantInfo {
+    /// 按身份选这个变体：探测之后主播放列表增删重排了变体，开始任务时也选到它。
+    #[gen_stub(override_return_type(type_repr = "VariantChoice.Matching"))]
+    fn choice(&self) -> VariantChoice {
+        VariantChoice::Matching {
+            key: crate::request::VariantKey {
+                bandwidth: self.bandwidth.map(Count),
+                resolution: self.resolution.clone(),
+                codecs: self.codecs.clone(),
+                audio_group: self.audio_group.clone(),
+                occurrence: Count(self.occurrence),
+            },
+        }
     }
 }
 
@@ -50,6 +72,25 @@ record! {
         pub default: bool,
         /// 有独立的媒体播放列表；为 False 时音频混在变体流里，选它即用变体里的音频
         pub separate: bool,
+        /// 组、名称、语言都相同的音频里排第几（从 0 起）
+        pub occurrence: usize,
+    }
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl AudioInfo {
+    /// 按身份选这个音频，同 `VariantInfo.choice()`。
+    #[gen_stub(override_return_type(type_repr = "AudioChoice.Matching"))]
+    fn choice(&self) -> AudioChoice {
+        AudioChoice::Matching {
+            key: crate::request::AudioKey {
+                group: self.group.clone(),
+                name: self.name.clone(),
+                language: self.language.clone(),
+                occurrence: Count(self.occurrence),
+            },
+        }
     }
 }
 
@@ -106,8 +147,17 @@ record! {
 impl From<core::hls::Resolution> for Resolution {
     fn from(r: core::hls::Resolution) -> Self {
         Resolution {
-            width: r.width,
-            height: r.height,
+            width: Count(r.width),
+            height: Count(r.height),
+        }
+    }
+}
+
+impl Resolution {
+    pub(crate) fn to_core(&self) -> core::hls::Resolution {
+        core::hls::Resolution {
+            width: self.width.0,
+            height: self.height.0,
         }
     }
 }
@@ -120,6 +170,7 @@ impl From<core::VariantInfo> for VariantInfo {
             resolution: v.resolution.map(Resolution::from),
             codecs: Seq(v.codecs),
             audio_group: v.audio_group,
+            occurrence: v.occurrence,
         }
     }
 }
@@ -133,6 +184,7 @@ impl From<core::AudioInfo> for AudioInfo {
             language: a.language,
             default: a.default,
             separate: a.separate,
+            occurrence: a.occurrence,
         }
     }
 }

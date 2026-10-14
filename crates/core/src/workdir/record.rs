@@ -2,13 +2,11 @@
 
 use std::path::Path;
 
-use hs_m3u8_hls::Resolution;
+use hs_m3u8_hls::{AudioKey, Resolution, VariantKey};
 use hs_m3u8_remux::Streams;
 use serde::{Deserialize, Serialize};
 
-use crate::selection::{
-    AudioAttributes, AudioKey, SelectionKey, VariantAttributes, VariantKey, track_streams,
-};
+use crate::selection::{SelectionKey, track_streams};
 use crate::{Error, JobType, WorkDirProblem};
 
 /// 任务目录格式的版本：job.json 与 outputs.json 的字段，分片与 init 段的文件名、其中指纹与摘要的编码，以及下载时对
@@ -221,50 +219,78 @@ pub(super) fn decode(bytes: &[u8]) -> Result<JobRecord, WorkDirProblem> {
 
 impl From<&SelectionKey> for SelectionFile {
     fn from(key: &SelectionKey) -> Self {
-        let v = &key.variant.attributes;
         SelectionFile {
-            variant: VariantFile {
-                bandwidth: v.bandwidth,
-                resolution: v.resolution.map(|r| [r.width, r.height]),
-                codecs: v.codecs.clone(),
-                audio_group: v.audio_group.clone(),
-                occurrence: key.variant.occurrence,
-            },
-            audio: key.audio.as_ref().map(|a| AudioFile {
-                group_id: a.attributes.group_id.clone(),
-                language: a.attributes.language.clone(),
-                name: a.attributes.name.clone(),
-                occurrence: a.occurrence,
-            }),
+            variant: VariantFile::from(&key.variant),
+            audio: key.audio.as_ref().map(AudioFile::from),
         }
     }
 }
 
 impl From<SelectionFile> for SelectionKey {
     fn from(file: SelectionFile) -> Self {
-        let v = file.variant;
         SelectionKey {
-            variant: VariantKey {
-                attributes: VariantAttributes {
-                    bandwidth: v.bandwidth,
-                    resolution: v
-                        .resolution
-                        .map(|[width, height]| Resolution { width, height }),
-                    codecs: v.codecs,
-                    audio_group: v.audio_group,
-                },
-                occurrence: v.occurrence,
-            },
-            audio: file.audio.map(|a| AudioKey {
-                attributes: AudioAttributes {
-                    group_id: a.group_id,
-                    language: a.language,
-                    name: a.name,
-                },
-                occurrence: a.occurrence,
-            }),
+            variant: file.variant.into(),
+            audio: file.audio.map(AudioKey::from),
         }
     }
+}
+
+impl From<&VariantKey> for VariantFile {
+    fn from(key: &VariantKey) -> Self {
+        VariantFile {
+            bandwidth: key.bandwidth,
+            resolution: key.resolution.map(|r| [r.width, r.height]),
+            codecs: key.codecs.clone(),
+            audio_group: key.audio_group.clone(),
+            occurrence: key.occurrence,
+        }
+    }
+}
+
+impl From<VariantFile> for VariantKey {
+    fn from(file: VariantFile) -> Self {
+        VariantKey {
+            bandwidth: file.bandwidth,
+            resolution: file
+                .resolution
+                .map(|[width, height]| Resolution { width, height }),
+            codecs: file.codecs,
+            audio_group: file.audio_group,
+            occurrence: file.occurrence,
+        }
+    }
+}
+
+impl From<&AudioKey> for AudioFile {
+    fn from(key: &AudioKey) -> Self {
+        AudioFile {
+            group_id: key.group_id.clone(),
+            language: key.language.clone(),
+            name: key.name.clone(),
+            occurrence: key.occurrence,
+        }
+    }
+}
+
+impl From<AudioFile> for AudioKey {
+    fn from(file: AudioFile) -> Self {
+        AudioKey {
+            group_id: file.group_id,
+            language: file.language,
+            name: file.name,
+            occurrence: file.occurrence,
+        }
+    }
+}
+
+/// 变体身份在 job.json 里的写法（JSON，字段顺序固定），来源摘要也用它编码按身份选的偏好。
+pub(crate) fn variant_json(key: &VariantKey) -> String {
+    serde_json::to_string(&VariantFile::from(key)).expect("只含数字、字符串与数组，序列化不会失败")
+}
+
+/// 音频身份在 job.json 里的写法（JSON，字段顺序固定），来源摘要也用它编码按身份选的偏好。
+pub(crate) fn audio_json(key: &AudioKey) -> String {
+    serde_json::to_string(&AudioFile::from(key)).expect("只含数字、字符串与数组，序列化不会失败")
 }
 
 #[cfg(test)]
@@ -277,23 +303,19 @@ mod tests {
             source_digest: "ab".into(),
             selection: Some(SelectionKey {
                 variant: VariantKey {
-                    attributes: VariantAttributes {
-                        bandwidth: Some(2000),
-                        resolution: Some(Resolution {
-                            width: 1280,
-                            height: 720,
-                        }),
-                        codecs: vec!["avc1.640020".into()],
-                        audio_group: Some("aud".into()),
-                    },
+                    bandwidth: Some(2000),
+                    resolution: Some(Resolution {
+                        width: 1280,
+                        height: 720,
+                    }),
+                    codecs: vec!["avc1.640020".into()],
+                    audio_group: Some("aud".into()),
                     occurrence: 1,
                 },
                 audio: Some(AudioKey {
-                    attributes: AudioAttributes {
-                        group_id: "aud".into(),
-                        language: Some("en".into()),
-                        name: None,
-                    },
+                    group_id: "aud".into(),
+                    language: Some("en".into()),
+                    name: None,
                     occurrence: 2,
                 }),
             }),

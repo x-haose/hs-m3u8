@@ -13,9 +13,10 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString, PyTuple};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
-use crate::convert::{Address, Count, Headers, Positive, ProxyAddress, PyPath, Span};
+use crate::convert::{Address, Count, Headers, Positive, ProxyAddress, PyPath, Seq, Span};
 use crate::error::{invalid_input, to_pyerr};
 use crate::hooks::{self, Hooks};
+use crate::info::Resolution;
 use crate::record::{field_names, record, reduce, variants};
 
 variants! {
@@ -29,6 +30,27 @@ variants! {
             /// 下标
             index: Count<usize>,
         },
+        /// 身份相同的变体（由 `VariantInfo.choice()` 得到）：探测之后主播放列表增删重排了变体也选到同一个
+        Matching {
+            /// 身份
+            key: VariantKey,
+        },
+    }
+}
+
+record! {
+    /// 变体的身份：属性，以及属性完全相同的变体里排第几。各项同 `VariantInfo` 的同名属性。
+    pub struct VariantKey {
+        /// BANDWIDTH，bit/s；来源没写时为 None
+        pub bandwidth: Option<Count<u64>>,
+        /// RESOLUTION；来源没写时为 None
+        pub resolution: Option<Resolution>,
+        /// CODECS 拆开后的各项
+        pub codecs: Seq<String>,
+        /// 引用的音频组；没有时为 None
+        pub audio_group: Option<String>,
+        /// 上面几项完全相同的变体里排第几（从 0 起）
+        pub occurrence: Count<usize>,
     }
 }
 
@@ -47,6 +69,25 @@ variants! {
             /// 下标
             index: Count<usize>,
         },
+        /// 身份相同的音频（由 `AudioInfo.choice()` 得到）；须在所选变体的音频组里
+        Matching {
+            /// 身份
+            key: AudioKey,
+        },
+    }
+}
+
+record! {
+    /// 音频 rendition 的身份：属性，以及属性完全相同的音频里排第几。各项同 `AudioInfo` 的同名属性。
+    pub struct AudioKey {
+        /// GROUP-ID
+        pub group: String,
+        /// NAME；来源没写时为 None
+        pub name: Option<String>,
+        /// LANGUAGE；来源没写时为 None
+        pub language: Option<String>,
+        /// 上面几项完全相同的音频里排第几（从 0 起）
+        pub occurrence: Count<usize>,
     }
 }
 
@@ -886,6 +927,9 @@ impl From<core::hls::Preference> for Preference {
                 core::hls::VariantChoice::Index(index) => VariantChoice::Index {
                     index: Count(index),
                 },
+                core::hls::VariantChoice::Matching(key) => {
+                    VariantChoice::Matching { key: key.into() }
+                }
             },
             audio: match p.audio {
                 core::hls::AudioChoice::Default => AudioChoice::Default {},
@@ -893,6 +937,7 @@ impl From<core::hls::Preference> for Preference {
                 core::hls::AudioChoice::Index(index) => AudioChoice::Index {
                     index: Count(index),
                 },
+                core::hls::AudioChoice::Matching(key) => AudioChoice::Matching { key: key.into() },
             },
         }
     }
@@ -904,6 +949,9 @@ impl Preference {
             variant: match &self.variant {
                 VariantChoice::Best {} => core::hls::VariantChoice::Best,
                 VariantChoice::Index { index } => core::hls::VariantChoice::Index(index.0),
+                VariantChoice::Matching { key } => {
+                    core::hls::VariantChoice::Matching(key.to_core())
+                }
             },
             audio: match &self.audio {
                 AudioChoice::Default {} => core::hls::AudioChoice::Default,
@@ -911,14 +959,63 @@ impl Preference {
                     core::hls::AudioChoice::Language(language.clone())
                 }
                 AudioChoice::Index { index } => core::hls::AudioChoice::Index(index.0),
+                AudioChoice::Matching { key } => core::hls::AudioChoice::Matching(key.to_core()),
             },
+        }
+    }
+}
+
+impl From<core::hls::VariantKey> for VariantKey {
+    fn from(key: core::hls::VariantKey) -> Self {
+        VariantKey {
+            bandwidth: key.bandwidth.map(Count),
+            resolution: key.resolution.map(Resolution::from),
+            codecs: Seq(key.codecs),
+            audio_group: key.audio_group,
+            occurrence: Count(key.occurrence),
+        }
+    }
+}
+
+impl VariantKey {
+    fn to_core(&self) -> core::hls::VariantKey {
+        core::hls::VariantKey {
+            bandwidth: self.bandwidth.map(|b| b.0),
+            resolution: self.resolution.as_ref().map(Resolution::to_core),
+            codecs: self.codecs.0.clone(),
+            audio_group: self.audio_group.clone(),
+            occurrence: self.occurrence.0,
+        }
+    }
+}
+
+impl From<core::hls::AudioKey> for AudioKey {
+    fn from(key: core::hls::AudioKey) -> Self {
+        AudioKey {
+            group: key.group_id,
+            name: key.name,
+            language: key.language,
+            occurrence: Count(key.occurrence),
+        }
+    }
+}
+
+impl AudioKey {
+    fn to_core(&self) -> core::hls::AudioKey {
+        core::hls::AudioKey {
+            group_id: self.group.clone(),
+            language: self.language.clone(),
+            name: self.name.clone(),
+            occurrence: self.occurrence.0,
         }
     }
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<VariantChoice>()?;
+    module.add_class::<VariantKey>()?;
     module.add_class::<AudioChoice>()?;
+    module.add_class::<AudioKey>()?;
     module.add_class::<Preference>()?;
     module.add_class::<Timeouts>()?;
     module.add_class::<RetryPolicy>()?;
