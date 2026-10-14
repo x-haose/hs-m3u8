@@ -2,6 +2,7 @@
 //! 格式描述表，打开装了中断回调的输出、读输出的读写错误，ffmpeg-next 没有对应的安全接口。
 
 use std::ffi::{CStr, CString};
+use std::path::PathBuf;
 
 use ffmpeg::codec;
 use ffmpeg::format;
@@ -142,16 +143,30 @@ pub(crate) fn set_codec_tag(ost: &mut StreamMut<'_>, id: codec::Id) {
 /// 上下文晚于本结构释放，所以文件不能留给上下文的析构去关。
 pub(crate) struct OutputFile {
     pub(crate) octx: format::context::Output,
+    pub(crate) path: PathBuf,
+    /// 装在中断回调上的取消信号
+    pub(crate) cancel: Cancel,
     _interrupt: InterruptGuard,
 }
 
-impl Drop for OutputFile {
-    fn drop(&mut self) {
+impl OutputFile {
+    /// 关闭文件：刷出缓冲、关闭文件描述符；已关闭时什么也不做。失败时为 FFmpeg 的错误，文件系统到关闭时才报的写入
+    /// 错误（如网络盘的延迟写入）在这里出现。
+    pub(crate) fn close(&mut self) -> Result<(), ffmpeg::Error> {
         // SAFETY: 上下文在 octx 存活期间有效；pb 为本结构用 avio_open2 打开的读写上下文或空，avio_closep 关闭后置空，
-        // 之后上下文析构时的 avio_close(NULL) 什么也不做。关闭时刷出缓冲会调用的中断回调此时仍由 _interrupt 持有。
-        unsafe {
-            ffmpeg::ffi::avio_closep(&raw mut (*self.octx.as_mut_ptr()).pb);
+        // 再调用与上下文析构时的 avio_close(NULL) 什么也不做。关闭时刷出缓冲会调用的中断回调此时仍由 _interrupt 持有。
+        let closed = unsafe { ffmpeg::ffi::avio_closep(&raw mut (*self.octx.as_mut_ptr()).pb) };
+        match closed {
+            0.. => Ok(()),
+            code => Err(ffmpeg::Error::from(code)),
         }
+    }
+}
+
+impl Drop for OutputFile {
+    /// 失败路径上的收尾：已经在报别的错误，关闭的结果不再看；成功路径先调 [`OutputFile::close`]。
+    fn drop(&mut self) {
+        let _ = self.close();
     }
 }
 
@@ -167,8 +182,8 @@ pub(crate) enum OpenFailure {
 /// 重新打开输出搬动数据的第二遍），`cancel` 取消后读写以 AVERROR_EXIT 失败。
 pub(crate) fn open_output(path: &str, cancel: &Cancel) -> Result<OutputFile, OpenFailure> {
     let c_path = CString::new(path).expect("调用方保证路径不含 NUL");
-    let cancel = cancel.clone();
-    let interrupt = interrupt::new(Box::new(move || cancel.is_cancelled()));
+    let polled = cancel.clone();
+    let interrupt = interrupt::new(Box::new(move || polled.is_cancelled()));
     let mut ctx = std::ptr::null_mut();
     // SAFETY: 格式名与路径是 NUL 结尾的字符串；成功时 ctx 指向新分配的上下文，失败时为空。
     let created = unsafe {
@@ -199,6 +214,8 @@ pub(crate) fn open_output(path: &str, cancel: &Cancel) -> Result<OutputFile, Ope
         }
         Ok(OutputFile {
             octx: format::context::Output::wrap(ctx),
+            path: PathBuf::from(path),
+            cancel: cancel.clone(),
             _interrupt: interrupt.guard,
         })
     }

@@ -97,7 +97,7 @@ pub enum Error {
         written: u64,
         found: u64,
     },
-    /// 读分片、写输出或回读输出时文件出错（写输出时含 FFmpeg 写文件的错误，如盘满）
+    /// 读分片、写出或关闭输出、回读输出时文件出错（写出时含 FFmpeg 写文件的错误，如盘满）
     #[error("{action} {path} 失败：{cause}")]
     Io {
         action: &'static str,

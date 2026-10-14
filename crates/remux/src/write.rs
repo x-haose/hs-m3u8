@@ -74,28 +74,26 @@ pub(crate) fn write_verified(
 }
 
 /// 正在写的 MP4：已建好输出流、写完头。
-struct Muxer<'a> {
+struct Muxer {
     file: OutputFile,
-    path: &'a str,
-    cancel: &'a Cancel,
     outs: Vec<OutStream>,
     /// 组间余量：最粗的输出时间基的一个 tick（向上取整到微秒）。换到输出时间基时的舍入不超过半个 tick，因此下一组的
     /// 首个 DTS 一定大于上一组的末个 DTS
     margin_us: i64,
 }
 
-impl<'a> Muxer<'a> {
+impl Muxer {
     /// 打开输出，按第 0 组 `first`（各轨选中的流为 `layout`）建立输出流并写头。
     fn open(
-        path: &'a str,
-        cancel: &'a Cancel,
+        path: &str,
+        cancel: &Cancel,
         first: &[OpenTrack],
         layout: &[Vec<Desc>],
-    ) -> Result<Muxer<'a>, Error> {
+    ) -> Result<Muxer, Error> {
         let mut file =
             ffi::open_output(path, cancel).map_err(|failure| open_error(failure, path, cancel))?;
         add_streams(&mut file.octx, first)?;
-        write_header(&mut file, path, cancel)?;
+        write_header(&mut file)?;
         let outs: Vec<OutStream> = layout
             .iter()
             .flatten()
@@ -118,15 +116,9 @@ impl<'a> Muxer<'a> {
             .expect("第 0 组至少有一路输出流");
         Ok(Muxer {
             file,
-            path,
-            cancel,
             outs,
             margin_us,
         })
-    }
-
-    fn failed(&self, error: ffmpeg::Error) -> Error {
-        write_error(&self.file, self.path, self.cancel, error)
     }
 
     /// 写出一组（各输入已读到每路流的第一个包）：各输入按回绕对齐（见 [`align_wraps`]），再按全组共用的偏移平移时间戳，
@@ -210,7 +202,7 @@ impl<'a> Muxer<'a> {
         mapping: Mapping,
         at: Placed,
     ) -> Result<(), Error> {
-        if self.cancel.is_cancelled() {
+        if self.file.cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
         let out = mapping.output;
@@ -233,16 +225,19 @@ impl<'a> Muxer<'a> {
         packet.set_position(-1);
         packet.set_stream(out);
         if let Err(e) = packet.write_interleaved(&mut self.file.octx) {
-            return Err(self.failed(e));
+            return Err(self.file.write_error(e));
         }
         self.outs[out].written += 1;
         Ok(())
     }
 
-    /// 写尾（moov 前置时在这里把数据整体后移，FFmpeg 读写文件时同样轮询取消），关闭输出。
+    /// 写尾（moov 前置时在这里把数据整体后移，FFmpeg 读写文件时同样轮询取消），关闭输出并检查关闭的结果。
     fn finish(mut self) -> Result<Vec<OutStream>, Error> {
         if let Err(e) = self.file.octx.write_trailer() {
-            return Err(self.failed(e));
+            return Err(self.file.write_error(e));
+        }
+        if let Err(e) = self.file.close() {
+            return Err(self.file.close_error(e));
         }
         Ok(self.outs)
     }
@@ -272,21 +267,40 @@ fn open_error(failure: OpenFailure, path: &str, cancel: &Cancel) -> Error {
     }
 }
 
-/// FFmpeg 写输出 `file`（路径 `path`）时的错误：取消了为 [`Error::Cancelled`]；输出的读写上下文记着写文件的错误（如
-/// 盘满）为 [`Error::Io`]；其余为封装器的错误 [`Error::Mux`]。
-fn write_error(file: &OutputFile, path: &str, cancel: &Cancel, error: ffmpeg::Error) -> Error {
-    if cancel.is_cancelled() {
-        return Error::Cancelled;
+impl OutputFile {
+    /// FFmpeg 写这个输出时的错误：取消了为 [`Error::Cancelled`]；输出的读写上下文记着写文件的错误（如盘满）为
+    /// [`Error::Io`]；其余为封装器的错误 [`Error::Mux`]。
+    fn write_error(&self, error: ffmpeg::Error) -> Error {
+        if self.cancel.is_cancelled() {
+            return Error::Cancelled;
+        }
+        let written = ffi::output_io_error(&self.octx)
+            .and_then(|code| file_error(&FfmpegError::from(ffmpeg::Error::from(code))));
+        match written {
+            Some(cause) => Error::Io {
+                action: "写入",
+                path: self.path.clone(),
+                cause,
+            },
+            None => Error::Mux(error.into()),
+        }
     }
-    let written = ffi::output_io_error(&file.octx)
-        .and_then(|code| file_error(&FfmpegError::from(ffmpeg::Error::from(code))));
-    match written {
-        Some(cause) => Error::Io {
-            action: "写入",
-            path: PathBuf::from(path),
-            cause,
-        },
-        None => Error::Mux(error.into()),
+
+    /// 关闭这个输出时的错误（见 [`OutputFile::close`]）：取消了为 [`Error::Cancelled`]；errno 型的为 [`Error::Io`]；
+    /// 其余为 [`Error::Mux`]。
+    fn close_error(&self, error: ffmpeg::Error) -> Error {
+        if self.cancel.is_cancelled() {
+            return Error::Cancelled;
+        }
+        let error = FfmpegError::from(error);
+        match file_error(&error) {
+            Some(cause) => Error::Io {
+                action: "关闭",
+                path: self.path.clone(),
+                cause,
+            },
+            None => Error::Mux(error),
+        }
     }
 }
 
@@ -310,7 +324,7 @@ fn add_streams(octx: &mut format::context::Output, first: &[OpenTrack]) -> Resul
 }
 
 /// 写 MP4 头（moov 前置）；封装器不认识的选项视为错误。
-fn write_header(file: &mut OutputFile, path: &str, cancel: &Cancel) -> Result<(), Error> {
+fn write_header(file: &mut OutputFile) -> Result<(), Error> {
     let mut options = Dictionary::new();
     options.set("movflags", "+faststart");
     let written = file.octx.write_header_with(options).map(|rejected| {
@@ -319,7 +333,7 @@ fn write_header(file: &mut OutputFile, path: &str, cancel: &Cancel) -> Result<()
             .map(|(k, v)| (k.to_owned(), v.to_owned()))
             .collect::<Vec<(String, String)>>()
     });
-    let rejected = written.map_err(|e| write_error(file, path, cancel, e))?;
+    let rejected = written.map_err(|e| file.write_error(e))?;
     if rejected.is_empty() {
         Ok(())
     } else {
