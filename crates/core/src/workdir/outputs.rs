@@ -11,7 +11,7 @@ use super::record::{FORMAT_VERSION, check_version};
 use super::write_atomic;
 use crate::error::io_error;
 use crate::ident::Fingerprint;
-use crate::{Error, WorkDirProblem, volume};
+use crate::{Error, WorkDirProblem, busy, volume};
 
 pub(super) const OUTPUTS_FILE: &str = "outputs.json";
 
@@ -112,7 +112,7 @@ pub(crate) fn record_outputs(
 
 /// 删除记录；没有时不算失败。失败时调用方把它记为残留（路径见 [`outputs_file`]）。
 pub(crate) fn clear_outputs(root: &Path) -> io::Result<()> {
-    match fs::remove_file(outputs_file(root)) {
+    match busy::retrying(|| fs::remove_file(outputs_file(root))) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         other => other,
     }

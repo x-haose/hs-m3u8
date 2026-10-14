@@ -38,7 +38,7 @@ use self::record::{decode, encode};
 use crate::entries::{self, is_canonical_number};
 use crate::error::io_error;
 use crate::ident::Fingerprint;
-use crate::{Error, Leftover, LeftoverKind, WorkDirProblem, blocking, volume};
+use crate::{Error, Leftover, LeftoverKind, WorkDirProblem, blocking, busy, volume};
 
 const JOB_FILE: &str = "job.json";
 const LOCK_FILE: &str = "lock";
@@ -301,13 +301,17 @@ fn remove_locked(root: &Path, lock: Lock) -> Result<Vec<PathBuf>, Error> {
             Some(JOB_FILE) if kind.is_file() => job = Some(entry.path),
             Some(TRACKS_DIR) if kind.is_dir() => remove_tracks(path, &mut kept)?,
             _ if entry.is_system_file() => system.push(entry),
-            _ if ours => fs::remove_file(path).map_err(io_error("删除", path))?,
+            _ if ours => {
+                busy::retrying(|| fs::remove_file(path)).map_err(io_error("删除", path))?
+            }
             _ => kept.push(entry.path),
         }
     }
     let mut remaining = kept.clone();
     match job {
-        Some(job) if kept.is_empty() => fs::remove_file(&job).map_err(io_error("删除", &job))?,
+        Some(job) if kept.is_empty() => {
+            busy::retrying(|| fs::remove_file(&job)).map_err(io_error("删除", &job))?;
+        }
         Some(job) => remaining.push(job),
         None => {}
     }
@@ -354,7 +358,8 @@ fn remove_tracks(tracks: &Path, kept: &mut Vec<PathBuf>) -> Result<(), Error> {
             if entry.is_system_file() {
                 track_system.push(entry);
             } else if ours {
-                fs::remove_file(&entry.path).map_err(io_error("删除", &entry.path))?;
+                busy::retrying(|| fs::remove_file(&entry.path))
+                    .map_err(io_error("删除", &entry.path))?;
             } else {
                 kept.push(entry.path);
             }
@@ -597,7 +602,7 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<(), Error> {
     file.write_all(data).map_err(io_error("写入", &part))?;
     file.sync_all().map_err(io_error("落盘", &part))?;
     drop(file);
-    fs::rename(&part, path).map_err(io_error("重命名", &part))
+    busy::retrying(|| fs::rename(&part, path)).map_err(io_error("重命名", &part))
 }
 
 /// 跟随符号链接；不存在时根读不到即报错（见 [`volume::reachable`]）。

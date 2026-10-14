@@ -326,7 +326,8 @@ class FetchFailure:
 @typing.final
 class FileError(HsM3u8Error):
     r"""
-    读写文件失败；`__cause__` 为系统报的 `OSError`（如 `PermissionError`）。
+    读写文件失败；`__cause__` 为系统报的 `OSError`（如 `PermissionError`）。Windows 上别的程序一直开着文件（如播放器
+    开着要替换的输出）时 `retryable` 为真：关掉它再试。
     """
     @property
     def action(self) -> builtins.str:

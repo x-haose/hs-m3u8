@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use super::hls;
 use crate::error::io_error;
 use crate::workdir::{self, OutputKind, PendingOutput};
-use crate::{Error, Leftover, LeftoverKind, Unsettled, entries, volume};
+use crate::{Error, Leftover, LeftoverKind, Unsettled, busy, entries, volume};
 
 /// 输出路径上现在的东西。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,7 +385,7 @@ fn cause_text(failure: Error) -> String {
 
 /// 把输出路径上的东西挪到挪开的名字上；已经不在了（检查之后被删掉）时为 false。
 fn move_aside(o: &PendingOutput) -> Result<bool, Error> {
-    match fs::rename(o.target(), o.aside()) {
+    match busy::retrying(|| fs::rename(o.target(), o.aside())) {
         Ok(()) => Ok(true),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(cause) => Err(io_error("挪开", o.target())(cause)),
@@ -400,9 +400,9 @@ fn install(from: &Path, to: &Path, kind: OutputKind, action: &'static str) -> Re
         OutputKind::Mp4 => match fs::hard_link(from, to) {
             Ok(()) => return Ok(true),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
-            Err(_) => fs::rename(from, to),
+            Err(_) => busy::retrying(|| fs::rename(from, to)),
         },
-        OutputKind::Hls => fs::rename(from, to),
+        OutputKind::Hls => busy::retrying(|| fs::rename(from, to)),
     };
     match renamed {
         Ok(()) => Ok(true),
@@ -413,10 +413,10 @@ fn install(from: &Path, to: &Path, kind: OutputKind, action: &'static str) -> Re
 
 /// 删掉文件或目录；已不存在的不算失败，根读不到时报错（见 [`volume::reachable`]）。
 fn remove(path: &Path, kind: OutputKind) -> Result<(), Error> {
-    let removed = match kind {
+    let removed = busy::retrying(|| match kind {
         OutputKind::Mp4 => fs::remove_file(path),
         OutputKind::Hls => fs::remove_dir_all(path),
-    };
+    });
     match removed {
         Ok(()) => Ok(()),
         Err(e) if is_absent(&e) => volume::reachable(path),

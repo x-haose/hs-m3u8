@@ -10,8 +10,9 @@
 //! - 源站给出没写完的内容：[`Error::Incomplete`]，可重试；
 //! - 说明出在哪里、看包着的原因：[`Error::Segment`]、[`Error::Key`]（哪个分片或 key）、[`Error::LiveStalled`]（直播
 //!   哪条轨停滞）、[`Error::Cleanup`]（失败后收拾也没做完，带残留列表）；
-//! - 读写文件：[`Error::Io`]、[`Error::VolumeUnavailable`]（盘不在、共享连不上，接上后再试）；合并 MP4：
-//!   [`Error::Remux`]；读操作系统的代理设置：[`Error::SystemProxy`]。都不可重试；
+//! - 读写文件：[`Error::Io`]（Windows 上别的进程一直开着文件时可重试，其余不可）、[`Error::VolumeUnavailable`]（盘
+//!   不在、共享连不上，接上后再试）；合并 MP4：[`Error::Remux`]；读操作系统的代理设置：[`Error::SystemProxy`]。除
+//!   注明的外都不可重试；
 //! - 任务目录：[`Error::WorkDir`]（按 [`WorkDirProblem`] 处理）、[`Error::NothingRecorded`]；
 //! - 调用方的回调出错：[`Error::Hook`]；[`Error::Cancelled`]。
 //!
@@ -102,6 +103,8 @@ pub enum Error {
     LiveStalled { track: usize, cause: StallError },
     #[error("{hook}回调出错：{cause}")]
     Hook { hook: HookKind, cause: HookError },
+    /// 读写文件 `path` 出错。Windows 上改名或删除时别的进程开着文件，先退避重试一小会儿，仍开着（如播放器开着要
+    /// 替换的输出）时可重试（见 [`Error::retryable`]）：关掉它再试
     #[error("{action} {} 失败：{cause}", .path.display())]
     Io {
         action: &'static str,
@@ -252,6 +255,7 @@ impl Error {
             Error::Segment { cause, .. } | Error::Key { cause, .. } => cause.retryable(),
             Error::Cleanup { failure, .. } => failure.retryable(),
             Error::LiveStalled { cause, .. } => cause.retryable(),
+            Error::Io { cause, .. } => crate::busy::held_open(cause),
             _ => false,
         }
     }
