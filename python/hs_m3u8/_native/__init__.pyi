@@ -941,9 +941,8 @@ class InvalidInputError(RequestError):
 @typing.final
 class Job:
     r"""
-    运行中的任务（`Engine.start`、`Engine.merge_recorded` 返回）。不再被引用、也没有在等它时（被回收）取消任务。异步
-    方法返回协程，在 asyncio 事件循环里 await（在别处驱动时抛
-    `RuntimeError`）。只能在建立它的进程里使用。
+    运行中的任务（`Engine.start`、`Engine.merge_recorded` 返回）。不再被引用、也没有在等它时（被回收）取消任务。异步方法
+    返回协程，在 asyncio 事件循环里 await（在别处驱动时抛 `RuntimeError`）。只能在建立它的进程里使用。
     """
     def progress(self) -> Progress:
         r"""
@@ -1896,8 +1895,8 @@ class Mp4Unsupported:
     @typing.final
     class NoKeyframe(Mp4Unsupported):
         r"""
-        这一组里这条轨的视频没有一个能开始解码的帧（关键帧；H.264 另认整帧都是 I slice 的帧）：各帧参考的帧都不在这一组
-        里，写进去解不出画面
+        这一组里这条轨的视频没有一个能开始解码的帧（关键帧；H.264 另认整帧都是 I slice 的帧）：各帧参考的帧都不在这
+        一组里，写进去解不出画面
         """
         __match_args__ = ("group", "track",)
         @property
@@ -2292,9 +2291,10 @@ class Proxy:
     @typing.final
     class System(Proxy):
         r"""
-        按系统代理设置：先看环境变量（规则同 curl，另认大写的 `HTTP_PROXY`；`no_proxy` 对系统设置的代理同样起作用），
-        没设代理时看 macOS 的系统设置或 Windows 的 Internet 选项，其他平台即直连。探测与开始任务时读取；值用不了（写错、
-        用了 PAC 等）时抛 `InvalidInputError`，读不出时抛 `SystemProxyError`，可改用 `Proxy.Direct()` 或 `Proxy.Url(...)`
+        按系统代理设置：先看环境变量（规则同 curl，另认大写的 `HTTP_PROXY`；`no_proxy` 对系统设置的代理同样起作
+        用），没设代理时看 macOS 的系统设置或 Windows 的 Internet 选项，其他平台即直连。探测与开始任务时读取；值用不
+        了（写错、用了 PAC 等）时抛 `InvalidInputError`，读不出时抛 `SystemProxyError`，可改用 `Proxy.Direct()` 或
+        `Proxy.Url(...)`
         """
         __match_args__ = ()
         def __new__(cls) -> Proxy.System: ...
@@ -3123,8 +3123,8 @@ class StreamReport:
     @property
     def skipped_before_keyframe(self) -> builtins.int:
         r"""
-        各组开头解不出、因而未写入的视频包数：第一个能开始解码的帧（关键帧；H.264 另认整帧都是 I slice 的帧）之前的包，
-        与参考上一个 GOP 的前导帧（HEVC 为 RASL；H.264 为解码在起点之后、呈现在它之前的帧）。音频为 0
+        各组开头解不出、因而未写入的视频包数：第一个能开始解码的帧（关键帧；H.264 另认整帧都是 I slice 的帧）之前的
+        包，与参考上一个 GOP 的前导帧（HEVC 为 RASL；H.264 为解码在起点之后、呈现在它之前的帧）。音频为 0
         """
     @property
     def discarded_corrupt_bytes(self) -> builtins.int:

@@ -50,8 +50,8 @@ async fn records_until_endlist() {
     );
 }
 
-/// 编码放不进 MP4（TS 里的 Opus 音频）：录到第一个分片就在进度里报出原因，录制照常进行（之后的分片照样录）；直播结束后合并
-/// MP4 时以同一个原因失败。
+/// 编码放不进 MP4（TS 里的 Opus 音频）：录到第一个分片就在进度里报出原因，录制照常进行（之后的分片照样录）；直播结束后
+/// 合并 MP4 时以同一个原因失败。
 #[tokio::test(flavor = "multi_thread")]
 async fn unsupported_codecs_show_in_progress_while_recording_goes_on() {
     let dir = test_dir("live_unsupported_codec");

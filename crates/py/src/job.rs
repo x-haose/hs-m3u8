@@ -17,9 +17,8 @@ use crate::error::to_pyerr;
 use crate::report::{Output, Progress};
 use crate::runtime::{self, Owned};
 
-/// 运行中的任务（`Engine.start`、`Engine.merge_recorded` 返回）。不再被引用、也没有在等它时（被回收）取消任务。异步
-/// 方法返回协程，在 asyncio 事件循环里 await（在别处驱动时抛
-/// `RuntimeError`）。只能在建立它的进程里使用。
+/// 运行中的任务（`Engine.start`、`Engine.merge_recorded` 返回）。不再被引用、也没有在等它时（被回收）取消任务。异步方法
+/// 返回协程，在 asyncio 事件循环里 await（在别处驱动时抛 `RuntimeError`）。只能在建立它的进程里使用。
 #[gen_stub_pyclass]
 #[pyclass(module = "hs_m3u8._native", frozen)]
 pub struct Job {

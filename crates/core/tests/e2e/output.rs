@@ -414,8 +414,8 @@ async fn live_holes_and_sessions_in_hls() {
     assert_output(&output, &expected_long(&dir, &[0, 2, 3], &[2, 1]));
 }
 
-/// 编码放不进 MP4（TS 里的 Opus 音频）：下了第一个分片、核对出来就报错，其余分片不下，任务目录保留；改为输出 HLS 后用同一个
-/// 默认任务目录接着下，已下的不重下。HLS 目录路径带结尾的分隔符也照常。
+/// 编码放不进 MP4（TS 里的 Opus 音频）：下了第一个分片、核对出来就报错，其余分片不下，任务目录保留；改为输出 HLS 后用同
+/// 一个默认任务目录接着下，已下的不重下。HLS 目录路径带结尾的分隔符也照常。
 #[tokio::test(flavor = "multi_thread")]
 async fn switching_to_hls_after_an_unsupported_codec_reuses_the_download() {
     let dir = test_dir("output_switch");

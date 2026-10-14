@@ -109,8 +109,8 @@ pub(crate) enum Config {
         config: Vec<u8>,
         decoded: Option<ffi::DecodedAac>,
     },
-    /// 参数随帧携带（TS 与打包音频）：音频以第 0 组第一个包的帧头为准逐包核对（见 [`crate::inband::Inband`]）；视频的参数集在关键帧
-    /// 前重复、解码器按带内的解码，只核对编码参数（宽高与像素格式，见 [`Shape`]）
+    /// 参数随帧携带（TS 与打包音频）：音频以第 0 组第一个包的帧头为准逐包核对（见 [`crate::inband::Inband`]）；视频的参
+    /// 数集在关键帧前重复、解码器按带内的解码，只核对编码参数（宽高与像素格式，见 [`Shape`]）
     Inband,
 }
 
