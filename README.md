@@ -89,7 +89,7 @@ uv run --no-sync python examples/download.py
 
 ## 用法（Rust，API 未定型）
 
-```rust
+```rust no_run
 use std::num::NonZeroUsize;
 
 use hs_m3u8_core::{Engine, JobRequest, OutputOptions, Source, Target, Url};

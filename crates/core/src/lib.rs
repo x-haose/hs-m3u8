@@ -13,6 +13,12 @@
 //! 独立的音频 rendition。
 
 mod blocking;
+
+/// README 里的 Rust 示例作为文档测试编译（标了 `no_run`：它要联网），接口改了而示例没跟上时编译失败。
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+struct ReadmeExamples;
+
 mod busy;
 mod cookies;
 mod crypto;

@@ -70,7 +70,8 @@ jobs:
         env:
           UV_PYTHON: "3.12"
 
-      # 检查项定义在 Makefile 的 rs_* 目标里。依赖图、许可证与覆盖率与平台无关，只在 Linux 上查
+      # 检查项定义在 Makefile 的 rs_* 目标里。依赖图、许可证、覆盖率与 Python 的检查与平台无关，只在 Linux 上查；
+      # 格式、clippy、文档与测试涉及各平台专属的代码（cfg 下的、sysproxy 的 macOS 与 Windows 实现），三个平台都查
       - name: 安装 cargo-deny 与 cargo-llvm-cov（Linux）
         if: runner.os == 'Linux'
         uses: taiki-e/install-action@v2
@@ -86,12 +87,12 @@ jobs:
         if: runner.os == 'Linux'
         run: make py_test VENV=.venv-latest UV_PYTHON=3.15
 
-      - name: 格式、clippy、测试（macOS）
+      - name: 格式、clippy、文档、测试（macOS）
         if: runner.os == 'macOS'
-        run: make rs_fmt rs_clippy rs_test py_test
+        run: make rs_fmt rs_clippy rs_doc rs_test py_test
 
       # Windows 的 make 只在 MSYS2 里，而 MSYS2 的 link.exe 会遮住 MSVC 的链接器，所以直接运行与 Makefile 的
-      # rs_fmt、rs_clippy、rs_test、py_test 相同的命令。每条命令单独一步：PowerShell 里一步跑几条命令时，只有最后一条的
+      # rs_fmt、rs_clippy、rs_doc、rs_test、py_test 相同的命令。每条命令单独一步：PowerShell 里一步跑几条命令时，只有最后一条的
       # 退出码算数
       - name: 格式（Windows）
         if: runner.os == 'Windows'
@@ -101,6 +102,13 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo clippy --workspace --all-targets -- -D warnings
         env:
+          PYO3_PYTHON: ${{ github.workspace }}\.venv\Scripts\python.exe
+
+      - name: 文档（Windows）
+        if: runner.os == 'Windows'
+        run: cargo doc --workspace --no-deps --document-private-items
+        env:
+          RUSTDOCFLAGS: "-D warnings"
           PYO3_PYTHON: ${{ github.workspace }}\.venv\Scripts\python.exe
 
       - name: 测试（Windows）
