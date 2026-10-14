@@ -1176,6 +1176,45 @@ fn leading_pictures_of_a_group_starting_with_cra_are_dropped() {
     );
 }
 
+/// 音频在这一片第 8.5 秒才出现：探测按声明的时长读完第一片，探测得出音频；声明的时长不够时（这里为 0，按 FFmpeg 的
+/// 默认值只探测 7 秒）报探测不出参数。
+#[test]
+fn probing_reads_through_the_declared_duration_of_the_first_segment() {
+    let dir = work_dir("probe_first_segment");
+    let output = dir.join("out.mp4");
+    let late = track("ts_audio_late_in_segment");
+
+    let report = remux(
+        &[Streams::All],
+        &[group([late.clone()])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
+
+    let kinds: Vec<StreamKind> = report.streams.iter().map(|s| s.shape.kind()).collect();
+    assert_eq!(kinds, [StreamKind::Video, StreamKind::Audio]);
+    let mut undeclared = late;
+    undeclared.segments[0].duration_us = 0;
+    let err = remux(
+        &[Streams::All],
+        &[group([undeclared])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::ParamsUnknown {
+                kind: StreamKind::Audio,
+                ..
+            })
+        ),
+        "{err:?}"
+    );
+}
+
 /// H.264 开放 GOP、不带 recovery point SEI：从第二片起每片以非 IDR 的 I 帧开头，FFmpeg 不给它打关键帧标志。以它开头
 /// 的组从这个 I 帧开始写，只去掉呈现在它之前、参考上一个 GOP 的帧，视频与音频一样长；这个 I 帧补上关键帧标志，MP4 的
 /// 同步样本表（stss，只有视频轨有）恰好列出它。

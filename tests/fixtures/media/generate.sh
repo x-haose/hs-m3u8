@@ -93,6 +93,12 @@ ts_segments ts_opus "${one_src[@]}" "${h264[@]}" -c:a libopus -b:a 48k
 # 音频晚 1.2 秒开始的 3 秒节目（MP3）：第一个分片里没有音频包，只看它探测不出音频的参数
 ts_segments ts_late_audio -f lavfi -i testsrc2=size=320x180:rate=25 -itsoffset 1.2 -f lavfi -i sine=frequency=440:sample_rate=48000 \
   -t 3 -map 0:v -map 1:a "${h264[@]}" -c:a libmp3lame -b:a 64k
+# 音频第 8.5 秒才出现的 10 秒单片（MP3）：FFmpeg 默认只探测 7 秒，要按声明的时长探测完整片才探测得出音频
+rm -rf -- "${DIR:?}/ts_audio_late_in_segment"
+mkdir -p "$DIR/ts_audio_late_in_segment"
+"${ff[@]}" -f lavfi -i testsrc2=size=160x90:rate=25 -itsoffset 8.5 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 10 \
+  -map 0:v -map 1:a -c:v libx264 -preset veryfast -g 25 -b:v 40k -pix_fmt yuv420p -c:a libmp3lame -b:a 32k -f mpegts \
+  "$DIR/ts_audio_late_in_segment/seg0.ts"
 # 只出现在 fMP4 里的编码：AV1 与 Opus、VP9 与 FLAC、H.264 与 ALAC
 read -r -a tiny_src <<< "$(source_args testsrc2 160x90 440 2)"
 fmp4_muxed fmp4_av1_opus "${tiny_src[@]}" -c:v libaom-av1 -cpu-used 8 -g 25 -b:v 100k -c:a libopus -b:a 48k

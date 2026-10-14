@@ -254,7 +254,8 @@ pub(crate) fn new_chain(
 }
 
 /// 打开输入时 FFmpeg 探测流参数最多读多少：至少读完第一个分片，探测不出的参数即第一个分片里没有（见
-/// [`crate::Unsupported::ParamsUnknown`]）。各流的参数都探测出后 FFmpeg 就停下，读不到这么多。
+/// [`crate::Unsupported::ParamsUnknown`]）。各流的参数都探测出后 FFmpeg 就停下；有流（含不进输出的，如节目列表里有、
+/// 第一个分片里却没有数据的另一路音频）一直探测不出时读到第一个分片结束，读过的包缓存在内存里，最多一个分片大小。
 pub(crate) struct Probe {
     /// 字节，不小于 FFmpeg 的默认值
     bytes: u64,
