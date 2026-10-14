@@ -2,9 +2,10 @@
 //! 等各轨的候选、核对内容见 [`super::deciding`]）。
 //!
 //! 一条轨的窗口与它最近一次有分片的会话重叠（身份与编号一致），且重叠的分片重新下载后与已存的逐字节相同，
-//! 才算接得上；编码器重启后序号与文件名都可能从头再来，只看文件名分不出是不是同一段内容。要录的各轨都接得上
-//! 各自最近的会话时，接着目录里最近的会话录：最近的会话就是它的轨补录没录完的分片，其余的轨跳过录过的序号
-//! 并入；否则另起一个会话，接得上的轨跳过录过的序号。
+//! 才算接得上；编码器重启后序号与文件名都可能从头再来，只看文件名分不出是不是同一段内容。要录的各轨里至少一条
+//! 接得上、其余的也都接得上或之前没录到时，接着目录里最近的会话录：最近的会话就是它的轨补录没录完的分片，其余的
+//! 轨跳过录过的序号并入；否则另起一个会话，接得上的轨跳过录过的序号。没有一条轨核对一致时，之前没录到的轨不知道
+//! 与哪段时间对得上，不并入旧会话。
 
 use std::collections::BTreeMap;
 
@@ -88,7 +89,7 @@ pub(super) enum Verdict {
     Matches,
     /// 没有重叠、有矛盾、内容不同，或重叠的分片都已取不到
     Differs,
-    /// 这条轨之前一个分片都没录到：没有可核对的，不阻挡接续，在定下的会话里从窗口起点录
+    /// 这条轨之前一个分片都没录到：没有可核对的，在定下的会话里从窗口起点录；另有要录的轨核对一致时不阻挡接续
     Unrecorded,
     /// 已录满 max_duration，这次不录，不影响判定
     Full,
@@ -197,9 +198,9 @@ impl Verdicts {
             .map(|v| v.expect("判定前各轨都已有结论"))
             .collect();
         let previous = self.previous_session;
-        let continued = verdicts.iter().all(|v| *v != Verdict::Differs);
         let recording = verdicts.iter().any(|v| v.records());
-        let verified = verdicts.contains(&Verdict::Matches);
+        let continued =
+            verdicts.contains(&Verdict::Matches) && !verdicts.contains(&Verdict::Differs);
         let session = if continued {
             previous
         } else {
@@ -207,7 +208,7 @@ impl Verdicts {
         };
         let new_url = if !recording {
             NewUrl::Keep
-        } else if continued && verified {
+        } else if continued {
             NewUrl::Adopt
         } else {
             NewUrl::Unverified
@@ -229,5 +230,82 @@ impl Verdicts {
             new_url,
             tracks,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ident::Fingerprint;
+
+    /// 第 `session` 个会话里从窗口起点录的、序号为 `sequences` 的分片。
+    fn recorded(session: u32, sequences: &[u64]) -> LatestSession {
+        let segments = sequences
+            .iter()
+            .map(|&sequence| {
+                let name = SegmentName {
+                    session,
+                    start: SessionStart::Fresh,
+                    sequence,
+                    discontinuity: 0,
+                    init: None,
+                    duration_us: 1_000_000,
+                    id: Fingerprint::of_content(&sequence.to_be_bytes()),
+                };
+                (sequence, name)
+            })
+            .collect();
+        LatestSession {
+            session,
+            segments,
+            start: SessionStart::Fresh,
+        }
+    }
+
+    /// 视频（第 0 条轨）在会话 3 录过、音频（第 1 条轨）一个分片都没录到，判定结论为 `video` 与 `audio` 时的结果。
+    fn decide(video: Verdict, audio: Verdict) -> Decision {
+        let mut verdicts = Verdicts {
+            previous_session: 3,
+            recorded: vec![Some(recorded(3, &[10, 11])), None],
+            verdicts: vec![None, None],
+        };
+        verdicts.conclude(0, video);
+        verdicts.conclude(1, audio);
+        verdicts.decide().unwrap()
+    }
+
+    #[test]
+    fn a_track_recorded_before_continues_only_when_some_track_matches() {
+        // 视频已录满：没有一条轨核对一致，音频不知道与旧会话哪段时间对得上，另起会话
+        let full = decide(Verdict::Full, Verdict::Unrecorded);
+        assert_eq!(full.session, 4);
+        assert!(matches!(
+            full.tracks[..],
+            [None, Some(Start::New(SessionStart::Fresh))]
+        ));
+        assert_eq!(full.new_url, NewUrl::Unverified);
+
+        // 视频核对一致：接着会话 3，音频从窗口起点并入
+        let matched = decide(Verdict::Matches, Verdict::Unrecorded);
+        assert_eq!(matched.session, 3);
+        assert!(matches!(
+            matched.tracks[..],
+            [
+                Some(Start::Continue(_)),
+                Some(Start::New(SessionStart::Fresh))
+            ]
+        ));
+        assert_eq!(matched.new_url, NewUrl::Adopt);
+
+        // 视频接不上：另起会话，视频从窗口起点录
+        let differs = decide(Verdict::Differs, Verdict::Unrecorded);
+        assert_eq!(differs.session, 4);
+        assert!(matches!(
+            differs.tracks[..],
+            [
+                Some(Start::New(SessionStart::Fresh)),
+                Some(Start::New(SessionStart::Fresh))
+            ]
+        ));
     }
 }
