@@ -137,10 +137,22 @@ pub(crate) fn set_codec_tag(ost: &mut StreamMut<'_>, id: codec::Id) {
     }
 }
 
-/// 装了中断回调的输出。字段按声明的顺序析构：上下文先于回调持有的闭包释放。
+/// 装了中断回调的输出。关闭文件时 FFmpeg 刷出缓冲还会调用回调：析构时先关闭文件（见 [`Drop`] 的实现），再释放上下文，
+/// 最后释放回调持有的闭包（字段按声明的顺序析构）。从输出流取得的 ffmpeg-next 对象（如流参数）持有上下文的引用，会让
+/// 上下文晚于本结构释放，所以文件不能留给上下文的析构去关。
 pub(crate) struct OutputFile {
     pub(crate) octx: format::context::Output,
     _interrupt: InterruptGuard,
+}
+
+impl Drop for OutputFile {
+    fn drop(&mut self) {
+        // SAFETY: 上下文在 octx 存活期间有效；pb 为本结构用 avio_open2 打开的读写上下文或空，avio_closep 关闭后置空，
+        // 之后上下文析构时的 avio_close(NULL) 什么也不做。关闭时刷出缓冲会调用的中断回调此时仍由 _interrupt 持有。
+        unsafe {
+            ffmpeg::ffi::avio_closep(&raw mut (*self.octx.as_mut_ptr()).pb);
+        }
+    }
 }
 
 /// 打开输出时失败的一步。
@@ -170,8 +182,8 @@ pub(crate) fn open_output(path: &str, cancel: &Cancel) -> Result<OutputFile, Ope
     if created < 0 {
         return Err(OpenFailure::Muxer(ffmpeg::Error::from(created)));
     }
-    // SAFETY: ctx 非空、归本函数所有；装上的回调的闭包由 interrupt.guard 持有，guard 与上下文一同放进 OutputFile，
-    // 上下文先释放。avio_open2 失败时 pb 仍为空，释放上下文即可。
+    // SAFETY: ctx 非空、归本函数所有；装上的回调的闭包由 interrupt.guard 持有，guard 与上下文一同放进 OutputFile，文件
+    // 在回调之前关闭（见 OutputFile）。avio_open2 失败时 pb 仍为空，释放上下文即可。
     unsafe {
         (*ctx).interrupt_callback = interrupt.interrupt;
         let opened = ffmpeg::ffi::avio_open2(
