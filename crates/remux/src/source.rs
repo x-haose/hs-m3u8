@@ -2,12 +2,14 @@
 
 use std::collections::VecDeque;
 
-use ffmpeg::{Packet, Rational, Rescale};
+use ffmpeg::{Packet, Rational, Rescale, codec};
 use ffmpeg_next as ffmpeg;
 
+use crate::compare::Config;
 use crate::group::Selected;
 use crate::inband::{Inband, Mismatch};
 use crate::input::Input;
+use crate::nal::{self, Framing};
 use crate::timing::MICROS;
 use crate::{Error, StreamKind, Unsupported, ffi};
 
@@ -41,7 +43,9 @@ pub(crate) struct Source {
     pub(crate) inband: Vec<Option<Inband>>,
     /// 按输入流下标
     pub(crate) dropped: Vec<Dropped>,
-    /// 按输入流下标：视频流在这一组里读到的第一个关键帧的 PTS（没有 PTS 时为 DTS），还没读到时为 None
+    /// 按输入流下标：进输出的视频流的编码与包里 NAL 单元的排法（H.264、HEVC 才有，见 [`Source::decodable`]）
+    video: Vec<Option<(codec::Id, Option<Framing>)>>,
+    /// 按输入流下标：视频流在这一组里读到的第一个能开始解码的帧的 PTS（没有 PTS 时为 DTS），还没读到时为 None
     keyframe_pts: Vec<Option<i64>>,
     /// 按输入流下标：上一个要写出的包所在的分片与它的 DTS（微秒），见 [`Source::check_advance`]
     last_written: Vec<Option<(usize, i64)>>,
@@ -66,12 +70,24 @@ impl Source {
         let streams = input.context().nb_streams() as usize;
         let mut map = vec![None; streams];
         let mut inband = vec![None; streams];
+        let mut video = vec![None; streams];
         for (s, &output) in selected.iter().zip(outputs) {
+            let kind = s.desc.shape.kind();
             map[s.index] = Some(Mapping {
                 output,
-                kind: s.desc.shape.kind(),
+                kind,
                 time_base: s.time_base,
             });
+            if kind == StreamKind::Video {
+                let framing = match (&s.desc.config, s.id) {
+                    (Config::Inband, _) => Some(Framing::AnnexB),
+                    (Config::Init(config), codec::Id::H264 | codec::Id::HEVC) => {
+                        Framing::of_config(config, s.id == codec::Id::HEVC)
+                    }
+                    _ => None,
+                };
+                video[s.index] = Some((s.id, framing));
+            }
             if input.standalone() {
                 inband[s.index] = Some(match references.get(output).cloned().flatten() {
                     Some(reference) => reference.for_next_group(),
@@ -86,6 +102,7 @@ impl Source {
             map,
             inband,
             dropped: vec![Dropped::default(); streams],
+            video,
             keyframe_pts: vec![None; streams],
             last_written: vec![None; streams],
             queue: VecDeque::new(),
@@ -115,7 +132,7 @@ impl Source {
                 self.dropped[packet.stream()].without_dts += 1;
                 continue;
             }
-            if mapping.kind == StreamKind::Video && !self.decodable(&packet) {
+            if mapping.kind == StreamKind::Video && !self.decodable(&mut packet) {
                 self.dropped[packet.stream()].before_keyframe += 1;
                 continue;
             }
@@ -200,19 +217,32 @@ impl Source {
         }
     }
 
-    /// 带 DTS 的视频包在这一组里解得出：从这一组第一个关键帧起，除去呈现时刻早于这个关键帧的前导帧（开放 GOP 里参考
-    /// 上一个 GOP 的帧，如 HEVC 的 RASL）。第一个关键帧之前的包与前导帧参考的帧不在这一组里：第 0 组之前什么也没有，
-    /// 其余组之前是不连续处另一段内容的帧。
-    fn decodable(&mut self, packet: &Packet) -> bool {
+    /// 带 DTS 的视频包在这一组里解得出：从这一组第一个能开始解码的帧起（FFmpeg 标的关键帧；H.264 另认整帧都是 I slice
+    /// 的帧，FFmpeg 不给不带 recovery point SEI 的非 IDR I 帧打标志，见 [`crate::nal`]），除去参考上一个 GOP 的前导帧
+    /// （HEVC 按 NAL 类型只去掉 RASL；H.264 没有这样的标记，解码在起点之后、呈现在它之前的帧一律去掉）。之前的帧参考的
+    /// 帧不在这一组里：第 0 组之前什么也没有，其余组之前是不连续处另一段内容的帧。认作起点而 FFmpeg 没标关键帧的包补上
+    /// 标志：写进 MP4 的同步样本表，播放器从它开始解码。
+    fn decodable(&mut self, packet: &mut Packet) -> bool {
+        let stream = packet.stream();
+        let (id, framing) = self.video[stream].expect("只对进输出的视频流调用");
         let pts = packet.pts().or(packet.dts()).expect("调用方已确认带 DTS");
-        let key = &mut self.keyframe_pts[packet.stream()];
-        match *key {
-            Some(key) => pts >= key,
-            None if packet.is_key() => {
-                *key = Some(pts);
+        let data = packet.data().unwrap_or_default();
+        match self.keyframe_pts[stream] {
+            Some(key) if pts >= key => true,
+            Some(_) => match (id, framing) {
+                (codec::Id::HEVC, Some(framing)) => !nal::hevc_rasl(data, framing),
+                _ => false,
+            },
+            None => {
+                let intra = id == codec::Id::H264
+                    && framing.is_some_and(|framing| nal::h264_intra(data, framing));
+                if !packet.is_key() && !intra {
+                    return false;
+                }
+                self.keyframe_pts[stream] = Some(pts);
+                packet.set_flags(packet.flags() | ffmpeg::packet::Flags::KEY);
                 true
             }
-            None => false,
         }
     }
 
@@ -243,19 +273,48 @@ impl Source {
         }
     }
 
-    /// 读到每路映射流都至少有一个包排队（或读到末尾），用于确定本组各流的首个 DTS 与最早的 PTS。
+    /// 读到每路映射流都有包排队、视频流另有一个呈现不早于起点的包（或读到末尾），用于确定本组各流的首个 DTS 与最早的
+    /// PTS：紧跟起点、呈现在它之前的前导帧（如 HEVC 的 RADL）都要算进最早的 PTS，否则平移后落在 0 之前，被编辑列表裁掉。
+    /// 读到末尾而有视频流一个能开始解码的帧都没有时报 [`Unsupported::NoKeyframe`]。
     pub(crate) fn prime(&mut self) -> Result<(), Error> {
-        let mapped: Vec<usize> = self.map.iter().flatten().map(|m| m.output).collect();
-        while !self.finished
-            && !mapped
-                .iter()
-                .all(|&out| self.queue.iter().any(|(_, m)| m.output == out))
-        {
+        let mapped: Vec<Mapping> = self.map.iter().flatten().copied().collect();
+        while !self.finished && !mapped.iter().all(|m| self.primed(m)) {
             if let Some(item) = self.read_next()? {
                 self.queue.push_back(item);
             }
         }
+        // 读完了这一组，视频一个能开始解码的帧都没有（各包都按解不出丢掉了）
+        let undecodable = self.map.iter().enumerate().any(|(index, mapping)| {
+            mapping.is_some_and(|m| {
+                m.kind == StreamKind::Video
+                    && self.dropped[index].before_keyframe > 0
+                    && !self
+                        .queue
+                        .iter()
+                        .any(|(_, queued)| queued.output == m.output)
+            })
+        });
+        if undecodable {
+            return Err(Error::Unsupported(Unsupported::NoKeyframe {
+                group: self.group,
+                track: self.track,
+            }));
+        }
         Ok(())
+    }
+
+    /// 一路流已读到足以确定本组起点的包（见 [`Source::prime`]）。
+    fn primed(&self, mapping: &Mapping) -> bool {
+        let mut pts = self
+            .queue
+            .iter()
+            .filter(|(_, m)| m.output == mapping.output)
+            .map(|(packet, _)| packet.pts().or(packet.dts()));
+        match pts.next() {
+            None => false,
+            Some(_) if mapping.kind != StreamKind::Video => true,
+            Some(first) => pts.any(|pts| pts >= first),
+        }
     }
 
     /// 队首的包对齐回绕后的 DTS，微秒。

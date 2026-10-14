@@ -1894,6 +1894,25 @@ class Mp4Unsupported:
         def __new__(cls, *, group: builtins.int, track: builtins.int, kind: StreamKind, segment: builtins.int, jump: datetime.timedelta) -> Mp4Unsupported.TimestampJump: ...
     
     @typing.final
+    class NoKeyframe(Mp4Unsupported):
+        r"""
+        这一组里这条轨的视频没有一个能开始解码的帧（关键帧；H.264 另认整帧都是 I slice 的帧）：各帧参考的帧都不在这一组
+        里，写进去解不出画面
+        """
+        __match_args__ = ("group", "track",)
+        @property
+        def group(self) -> builtins.int:
+            r"""
+            第几个不连续段组
+            """
+        @property
+        def track(self) -> builtins.int:
+            r"""
+            第几条轨
+            """
+        def __new__(cls, *, group: builtins.int, track: builtins.int) -> Mp4Unsupported.NoKeyframe: ...
+    
+    @typing.final
     class UntimedPackedAudio(Mp4Unsupported):
         r"""
         这条轨是打包音频，这一组有分片没有 ID3 时间戳，而这一组还有别的轨：不知道怎样与它们对齐
@@ -1928,7 +1947,7 @@ class Mp4UnsupportedError(RequestError):
     第一个分片判断不了的，合并时读到才报。
     """
     @property
-    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.Mp3SampleRate | Mp4Unsupported.ParamsUnknown | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ConfigChanged | Mp4Unsupported.StreamChangedInGroup | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.FormatChangedInGroup | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.TimestampJump | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
+    def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.Mp3SampleRate | Mp4Unsupported.ParamsUnknown | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ConfigChanged | Mp4Unsupported.StreamChangedInGroup | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.FormatChangedInGroup | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.TimestampJump | Mp4Unsupported.NoKeyframe | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams:
         r"""
         放不进的原因
         """
@@ -2249,7 +2268,7 @@ class Progress:
         一直失败到停滞时任务以 `LiveStalledError` 结束。点播与录制开始前为空
         """
     @property
-    def mp4_unsupported(self) -> typing.Optional[Mp4Unsupported.Codec | Mp4Unsupported.Mp3SampleRate | Mp4Unsupported.ParamsUnknown | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ConfigChanged | Mp4Unsupported.StreamChangedInGroup | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.FormatChangedInGroup | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.TimestampJump | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams]:
+    def mp4_unsupported(self) -> typing.Optional[Mp4Unsupported.Codec | Mp4Unsupported.Mp3SampleRate | Mp4Unsupported.ParamsUnknown | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ConfigChanged | Mp4Unsupported.StreamChangedInGroup | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.FormatChangedInGroup | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.TimestampJump | Mp4Unsupported.NoKeyframe | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams]:
         r"""
         直播且输出含 MP4：录到的内容放不进 MP4 的原因。续录时任务目录里已录齐的组在开始后核对一次，之后每个（会话,
         不连续段）组在各轨都有分片时核对（录制循环结束、收尾时才下完的不核对）；第 0 组开头的分片判断不了时，各组
@@ -3104,8 +3123,8 @@ class StreamReport:
     @property
     def skipped_before_keyframe(self) -> builtins.int:
         r"""
-        各组开头解不出、因而未写入的视频包数：第一个关键帧之前的包，与呈现时刻早于它的前导帧（开放 GOP 里参考上一个
-        GOP 的帧，如 HEVC 的 RASL）。与 FFmpeg 流复制的默认行为一致；音频为 0
+        各组开头解不出、因而未写入的视频包数：第一个能开始解码的帧（关键帧；H.264 另认整帧都是 I slice 的帧）之前的包，
+        与参考上一个 GOP 的前导帧（HEVC 为 RASL；H.264 为解码在起点之后、呈现在它之前的帧）。音频为 0
         """
     @property
     def discarded_corrupt_bytes(self) -> builtins.int:

@@ -163,6 +163,23 @@ change_enc=(-c:v libx264 -preset veryfast -bf 0 -g 10 -b:v 150k "${aac[@]}" -f m
 "${ff[@]}" -f lavfi -i testsrc2=size=160x90:rate=10 -f lavfi -i sine=frequency=440:sample_rate=44100 -t 1 \
   -output_ts_offset 1.1 "${change_enc[@]}" "$DIR/ts_param_change/seg1.ts"
 
+# H.264 开放 GOP、去掉 SEI（没有 recovery point）：4 秒按 1 秒切成 4 片，第二片起以非 IDR 的 I 帧开头，FFmpeg 不给它打
+# 关键帧标志；每帧都带参数集
+read -r -a four_src <<< "$(source_args testsrc2 320x180 440 4)"
+ts_segments ts_h264_open_gop "${four_src[@]}" -c:v libx264 -preset veryfast -x264-params open-gop=1:ref=3:keyint=25:scenecut=0 \
+  -pix_fmt yuv420p -b:v 150k -bsf:v filter_units=remove_types=6,dump_extra=freq=all "${aac[@]}"
+# HEVC 闭合 GOP 带 RADL：2 秒按 1 秒切成两片，第二片以 IDR_W_RADL 开头，紧跟两帧解得出的前导帧（RADL）
+ts_segments ts_hevc_radl -f lavfi -i testsrc2=size=320x180:rate=25 -t 2 -c:v libx265 -preset veryfast \
+  -x265-params log-level=error:open-gop=0:bframes=3:radl=2:keyint=25:min-keyint=25:scenecut=0 -pix_fmt yuv420p -b:v 150k -an
+# 长 GOP（只有开头一个 IDR）、每帧都带参数集的 H.264 按字节切成两半：后一半参数探测得出，却没有能开始解码的帧
+rm -rf -- "${DIR:?}/ts_long_gop"
+mkdir -p "$DIR/ts_long_gop"
+"${ff[@]}" -f lavfi -i testsrc2=size=160x90:rate=25 -t 4 -c:v libx264 -preset veryfast -x264-params keyint=250:scenecut=0 \
+  -flags:v +global_header -pix_fmt yuv420p -b:v 100k -bsf:v dump_extra=freq=all -an -f mpegts "$TMP/long_gop.ts"
+half=$(( ($(wc -c < "$TMP/long_gop.ts") / 188 + 1) / 2 ))
+dd if="$TMP/long_gop.ts" of="$DIR/ts_long_gop/seg0.ts" bs=188 count="$half" 2>/dev/null
+dd if="$TMP/long_gop.ts" of="$DIR/ts_long_gop/seg1.ts" bs=188 skip="$half" 2>/dev/null
+
 # 组内时间戳往前跳（来源在时间戳重新开始处漏标 EXT-X-DISCONTINUITY）：两个各 1 秒的分片，第二个晚 1000 秒开始
 rm -rf -- "${DIR:?}/ts_jump"
 mkdir -p "$DIR/ts_jump"

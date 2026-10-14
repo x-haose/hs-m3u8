@@ -1176,6 +1176,114 @@ fn leading_pictures_of_a_group_starting_with_cra_are_dropped() {
     );
 }
 
+/// H.264 开放 GOP、不带 recovery point SEI：从第二片起每片以非 IDR 的 I 帧开头，FFmpeg 不给它打关键帧标志。以它开头
+/// 的组从这个 I 帧开始写，只去掉呈现在它之前、参考上一个 GOP 的帧，视频与音频一样长；这个 I 帧补上关键帧标志，MP4 的
+/// 同步样本表（stss，只有视频轨有）恰好列出它。
+#[test]
+fn an_h264_open_gop_without_recovery_points_starts_at_its_intra_frame() {
+    let dir = work_dir("h264_open_gop");
+    let output = dir.join("out.mp4");
+    let gop = track("ts_h264_open_gop");
+    let later = TrackSegments {
+        segments: gop.segments[1..].to_vec(),
+        ..gop.clone()
+    };
+    let (v_in, a_in) = timelines(&concat_track(&later, &dir, "later.ts"));
+    let leading = v_in.iter().skip(1).filter(|p| p.0 < v_in[0].0).count();
+
+    let report = remux(
+        &[Streams::All],
+        &[group([later])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
+
+    let video = &report.streams[0];
+    assert_eq!(video.skipped_before_keyframe, leading as u64, "{video:?}");
+    assert_eq!(video.packets, (v_in.len() - leading) as u64);
+    let v_out = timelines(&output).0;
+    assert!(
+        (span(&v_out) - span(&a_in)).abs() < 0.2,
+        "视频 {} 秒，音频 {} 秒",
+        span(&v_out),
+        span(&a_in)
+    );
+    // stss：版本与标志 4 字节、条目数 1、第 1 个样本
+    let data = std::fs::read(&output).unwrap();
+    let at = data
+        .windows(4)
+        .position(|w| w == b"stss")
+        .expect("视频轨应有同步样本表");
+    assert_eq!(
+        &data[at + 4..at + 16],
+        &[0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1]
+    );
+}
+
+/// HEVC 闭合 GOP 的组以 IDR_W_RADL 开头，后面呈现在它之前的 RADL 只参考本 GOP、解得出：照常写入，一帧不丢。
+#[test]
+fn hevc_radl_pictures_at_the_start_of_a_group_are_kept() {
+    let dir = work_dir("hevc_radl");
+    let output = dir.join("out.mp4");
+    let radl = track("ts_hevc_radl");
+    let second = TrackSegments {
+        segments: radl.segments[1..].to_vec(),
+        ..radl.clone()
+    };
+    let v_in = timelines(&concat_track(&second, &dir, "second.ts")).0;
+    assert!(
+        v_in.iter().skip(1).any(|p| p.0 < v_in[0].0),
+        "样本的第二片应以带前导帧的 IDR 开头"
+    );
+
+    let report = remux(
+        &[Streams::All],
+        &[group([second])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
+
+    let video = &report.streams[0];
+    assert_eq!(
+        (video.packets, video.skipped_before_keyframe),
+        (v_in.len() as u64, 0)
+    );
+    let (packets, rejected, frames) = decode_video(&output);
+    assert_eq!((packets, rejected, frames), (packets, 0, packets));
+}
+
+/// 一组里视频一个能开始解码的帧都没有（长 GOP 按字节切开的后一半）：报 NoKeyframe，不静默写出一段没有画面的视频。
+/// 下载前核对只拿到开头的分片，判断不了，不报。
+#[test]
+fn a_group_without_any_decodable_video_frame_is_rejected() {
+    let dir = work_dir("no_keyframe");
+    let output = dir.join("out.mp4");
+    let gop = track("ts_long_gop");
+    let tail = TrackSegments {
+        segments: gop.segments[1..].to_vec(),
+        ..gop
+    };
+
+    let err = remux(
+        &[Streams::All],
+        &[group([tail.clone()])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::NoKeyframe { group: 0, track: 0 })
+        ),
+        "{err:?}"
+    );
+    check(&[Streams::All], &[group([tail])]).unwrap();
+}
+
 /// 缺了一片、音频 PES 跨在缺片处的 TS：只丢缺片处拼坏的音频包并计数，其余照常合并；视频不丢。
 #[test]
 fn audio_damaged_at_a_missing_segment_is_dropped_and_counted() {

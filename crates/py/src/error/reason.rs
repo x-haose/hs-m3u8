@@ -359,6 +359,15 @@ variants! {
             /// 空档的长度：与这路流上一个包的时间戳之差，减去其间整片都没有这路流的包的那几片声明的时长
             jump: Duration,
         },
+        /// 这一组里这条轨的视频没有一个能开始解码的帧（关键帧；H.264 另认整帧都是 I slice 的帧）：各帧参考的帧都不在这一组
+        /// 里，写进去解不出画面
+        #[pyo3(constructor = (*, group, track))]
+        NoKeyframe {
+            /// 第几个不连续段组
+            group: usize,
+            /// 第几条轨
+            track: usize,
+        },
         /// 这条轨是打包音频，这一组有分片没有 ID3 时间戳，而这一组还有别的轨：不知道怎样与它们对齐
         #[pyo3(constructor = (*, group, track))]
         UntimedPackedAudio {
@@ -637,6 +646,7 @@ impl From<core::Mp4Unsupported> for Mp4Unsupported {
                 segment,
                 jump: Duration::from_micros(jump_us),
             },
+            U::NoKeyframe { group, track } => Mp4Unsupported::NoKeyframe { group, track },
             U::UntimedPackedAudio { group, track } => {
                 Mp4Unsupported::UntimedPackedAudio { group, track }
             }

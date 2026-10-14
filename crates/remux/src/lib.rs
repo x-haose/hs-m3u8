@@ -19,6 +19,7 @@
 //! 输出写完回读核对每路流的包数并落盘；失败或取消（见 [`Cancel`]）时输出上可能留有写了一半的文件。输出要么完整、要么
 //! 不存在由调用方写到临时路径、成功后改名、失败时删除来保证。错误信息已包含原因，不经 `source()` 重复给出。
 
+mod bits;
 mod chain;
 mod codecs;
 mod compare;
@@ -29,6 +30,7 @@ mod frame;
 mod group;
 mod inband;
 mod input;
+mod nal;
 mod packed;
 mod source;
 pub mod standalone;
@@ -172,8 +174,8 @@ pub struct StreamReport {
     pub packets: u64,
     /// 输入中没有 DTS、因而未写入的包数
     pub skipped_without_dts: u64,
-    /// 各组开头解不出、因而未写入的视频包数：第一个关键帧之前的包，与呈现时刻早于它的前导帧（开放 GOP 里参考上一个
-    /// GOP 的帧，如 HEVC 的 RASL）。与 FFmpeg 流复制的默认行为一致；音频为 0
+    /// 各组开头解不出、因而未写入的视频包数：第一个能开始解码的帧（关键帧；H.264 另认整帧都是 I slice 的帧）之前的包，
+    /// 与参考上一个 GOP 的前导帧（HEVC 为 RASL；H.264 为解码在起点之后、呈现在它之前的帧）。音频为 0
     pub skipped_before_keyframe: u64,
     /// 损坏而没有写入的音频字节数：TS 里读不出帧头或帧长与包长对不上的包（来源丢了 TS 包，或缺片处 PES 不完整，拼出
     /// 的包），打包音频里切帧时跳过的不完整的帧或标签、认不出的字节，以及片内损坏之后定不了时刻（这一片是最后一片，
@@ -239,8 +241,8 @@ pub fn remux(
 /// 各轨的输入、读到每路流的第一个包，核对编码受支持，同类流不来自两条轨，各组的流种类、编码参数与解码配置与第 0 组
 /// 相同，给出的分片有时间戳（打包音频与别的轨同组时），E-AC-3 的帧结构。
 ///
-/// 只靠开头的分片判断不了的不报，留给合并：FFmpeg 打不开（如只有一两帧的 MP3）或探测不出参数（如开头没有这路流的包）
-/// 的组跳过；第 0 组判断不了时，其余各组只核对自身（编码、E-AC-3 的帧结构等），不与第 0 组比较。通过不保证合并成功：
+/// 只靠开头的分片判断不了的不报，留给合并：FFmpeg 打不开（如只有一两帧的 MP3）、探测不出参数（如开头没有这路流的包）
+/// 或开头的分片里没有能开始解码的视频帧的组跳过；第 0 组判断不了时，其余各组只核对自身（编码、E-AC-3 的帧结构等），不与第 0 组比较。通过不保证合并成功：
 /// 组内中途的变化、后面的分片缺时间戳、时间戳不递增等要读到才知道。
 ///
 /// `groups` 的各项为报错时用的组号（合并时这一组的下标）与这一组，按合并的顺序，第一项为第 0 组：可以只核对其中几组，
@@ -249,27 +251,25 @@ pub fn check(streams: &[Streams], groups: &[(usize, &DiscontinuityGroup)]) -> Re
     init()?;
     validate(streams, groups)?;
     let cancel = Cancel::never();
-    let first = match judgeable(open_group(streams, groups[0], None, &cancel))? {
-        Some(first) => {
+    let first = judgeable(
+        open_group(streams, groups[0], None, &cancel).and_then(|first| {
             let layout = layout_of(&first)?;
             let outputs = layout.iter().map(Vec::len).sum();
             let references = references_of(&primed(groups[0].0, first, &layout, &[])?, outputs);
-            Some((layout, references))
-        }
-        None => None,
-    };
+            Ok((layout, references))
+        }),
+    )?;
     for &numbered in &groups[1..] {
         let layout = first.as_ref().map(|(layout, _)| layout.as_slice());
-        let Some(opened) = judgeable(open_group(streams, numbered, layout, &cancel))? else {
-            continue;
-        };
-        match &first {
-            Some((layout, references)) => primed(numbered.0, opened, layout, references)?,
-            None => {
-                let own = layout_of(&opened)?;
-                primed(numbered.0, opened, &own, &[])?
-            }
-        };
+        judgeable(open_group(streams, numbered, layout, &cancel).and_then(
+            |opened| match &first {
+                Some((layout, references)) => primed(numbered.0, opened, layout, references),
+                None => {
+                    let own = layout_of(&opened)?;
+                    primed(numbered.0, opened, &own, &[])
+                }
+            },
+        ))?;
     }
     Ok(())
 }
@@ -281,9 +281,10 @@ pub(crate) type Numbered<'a> = (usize, &'a DiscontinuityGroup);
 fn judgeable<T>(result: Result<T, Error>) -> Result<Option<T>, Error> {
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(Error::OpenInput { .. } | Error::Unsupported(Unsupported::ParamsUnknown { .. })) => {
-            Ok(None)
-        }
+        Err(
+            Error::OpenInput { .. }
+            | Error::Unsupported(Unsupported::ParamsUnknown { .. } | Unsupported::NoKeyframe { .. }),
+        ) => Ok(None),
         Err(e) => Err(e),
     }
 }
