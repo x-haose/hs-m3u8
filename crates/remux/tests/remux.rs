@@ -301,10 +301,8 @@ fn ts_single_group_copies_every_packet_from_zero_with_moov_first() {
         .chain(&a_out)
         .map(|p| p.0)
         .fold(f64::INFINITY, f64::min);
-    assert!(
-        (0.0..0.1).contains(&start),
-        "输出应从 0 附近开始，实际 {start}"
-    );
+    // 有 B 帧的视频首个 DTS 早于 PTS：最早的呈现时刻仍是 0（误差在一个输出时间基 tick 内），开头不留空白
+    assert!(start.abs() < 1e-4, "输出应从 0 开始，实际 {start}");
 
     let boxes = top_level_boxes(&output);
     let pos = |name: &[u8; 4]| boxes.iter().position(|b| b == name).unwrap();

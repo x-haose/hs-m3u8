@@ -38,10 +38,10 @@ fn wrap_shift_us(distance_us: i64) -> i64 {
 
 /// 本组的时间偏移（微秒），取两个下限中较大者：
 /// - 呈现：本组最早的 PTS 不早于此前所有流的最晚结束时刻（第 0 组为 0）；
-/// - 解码：每路流本组首个 DTS 严格大于该流上一组的末个 DTS，多加 `margin_us` 吸收换到输出时间基时的舍入；
-///   此前没写过包的流，DTS 不小于 0。
+/// - 解码：每路流本组首个 DTS 严格大于该流上一组的末个 DTS，多加 `margin_us` 吸收换到输出时间基时的舍入。
 ///
 /// 整组共用这一个偏移，组内各轨的相对时序保持原样；按呈现而非 DTS 对齐，避免 B 帧的解码提前量在每个组边界留下空隙。
+/// 有 B 帧的流首个 DTS 早于它的 PTS，第 0 组平移后为负：MP4 封装器把它写成编辑列表的 media_time，呈现仍从 0 开始。
 pub(crate) fn group_offset(
     ends_us: &[Option<i64>],
     last_dts_us: &[Option<i64>],
@@ -53,11 +53,7 @@ pub(crate) fn group_offset(
     let decode = last_dts_us
         .iter()
         .zip(first_dts_us)
-        .filter_map(|(last, first)| match (last, first) {
-            (Some(last), Some(first)) => Some(last - first + margin_us),
-            (None, Some(first)) => Some(-first),
-            (_, None) => None,
-        })
+        .filter_map(|(&last, &first)| Some(last? - first? + margin_us))
         .max();
     decode.map_or(presentation, |d| presentation.max(d))
 }
