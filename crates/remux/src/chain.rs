@@ -9,8 +9,18 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// 读取中遇到的文件错误：FFmpeg 只拿到错误码，这里留下路径与原始错误供调用方报告。
-pub(crate) type Failure = Arc<Mutex<Option<(PathBuf, io::Error)>>>;
+use crate::Cancel;
+
+/// 读取中止的原因：FFmpeg 只拿到错误码，这里留下供调用方报告。
+pub(crate) enum Stopped {
+    /// 读文件出错：路径与原始错误
+    File(PathBuf, io::Error),
+    /// 调用方取消了
+    Cancelled,
+}
+
+/// 第一次读取中止的原因（见 [`Stopped`]）。
+pub(crate) type Failure = Arc<Mutex<Option<Stopped>>>;
 
 pub(crate) struct SegmentChain {
     /// 各段所在的文件
@@ -23,12 +33,15 @@ pub(crate) struct SegmentChain {
     /// 当前打开的文件：(段的下标, 文件, 在段内的读写位置)
     open: Option<(usize, File, u64)>,
     failure: Failure,
+    cancel: Cancel,
 }
 
 impl SegmentChain {
     /// 按顺序串起各段，每段为文件与其中要读的字节区间；不打开文件。各段长度之和超出 64 位整数范围时报那一段的文件。
+    /// `cancel` 取消后读取失败（见 [`Stopped::Cancelled`]）。
     pub(crate) fn new(
         pieces: Vec<(PathBuf, Range<u64>)>,
+        cancel: Cancel,
     ) -> Result<(Self, Failure), (PathBuf, io::Error)> {
         let (paths, ranges): (Vec<PathBuf>, Vec<Range<u64>>) = pieces.into_iter().unzip();
         let mut starts = Vec::with_capacity(paths.len() + 1);
@@ -53,6 +66,7 @@ impl SegmentChain {
             position: 0,
             open: None,
             failure: failure.clone(),
+            cancel,
         };
         Ok((chain, failure))
     }
@@ -73,10 +87,15 @@ impl SegmentChain {
     fn fail(&self, index: usize, error: io::Error) -> io::Error {
         if error.kind() != io::ErrorKind::Interrupted {
             let copy = io::Error::new(error.kind(), error.to_string());
-            let mut slot = self.failure.lock().unwrap_or_else(|p| p.into_inner());
-            slot.get_or_insert((self.paths[index].clone(), copy));
+            self.stop(Stopped::File(self.paths[index].clone(), copy));
         }
         error
+    }
+
+    /// 记下第一次中止的原因。
+    fn stop(&self, stopped: Stopped) {
+        let mut slot = self.failure.lock().expect("持锁时只赋值，不会 panic");
+        slot.get_or_insert(stopped);
     }
 
     /// 打开（或复用）第 `index` 段的文件并定位到流位置 `self.position`。
@@ -97,6 +116,10 @@ impl SegmentChain {
 
 impl Read for SegmentChain {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.cancel.is_cancelled() {
+            self.stop(Stopped::Cancelled);
+            return Err(io::Error::other("合并已取消"));
+        }
         let Some(index) = self.index_at(self.position) else {
             return Ok(0);
         };
@@ -165,7 +188,7 @@ mod tests {
             .zip(parts)
             .map(|(path, data)| (path, 0..data.len() as u64))
             .collect();
-        SegmentChain::new(pieces).unwrap().0
+        SegmentChain::new(pieces, Cancel::never()).unwrap().0
     }
 
     #[test]
@@ -198,11 +221,14 @@ mod tests {
     #[test]
     fn only_the_given_ranges_are_read() {
         let paths = files("ranges", &[b"abcdef", b"gh"]);
-        let mut chain = SegmentChain::new(vec![
-            (paths[0].clone(), 1..3),
-            (paths[0].clone(), 4..6),
-            (paths[1].clone(), 1..2),
-        ])
+        let mut chain = SegmentChain::new(
+            vec![
+                (paths[0].clone(), 1..3),
+                (paths[0].clone(), 4..6),
+                (paths[1].clone(), 1..2),
+            ],
+            Cancel::never(),
+        )
         .unwrap()
         .0;
         let mut all = Vec::new();
@@ -222,7 +248,9 @@ mod tests {
         let mut all = Vec::new();
         let err = chain.read_to_end(&mut all).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
-        let (path, _) = failure.lock().unwrap().take().unwrap();
+        let Some(Stopped::File(path, _)) = failure.lock().unwrap().take() else {
+            panic!("应记下出错的文件");
+        };
         assert_eq!(path, chain.paths[1]);
     }
 }

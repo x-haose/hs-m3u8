@@ -17,6 +17,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use hs_m3u8_remux::standalone::{self, Format};
+use tokio_util::sync::CancellationToken;
 
 use super::GroupTrack;
 use super::commit::Occupant;
@@ -103,15 +104,16 @@ fn check_layout(has_init: &[Vec<bool>]) -> Result<(), Error> {
 }
 
 /// 在准备目录 `stage`（还不存在，上级已建出）里备齐 HLS 输出；`work_dir` 为分片所在的任务目录，用于
-/// 报告目录内容无法识别。失败时 `stage` 里可能留有备了一半的内容，由调用方删除。
+/// 报告目录内容无法识别。失败或取消（每放一个文件前检查）时 `stage` 里可能留有备了一半的内容，由调用方删除。
 pub(super) fn stage(
     stage: &Path,
     work_dir: &Path,
     groups: &[Vec<GroupTrack>],
     selection: Option<&SelectionKey>,
+    cancel: &CancellationToken,
 ) -> Result<(), Error> {
     fs::create_dir(stage).map_err(io_error("创建", stage))?;
-    fill(stage, work_dir, groups, selection)
+    fill(stage, work_dir, groups, selection, cancel)
 }
 
 /// 在 `stage` 里放好各轨的分片、init 段与播放列表。
@@ -120,6 +122,7 @@ fn fill(
     work_dir: &Path,
     groups: &[Vec<GroupTrack>],
     selection: Option<&SelectionKey>,
+    cancel: &CancellationToken,
 ) -> Result<(), Error> {
     let track_count = groups.first().map_or(0, Vec::len);
     let mut tracks = Vec::with_capacity(track_count);
@@ -130,6 +133,7 @@ fn fill(
             &dir,
             work_dir,
             groups.iter().map(|g| &g[track]),
+            cancel,
         )?);
     }
     match (&tracks[..], selection) {
@@ -169,7 +173,14 @@ fn fill_track<'a>(
     dir: &Path,
     work_dir: &Path,
     groups: impl Iterator<Item = &'a GroupTrack>,
+    cancel: &CancellationToken,
 ) -> Result<TrackFiles, Error> {
+    let place = |src: &Path, dst: &Path| {
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        place(src, dst)
+    };
     let mut placed_inits = HashSet::new();
     let mut written = TrackFiles {
         groups: Vec::new(),

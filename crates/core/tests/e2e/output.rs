@@ -10,7 +10,7 @@ use hs_m3u8_core::{
     Error, HlsUnsupported, JobRequest, LiveOptions, Mp4Unsupported, Target, Unsupported, Url,
 };
 use hs_m3u8_hls::{MediaPlaylist, Playlist, parse};
-use hs_m3u8_remux::{DiscontinuityGroup, Segment, Streams, TrackSegments, remux};
+use hs_m3u8_remux::{Cancel, DiscontinuityGroup, Segment, Streams, TrackSegments, remux};
 
 use crate::server::Server;
 #[cfg(unix)]
@@ -115,7 +115,7 @@ fn read_hls(dir: &Path) -> (Vec<Streams>, Vec<DiscontinuityGroup>) {
 fn assert_hls_matches(hls: &Path, mp4: &Path) {
     let (streams, groups) = read_hls(hls);
     let merged = hls.with_extension("check.mp4");
-    remux(&streams, &groups, &merged).unwrap();
+    remux(&streams, &groups, &merged, &Cancel::never()).unwrap();
     assert_eq!(std::fs::read(merged).unwrap(), std::fs::read(mp4).unwrap());
 }
 

@@ -196,8 +196,7 @@ fn count_received(progress: watch::Sender<Progress>) -> OnReceived {
     Box::new(move |len| progress.send_modify(|p| p.received += len))
 }
 
-/// 运行中的任务：等结果用 [`Job::wait`]，取消、停止与读进度用 [`Job::control`]。丢弃句柄即取消任务；已开始写出
-/// （[`Stage::Writing`]）的任务仍会在后台写完。
+/// 运行中的任务：等结果用 [`Job::wait`]，取消、停止与读进度用 [`Job::control`]。丢弃句柄即取消任务。
 pub struct Job {
     control: JobControl,
     task: JoinHandle<Result<Output, Error>>,
@@ -253,8 +252,8 @@ impl JobControl {
         self.progress.clone()
     }
 
-    /// 请求取消；[`Job::wait`] 随后返回 [`Error::Cancelled`]，已完成的分片保留在任务目录中。
-    /// 开始写出（[`Stage::Writing`]）后不响应取消：已开始写出的任务照常完成。
+    /// 请求取消；[`Job::wait`] 随后返回 [`Error::Cancelled`]，已完成的分片保留在任务目录中。写出（[`Stage::Writing`]）
+    /// 中取消时删掉写了一半的输出，已有的输出不受影响；换上输出的几步改名不中断，取消晚于它们时任务照常成功。
     pub fn cancel(&self) {
         self.cancel.cancel();
     }

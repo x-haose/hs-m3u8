@@ -10,9 +10,9 @@ use ffmpeg::format::context::StreamIo;
 use ffmpeg::{Dictionary, Packet, format};
 use ffmpeg_next as ffmpeg;
 
-use crate::chain::{self, SegmentChain};
+use crate::chain::{self, SegmentChain, Stopped};
 use crate::packed::Packed;
-use crate::{Error, Segment, TrackSegments, Unsupported, fmp4, standalone};
+use crate::{Cancel, Error, Segment, TrackSegments, Unsupported, fmp4, standalone};
 
 pub(crate) enum Input {
     /// TS 与 fMP4：init 段与分片按字节相连，作为一个输入读
@@ -29,11 +29,12 @@ pub(crate) enum Input {
 
 impl Input {
     /// 打开一条轨在一组里的分片。没有 init 段的分片须同一格式（见 [`Unsupported::FormatChangedInGroup`]），不是 TS
-    /// 的为打包音频。
+    /// 的为打包音频。`cancel` 取消后打开与读取以 [`Error::Cancelled`] 失败。
     pub(crate) fn open(
         segments: &TrackSegments,
         group: usize,
         track: usize,
+        cancel: &Cancel,
     ) -> Result<Input, Error> {
         let init = segments.init.is_some();
         if !init {
@@ -49,7 +50,7 @@ impl Input {
                 }));
             }
             if heads[0].format != standalone::Format::Ts {
-                return Packed::open(segments, &heads, group, track)
+                return Packed::open(segments, &heads, group, track, cancel)
                     .map(|packed| Input::Packed(Box::new(packed)));
             }
         }
@@ -84,7 +85,7 @@ impl Input {
             .map(|(_, range)| range.end - range.start)
             .sum();
         let probe = Probe::first_segment(first_end, &segments.segments[0]);
-        let (chain, failure) = new_chain(files)?;
+        let (chain, failure) = new_chain(files, cancel)?;
         let ictx = open_chain(chain, &failure, probe, group, track)?;
         Ok(Input::Chain {
             ictx,
@@ -240,11 +241,12 @@ pub(crate) fn segment_head(path: &Path) -> Result<standalone::Head, Error> {
     head.ok_or_else(|| Error::Unrecognized(path.to_path_buf()))
 }
 
-/// 把 `pieces`（文件与其中要读的字节区间）串成一个分片链，并返回记录文件错误的位置。
+/// 把 `pieces`（文件与其中要读的字节区间）串成一个分片链，并返回记录读取中止原因的位置。
 pub(crate) fn new_chain(
     pieces: Vec<(PathBuf, Range<u64>)>,
+    cancel: &Cancel,
 ) -> Result<(SegmentChain, chain::Failure), Error> {
-    SegmentChain::new(pieces).map_err(|(path, cause)| Error::Io {
+    SegmentChain::new(pieces, cancel.clone()).map_err(|(path, cause)| Error::Io {
         action: "读取",
         path,
         cause,
@@ -322,12 +324,14 @@ pub(crate) fn read_packet(
     }
 }
 
-/// 分片链记下的文件错误；FFmpeg 只拿到错误码，这里换回带路径的原始错误。
+/// 分片链记下的读取中止原因；FFmpeg 只拿到错误码，这里换回带路径的原始错误，或取消。
 fn read_failure(failure: &chain::Failure) -> Option<Error> {
-    let (path, cause) = failure.lock().unwrap_or_else(|p| p.into_inner()).take()?;
-    Some(Error::Io {
-        action: "读取",
-        path,
-        cause,
-    })
+    match failure.lock().expect("持锁时只赋值，不会 panic").take()? {
+        Stopped::File(path, cause) => Some(Error::Io {
+            action: "读取",
+            path,
+            cause,
+        }),
+        Stopped::Cancelled => Some(Error::Cancelled),
+    }
 }

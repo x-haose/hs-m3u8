@@ -9,7 +9,7 @@ use ffmpeg_next as ffmpeg;
 
 use crate::input::{Probe, SegmentMap, new_chain, open_chain, read_packet};
 use crate::standalone::{Format, Head, Item, is_id3v1, item};
-use crate::{Error, TrackSegments, chain, frame};
+use crate::{Cancel, Error, TrackSegments, chain, frame};
 
 /// 打包音频时间戳的时钟（90 kHz）。
 const CLOCK_90K: Rational = Rational(1, 90_000);
@@ -55,6 +55,7 @@ impl Packed {
         heads: &[Head],
         group: usize,
         track: usize,
+        cancel: &Cancel,
     ) -> Result<Packed, Error> {
         let count = segments.segments.len();
         let mut pieces = Vec::new();
@@ -99,7 +100,7 @@ impl Packed {
         // 第一个分片切出的音频帧的结尾
         let first_end = starts.get(1).copied().unwrap_or(total);
         let probe = Probe::first_segment(first_end, &segments.segments[0]);
-        let (chain, failure) = new_chain(pieces)?;
+        let (chain, failure) = new_chain(pieces, cancel)?;
         let ictx = open_chain(chain, &failure, probe, group, track)?;
         let audio = ictx
             .streams()

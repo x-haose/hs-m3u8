@@ -1,14 +1,15 @@
 //! 本 crate 的全部 unsafe：直接读写 AVCodecParameters 字段，读解复用器给流用的解析器的状态、输入的节目列表，查像素
-//! 格式描述表，ffmpeg-next 没有对应的安全接口。
+//! 格式描述表，打开装了中断回调的输出、读输出的读写错误，ffmpeg-next 没有对应的安全接口。
 
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 
 use ffmpeg::codec;
 use ffmpeg::format;
 use ffmpeg::format::stream::{Stream, StreamMut};
+use ffmpeg::util::interrupt::{self, InterruptGuard};
 use ffmpeg_next as ffmpeg;
 
-use crate::{Shape, StreamKind};
+use crate::{Cancel, Shape, StreamKind};
 
 pub(crate) fn shape(stream: &Stream<'_>, kind: StreamKind) -> Shape {
     let params = stream.parameters();
@@ -134,4 +135,66 @@ pub(crate) fn set_codec_tag(ost: &mut StreamMut<'_>, id: codec::Id) {
     unsafe {
         (*ost.parameters().as_mut_ptr()).codec_tag = tag;
     }
+}
+
+/// 装了中断回调的输出。字段按声明的顺序析构：上下文先于回调持有的闭包释放。
+pub(crate) struct OutputFile {
+    pub(crate) octx: format::context::Output,
+    _interrupt: InterruptGuard,
+}
+
+/// 打开输出时失败的一步。
+pub(crate) enum OpenFailure {
+    /// 建立 MP4 封装器的上下文
+    Muxer(ffmpeg::Error),
+    /// 创建文件
+    File(ffmpeg::Error),
+}
+
+/// 以 MP4 格式打开输出 `path`（不含 NUL 的 UTF-8），装上中断回调：FFmpeg 每次读写文件前轮询它（含写 moov 前置时
+/// 重新打开输出搬动数据的第二遍），`cancel` 取消后读写以 AVERROR_EXIT 失败。
+pub(crate) fn open_output(path: &str, cancel: &Cancel) -> Result<OutputFile, OpenFailure> {
+    let c_path = CString::new(path).expect("调用方保证路径不含 NUL");
+    let cancel = cancel.clone();
+    let interrupt = interrupt::new(Box::new(move || cancel.is_cancelled()));
+    let mut ctx = std::ptr::null_mut();
+    // SAFETY: 格式名与路径是 NUL 结尾的字符串；成功时 ctx 指向新分配的上下文，失败时为空。
+    let created = unsafe {
+        ffmpeg::ffi::avformat_alloc_output_context2(
+            &raw mut ctx,
+            std::ptr::null(),
+            c"mp4".as_ptr(),
+            c_path.as_ptr(),
+        )
+    };
+    if created < 0 {
+        return Err(OpenFailure::Muxer(ffmpeg::Error::from(created)));
+    }
+    // SAFETY: ctx 非空、归本函数所有；装上的回调的闭包由 interrupt.guard 持有，guard 与上下文一同放进 OutputFile，
+    // 上下文先释放。avio_open2 失败时 pb 仍为空，释放上下文即可。
+    unsafe {
+        (*ctx).interrupt_callback = interrupt.interrupt;
+        let opened = ffmpeg::ffi::avio_open2(
+            &raw mut (*ctx).pb,
+            c_path.as_ptr(),
+            ffmpeg::ffi::AVIO_FLAG_WRITE,
+            &raw const (*ctx).interrupt_callback,
+            std::ptr::null_mut(),
+        );
+        if opened < 0 {
+            ffmpeg::ffi::avformat_free_context(ctx);
+            return Err(OpenFailure::File(ffmpeg::Error::from(opened)));
+        }
+        Ok(OutputFile {
+            octx: format::context::Output::wrap(ctx),
+            _interrupt: interrupt.guard,
+        })
+    }
+}
+
+/// 输出的读写上下文记下的错误（负的 AVERROR）：FFmpeg 写文件失败时记在这里，封装器自身的错误不记；没有时为 None。
+pub(crate) fn output_io_error(octx: &format::context::Output) -> Option<i32> {
+    // SAFETY: 上下文在 octx 存活期间有效；pb 为空或指向打开的读写上下文，此处只读。
+    let error = unsafe { (*octx.as_ptr()).pb.as_ref() }?.error;
+    (error < 0).then_some(error)
 }

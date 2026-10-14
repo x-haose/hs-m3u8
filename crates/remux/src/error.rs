@@ -97,12 +97,16 @@ pub enum Error {
         written: u64,
         found: u64,
     },
+    /// 读分片或写输出时文件出错（写输出时含 FFmpeg 写文件的错误，如盘满）
     #[error("{action} {path} 失败：{cause}")]
     Io {
         action: &'static str,
         path: PathBuf,
         cause: io::Error,
     },
+    /// 调用方取消了（见 [`crate::Cancel`]）
+    #[error("合并已取消")]
+    Cancelled,
 }
 
 /// 内容放不进 MP4：编码不受支持或参数探测不出；后续组与第 0 组的流种类、编码参数或解码配置不同，组内分片格式、PID
@@ -228,4 +232,55 @@ pub enum Unsupported {
     UntimedPackedAudio { group: usize, track: usize },
     #[error("各轨都没有要取的视频或音频流，写不出 MP4")]
     NoStreams,
+}
+
+/// FFmpeg 读写文件出错时给的 AVERROR（负的 errno）换成 [`io::Error`]；不是 errno 的（FFmpeg 自己的错误码，取值远在 errno
+/// 之外）为 None。Unix 上 errno 即系统的；Windows 上 FFmpeg 经 C 运行库读写文件，errno 是 MSVC C 运行库的取值，与
+/// Windows 的系统错误码不是一套编号，按取值换成对应的种类，说明取 FFmpeg 的。
+pub(crate) fn file_error(error: &FfmpegError) -> Option<io::Error> {
+    let errno = error.code.checked_neg().filter(|e| (1..4096).contains(e))?;
+    #[cfg(unix)]
+    {
+        Some(io::Error::from_raw_os_error(errno))
+    }
+    #[cfg(windows)]
+    {
+        let kind = match errno {
+            libc::ENOENT => io::ErrorKind::NotFound,
+            libc::EACCES => io::ErrorKind::PermissionDenied,
+            libc::EEXIST => io::ErrorKind::AlreadyExists,
+            libc::ENOSPC => io::ErrorKind::StorageFull,
+            libc::EFBIG => io::ErrorKind::FileTooLarge,
+            libc::EROFS => io::ErrorKind::ReadOnlyFilesystem,
+            libc::ENOMEM => io::ErrorKind::OutOfMemory,
+            libc::EINVAL => io::ErrorKind::InvalidInput,
+            libc::EBUSY => io::ErrorKind::ResourceBusy,
+            libc::EPIPE => io::ErrorKind::BrokenPipe,
+            _ => io::ErrorKind::Other,
+        };
+        Some(io::Error::new(kind, error.message.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn errno_codes_from_ffmpeg_become_io_errors() {
+        let full = FfmpegError {
+            code: -28,
+            message: "No space left on device".to_owned(),
+        };
+        assert_eq!(
+            file_error(&full).map(|e| e.kind()),
+            Some(io::ErrorKind::StorageFull)
+        );
+        // AVERROR_INVALIDDATA（FFERRTAG('I','N','D','A')）是 FFmpeg 自己的错误码，不是 errno
+        let invalid = FfmpegError {
+            code: -1_094_995_529,
+            message: "Invalid data found when processing input".to_owned(),
+        };
+        assert!(file_error(&invalid).is_none());
+    }
 }

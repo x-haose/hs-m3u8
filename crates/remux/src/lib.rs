@@ -16,7 +16,7 @@
 //!   一致；TS 与打包音频里只收其中能逐帧读出参数的 H.264、HEVC、AAC、AC-3、E-AC-3、MP3。MP3 的采样率须不低于
 //!   16 kHz，TS 与打包音频里的 E-AC-3 每帧须为 6 块、只有一个独立子流（MP4 封装器的限制）。
 //!
-//! 输出写完回读核对每路流的包数并落盘；失败时输出上可能留有写了一半的文件。输出要么完整、要么不存在由调用方
+//! 输出写完回读核对每路流的包数并落盘；失败或取消（见 [`Cancel`]）时输出上可能留有写了一半的文件。输出要么完整、要么不存在由调用方
 //! 写到临时路径、成功后改名、失败时删除来保证。错误信息已包含原因，不经 `source()` 重复给出。
 
 mod chain;
@@ -37,7 +37,7 @@ mod write;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use ffmpeg::media;
 use ffmpeg_next as ffmpeg;
@@ -189,20 +189,48 @@ pub struct Report {
     pub streams: Vec<StreamReport>,
 }
 
-/// 把各不连续段组的分片复制进 `output`（MP4，moov 前置），写完回读核对每路流的包数并落盘。失败时 `output` 上
+/// 调用方的取消信号：返回真之后，合并在下一处检查以 [`Error::Cancelled`] 结束。读分片、写出每个包、FFmpeg 每次读写
+/// 输出文件（含 moov 前置时搬动数据的第二遍）与回读核对每个包时检查；最后的落盘不中断。
+#[derive(Clone)]
+pub struct Cancel(Arc<dyn Fn() -> bool + Send + Sync>);
+
+impl Cancel {
+    /// `cancelled` 会在 FFmpeg 的读写回调里被调用，要快、不阻塞。
+    pub fn new(cancelled: impl Fn() -> bool + Send + Sync + 'static) -> Cancel {
+        Cancel(Arc::new(cancelled))
+    }
+
+    /// 不会取消。
+    pub fn never() -> Cancel {
+        Cancel::new(|| false)
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        (self.0)()
+    }
+}
+
+impl fmt::Debug for Cancel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Cancel")
+    }
+}
+
+/// 把各不连续段组的分片复制进 `output`（MP4，moov 前置），写完回读核对每路流的包数并落盘。失败或取消时 `output` 上
 /// 可能留有写了一半的文件，由调用方删除；已存在的 `output` 会被替换。`streams[i]` 为第 i 条轨贡献的流种类。
 pub fn remux(
     streams: &[Streams],
     groups: &[DiscontinuityGroup],
     output: &Path,
+    cancel: &Cancel,
 ) -> Result<Report, Error> {
     init()?;
     let groups: Vec<Numbered<'_>> = groups.iter().enumerate().collect();
     validate(streams, &groups)?;
-    if ffmpeg_path(output).is_none() {
+    let Some(path) = ffmpeg_path(output) else {
         return Err(Error::NonUtf8Path(output.to_path_buf()));
-    }
-    let report = write_verified(streams, &groups, output)?;
+    };
+    let report = write_verified(streams, &groups, path, cancel)?;
     sync(output)?;
     Ok(report)
 }
@@ -220,7 +248,8 @@ pub fn remux(
 pub fn check(streams: &[Streams], groups: &[(usize, &DiscontinuityGroup)]) -> Result<(), Error> {
     init()?;
     validate(streams, groups)?;
-    let first = match judgeable(open_group(streams, groups[0], None))? {
+    let cancel = Cancel::never();
+    let first = match judgeable(open_group(streams, groups[0], None, &cancel))? {
         Some(first) => {
             let layout = layout_of(&first)?;
             let outputs = layout.iter().map(Vec::len).sum();
@@ -231,7 +260,7 @@ pub fn check(streams: &[Streams], groups: &[(usize, &DiscontinuityGroup)]) -> Re
     };
     for &numbered in &groups[1..] {
         let layout = first.as_ref().map(|(layout, _)| layout.as_slice());
-        let Some(opened) = judgeable(open_group(streams, numbered, layout))? else {
+        let Some(opened) = judgeable(open_group(streams, numbered, layout, &cancel))? else {
             continue;
         };
         match &first {

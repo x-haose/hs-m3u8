@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use ffmpeg_next as ffmpeg;
 use hs_m3u8_remux::{
-    DiscontinuityGroup, Error, Segment, Shape, StreamKind, Streams, TrackSegments, Unsupported,
-    remux,
+    Cancel, DiscontinuityGroup, Error, Segment, Shape, StreamKind, Streams, TrackSegments,
+    Unsupported, remux,
 };
 
 fn fixtures() -> PathBuf {
@@ -336,7 +336,13 @@ fn ts_single_group_copies_every_packet_from_zero_with_moov_first() {
     let output = dir.join("out.mp4");
     let a = track("ts_a");
 
-    let report = remux(&[Streams::All], &[group([a.clone()])], &output).unwrap();
+    let report = remux(
+        &[Streams::All],
+        &[group([a.clone()])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
 
     let (v_in, a_in) = timelines(&concat_track(&a, &dir, "in.ts"));
     let streams: Vec<_> = report
@@ -410,6 +416,7 @@ fn split_fmp4_renditions_merge_into_one_file() {
         &[Streams::Video, Streams::Audio],
         &[group([video.clone(), audio.clone()])],
         &output,
+        &Cancel::never(),
     )
     .unwrap();
 
@@ -440,6 +447,7 @@ fn discontinuity_groups_are_laid_end_to_end() {
         &[Streams::All],
         &[group([a.clone()]), group([b]), group([a])],
         &output,
+        &Cancel::never(),
     )
     .unwrap();
 
@@ -469,6 +477,7 @@ fn split_renditions_keep_their_relative_timing_across_discontinuities() {
         &[Streams::Video, Streams::Audio],
         &[group([va, aa]), group([vb, ab])],
         &output,
+        &Cancel::never(),
     )
     .unwrap();
 
@@ -511,7 +520,13 @@ fn hevc_output_is_tagged_hvc1() {
     let output = dir.join("out.mp4");
     let hevc = track("ts_hevc");
 
-    remux(&[Streams::All], &[group([hevc.clone()])], &output).unwrap();
+    remux(
+        &[Streams::All],
+        &[group([hevc.clone()])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
 
     let (v_in, a_in) = timelines(&concat_track(&hevc, &dir, "in.ts"));
     let (v_out, a_out) = timelines(&output);
@@ -530,7 +545,13 @@ fn paths_with_quotes_and_spaces_are_read() {
     }
     let output = dir.join("out file.mp4");
 
-    let report = remux(&[Streams::All], &[group([track_in(&dir)])], &output).unwrap();
+    let report = remux(
+        &[Streams::All],
+        &[group([track_in(&dir)])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
 
     assert_eq!(report.streams.len(), 2);
     assert!(output.exists());
@@ -544,7 +565,13 @@ fn timestamps_going_back_within_a_group_fail() {
     let mut mixed = track("ts_a");
     mixed.segments.extend(track("ts_b").segments);
 
-    let err = remux(&[Streams::All], &[group([mixed])], &output).unwrap_err();
+    let err = remux(
+        &[Streams::All],
+        &[group([mixed])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap_err();
 
     assert!(
         matches!(
@@ -565,7 +592,13 @@ fn a_frame_repeated_across_segments_fails() {
     let dir = work_dir("repeated_frame");
     let output = dir.join("out.mp4");
 
-    let err = remux(&[Streams::Video], &[group([track("ts_repeat")])], &output).unwrap_err();
+    let err = remux(
+        &[Streams::Video],
+        &[group([track("ts_repeat")])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap_err();
 
     assert!(
         matches!(
@@ -589,6 +622,7 @@ fn same_stream_kind_from_two_tracks_is_rejected() {
         &[Streams::All; 2],
         &[group([track("ts_a"), track("fmp4_a/audio")])],
         &output,
+        &Cancel::never(),
     )
     .unwrap_err();
 
@@ -615,6 +649,7 @@ fn unwanted_streams_are_dropped_without_codec_checks() {
         &[Streams::Video, Streams::Audio],
         &[group([muxed.clone(), audio.clone()])],
         &output,
+        &Cancel::never(),
     )
     .unwrap();
 
@@ -646,6 +681,7 @@ fn tracks_without_the_wanted_streams_contribute_nothing() {
         &[Streams::Video, Streams::Audio],
         &[group([audio_only.clone(), audio.clone()])],
         &output,
+        &Cancel::never(),
     )
     .unwrap();
 
@@ -657,7 +693,13 @@ fn tracks_without_the_wanted_streams_contribute_nothing() {
         .collect();
     assert_eq!(streams, vec![(StreamKind::Audio, a_in.len() as u64)]);
 
-    let err = remux(&[Streams::Video], &[group([audio_only])], &output).unwrap_err();
+    let err = remux(
+        &[Streams::Video],
+        &[group([audio_only])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap_err();
     assert!(
         matches!(err, Error::Unsupported(Unsupported::NoStreams)),
         "实际 {err:?}"
@@ -673,6 +715,7 @@ fn resolution_change_between_groups_is_rejected() {
         &[Streams::All],
         &[group([track("ts_a")]), group([track("ts_small")])],
         &output,
+        &Cancel::never(),
     )
     .unwrap_err();
 
@@ -702,7 +745,7 @@ fn equivalent_aac_configs_from_two_encoders_merge() {
     ] {
         let groups = [group([track(first)]), group([track(second)])];
         check(&[Streams::Audio], &groups).unwrap();
-        remux(&[Streams::Audio], &groups, &output).unwrap();
+        remux(&[Streams::Audio], &groups, &output, &Cancel::never()).unwrap();
     }
 }
 
@@ -713,7 +756,13 @@ fn chroma_changes_are_rejected() {
     let dir = work_dir("chroma_changed");
     let output = dir.join("out.mp4");
     let changing = track("ts_chroma_change");
-    let err = remux(&[Streams::Video], &[group([changing.clone()])], &output).unwrap_err();
+    let err = remux(
+        &[Streams::Video],
+        &[group([changing.clone()])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap_err();
     assert!(
         matches!(
             err,
@@ -740,6 +789,7 @@ fn chroma_changes_are_rejected() {
         &[Streams::Video],
         &[group([first]), group([second])],
         &output,
+        &Cancel::never(),
     )
     .unwrap_err();
     assert!(
@@ -800,6 +850,7 @@ fn decoder_configs_differing_between_groups_are_rejected() {
             &[streams],
             &[group([track(first)]), group([track(second)])],
             &output,
+            &Cancel::never(),
         )
         .unwrap_err();
         assert!(
@@ -824,7 +875,13 @@ fn av1_vp9_opus_flac_and_alac_are_copied() {
     ] {
         let muxed = track(name);
         let output = dir.join(format!("{name}.mp4"));
-        let report = remux(&[Streams::All], &[group([muxed.clone()])], &output).unwrap();
+        let report = remux(
+            &[Streams::All],
+            &[group([muxed.clone()])],
+            &output,
+            &Cancel::never(),
+        )
+        .unwrap();
 
         let (v_in, a_in) = timelines(&concat_track(&muxed, &dir, "in.mp4"));
         let found: Vec<(&str, u64)> = report
@@ -862,7 +919,13 @@ fn parameter_changes_within_a_group_are_rejected() {
         (Streams::Video, StreamKind::Video),
         (Streams::Audio, StreamKind::Audio),
     ] {
-        let err = remux(&[streams], &[group([changed.clone()])], &output).unwrap_err();
+        let err = remux(
+            &[streams],
+            &[group([changed.clone()])],
+            &output,
+            &Cancel::never(),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 &err,
@@ -870,6 +933,35 @@ fn parameter_changes_within_a_group_are_rejected() {
                     if *found == kind
             ),
             "{kind}：实际 {err:?}"
+        );
+    }
+}
+
+/// 取消后合并在下一处检查以 Cancelled 停下：打开输入、写出每个包、FFmpeg 读写输出文件（含 moov 前置的第二遍）与回读
+/// 核对，在哪一处检查时取消都是 Cancelled，不会报成别的错误。
+#[test]
+fn a_merge_cancelled_at_any_check_stops_as_cancelled() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let dir = work_dir("cancelled");
+    let output = dir.join("out.mp4");
+    let groups = [group([track("ts_long")])];
+    // 从第 `from` 次检查起取消，返回检查的次数与结果
+    let run = |from: usize| {
+        let checks = Arc::new(AtomicUsize::new(0));
+        let counted = checks.clone();
+        let cancel = Cancel::new(move || counted.fetch_add(1, Ordering::Relaxed) >= from);
+        let result = remux(&[Streams::All], &groups, &output, &cancel);
+        (checks.load(Ordering::Relaxed), result)
+    };
+    let (total, result) = run(usize::MAX);
+    result.unwrap();
+    for from in [0, total / 4, total / 2, total * 3 / 4, total - 1] {
+        let (_, result) = run(from);
+        assert!(
+            matches!(result, Err(Error::Cancelled)),
+            "第 {from} 次检查（共 {total} 次）起取消：{result:?}"
         );
     }
 }
@@ -882,7 +974,13 @@ fn a_forward_timestamp_jump_within_a_group_is_rejected() {
     let output = dir.join("out.mp4");
     let jump = track("ts_jump");
 
-    let err = remux(&[Streams::All], &[group([jump.clone()])], &output).unwrap_err();
+    let err = remux(
+        &[Streams::All],
+        &[group([jump.clone()])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap_err();
     assert!(
         matches!(
             err,
@@ -901,7 +999,13 @@ fn a_forward_timestamp_jump_within_a_group_is_rejected() {
         gaps: vec![1],
         ..jump
     };
-    remux(&[Streams::All], &[group([missing])], &output).unwrap();
+    remux(
+        &[Streams::All],
+        &[group([missing])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
 }
 
 /// 从 GOP 中间开始的组：第一个关键帧之前的视频包参考的帧不在输出里，不写出、计数，输出的视频每个包都解得出。
@@ -914,7 +1018,7 @@ fn video_before_the_first_keyframe_of_a_group_is_dropped_and_counted() {
     cut.segments.remove(0);
     let v_in = timelines(&concat_track(&cut, &dir, "in.ts")).0;
 
-    let report = remux(&[Streams::All], &[group([cut])], &output).unwrap();
+    let report = remux(&[Streams::All], &[group([cut])], &output, &Cancel::never()).unwrap();
 
     let video = &report.streams[0];
     assert!(video.skipped_before_keyframe > 0, "{video:?}");
@@ -952,7 +1056,13 @@ fn leading_pictures_of_a_group_starting_with_cra_are_dropped() {
     assert!(leading > 0, "样本的第二片应以带前导帧的 CRA 开头");
     let first_in = timelines(&concat_track(&first, &dir, "first.ts")).0;
 
-    let report = remux(&[Streams::All], &[group([first]), group([second])], &output).unwrap();
+    let report = remux(
+        &[Streams::All],
+        &[group([first]), group([second])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
 
     assert_eq!(
         report.streams[0].skipped_before_keyframe, leading as u64,
@@ -977,7 +1087,13 @@ fn audio_damaged_at_a_missing_segment_is_dropped_and_counted() {
     holed.segments.remove(2);
     let (v_in, a_in) = timelines(&concat_track(&holed, &dir, "in.ts"));
 
-    let report = remux(&[Streams::All], &[group([holed])], &output).unwrap();
+    let report = remux(
+        &[Streams::All],
+        &[group([holed])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
 
     let [video, audio] = &report.streams[..] else {
         panic!("应有视频与音频两路流：{report:?}");
@@ -1052,7 +1168,13 @@ fn audio_in_pes_flagged_corrupt_but_intact_is_kept() {
             gaps: Vec::new(),
         };
 
-        let report = remux(&[Streams::All], &[group([rewritten])], &output).unwrap();
+        let report = remux(
+            &[Streams::All],
+            &[group([rewritten])],
+            &output,
+            &Cancel::never(),
+        )
+        .unwrap();
 
         let audio = &report.streams[1];
         assert_eq!(
@@ -1070,7 +1192,13 @@ fn a_pid_change_within_a_group_is_rejected() {
     let dir = work_dir("pid_change");
     let output = dir.join("out.mp4");
 
-    let err = remux(&[Streams::All], &[group([track("ts_pid_change")])], &output).unwrap_err();
+    let err = remux(
+        &[Streams::All],
+        &[group([track("ts_pid_change")])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap_err();
 
     assert!(
         matches!(
@@ -1088,12 +1216,19 @@ fn a_pid_change_within_a_group_is_rejected() {
         &[Streams::Video],
         &[group([track("ts_pid_change")])],
         &output,
+        &Cancel::never(),
     )
     .unwrap();
 
     // 一开始就有两路音频：取第一路，另一路一直列在节目里，不算换了 PID
     let two = track("ts_two_audio");
-    let report = remux(&[Streams::All], &[group([two.clone()])], &output).unwrap();
+    let report = remux(
+        &[Streams::All],
+        &[group([two.clone()])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
     ffmpeg::init().unwrap();
     let mut ictx = ffmpeg::format::input(&two.segments[0].path).unwrap();
     let first_audio = ictx
@@ -1121,7 +1256,13 @@ fn a_codec_switch_on_one_pid_is_rejected() {
     let mut switched = track("ts_a");
     switched.segments.extend(track("ts_ac3").segments);
 
-    let err = remux(&[Streams::Audio], &[group([switched])], &output).unwrap_err();
+    let err = remux(
+        &[Streams::Audio],
+        &[group([switched])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap_err();
 
     assert!(
         matches!(
@@ -1158,7 +1299,13 @@ fn format_changes_within_a_group_are_rejected() {
             segments: segs(segments),
             gaps: Vec::new(),
         };
-        let err = remux(&[Streams::Audio], &[group([audio])], &output).unwrap_err();
+        let err = remux(
+            &[Streams::Audio],
+            &[group([audio])],
+            &output,
+            &Cancel::never(),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1260,8 +1407,14 @@ fn check_leaves_what_the_first_segment_cannot_tell_to_the_merge() {
         ),
         "实际 {err:?}"
     );
-    remux(&[Streams::All], &[group([late])], &output).unwrap();
-    let err = remux(&[Streams::All], &[group([head("ts_late_audio")])], &output).unwrap_err();
+    remux(&[Streams::All], &[group([late])], &output, &Cancel::never()).unwrap();
+    let err = remux(
+        &[Streams::All],
+        &[group([head("ts_late_audio")])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap_err();
     assert!(
         matches!(
             err,
@@ -1291,7 +1444,13 @@ fn check_leaves_what_the_first_segment_cannot_tell_to_the_merge() {
         segments: segs([first, rest]),
         gaps: Vec::new(),
     };
-    remux(&[Streams::Audio], &[group([whole])], &output).unwrap();
+    remux(
+        &[Streams::Audio],
+        &[group([whole])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
 }
 
 /// fMP4 某一组开头的分片里没有样本（只有 styp）：宽高、采样率与声道数来自 init 段，视频的像素格式与 AAC 解出一帧后的
@@ -1333,7 +1492,13 @@ fn check_skips_what_a_head_without_samples_cannot_tell() {
         ..track("fmp4_he_aac")
     };
     let groups = [group([track("fmp4_he_aac")]), group([whole])];
-    remux(&[Streams::Audio], &groups, &dir.join("out.mp4")).unwrap();
+    remux(
+        &[Streams::Audio],
+        &groups,
+        &dir.join("out.mp4"),
+        &Cancel::never(),
+    )
+    .unwrap();
 
     let err = check(
         &[Streams::Video],
@@ -1395,6 +1560,7 @@ fn eac3_with_fewer_than_six_blocks_per_frame_is_rejected() {
         &[Streams::Audio],
         &[group([track("ts_eac3_short")])],
         &output,
+        &Cancel::never(),
     )
     .unwrap_err();
     assert!(
@@ -1413,7 +1579,13 @@ fn mp2_opus_in_ts_and_low_rate_mp3_audio_are_rejected() {
     let output = dir.join("out.mp4");
 
     for (name, expected) in [("ts_mp2", "mp2"), ("ts_opus", "opus")] {
-        let err = remux(&[Streams::All], &[group([track(name)])], &output).unwrap_err();
+        let err = remux(
+            &[Streams::All],
+            &[group([track(name)])],
+            &output,
+            &Cancel::never(),
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1426,7 +1598,13 @@ fn mp2_opus_in_ts_and_low_rate_mp3_audio_are_rejected() {
             "{name}：实际 {err:?}"
         );
     }
-    let err = remux(&[Streams::All], &[group([track("ts_mp3_8k")])], &output).unwrap_err();
+    let err = remux(
+        &[Streams::All],
+        &[group([track("ts_mp3_8k")])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap_err();
     assert!(
         matches!(
             err,
@@ -1453,7 +1631,13 @@ fn ac3_eac3_and_mp3_audio_are_copied() {
         ("ts_mp3", "mp3", "mp3"),
     ] {
         let muxed = track(ts);
-        let report = remux(&[Streams::All], &[group([muxed.clone()])], &output).unwrap();
+        let report = remux(
+            &[Streams::All],
+            &[group([muxed.clone()])],
+            &output,
+            &Cancel::never(),
+        )
+        .unwrap();
         let a_in = timelines(&concat_track(&muxed, &dir, "in.ts")).1;
         assert_eq!(report.streams[1].packets, a_in.len() as u64, "{ts}");
         assert_eq!(codecs(&output), ["h264", codec], "{ts}");
@@ -1471,7 +1655,13 @@ fn ac3_eac3_and_mp3_audio_are_copied() {
             segments: segs(tagged),
             gaps: Vec::new(),
         };
-        let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
+        let report = remux(
+            &[Streams::Audio],
+            &[group([audio])],
+            &output,
+            &Cancel::never(),
+        )
+        .unwrap();
         let packets: usize = segments
             .iter()
             .map(|(path, _)| timelines(path).1.len())
@@ -1509,6 +1699,7 @@ fn packed_audio_follows_its_id3_timestamps() {
         &[Streams::Video, Streams::Audio],
         &[group([video, audio])],
         &output,
+        &Cancel::never(),
     )
     .unwrap();
 
@@ -1543,7 +1734,13 @@ fn packed_audio_timestamps_wrap_around() {
         gaps: Vec::new(),
     };
 
-    let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
+    let report = remux(
+        &[Streams::Audio],
+        &[group([audio])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
 
     let expected = (segments[0].1 + segments[1].1) as f64 / 90_000.0;
     let duration = report.streams[0].duration_us as f64 / 1e6;
@@ -1574,7 +1771,13 @@ fn packed_audio_with_very_short_segments_is_read() {
                 gaps: Vec::new(),
             };
 
-            let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
+            let report = remux(
+                &[Streams::Audio],
+                &[group([audio])],
+                &output,
+                &Cancel::never(),
+            )
+            .unwrap();
 
             let stream = &report.streams[0];
             assert_eq!(
@@ -1638,7 +1841,13 @@ fn packed_audio_with_id3_tags_between_frames_keeps_its_timing() {
                 gaps: Vec::new(),
             };
 
-            let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
+            let report = remux(
+                &[Streams::Audio],
+                &[group([audio])],
+                &output,
+                &Cancel::never(),
+            )
+            .unwrap();
 
             assert_eq!(
                 report.streams[0].packets,
@@ -1687,7 +1896,13 @@ fn packed_mp3_info_frames_and_id3v1_tags_are_skipped() {
         gaps: Vec::new(),
     };
 
-    let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
+    let report = remux(
+        &[Streams::Audio],
+        &[group([audio])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
 
     assert_eq!(report.streams[0].packets, frames as u64);
     let expected = (start - 900_000) as f64 / 90_000.0;
@@ -1736,7 +1951,13 @@ fn damage_in_packed_audio_keeps_the_timing_of_later_frames() {
         gaps: Vec::new(),
     };
 
-    let report = remux(&[Streams::Audio], &[group([audio])], &output).unwrap();
+    let report = remux(
+        &[Streams::Audio],
+        &[group([audio])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
 
     let stream = &report.streams[0];
     let (n0, n1) = (sizes[0].len(), sizes[1].len());
@@ -1799,7 +2020,13 @@ fn damage_before_a_gap_or_a_frameless_segment_in_packed_audio() {
         ],
         gaps: vec![1],
     };
-    let report = remux(&[Streams::Audio], &[group([gap])], &output).unwrap();
+    let report = remux(
+        &[Streams::Audio],
+        &[group([gap])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
     assert_eq!(report.streams[0].packets, (10 + n2) as u64);
     let lost: usize = sizes[0][10..].iter().sum();
     assert_eq!(report.streams[0].discarded_corrupt_bytes, lost as u64);
@@ -1816,7 +2043,13 @@ fn damage_before_a_gap_or_a_frameless_segment_in_packed_audio() {
         ],
         gaps: Vec::new(),
     };
-    let report = remux(&[Streams::Audio], &[group([empty_next])], &output).unwrap();
+    let report = remux(
+        &[Streams::Audio],
+        &[group([empty_next])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
     assert_eq!(report.streams[0].packets, (n0 - 1 + n2) as u64);
     assert_eq!(
         report.streams[0].discarded_corrupt_bytes,
@@ -1899,6 +2132,7 @@ fn fmp4_structure_is_checked() {
             &[Streams::Video],
             &[group([segments])],
             &dir.join("out.mp4"),
+            &Cancel::never(),
         )
         .unwrap_err();
         let expected = match name {
@@ -1952,7 +2186,13 @@ fn consecutive_damaged_segments_in_packed_audio_are_timed_separately() {
         ]),
         gaps: Vec::new(),
     };
-    let report = remux(&[Streams::Audio], &[group([three])], &output).unwrap();
+    let report = remux(
+        &[Streams::Audio],
+        &[group([three])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
     let n2 = sizes[2].len();
     assert_eq!(report.streams[0].packets, (n0 - 1 + 20 + n2) as u64);
     assert_eq!(report.streams[0].discarded_corrupt_bytes, lost_in_a);
@@ -1971,7 +2211,13 @@ fn consecutive_damaged_segments_in_packed_audio_are_timed_separately() {
         ]),
         gaps: Vec::new(),
     };
-    let report = remux(&[Streams::Audio], &[group([two])], &output).unwrap();
+    let report = remux(
+        &[Streams::Audio],
+        &[group([two])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
     assert_eq!(report.streams[0].packets, (n0 - 1) as u64);
     assert_eq!(
         report.streams[0].discarded_corrupt_bytes,
@@ -1987,7 +2233,7 @@ fn invalid_gaps_are_rejected() {
     for gaps in [vec![0], vec![2], vec![1, 1]] {
         let mut ts = track("ts_a");
         ts.gaps = gaps;
-        let err = remux(&[Streams::All], &[group([ts])], &output).unwrap_err();
+        let err = remux(&[Streams::All], &[group([ts])], &output, &Cancel::never()).unwrap_err();
         assert!(
             matches!(err, Error::InvalidGaps { group: 0, track: 0 }),
             "实际 {err:?}"
@@ -2012,6 +2258,7 @@ fn ts_inputs_across_the_wrap_edge_stay_aligned() {
         &[Streams::Video, Streams::Audio],
         &[group([video, audio])],
         &output,
+        &Cancel::never(),
     )
     .unwrap();
 
@@ -2045,6 +2292,7 @@ fn packed_audio_aligns_with_ts_across_the_wrap_edge() {
         &[Streams::Video, Streams::Audio],
         &[group([video, audio])],
         &output,
+        &Cancel::never(),
     )
     .unwrap();
 
@@ -2082,6 +2330,7 @@ fn untimed_packed_audio_is_used_only_alone() {
             &[Streams::Video, Streams::Audio],
             &[group([track("ts_a"), audio.clone()])],
             &output,
+            &Cancel::never(),
         )
         .unwrap_err();
         assert!(
@@ -2093,14 +2342,26 @@ fn untimed_packed_audio_is_used_only_alone() {
         );
     }
 
-    let report = remux(&[Streams::Audio], &[group([untimed])], &output).unwrap();
+    let report = remux(
+        &[Streams::Audio],
+        &[group([untimed])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
     let packets: usize = segments
         .iter()
         .map(|(path, _)| timelines(path).1.len())
         .sum();
     assert_eq!(report.streams[0].packets, packets as u64);
     // 有时间戳的那片也按样本数接续：缺的那片不留空档
-    let report = remux(&[Streams::Audio], &[group([partly])], &output).unwrap();
+    let report = remux(
+        &[Streams::Audio],
+        &[group([partly])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
     let expected = (segments[0].1 + segments[2].1) as f64 / 90_000.0;
     let duration = report.streams[0].duration_us as f64 / 1e6;
     assert!(

@@ -98,7 +98,7 @@ pub enum Stage {
     Downloading,
     /// 直播：刷新播放列表并下载新分片
     Recording,
-    /// 写出输出（合并 MP4、写本地 HLS）；不响应取消
+    /// 写出输出（合并 MP4、写本地 HLS）
     Writing,
     Done,
 }

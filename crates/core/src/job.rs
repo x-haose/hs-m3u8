@@ -265,10 +265,7 @@ impl Task {
     }
 }
 
-/// 写出输出，按选项删除任务目录。
-///
-/// 简化：开始写出后不响应取消（合并 MP4 不可中断，复制 HLS 不检查取消）；耗时成为问题时给 remux 加 FFmpeg
-/// 中断回调、复制时检查取消。
+/// 写出输出，按选项删除任务目录。取消在换上输出之前都生效（见 [`output::write`]）。
 async fn finish(
     dir: WorkDir,
     content: Content,
@@ -281,7 +278,7 @@ async fn finish(
     }
     progress.send_modify(|p| p.stage = Stage::Writing);
     let bytes = progress.borrow().bytes;
-    let output = output::write(dir, content, options, bytes).await?;
+    let output = output::write(dir, content, options, bytes, cancel).await?;
     progress.send_modify(|p| p.stage = Stage::Done);
     Ok(output)
 }

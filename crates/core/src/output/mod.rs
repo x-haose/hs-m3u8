@@ -7,7 +7,8 @@ mod options;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use hs_m3u8_remux::{DiscontinuityGroup, Report, Segment, Streams, TrackSegments};
+use hs_m3u8_remux::{Cancel, DiscontinuityGroup, Report, Segment, Streams, TrackSegments};
+use tokio_util::sync::CancellationToken;
 
 pub(crate) use self::commit::recover_recorded;
 pub use self::options::{OutputOptions, Target};
@@ -127,12 +128,14 @@ fn check_all(options: &ResolvedOutput) -> Result<Vec<Occupant>, Error> {
         .collect()
 }
 
-/// 写出输出，按选项删除任务目录。`bytes` 为任务目录中已完成的分片与 init 段的字节数。
+/// 写出输出，按选项删除任务目录。`bytes` 为任务目录中已完成的分片与 init 段的字节数。`cancel` 在换上输出之前都生效
+/// （见 [`write_files`]）。
 pub(crate) async fn write(
     dir: WorkDir,
     content: Content,
     options: &ResolvedOutput,
     bytes: u64,
+    cancel: &CancellationToken,
 ) -> Result<Output, Error> {
     let Content {
         streams,
@@ -142,8 +145,10 @@ pub(crate) async fn write(
         live,
     } = content;
     let files = options.clone();
+    let cancel = cancel.clone();
     let (mp4, mut leftovers) =
-        blocking(move || write_files(&streams, &groups, selection.as_ref(), &files)).await??;
+        blocking(move || write_files(&streams, &groups, selection.as_ref(), &files, &cancel))
+            .await??;
     if !options.keep_work_dir {
         leftovers.extend(dir.remove().await);
     }
@@ -160,12 +165,14 @@ pub(crate) async fn write(
 }
 
 /// 先把 MP4 合并到临时名、HLS 备齐到准备目录，都成功后再换上（见 [`commit`]）。合并 MP4 失败时还没有动到输出；
-/// 任一步失败都撤回，等于没有写过。成功时另返回收尾没删掉的东西。
+/// 任一步失败都撤回，等于没有写过。成功时另返回收尾没删掉的东西。`cancel` 取消时以 [`Error::Cancelled`] 撤回：合并
+/// MP4（见 [`hs_m3u8_remux::Cancel`]）与备齐 HLS 的每个文件之间检查，换上之前最后检查一次；换上的几步改名不中断。
 fn write_files(
     streams: &[Streams],
     groups: &[Vec<GroupTrack>],
     selection: Option<&SelectionKey>,
     options: &ResolvedOutput,
+    cancel: &CancellationToken,
 ) -> Result<(Option<Mp4Output>, Vec<Leftover>), Error> {
     check_all(options)?;
     create_dirs(options)?;
@@ -173,7 +180,10 @@ fn write_files(
         hls::check_content(groups, selection)?;
     }
     let commit = Commit::begin(&options.work_dir, &options.outputs)?;
-    let written = write_temps(streams, groups, selection, options).and_then(|report| {
+    let written = write_temps(streams, groups, selection, options, cancel).and_then(|report| {
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
         // 写出期间输出路径可能已被别人占用；开始时检查过，换上前再查一次，按这次的结果换
         Ok((report, check_all(options)?))
     });
@@ -198,26 +208,36 @@ fn write_temps(
     groups: &[Vec<GroupTrack>],
     selection: Option<&SelectionKey>,
     options: &ResolvedOutput,
+    cancel: &CancellationToken,
 ) -> Result<Option<Report>, Error> {
     let report = match options.get(OutputKind::Mp4) {
-        Some(mp4) => Some(write_mp4(mp4.temp(), streams, groups, &options.work_dir)?),
+        Some(mp4) => Some(write_mp4(
+            mp4.temp(),
+            streams,
+            groups,
+            &options.work_dir,
+            cancel,
+        )?),
         None => None,
     };
     if let Some(hls) = options.get(OutputKind::Hls) {
-        hls::stage(hls.temp(), &options.work_dir, groups, selection)?;
+        hls::stage(hls.temp(), &options.work_dir, groups, selection, cancel)?;
     }
     Ok(report)
 }
 
-/// 合并为 MP4 写到 `temp`；失败时 `temp` 上可能留有写了一半的文件。`work_dir` 为分片所在的任务目录。
+/// 合并为 MP4 写到 `temp`；失败或取消时 `temp` 上可能留有写了一半的文件。`work_dir` 为分片所在的任务目录。
 fn write_mp4(
     temp: &Path,
     streams: &[Streams],
     groups: &[Vec<GroupTrack>],
     work_dir: &Path,
+    cancel: &CancellationToken,
 ) -> Result<Report, Error> {
     let groups: Vec<DiscontinuityGroup> = groups.iter().map(|g| remux_group(g)).collect();
-    hs_m3u8_remux::remux(streams, &groups, temp).map_err(|e| remux_error(e, work_dir))
+    let token = cancel.clone();
+    let cancel = Cancel::new(move || token.is_cancelled());
+    hs_m3u8_remux::remux(streams, &groups, temp, &cancel).map_err(|e| remux_error(e, work_dir))
 }
 
 /// 下载完之前核对能否合并进 MP4（见 [`hs_m3u8_remux::check`]），各轨只需开头的分片。`groups` 的各项为合并时的组号与
@@ -243,9 +263,20 @@ pub(super) fn unrecognized_segment(work_dir: &Path, path: &Path) -> Error {
 
 /// 合并或核对任务目录里的分片时 remux 的错误：放不进 MP4 的为 [`crate::Unsupported::Mp4`]；认不出的分片与结构不对的
 /// fMP4 为任务目录损坏（下载时都核对过，即目录里的文件被改动过），认不出的与写本地 HLS 时相同（见
-/// [`unrecognized_segment`]）；其余为 [`Error::Remux`]。
+/// [`unrecognized_segment`]）；读分片、写输出时文件出错为 [`Error::Io`]（如盘满），取消为 [`Error::Cancelled`]；其余为
+/// [`Error::Remux`]。
 fn remux_error(error: hs_m3u8_remux::Error, work_dir: &Path) -> Error {
     match error {
+        hs_m3u8_remux::Error::Io {
+            action,
+            path,
+            cause,
+        } => Error::Io {
+            action,
+            path,
+            cause,
+        },
+        hs_m3u8_remux::Error::Cancelled => Error::Cancelled,
         hs_m3u8_remux::Error::Unsupported(unsupported) => {
             Error::Unsupported(crate::Unsupported::Mp4(unsupported))
         }

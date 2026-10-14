@@ -941,8 +941,8 @@ class InvalidInputError(RequestError):
 @typing.final
 class Job:
     r"""
-    运行中的任务（`Engine.start`、`Engine.merge_recorded` 返回）。不再被引用、也没有在等它时（被回收）取消任务；已开始
-    写出（`Stage.Writing`）的仍在后台写完。异步方法返回协程，在 asyncio 事件循环里 await（在别处驱动时抛
+    运行中的任务（`Engine.start`、`Engine.merge_recorded` 返回）。不再被引用、也没有在等它时（被回收）取消任务。异步
+    方法返回协程，在 asyncio 事件循环里 await（在别处驱动时抛
     `RuntimeError`）。只能在建立它的进程里使用。
     """
     def progress(self) -> Progress:
@@ -951,8 +951,8 @@ class Job:
         """
     def cancel(self) -> None:
         r"""
-        请求取消；`wait` 随后抛 `JobCancelledError`，已完成的分片保留在任务目录中。开始写出后不响应取消：已开始写出的
-        任务照常完成。
+        请求取消；`wait` 随后抛 `JobCancelledError`，已完成的分片保留在任务目录中。写出（`Stage.Writing`）中取消时删掉
+        写了一半的输出，已有的输出不受影响；换上输出的几步改名不中断，取消晚于它们时任务照常成功。
         """
     def stop(self) -> None:
         r"""
@@ -2966,7 +2966,7 @@ class Stage:
     @typing.final
     class Writing(Stage):
         r"""
-        写出输出（合并 MP4、写本地 HLS）；不响应取消
+        写出输出（合并 MP4、写本地 HLS）
         """
         __match_args__ = ()
         def __new__(cls) -> Stage.Writing: ...

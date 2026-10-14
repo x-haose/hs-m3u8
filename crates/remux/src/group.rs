@@ -8,7 +8,7 @@ use crate::compare::{Config, Desc, same_streams};
 use crate::inband::Inband;
 use crate::input::Input;
 use crate::source::Source;
-use crate::{Error, Numbered, StreamKind, Streams, TrackSegments, Unsupported, ffi, frame};
+use crate::{Cancel, Error, Numbered, StreamKind, Streams, TrackSegments, Unsupported, ffi, frame};
 
 /// 一条轨在某组中被选中的一路流。
 pub(crate) struct Selected {
@@ -24,8 +24,9 @@ fn open_selected(
     wanted: Streams,
     group: usize,
     track: usize,
+    cancel: &Cancel,
 ) -> Result<(Input, Vec<Selected>), Error> {
-    let input = Input::open(segments, group, track)?;
+    let input = Input::open(segments, group, track, cancel)?;
     let mut selected = Vec::new();
     for kind in [StreamKind::Video, StreamKind::Audio] {
         if !wanted.wants(kind) {
@@ -72,18 +73,19 @@ pub(crate) struct OpenTrack {
     pub(crate) selected: Vec<Selected>,
 }
 
-/// 打开第 `group` 组的各轨并选流（见 [`open_selected`]）。`layout` 为第 0 组各轨选中的流（见 [`crate::compare::layout_of`]），其余组
-/// 的流种类、参数与解码配置须与它相同（见 [`same_streams`]），各轨都没有确定的不同、而有项只有一边探测出时报
-/// [`Unsupported::ParamsUnknown`]；打开第 0 组时为 None。
+/// 打开第 `group` 组的各轨并选流（见 [`open_selected`]）。`layout` 为第 0 组各轨选中的流（见
+/// [`crate::compare::layout_of`]），其余组的流种类、参数与解码配置须与它相同（见 [`same_streams`]），各轨都没有确定的
+/// 不同、而有项只有一边探测出时报 [`Unsupported::ParamsUnknown`]；打开第 0 组时为 None。
 pub(crate) fn open_group(
     streams: &[Streams],
     (group, tracks): Numbered<'_>,
     layout: Option<&[Vec<Desc>]>,
+    cancel: &Cancel,
 ) -> Result<Vec<OpenTrack>, Error> {
     let mut opened = Vec::new();
     let mut unknown = None;
     for (track, segments) in tracks.tracks.iter().enumerate() {
-        let (input, selected) = open_selected(segments, streams[track], group, track)?;
+        let (input, selected) = open_selected(segments, streams[track], group, track, cancel)?;
         if let Some(layout) = layout
             && let Some(kind) = same_streams(&selected, &layout[track], group, track)?
         {
