@@ -51,27 +51,7 @@ pub(crate) async fn download(
     let names = names(plan, &inits);
     verify_completed(fetcher, plan, &names, dir, cancel).await?;
 
-    let mut items: Vec<Vec<Option<Item>>> = plan
-        .tracks
-        .iter()
-        .zip(&names)
-        .enumerate()
-        .map(|(track, (t, names))| {
-            t.segments
-                .iter()
-                .zip(names)
-                .map(|(segment, name)| {
-                    Some(Item {
-                        track,
-                        segment: Box::new(segment.clone()),
-                        name: *name,
-                        path: layout.segment(track, name),
-                        init: layout.segment_init(track, name),
-                    })
-                })
-                .collect()
-        })
-        .collect();
+    let mut items = items(plan, &names, layout);
     if let Some(streams) = mp4 {
         let heads = plan
             .groups
@@ -94,6 +74,30 @@ pub(crate) async fn download(
     Ok(group_input(plan, &names, layout, Range::clone))
 }
 
+/// 各轨各分片的下载项：`items[t][i]` 为第 t 条轨第 i 个分片的。
+fn items(plan: &Plan, names: &[Vec<SegmentName>], layout: &Layout) -> Vec<Vec<Option<Item>>> {
+    plan.tracks
+        .iter()
+        .zip(names)
+        .enumerate()
+        .map(|(track, (t, names))| {
+            t.segments
+                .iter()
+                .zip(names)
+                .map(|(segment, name)| {
+                    Some(Item {
+                        track,
+                        segment: Box::new(segment.clone()),
+                        name: *name,
+                        path: layout.segment(track, name),
+                        init: layout.segment_init(track, name),
+                    })
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// 核对已完成的分片时每条轨最多核对几组：取已完成的字节数最多的，主体内容在其中，各视频共用的片头片尾这类小组排在
 /// 后面；有十几个以上共用组、每个都比主体已完成的部分大的播放列表实际上没有，而每片一组的播放列表不必把已完成的都
 /// 重下一遍。
@@ -102,8 +106,7 @@ const RECHECK_GROUPS: usize = 16;
 /// 每组最多试几个已完成的分片：取不到（404/410）的才换下一个，一次很快的请求；滚动删除旧分片的回看源可能要多试几个。
 const RECHECK_TRIES: usize = 16;
 
-/// 见 [`download`]：要核对的组里已完成的分片重新下载，与已存的比较，各组并发（至多任务的并发数个）；都相同而地址
-/// 变了时改记新地址。
+/// 见 [`download`]：要核对的组里已完成的分片重新下载，与已存的比较；都相同而地址变了时改记新地址。
 async fn verify_completed(
     fetcher: &Fetcher,
     plan: &Plan,
@@ -112,8 +115,29 @@ async fn verify_completed(
     cancel: &CancellationToken,
 ) -> Result<(), Error> {
     let layout = dir.layout();
-    let groups: Vec<Group> = plan
-        .groups
+    let groups = groups(plan, names, layout);
+    let (tracks, url_changed) = (plan.tracks.len(), dir.url_changed());
+    let Some(picked) = blocking(move || to_verify(groups, tracks, url_changed)).await?? else {
+        return Ok(());
+    };
+    match recheck_all(&fetcher.direct(), picked, fetcher.limit(), cancel).await? {
+        Recheck::Same => {}
+        Recheck::Different | Recheck::Gone => {
+            return Err(Error::WorkDir {
+                path: layout.root().to_path_buf(),
+                problem: WorkDirProblem::SourceUnverified,
+            });
+        }
+    }
+    if url_changed {
+        dir.adopt_url().await?;
+    }
+    Ok(())
+}
+
+/// 计划里各组各轨的分片，作为核对的候选。
+fn groups(plan: &Plan, names: &[Vec<SegmentName>], layout: &Layout) -> Vec<Group> {
+    plan.groups
         .iter()
         .flat_map(|ranges| ranges.iter().enumerate())
         .map(|(track, range)| Group {
@@ -127,16 +151,22 @@ async fn verify_completed(
                 })
                 .collect(),
         })
-        .collect();
-    let (tracks, url_changed) = (plan.tracks.len(), dir.url_changed());
-    let Some(picked) = blocking(move || to_verify(groups, tracks, url_changed)).await?? else {
-        return Ok(());
-    };
-    let direct = fetcher.direct();
-    let mut pending = picked.into_iter();
+        .collect()
+}
+
+/// 核对 `groups` 各组（见 [`recheck`]），至多 `limit` 组并发：都相同时为 [`Recheck::Same`]，否则为第一组不通过的结论
+/// 或失败。有一组不通过或失败时其余的中止，等它们退出再返回：它们的请求与退避在任务结束之前收尾；其中 panic 的照样
+/// 传出。
+async fn recheck_all(
+    direct: &Direct,
+    groups: Vec<Group>,
+    limit: usize,
+    cancel: &CancellationToken,
+) -> Result<Recheck, Error> {
+    let mut pending = groups.into_iter();
     let mut running = JoinSet::new();
-    let verified = loop {
-        while running.len() < fetcher.limit()
+    let verdict = loop {
+        while running.len() < limit
             && let Some(Group { track, candidates }) = pending.next()
         {
             let (direct, cancel) = (direct.clone(), cancel.clone());
@@ -145,25 +175,17 @@ async fn verify_completed(
             });
         }
         let Some(joined) = running.join_next().await else {
-            break Ok(());
+            break Ok(Recheck::Same);
         };
         let checked = match joined {
             Ok(checked) => checked,
             Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
             Err(_) => unreachable!("核对的任务不会被单独中止，运行时关闭时这里也不再被轮询"),
         };
-        match checked {
-            Ok(Recheck::Same) => {}
-            Ok(Recheck::Different | Recheck::Gone) => {
-                break Err(Error::WorkDir {
-                    path: layout.root().to_path_buf(),
-                    problem: WorkDirProblem::SourceUnverified,
-                });
-            }
-            Err(failure) => break Err(failure),
+        if !matches!(checked, Ok(Recheck::Same)) {
+            break checked;
         }
     };
-    // 有一组不通过时其余的中止，等它们退出再返回：它们的请求与退避在任务结束之前收尾；其中 panic 的照样传出
     running.abort_all();
     while let Some(joined) = running.join_next().await {
         if let Err(e) = joined
@@ -172,11 +194,7 @@ async fn verify_completed(
             std::panic::resume_unwind(e.into_panic());
         }
     }
-    verified?;
-    if url_changed {
-        dir.adopt_url().await?;
-    }
-    Ok(())
+    verdict
 }
 
 /// 一个不连续段组里第 `track` 条轨的分片。

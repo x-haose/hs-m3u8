@@ -186,21 +186,7 @@ pub(crate) async fn write(
         missed,
         live,
     } = content;
-    let per_output: usize = groups
-        .iter()
-        .flatten()
-        .map(|t| t.segments.len() + usize::from(t.init.is_some()))
-        .sum();
-    let count = |kind| {
-        options.get(kind).map(|_| FileCount {
-            done: 0,
-            total: per_output,
-        })
-    };
-    let writing = Writing {
-        mp4: count(OutputKind::Mp4),
-        hls: count(OutputKind::Hls),
-    };
+    let writing = writing(&groups, options);
     progress.send_modify(|p| p.writing = Some(writing));
     let advance = Advance(progress.clone());
     let files = options.clone();
@@ -230,6 +216,25 @@ pub(crate) async fn write(
         missed,
         live,
     })
+}
+
+/// 写出开始时的进度：每种要写的输出都是各组各轨的分片与 init 段合计。
+fn writing(groups: &[Vec<GroupTrack>], options: &ResolvedOutput) -> Writing {
+    let per_output: usize = groups
+        .iter()
+        .flatten()
+        .map(|t| t.segments.len() + usize::from(t.init.is_some()))
+        .sum();
+    let count = |kind| {
+        options.get(kind).map(|_| FileCount {
+            done: 0,
+            total: per_output,
+        })
+    };
+    Writing {
+        mp4: count(OutputKind::Mp4),
+        hls: count(OutputKind::Hls),
+    }
 }
 
 /// 先把 MP4 合并到临时名、HLS 备齐到准备目录，都成功后再换上（见 [`commit`]）。合并 MP4 失败时还没有动到输出；

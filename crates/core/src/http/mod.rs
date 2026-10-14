@@ -278,7 +278,7 @@ impl Http {
         Ok(parts)
     }
 
-    /// 发出请求并检查状态码：非 2xx 为失败（429/503 时带上 Retry-After），字节范围请求须返回 206。
+    /// 发出请求并检查状态（见 [`check_status`]）。
     async fn send(
         &self,
         parts: &RequestParts,
@@ -300,44 +300,7 @@ impl Http {
             _ = cancel.cancelled() => return Err(Error::Cancelled),
             sent = builder.send() => sent.map_err(|e| http_error(&parts.url, classify(e)))?,
         };
-        let status = response.status();
-        if !status.is_success() {
-            let retry_after = matches!(
-                status,
-                StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
-            )
-            .then(|| {
-                let value = response.headers().get(RETRY_AFTER)?.to_str().ok()?;
-                requested_wait(value, SystemTime::now())
-            })
-            .flatten();
-            return Err(Error::Http {
-                url: Box::new(parts.url.clone()),
-                kind: HttpErrorKind::Status(status.as_u16()),
-                retry_after,
-            });
-        }
-        if let Some(r) = range {
-            if status != StatusCode::PARTIAL_CONTENT {
-                return Err(http_error(
-                    &parts.url,
-                    HttpErrorKind::RangeIgnored(status.as_u16()),
-                ));
-            }
-            let content_range = response
-                .headers()
-                .get(CONTENT_RANGE)
-                .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
-            if !content_range
-                .as_deref()
-                .is_some_and(|v| range_matches(v, r))
-            {
-                return Err(http_error(
-                    &parts.url,
-                    HttpErrorKind::RangeMismatch(content_range),
-                ));
-            }
-        }
+        check_status(&response, &parts.url, range)?;
         Ok(response)
     }
 
@@ -401,6 +364,51 @@ impl Http {
             body,
         })
     }
+}
+
+/// 检查响应 `response` 的状态：非 2xx 为失败（429/503 时带上 Retry-After），字节范围请求 `range` 须返回 206 且
+/// Content-Range 与请求的相符。`url` 为发出请求的地址，用于错误信息。
+fn check_status(
+    response: &reqwest::Response,
+    url: &Url,
+    range: Option<ByteRange>,
+) -> Result<(), Error> {
+    let status = response.status();
+    if !status.is_success() {
+        let retry_after = matches!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+        )
+        .then(|| {
+            let value = response.headers().get(RETRY_AFTER)?.to_str().ok()?;
+            requested_wait(value, SystemTime::now())
+        })
+        .flatten();
+        return Err(Error::Http {
+            url: Box::new(url.clone()),
+            kind: HttpErrorKind::Status(status.as_u16()),
+            retry_after,
+        });
+    }
+    if let Some(r) = range {
+        if status != StatusCode::PARTIAL_CONTENT {
+            return Err(http_error(
+                url,
+                HttpErrorKind::RangeIgnored(status.as_u16()),
+            ));
+        }
+        let content_range = response
+            .headers()
+            .get(CONTENT_RANGE)
+            .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
+        if !content_range
+            .as_deref()
+            .is_some_and(|v| range_matches(v, r))
+        {
+            return Err(http_error(url, HttpErrorKind::RangeMismatch(content_range)));
+        }
+    }
+    Ok(())
 }
 
 /// 用途为 `purpose` 的响应体的上限，字节（见 [`Error::ResponseTooLarge`]）。分片不设：合法的分片随码率与时长相差
