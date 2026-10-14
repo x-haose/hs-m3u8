@@ -46,7 +46,7 @@ impl Inband {
             }
             codec::Id::AAC => frame::Framing::Adts,
             codec::Id::AC3 | codec::Id::EAC3 => frame::Framing::Ac3,
-            codec::Id::MP3 => frame::Framing::Mpeg,
+            codec::Id::MP2 | codec::Id::MP3 => frame::Framing::Mpeg,
             _ => return None,
         };
         Some(Inband {

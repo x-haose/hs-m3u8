@@ -222,8 +222,7 @@ variants! {
     /// 内容放不进 MP4 的原因；可只输出本地 HLS（`Target.Hls`），它原样保留分片，不受这些限制。各取值的 `group` 为合并
     /// 时的组号：点播即播放列表里第几个不连续段组，直播为各轨都录到的组按会话、不连续段排列的下标。
     pub enum Mp4Unsupported {
-        /// 编码放不进 MP4：fMP4 里支持 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、MP3、FLAC、Opus、ALAC 音频，TS 与
-        /// 打包音频里支持 H.264、HEVC 视频与 AAC、AC-3、E-AC-3、MP3 音频
+        /// 编码放不进 MP4；支持的编码列在异常的说明（`str(异常)`）里
         #[pyo3(constructor = (*, group, track, kind, codec))]
         Codec {
             /// 第几个不连续段组

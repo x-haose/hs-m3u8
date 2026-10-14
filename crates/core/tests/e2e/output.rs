@@ -189,12 +189,12 @@ fn names_in(dir: &Path) -> Vec<String> {
     names
 }
 
-/// 只要 HLS：不经 FFmpeg，MP4 合并不支持的编码（这里是 MP2 音频）照样输出；分片原样放进目录。
+/// 只要 HLS：不经 FFmpeg，MP4 合并不支持的编码（这里是 TS 里的 Opus 音频）照样输出；分片原样放进目录。
 #[tokio::test(flavor = "multi_thread")]
 async fn hls_only_keeps_codecs_the_mp4_cannot_take() {
     let dir = test_dir("output_hls_only");
     let server = Server::start().await;
-    server.put("seg0.ts", fixture("ts_mp2/seg0.ts"));
+    server.put("seg0.ts", fixture("ts_opus/seg0.ts"));
     server.put(
         "index.m3u8",
         "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1.5,\nseg0.ts\n#EXT-X-ENDLIST\n",
@@ -213,7 +213,7 @@ async fn hls_only_keeps_codecs_the_mp4_cannot_take() {
     assert_eq!(segment.duration_us, 1_500_000);
     assert_eq!(
         std::fs::read(hls.join("0/0.ts")).unwrap(),
-        fixture("ts_mp2/seg0.ts")
+        fixture("ts_opus/seg0.ts")
     );
     assert!(!dir.join("out.hsdl").exists());
 }
@@ -413,7 +413,7 @@ async fn live_holes_and_sessions_in_hls() {
     assert_output(&output, &expected_long(&dir, &[0, 2, 3], &[2, 1]));
 }
 
-/// 编码放不进 MP4（MP2 音频）：下了第一个分片、核对出来就报错，其余分片不下，任务目录保留；改为输出 HLS 后用同一个
+/// 编码放不进 MP4（TS 里的 Opus 音频）：下了第一个分片、核对出来就报错，其余分片不下，任务目录保留；改为输出 HLS 后用同一个
 /// 默认任务目录接着下，已下的不重下。HLS 目录路径带结尾的分隔符也照常。
 #[tokio::test(flavor = "multi_thread")]
 async fn switching_to_hls_after_an_unsupported_codec_reuses_the_download() {
@@ -421,7 +421,7 @@ async fn switching_to_hls_after_an_unsupported_codec_reuses_the_download() {
     let server = Server::start().await;
     let mut playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n".to_owned();
     for i in 0..3 {
-        server.put(&format!("seg{i}.ts"), fixture("ts_mp2/seg0.ts"));
+        server.put(&format!("seg{i}.ts"), fixture("ts_opus/seg0.ts"));
         playlist += &format!("#EXTINF:1.5,\nseg{i}.ts\n");
     }
     server.put("index.m3u8", playlist + "#EXT-X-ENDLIST\n");
@@ -430,9 +430,9 @@ async fn switching_to_hls_after_an_unsupported_codec_reuses_the_download() {
     let mp4 = request_to(url.clone(), &dir, Target::Mp4(dir.join("out.mp4")));
     match run(mp4).await {
         Err(Error::Unsupported(Unsupported::Mp4(Mp4Unsupported::Codec {
-            codec: "mp2", ..
+            codec: "opus", ..
         }))) => {}
-        other => panic!("MP2 音频应放不进 MP4：{other:?}"),
+        other => panic!("TS 里的 Opus 音频应放不进 MP4：{other:?}"),
     }
     assert_eq!(hits(), [1, 0, 0]);
     assert_eq!(names_in(&dir), ["out.hsdl"]);

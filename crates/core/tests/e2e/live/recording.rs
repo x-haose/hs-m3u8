@@ -48,14 +48,14 @@ async fn records_until_endlist() {
     );
 }
 
-/// 编码放不进 MP4（MP2 音频）：录到第一个分片就在进度里报出原因，录制照常进行（之后的分片照样录）；直播结束后合并
+/// 编码放不进 MP4（TS 里的 Opus 音频）：录到第一个分片就在进度里报出原因，录制照常进行（之后的分片照样录）；直播结束后合并
 /// MP4 时以同一个原因失败。
 #[tokio::test(flavor = "multi_thread")]
 async fn unsupported_codecs_show_in_progress_while_recording_goes_on() {
     let dir = test_dir("live_unsupported_codec");
     let server = Server::start().await;
-    server.put("seg0.ts", fixture("ts_mp2/seg0.ts"));
-    server.put("seg1.ts", fixture("ts_mp2/seg0.ts"));
+    server.put("seg0.ts", fixture("ts_opus/seg0.ts"));
+    server.put("seg1.ts", fixture("ts_opus/seg0.ts"));
     server.put("live.m3u8", playlist(&[0], false));
 
     let job = engine()
@@ -72,7 +72,7 @@ async fn unsupported_codecs_show_in_progress_while_recording_goes_on() {
     .mp4_unsupported
     .clone();
     assert!(
-        matches!(reason, Some(Mp4Unsupported::Codec { codec: "mp2", .. })),
+        matches!(reason, Some(Mp4Unsupported::Codec { codec: "opus", .. })),
         "{reason:?}"
     );
 
@@ -82,7 +82,7 @@ async fn unsupported_codecs_show_in_progress_while_recording_goes_on() {
         matches!(
             failed,
             Err(Error::Unsupported(Unsupported::Mp4(
-                Mp4Unsupported::Codec { codec: "mp2", .. }
+                Mp4Unsupported::Codec { codec: "opus", .. }
             )))
         ),
         "{failed:?}"

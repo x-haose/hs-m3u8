@@ -638,12 +638,12 @@ fn same_stream_kind_from_two_tracks_is_rejected() {
     );
 }
 
-/// 另一条轨提供音频时只取本轨的视频：本轨混着的音频不进输出，其编码（MP2）也不检查。
+/// 另一条轨提供音频时只取本轨的视频：本轨混着的音频不进输出，其编码（TS 里的 Opus，放不进 MP4）也不检查。
 #[test]
 fn unwanted_streams_are_dropped_without_codec_checks() {
     let dir = work_dir("unwanted_streams");
     let output = dir.join("out.mp4");
-    let (muxed, audio) = (track("ts_mp2"), track("fmp4_a/audio"));
+    let (muxed, audio) = (track("ts_opus"), track("fmp4_a/audio"));
 
     let report = remux(
         &[Streams::Video, Streams::Audio],
@@ -1339,11 +1339,11 @@ fn check_finds_what_cannot_go_into_an_mp4_from_the_first_segments() {
     )
     .unwrap();
 
-    let err = check(&[Streams::All], &[group([head("ts_mp2")])]).unwrap_err();
+    let err = check(&[Streams::All], &[group([head("ts_opus")])]).unwrap_err();
     assert!(
         matches!(
             err,
-            Error::Unsupported(Unsupported::Codec { codec: "mp2", .. })
+            Error::Unsupported(Unsupported::Codec { codec: "opus", .. })
         ),
         "实际 {err:?}"
     );
@@ -1393,7 +1393,7 @@ fn check_leaves_what_the_first_segment_cannot_tell_to_the_merge() {
     // 第 0 组判断不了时，其余各组照样核对自身
     let err = check(
         &[Streams::All],
-        &[group([head("ts_late_audio")]), group([head("ts_mp2")])],
+        &[group([head("ts_late_audio")]), group([head("ts_opus")])],
     )
     .unwrap_err();
     assert!(
@@ -1401,7 +1401,7 @@ fn check_leaves_what_the_first_segment_cannot_tell_to_the_merge() {
             err,
             Error::Unsupported(Unsupported::Codec {
                 group: 1,
-                codec: "mp2",
+                codec: "opus",
                 ..
             })
         ),
@@ -1572,32 +1572,30 @@ fn eac3_with_fewer_than_six_blocks_per_frame_is_rejected() {
     );
 }
 
-/// MP2 音频放不进 MP4；TS 里的 Opus 也不收（只收 fMP4 里的）；采样率低于 16 kHz 的 MP3 也放不进，报出采样率。
+/// TS 里的 Opus 不收（只收 fMP4 里的，TS 里读不出每帧的参数）；采样率低于 16 kHz 的 MP3 放不进，报出采样率。
 #[test]
-fn mp2_opus_in_ts_and_low_rate_mp3_audio_are_rejected() {
+fn opus_in_ts_and_low_rate_mp3_audio_are_rejected() {
     let dir = work_dir("rejected_audio");
     let output = dir.join("out.mp4");
 
-    for (name, expected) in [("ts_mp2", "mp2"), ("ts_opus", "opus")] {
-        let err = remux(
-            &[Streams::All],
-            &[group([track(name)])],
-            &output,
-            &Cancel::never(),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                Error::Unsupported(Unsupported::Codec {
-                    kind: StreamKind::Audio,
-                    codec,
-                    ..
-                }) if codec == expected
-            ),
-            "{name}：实际 {err:?}"
-        );
-    }
+    let err = remux(
+        &[Streams::All],
+        &[group([track("ts_opus")])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::Codec {
+                kind: StreamKind::Audio,
+                codec: "opus",
+                ..
+            })
+        ),
+        "实际 {err:?}"
+    );
     let err = remux(
         &[Streams::All],
         &[group([track("ts_mp3_8k")])],
@@ -1614,6 +1612,46 @@ fn mp2_opus_in_ts_and_low_rate_mp3_audio_are_rejected() {
             })
         ),
         "实际 {err:?}"
+    );
+}
+
+/// TS 里的 MP2 音频（与 MP3 同样的 MPEG 音频帧头，逐帧核对参数）原样复制进 MP4。
+#[test]
+fn mp2_audio_in_ts_is_copied() {
+    let dir = work_dir("mp2_audio");
+    let output = dir.join("out.mp4");
+    let muxed = track("ts_mp2");
+
+    let report = remux(
+        &[Streams::All],
+        &[group([muxed.clone()])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
+
+    let a_in = timelines(&concat_track(&muxed, &dir, "in.ts")).1;
+    assert_eq!(report.streams[1].packets, a_in.len() as u64);
+    assert_eq!(report.streams[1].shape.codec(), "mp2");
+    // MP4 里 MPEG 音频的对象类型（0x69）不分 Layer，FFmpeg 回读时按表认作 mp3；写进去的是 Layer II 的帧：帧头的 layer
+    // 位为 0b10
+    ffmpeg::init().unwrap();
+    let mut ictx = ffmpeg::format::input(&output).unwrap();
+    let audio = ictx
+        .streams()
+        .best(ffmpeg::media::Type::Audio)
+        .unwrap()
+        .index();
+    let first = loop {
+        let mut packet = ffmpeg::Packet::empty();
+        packet.read(&mut ictx).unwrap();
+        if packet.stream() == audio {
+            break packet.data().unwrap().to_vec();
+        }
+    };
+    assert_eq!(
+        (first[0], first[1] & 0xE0, first[1] >> 1 & 0b11),
+        (0xFF, 0xE0, 0b10)
     );
 }
 

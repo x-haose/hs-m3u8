@@ -71,8 +71,8 @@ fmp4_split fmp4_a "${a_src[@]}"
 # B 的视频轨 handler 名不同：init 段不同而样本描述相同，测试据此核对每组用的 init 段
 fmp4_split fmp4_b "${b_src[@]}" -metadata:s:v:0 handler_name=ProgramB
 
-# 编码与参数：分辨率与前面的组不同（合并应报参数变化）；HEVC、AC-3、E-AC-3（5.1 声道）、MP3（支持）；MP2、8 kHz
-# 的 MP3 与 TS 里的 Opus 音频（不支持）
+# 编码与参数：分辨率与前面的组不同（合并应报参数变化）；HEVC、AC-3、E-AC-3（5.1 声道）、MP3、MP2（支持）；8 kHz 的
+# MP3 与 TS 里的 Opus 音频（不支持）
 read -r -a small_src <<< "$(source_args testsrc2 160x90 440 1)"
 ts_segments ts_small "${small_src[@]}" "${h264[@]}" "${aac[@]}"
 read -r -a one_src <<< "$(source_args testsrc2 320x180 440 1)"
