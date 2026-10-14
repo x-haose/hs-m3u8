@@ -1897,8 +1897,8 @@ fn mp2_audio_in_ts_is_copied() {
     let a_in = timelines(&concat_track(&muxed, &dir, "in.ts")).1;
     assert_eq!(report.streams[1].packets, a_in.len() as u64);
     assert_eq!(report.streams[1].shape.codec(), "mp2");
-    // MP4 里 MPEG 音频的对象类型（0x69）不分 Layer，FFmpeg 回读时按表认作 mp3；写进去的是 Layer II 的帧：帧头的 layer
-    // 位为 0b10
+    // MP4 里 MPEG 音频的对象类型不分 Layer（采样率高于 24 kHz 时为 0x6B，即 ISO/IEC 11172-3），FFmpeg 回读时按表认作
+    // mp3；写进去的是 Layer II 的帧：帧头的 layer 位为 0b10
     ffmpeg::init().unwrap();
     let mut ictx = ffmpeg::format::input(&output).unwrap();
     let audio = ictx

@@ -401,7 +401,8 @@ variants! {
     /// 在任务开头与写出前创建；相对路径按开始任务时的当前目录补全，之后改变当前目录不影响任务；补全后最后一段变了
     /// （Windows 去掉结尾的点与空格）时报参数错误。
     pub enum Target {
-        /// MP4 文件
+        /// MP4 文件，各路流原样复制、不重编码。MP3、MP2 音轨放进 MP4 后，苹果基于 AVFoundation 的播放器（QuickTime
+        /// Player、Safari 等）认不出
         Mp4 {
             /// MP4 的路径
             path: PyPath,

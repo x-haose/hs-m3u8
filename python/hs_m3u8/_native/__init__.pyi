@@ -1587,7 +1587,7 @@ class Mp4Unsupported:
     @typing.final
     class Codec(Mp4Unsupported):
         r"""
-        编码放不进 MP4；支持的编码列在异常的说明（`str(异常)`）里
+        编码放不进 MP4。支持的编码见 README 的「能力」一节；作为异常抛出时，异常的说明（`str(异常)`）里也列出
         """
         __match_args__ = ("group", "track", "kind", "codec",)
         @property
@@ -3172,7 +3172,8 @@ class Target:
     @typing.final
     class Mp4(Target):
         r"""
-        MP4 文件
+        MP4 文件，各路流原样复制、不重编码。MP3、MP2 音轨放进 MP4 后，苹果基于 AVFoundation 的播放器（QuickTime
+        Player、Safari 等）认不出
         """
         __match_args__ = ("path",)
         @property

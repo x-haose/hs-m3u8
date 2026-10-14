@@ -30,7 +30,8 @@ pub struct OutputOptions {
 /// 去掉结尾的点与空格）时报参数错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
-    /// MP4 文件
+    /// MP4 文件，各路流原样复制、不重编码。MP3、MP2 音轨放进 MP4 后，苹果基于 AVFoundation 的播放器（QuickTime
+    /// Player、Safari 等）认不出
     Mp4(PathBuf),
     /// 可直接播放的本地 HLS 目录：不经 FFmpeg，原样保留分片（已解密），不受 MP4 合并对编码的限制。
     /// 入口为其中的 `index.m3u8`，布局见 [`crate::Output::hls`]
