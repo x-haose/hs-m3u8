@@ -181,7 +181,7 @@ variants! {
             at: u64,
         },
         /// 要取的分片或 init 段加密而所用的 EXT-X-KEY 没写 URI（违反 RFC 8216），取不到 key；已知 key 时用
-        /// `JobRequest.key`。下载与录制收到播放列表即核对，不等取分片
+        /// `JobRequest.key`。下载与录制收到播放列表即核对，不等取分片：续传只差合并时也要给
         KeyWithoutUri {
             /// 播放列表的地址
             url: Address,

@@ -76,7 +76,7 @@ impl Tasks {
                 let playlist =
                     resolve::fetch_media(&http, &hooks, &request.url, Attempts::Once, &cancel)
                         .await?;
-                direct.require_key_uris(&request.url, &playlist)?;
+                resolve::require_key_uris(&request.url, &playlist.segments, direct.custom_key())?;
                 let inits = match &request.inits {
                     Some(inits) => Some(new_inits(&direct, &playlist, inits, &cancel).await?),
                     None => None,

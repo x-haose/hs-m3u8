@@ -7,7 +7,7 @@ use hs_m3u8_remux::Streams;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::fetch::{self, Fetcher};
+use crate::fetch::Fetcher;
 use crate::http::{Http, Permit};
 use crate::info::Selected;
 use crate::live::{self, Context, Outcome};
@@ -82,9 +82,6 @@ pub(crate) async fn run(
         .as_ref()
         .map(|m| Selected::of(&m.playlist, &m.selection));
     task.progress.send_modify(|p| p.selected = selection);
-    for t in &resolved.tracks {
-        fetch::require_key_uris(&t.url, &t.playlist, request.key.as_ref())?;
-    }
     if resolved.is_live() || continuing_live && request.live.is_some() {
         run_live(task, preference, resolved, lock).await
     } else {
@@ -112,6 +109,10 @@ async fn run_live(
     lock: Option<Lock>,
 ) -> Result<Output, Error> {
     let options = task.request.live.ok_or(Error::LiveNotEnabled)?;
+    let custom_key = task.request.key.is_some();
+    for t in &resolved.tracks {
+        resolve::require_key_uris(&t.url, &t.playlist.segments, custom_key)?;
+    }
     let record = JobRecord {
         preference_digest,
         url_digest: url_digest(&task.request.source.url),
@@ -149,7 +150,7 @@ async fn run_vod(
 ) -> Result<Output, Error> {
     let streams = resolved.streams();
     let selection = resolved.selection_key();
-    let plan = Plan::new(resolved.tracks)?;
+    let plan = Plan::new(resolved.tracks, task.request.key.is_some())?;
     let record = JobRecord {
         preference_digest,
         url_digest: url_digest(&task.request.source.url),

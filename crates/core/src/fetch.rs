@@ -8,7 +8,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use hs_m3u8_hls::{InitSection, MediaPlaylist, Segment};
+use hs_m3u8_hls::{InitSection, Segment};
 use hs_m3u8_remux::fmp4;
 use tokio::sync::{OnceCell, watch};
 use tokio::task::JoinSet;
@@ -22,7 +22,7 @@ use crate::http::{Http, Permit};
 use crate::request::KeyOverride;
 use crate::verify::{Container, ContentError, check, decrypt_failure};
 use crate::workdir::{self, SegmentName};
-use crate::{Error, Progress, Unsupported, WorkDirProblem};
+use crate::{Error, Progress, WorkDirProblem};
 
 /// 一项下载：第 `track` 条轨的分片，`name` 为它在任务目录中的名字，`path` 为由名字得出的写入位置，`init` 为它所用的
 /// init 段在任务目录里的文件（排入下载之前已落盘；分片没有 init 段、不是 fMP4 时为 None）。
@@ -206,13 +206,9 @@ pub(crate) struct Direct {
 }
 
 impl Direct {
-    /// 见 [`require_key_uris`]，自定义 key 取自任务的请求。
-    pub(crate) fn require_key_uris(
-        &self,
-        url: &Url,
-        playlist: &MediaPlaylist,
-    ) -> Result<(), Error> {
-        require_key_uris(url, playlist, self.ctx.key_override.as_ref())
+    /// 任务的请求给了自定义 key。
+    pub(crate) fn custom_key(&self) -> bool {
+        self.ctx.key_override.is_some()
     }
 
     /// 拉取第 `track` 条轨的一个分片，不写盘；`init` 见 [`Item`]。失败同排队下载的分片一样包装为
@@ -229,8 +225,9 @@ impl Direct {
             .map_err(|e| segment_error(track, segment, e))
     }
 
-    /// 拉取 init 段，经 `on_init` 回调后解密并校验（见 [`check`]，须为 fMP4）；没写完的与请求的临时故障一起重试。`permit` 为 init 段与它的
-    /// key 的请求占哪一份引擎名额。IV 依次取自定义的、EXT-X-KEY 写明的，都没有时用 [`INIT_IV`]。
+    /// 拉取 init 段，经 `on_init` 回调后解密并校验（见 [`check`]，须为 fMP4）；没写完的与请求的临时故障一起重试。
+    /// `permit` 为 init 段与它的 key 的请求占哪一份引擎名额。IV 依次取自定义的、EXT-X-KEY 写明的，都没有时用
+    /// [`INIT_IV`]。
     pub(crate) async fn fetch_init(
         &self,
         init: &InitSection,
@@ -313,9 +310,9 @@ async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
     (id, result)
 }
 
-/// 拉取分片，经 `on_segment` 回调后解密（有自定义的 key、IV 时用它们）并校验内容（见 [`check`]，`init` 见 [`Item`]；解密失败见
-/// [`decrypt_failure`]）。请求、回调、解密与校验作为一次尝试，没写完的与请求的临时故障一起重试。来源标了 EXT-X-GAP
-/// 的分片不取（RFC 8216 4.4.4.7），交到这里是本库的错误。
+/// 拉取分片，经 `on_segment` 回调后解密（有自定义的 key、IV 时用它们）并校验内容（见 [`check`]，`init` 见 [`Item`]；解
+/// 密失败见 [`decrypt_failure`]）。请求、回调、解密与校验作为一次尝试，没写完的与请求的临时故障一起重试。来源标了
+/// EXT-X-GAP 的分片不取（RFC 8216 4.4.4.7），交到这里是本库的错误。
 async fn fetch_segment(
     ctx: &Ctx,
     segment: &Segment,
@@ -368,35 +365,8 @@ async fn fetch_segment(
 }
 
 /// 加密的 init 段所用的 EXT-X-KEY 没写 IV（RFC 8216 4.3.2.5 要求写明）、也没有自定义的 IV 时用的 IV：同 hls.js，按序号
-/// 0 算。猜错时 CBC 只错第一块（ftyp 的长度与类型），init 段的校验会拦下。
+/// 0 算。猜错时 CBC 只错第一块：错在 ftyp 的长度或类型上时 init 段的校验拦下；只错在品牌字段上时拦不下，不影响解码。
 const INIT_IV: [u8; 16] = [0; 16];
-
-/// 播放列表里有要取的分片（没标 EXT-X-GAP 的）或它的 init 段加密而所用的 EXT-X-KEY 没写 URI：没有自定义 key 就取不到
-/// key。
-pub(crate) fn key_without_uri(playlist: &MediaPlaylist) -> bool {
-    playlist.segments.iter().filter(|s| !s.gap).any(|s| {
-        s.key.as_ref().is_some_and(|k| k.uri.is_none())
-            || s.init
-                .as_ref()
-                .and_then(|i| i.key.as_ref())
-                .is_some_and(|k| k.uri.is_none())
-    })
-}
-
-/// 收下播放列表 `url`（开始任务、录制中刷新）时核对取得到 key：见 [`key_without_uri`]，`key` 为请求给的自定义 key；
-/// 取不到时报 [`Unsupported::KeyWithoutUri`]。
-pub(crate) fn require_key_uris(
-    url: &Url,
-    playlist: &MediaPlaylist,
-    key: Option<&KeyOverride>,
-) -> Result<(), Error> {
-    if key.is_none() && key_without_uri(playlist) {
-        return Err(Error::Unsupported(Unsupported::KeyWithoutUri(Box::new(
-            url.clone(),
-        ))));
-    }
-    Ok(())
-}
 
 /// 解密用的 key：有自定义 key 时用它，否则按 EXT-X-KEY 的地址 `uri` 取（见 [`key_for`]，请求占 `permit`）。
 async fn key(
@@ -408,7 +378,8 @@ async fn key(
     if let Some(given) = ctx.key_override {
         return Ok(given.key);
     }
-    let url = uri.expect("没写 URI 的 EXT-X-KEY 在收下播放列表时已报错（见 require_key_uris）");
+    let url =
+        uri.expect("没写 URI 的 EXT-X-KEY 在收下播放列表时已报错（见 resolve::require_key_uris）");
     key_for(ctx, url, permit, cancel).await
 }
 

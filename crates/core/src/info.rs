@@ -6,7 +6,7 @@ use hs_m3u8_hls::{
     VariantKey, audio_renditions,
 };
 
-use crate::fetch;
+use crate::resolve;
 
 /// 一个变体的属性。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,7 +98,8 @@ pub struct TrackInfo {
     pub duration_us: u64,
     /// 有 AES-128 加密的分片或 init 段
     pub encrypted: bool,
-    /// 有要取的分片或 init 段加密而所用的 EXT-X-KEY 没写 URI：要给自定义 key（[`crate::JobRequest::key`]）才下得了
+    /// 有没标 EXT-X-GAP 的分片或它的 init 段加密而所用的 EXT-X-KEY 没写 URI：要给自定义 key
+    /// （[`crate::JobRequest::key`]）才下得了
     pub needs_custom_key: bool,
 }
 
@@ -144,7 +145,7 @@ impl TrackInfo {
                 .segments
                 .iter()
                 .any(|s| s.key.is_some() || s.init.as_ref().is_some_and(|i| i.key.is_some())),
-            needs_custom_key: fetch::key_without_uri(playlist),
+            needs_custom_key: resolve::key_without_uri(&playlist.segments),
         }
     }
 }

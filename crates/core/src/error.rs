@@ -284,7 +284,7 @@ pub enum Unsupported {
         what: hs_m3u8_hls::Encryption,
     },
     /// 播放列表 `0` 里要取的分片或 init 段加密而所用的 EXT-X-KEY 没写 URI（违反 RFC 8216），取不到 key；已知 key 时用
-    /// 自定义 key（[`crate::JobRequest::key`]）。下载与录制收到播放列表即核对，不等取分片
+    /// 自定义 key（[`crate::JobRequest::key`]）。下载与录制收到播放列表即核对，不等取分片：续传只差合并时也要给
     #[error("播放列表 {} 的 EXT-X-KEY 没写 URI，取不到 key；已知 key 时可用自定义 key", bare_url(.0))]
     KeyWithoutUri(Box<Url>),
     /// 播放列表 `url` 第 `line` 行的 EXT-X-I-FRAMES-ONLY：只有关键帧的播放列表，供快进时预览，不是正常播放的内容；

@@ -131,7 +131,8 @@ record! {
         pub duration: Duration,
         /// 有 AES-128 加密的分片或 init 段
         pub encrypted: bool,
-        /// 有要取的分片或 init 段加密而所用的 EXT-X-KEY 没写 URI：要给自定义 key（`JobRequest.key`）才下得了
+        /// 有没标 EXT-X-GAP 的分片或它的 init 段加密而所用的 EXT-X-KEY 没写 URI：要给自定义 key（`JobRequest.key`）
+        /// 才下得了
         pub needs_custom_key: bool,
     }
 }

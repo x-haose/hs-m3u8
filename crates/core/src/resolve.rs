@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use hs_m3u8_hls::{self as hls, MasterPlaylist, MediaPlaylist, Playlist, Selection};
+use hs_m3u8_hls::{self as hls, MasterPlaylist, MediaPlaylist, Playlist, Segment, Selection};
 use hs_m3u8_remux::Streams;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -171,4 +171,30 @@ async fn load_playlist(
             })
         }
     })
+}
+
+/// `segments` 里有没标 EXT-X-GAP 的分片或它的 init 段加密而所用的 EXT-X-KEY 没写 URI：没有自定义 key 就取不到 key。
+pub(crate) fn key_without_uri<'a>(segments: impl IntoIterator<Item = &'a Segment>) -> bool {
+    segments.into_iter().filter(|s| !s.gap).any(|s| {
+        s.key.as_ref().is_some_and(|k| k.uri.is_none())
+            || s.init
+                .as_ref()
+                .and_then(|i| i.key.as_ref())
+                .is_some_and(|k| k.uri.is_none())
+    })
+}
+
+/// 收下播放列表 `url`（开始任务、录制中刷新）时核对它的分片 `segments` 取得到 key（见 [`key_without_uri`]），
+/// `custom_key` 为请求给了自定义 key；取不到时报 [`Unsupported::KeyWithoutUri`]。
+pub(crate) fn require_key_uris<'a>(
+    url: &Url,
+    segments: impl IntoIterator<Item = &'a Segment>,
+    custom_key: bool,
+) -> Result<(), Error> {
+    if !custom_key && key_without_uri(segments) {
+        return Err(Error::Unsupported(Unsupported::KeyWithoutUri(Box::new(
+            url.clone(),
+        ))));
+    }
+    Ok(())
 }

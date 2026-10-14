@@ -6,7 +6,7 @@ use hs_m3u8_hls::{InitSection, Segment};
 use sha2::{Digest, Sha256};
 
 use crate::ident::{Fingerprint, hex};
-use crate::resolve::ResolvedTrack;
+use crate::resolve::{self, ResolvedTrack};
 use crate::{Error, MissReason, Missed, Unsupported};
 
 /// 点播计划中的一条轨。
@@ -21,6 +21,40 @@ pub(crate) struct Track {
 }
 
 impl Track {
+    /// 一条轨的分片 `segments` 按所在的段（`runs`，分片下标范围）能否合并（`mergeable`）分拣；另返回各可合并段的分片
+    /// 在 `segments` 中的下标范围，都不为空（可合并的段里每条轨都有没标 GAP 的分片）。
+    fn new(
+        segments: &[Segment],
+        runs: &[Range<usize>],
+        mergeable: &[bool],
+    ) -> (Self, Vec<Range<usize>>) {
+        let mut track = Track {
+            segments: Vec::new(),
+            skipped: Vec::new(),
+            inits: Vec::new(),
+        };
+        let mut ranges = Vec::new();
+        for (run, &mergeable) in runs.iter().zip(mergeable) {
+            let start = track.segments.len();
+            for s in &segments[run.clone()] {
+                match (s.gap, mergeable) {
+                    (true, _) => track.skipped.push((s.sequence, MissReason::Gap)),
+                    (false, false) => track.skipped.push((s.sequence, MissReason::Unmergeable)),
+                    (false, true) => track.segments.push(s.clone()),
+                }
+            }
+            if mergeable {
+                ranges.push(start..track.segments.len());
+            }
+        }
+        for init in track.segments.iter().filter_map(|s| s.init.as_ref()) {
+            if !track.inits.contains(init) {
+                track.inits.push(init.clone());
+            }
+        }
+        (track, ranges)
+    }
+
     /// 分片所用 init 段在 `inits` 中的下标；无 init 段时为 None。
     pub(crate) fn init_index(&self, segment: &Segment) -> Option<usize> {
         let init = segment.init.as_ref()?;
@@ -40,8 +74,9 @@ pub(crate) struct Plan {
 impl Plan {
     /// 点播计划。各轨的不连续段序列须相同（含标了 EXT-X-GAP 的分片），否则报
     /// [`Unsupported::DiscontinuityMismatch`]；有轨在某段里只有 GAP 分片时这段合并不了，各轨在这段的分片都不下载；
-    /// 没有一段合并得了时报 [`Unsupported::NoMergeableGroup`]。
-    pub(crate) fn new(tracks: Vec<ResolvedTrack>) -> Result<Self, Error> {
+    /// 没有一段合并得了时报 [`Unsupported::NoMergeableGroup`]。要下载的分片取不到 key（见
+    /// [`resolve::require_key_uris`]，`custom_key` 为请求给了自定义 key）时报 [`Unsupported::KeyWithoutUri`]。
+    pub(crate) fn new(tracks: Vec<ResolvedTrack>, custom_key: bool) -> Result<Self, Error> {
         if let Some(t) = tracks.iter().find(|t| t.playlist.segments.is_empty()) {
             return Err(Error::Unsupported(Unsupported::EmptyPlaylist(Box::new(
                 t.url.clone(),
@@ -49,56 +84,19 @@ impl Plan {
         }
         let all: Vec<&[Segment]> = tracks.iter().map(|t| &t.playlist.segments[..]).collect();
         let runs = check_discontinuities(&all)?;
-        // 各段合并得了：每条轨在这段里都有没标 GAP 的分片
-        let has_content = |track: usize, group: usize| {
-            all[track][runs[track][group].clone()]
-                .iter()
-                .any(|s| !s.gap)
-        };
-        let mergeable: Vec<bool> = (0..runs[0].len())
-            .map(|group| (0..all.len()).all(|track| has_content(track, group)))
-            .collect();
-        if !mergeable.contains(&true) {
-            let track = (0..all.len())
-                .find(|&track| !has_content(track, 0))
-                .expect("第一段合并不了，即有轨在其中只有 GAP 分片");
-            return Err(Error::Unsupported(Unsupported::NoMergeableGroup(Box::new(
-                tracks[track].url.clone(),
-            ))));
-        }
-        let mut groups: Vec<Vec<Range<usize>>> = Vec::new();
-        let mut planned = Vec::with_capacity(all.len());
-        for (segments, runs) in all.iter().zip(&runs) {
-            let mut track = Track {
-                segments: Vec::new(),
-                skipped: Vec::new(),
-                inits: Vec::new(),
-            };
-            let mut ranges = Vec::new();
-            for (run, &mergeable) in runs.iter().zip(&mergeable) {
-                let start = track.segments.len();
-                for s in &segments[run.clone()] {
-                    match (s.gap, mergeable) {
-                        (true, _) => track.skipped.push((s.sequence, MissReason::Gap)),
-                        (false, false) => track.skipped.push((s.sequence, MissReason::Unmergeable)),
-                        (false, true) => track.segments.push(s.clone()),
-                    }
-                }
-                if mergeable {
-                    ranges.push(start..track.segments.len());
-                }
-            }
-            for init in track.segments.iter().filter_map(|s| s.init.as_ref()) {
-                if !track.inits.contains(init) {
-                    track.inits.push(init.clone());
-                }
-            }
-            groups.resize_with(ranges.len(), Vec::new);
-            for (group, range) in groups.iter_mut().zip(ranges) {
-                group.push(range);
-            }
+        let mergeable = mergeable(&tracks, &runs)?;
+        let mut planned = Vec::with_capacity(tracks.len());
+        let mut ranges = Vec::with_capacity(tracks.len());
+        for (t, runs) in tracks.iter().zip(&runs) {
+            let (track, track_ranges) = Track::new(&t.playlist.segments, runs, &mergeable);
+            resolve::require_key_uris(&t.url, &track.segments, custom_key)?;
             planned.push(track);
+            ranges.push(track_ranges);
         }
+        // 各轨的可合并段数相同（共用 mergeable），转置成按组排
+        let groups = (0..ranges[0].len())
+            .map(|group| ranges.iter().map(|r| r[group].clone()).collect())
+            .collect();
         Ok(Plan {
             digest: digest(&all),
             tracks: planned,
@@ -179,6 +177,28 @@ impl Plan {
     }
 }
 
+/// 各段（`runs` 为各轨各段的分片下标范围）合并得了：每条轨在这段里都有没标 EXT-X-GAP 的分片。没有一段合并得了时
+/// 报 [`Unsupported::NoMergeableGroup`]，带第一段里只有 GAP 的那条轨的地址。
+fn mergeable(tracks: &[ResolvedTrack], runs: &[Vec<Range<usize>>]) -> Result<Vec<bool>, Error> {
+    let has_content = |track: usize, group: usize| {
+        tracks[track].playlist.segments[runs[track][group].clone()]
+            .iter()
+            .any(|s| !s.gap)
+    };
+    let mergeable: Vec<bool> = (0..runs[0].len())
+        .map(|group| (0..tracks.len()).all(|track| has_content(track, group)))
+        .collect();
+    if mergeable.contains(&true) {
+        return Ok(mergeable);
+    }
+    let track = (0..tracks.len())
+        .find(|&track| !has_content(track, 0))
+        .expect("第一段合并不了，即有轨在其中只有 GAP 分片");
+    Err(Error::Unsupported(Unsupported::NoMergeableGroup(Box::new(
+        tracks[track].url.clone(),
+    ))))
+}
+
 /// 见 [`Plan::digest`]：`tracks` 为各轨播放列表里的全部分片。
 fn digest(tracks: &[&[Segment]]) -> String {
     let mut hasher = Sha256::new();
@@ -254,10 +274,13 @@ mod tests {
         let Ok(Playlist::Media(playlist)) = parse(text, &url) else {
             panic!("应解析为媒体播放列表");
         };
-        let plan = Plan::new(vec![ResolvedTrack {
-            url: url.clone(),
-            playlist,
-        }])
+        let plan = Plan::new(
+            vec![ResolvedTrack {
+                url: url.clone(),
+                playlist,
+            }],
+            false,
+        )
         .unwrap();
         assert_eq!(
             plan.digest(),
@@ -273,7 +296,7 @@ mod tests {
                 url: url.clone(),
                 playlist,
             };
-            Plan::new(vec![track]).unwrap().digest()
+            Plan::new(vec![track], false).unwrap().digest()
         };
         let plain =
             "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\nseg0.ts\n#EXTINF:10,\nseg1.ts\n";

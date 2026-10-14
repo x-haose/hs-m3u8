@@ -1201,8 +1201,9 @@ class KeyOverride:
     @property
     def iv(self) -> typing.Optional[bytes]:
         r"""
-        所有加密分片都用的 IV；None 时用各分片自己的（播放列表写明的，或由媒体序号推出）。IV 只影响每个分片解密后的
-        头 16 字节，给错了校验发现不了、错的内容照样写进输出，只在确知时给
+        所有加密的分片与 init 段都用的 IV；None 时用各自的：分片为播放列表写明的或由媒体序号推出的，init 段为它的
+        EXT-X-KEY 写明的、没写时为全零（同 hls.js）。IV 只影响解密后的头 16 字节，给错了校验多半发现不了、错的内容照样
+        写进输出，只在确知时给
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
@@ -3225,7 +3226,7 @@ class SourceUnsupported:
     class KeyWithoutUri(SourceUnsupported):
         r"""
         要取的分片或 init 段加密而所用的 EXT-X-KEY 没写 URI（违反 RFC 8216），取不到 key；已知 key 时用
-        `JobRequest.key`。下载与录制收到播放列表即核对，不等取分片
+        `JobRequest.key`。下载与录制收到播放列表即核对，不等取分片：续传只差合并时也要给
         """
         __match_args__ = ("url",)
         @property
@@ -3594,7 +3595,8 @@ class TrackInfo:
     @property
     def needs_custom_key(self) -> builtins.bool:
         r"""
-        有要取的分片或 init 段加密而所用的 EXT-X-KEY 没写 URI：要给自定义 key（`JobRequest.key`）才下得了
+        有没标 EXT-X-GAP 的分片或它的 init 段加密而所用的 EXT-X-KEY 没写 URI：要给自定义 key（`JobRequest.key`）
+        才下得了
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...

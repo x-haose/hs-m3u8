@@ -157,8 +157,9 @@ pub struct JobRequest {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct KeyOverride {
     pub key: [u8; 16],
-    /// 所有加密分片都用这个 IV；None 时用各分片自己的（播放列表写明的，或由媒体序号推出）。IV 只影响每个分片
-    /// 解密后的头 16 字节，给错了校验发现不了、错的内容照样写进输出，只在确知时给
+    /// 所有加密的分片与 init 段都用这个 IV；None 时用各自的：分片为播放列表写明的或由媒体序号推出的，init 段为它的
+    /// EXT-X-KEY 写明的、没写时为全零（同 hls.js）。IV 只影响解密后的头 16 字节，给错了校验多半发现不了、错的内容照样
+    /// 写进输出，只在确知时给
     pub iv: Option<[u8; 16]>,
 }
 
