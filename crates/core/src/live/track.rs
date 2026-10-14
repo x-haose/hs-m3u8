@@ -448,14 +448,15 @@ impl LiveTrack {
 }
 
 /// `older` 与之后拉到的 `newer` 合成的一份：两者的分片按序号取并集，同一序号取 `newer` 的（地址里的令牌最新），
-/// 是否结束等取 `newer` 的。两者都有分片、`newer` 的第一个序号不早于 `older` 的第一个且不晚于它最后一个的下一个
-/// （并集没有空档）、重叠的序号身份与不连续段序号都一致时才接得上；否则为 None：序号回退（编码器重启或 CDN 的
-/// 旧缓存）、同一序号换了分片、不连续段重新编号、中间有没列出过的序号，都要窗口逐份比对。
+/// 是否结束等取 `newer` 的。两者都有分片、`newer` 的第一个序号落在 `older` 的序号范围里（至少重叠一个）、重叠的序号
+/// 身份与不连续段序号都一致时才接得上；否则为 None，要窗口逐份比对：序号回退（编码器重启或 CDN 的旧缓存）、同一序号
+/// 换了分片、不连续段重新编号，以及没有重叠（首尾相接时核对不了 `newer` 的不连续段序号与 `older` 的是否同一基准，
+/// 服务器没写 EXT-X-DISCONTINUITY-SEQUENCE 而有不连续标记恰好在这时滑出窗口时，合成会把后面的分片编进错的组）。
 fn joined(older: &MediaPlaylist, newer: &MediaPlaylist) -> Option<MediaPlaylist> {
     let older_first = older.segments.first()?.sequence;
     let older_last = older.segments.last()?.sequence;
     let newer_first = newer.segments.first()?.sequence;
-    if newer_first < older_first || newer_first > older_last.checked_add(1)? {
+    if !(older_first..=older_last).contains(&newer_first) {
         return None;
     }
     let mut segments: BTreeMap<u64, &Segment> =
@@ -557,9 +558,10 @@ mod tests {
         ]);
         assert_eq!(merged, vec![names(&["0:s0.ts?t=2", "1:s1.ts"])]);
 
-        // 中间有没列出过的序号、序号回退、同一序号换了分片：接不上，分开暂存
+        // 中间有没列出过的序号、首尾相接没有重叠、序号回退、同一序号换了分片：接不上，分开暂存
         let apart = |a: MediaPlaylist, b: MediaPlaylist| held(&[a, b]).len();
         assert_eq!(apart(playlist(0, &["s0.ts"]), playlist(2, &["s2.ts"])), 2);
+        assert_eq!(apart(playlist(0, &["s0.ts"]), playlist(1, &["s1.ts"])), 2);
         assert_eq!(
             apart(playlist(100, &["s100.ts"]), playlist(0, &["s0.ts"])),
             2
