@@ -175,7 +175,13 @@ impl Muxer {
         for (track, done) in tracks.iter().zip(written) {
             progress.add(track.segments.len() + usize::from(track.init.is_some()) - done);
         }
-        for source in &sources {
+        self.add_dropped(&sources);
+        Ok(())
+    }
+
+    /// 一组写完：各输入丢弃的包计入对应的输出流。
+    fn add_dropped(&mut self, sources: &[Source]) {
+        for source in sources {
             for (mapping, dropped) in source.map.iter().zip(&source.dropped) {
                 if let Some(mapping) = mapping {
                     let total = &mut self.outs[mapping.output].dropped;
@@ -185,7 +191,6 @@ impl Muxer {
                 }
             }
         }
-        Ok(())
     }
 
     /// 本组的时间偏移（见 [`group_offset`]），由各输出流本组的首个 DTS 与全组最早的 PTS（输入时间线，微秒，取自各输入

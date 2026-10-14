@@ -7,7 +7,7 @@ use reqwest::header::HeaderValue;
 use tokio::time::Instant;
 use url::Url;
 
-use super::chain_text;
+use super::classify::chain_text;
 use crate::Error;
 use crate::ident::bare_url;
 use crate::proxy::{self, SystemProxy};

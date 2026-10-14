@@ -16,31 +16,32 @@
 //! 文件先写 `<名字>.part`，fsync 后改名，因此最终文件名存在即内容完整（断电也成立）。
 //! 请求配置（请求头、Cookie 等）不写入目录：续传时由调用方再次提供。
 
+mod lock;
 mod names;
 mod outputs;
 mod record;
+mod removal;
 
-use std::collections::BTreeMap;
-use std::fs::{self, File, TryLockError};
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LockResult, Mutex, MutexGuard};
 
+pub(crate) use self::lock::Lock;
+use self::lock::acquire;
+pub use self::lock::{ForkGuard, LockFiles, close_inherited_locks, prepare_fork};
 pub(crate) use self::names::{GroupKey, SegmentName, SessionStart};
 use self::names::{init_file_name, parse_init_name, parse_segment_name, segment_file_name};
-use self::outputs::OUTPUTS_FILE;
 pub(crate) use self::outputs::{
     OutputKind, PendingOutput, clear_outputs, outputs_file, read_outputs, record_outputs,
 };
 pub(crate) use self::record::{JobRecord, RecordKind, preference_digest, url_digest};
 use self::record::{decode, encode};
-use crate::entries::{self, is_canonical_number};
+pub(crate) use self::removal::remove;
+use self::removal::{remove_steps, remove_tracks};
+use crate::entries;
 use crate::error::io_error;
 use crate::ident::Fingerprint;
-use tokio_util::sync::CancellationToken;
-
-use crate::{Error, Leftover, LeftoverKind, WorkDirProblem, blocking, busy, volume};
+use crate::{Error, Leftover, WorkDirProblem, blocking, busy, volume};
 
 const JOB_FILE: &str = "job.json";
 const LOCK_FILE: &str = "lock";
@@ -104,62 +105,6 @@ impl Layout {
 
     fn track(&self, track: usize) -> PathBuf {
         self.root.join(TRACKS_DIR).join(track.to_string())
-    }
-}
-
-/// 任务目录的排他锁：同一任务目录同一时间只有一个任务。加了锁的锁文件登记在 [`HELD`]，drop 时取出关闭，即释放。
-pub(crate) struct Lock {
-    /// 在 [`HELD`] 里的编号
-    id: u64,
-}
-
-impl Drop for Lock {
-    fn drop(&mut self) {
-        held().0.remove(&self.id);
-    }
-}
-
-/// 本进程持有的任务目录锁文件：[`prepare_fork`] 锁住的登记表的内容。
-pub struct LockFiles(BTreeMap<u64, File>);
-
-/// 登记表。锁跟着打开的文件走，fork 出的子进程也就继承了它们，见 [`prepare_fork`]。从打开锁文件到登记、从取出到
-/// 关闭都拿着它，所以没有已打开而不在表里的锁文件；这些地方持有期间不等别的锁（[`ForkGuard`] 除外）。
-static HELD: Mutex<LockFiles> = Mutex::new(LockFiles(BTreeMap::new()));
-
-fn held() -> MutexGuard<'static, LockFiles> {
-    HELD.lock().expect("持锁期间不会 panic")
-}
-
-/// fork 之前调用：用 `lock` 锁住登记表；fork 之后在子进程里调用返回值的 [`ForkGuard::child`]，在父进程里丢弃它。
-///
-/// fork 出的子进程继承父进程打开的文件，也就继承了任务目录的锁：父进程的任务结束、关掉自己那份之后锁仍在，直到
-/// 子进程退出，期间续传或放弃这个任务都报 [`WorkDirProblem::Locked`]。子进程关掉继承来的锁文件即可，父进程的锁
-/// 不受影响。返回的 [`ForkGuard`] 拿着登记表的锁，fork 期间别的线程改不了登记。
-///
-/// `lock` 为怎么等登记表的锁，通常即 [`Mutex::lock`]。拿着它去等别的锁的，只有另一个正在 fork 的线程（它拿着
-/// [`ForkGuard`] 执行 fork 前后的其他处理）：调用方持有那些处理也要的锁时，等待期间要放开。
-pub fn prepare_fork(
-    lock: impl FnOnce(&'static Mutex<LockFiles>) -> LockResult<MutexGuard<'static, LockFiles>>,
-) -> ForkGuard {
-    ForkGuard(lock(&HELD).expect("持锁期间不会 panic"))
-}
-
-/// fork 出的子进程里、fork 之前没能调用 [`prepare_fork`] 时用（如它在 fork 开始之后才登记为 fork 前的处理）：登记表
-/// 此刻没被拿着才关掉继承来的锁文件。被拿着时，拿着它的是父进程里的线程，不在子进程里，这把锁再也放不开：继承来的
-/// 锁文件留到子进程退出，子进程里再加锁的任务会一直等着。
-pub fn close_inherited_locks() {
-    if let Ok(mut held) = HELD.try_lock() {
-        held.0.clear();
-    }
-}
-
-/// 见 [`prepare_fork`]。
-pub struct ForkGuard(MutexGuard<'static, LockFiles>);
-
-impl ForkGuard {
-    /// fork 出的子进程里调用：关掉从父进程继承来的锁文件。
-    pub fn child(mut self) {
-        self.0.0.clear();
     }
 }
 
@@ -252,9 +197,9 @@ impl WorkDir {
     }
 
     /// 删除整个任务目录。只删本库写的文件（`job.json`、`outputs.json`、各轨的分片与 init 段，以及它们写到一半的
-    /// `.part`）、系统自动生成的元数据文件（见 [`remove_system_file`]）与因此变空的目录；其他文件（例如经符号链接或
-    /// 只差大小写的路径写进来的输出）原样留下。有东西留下时 `job.json` 也留下：目录仍是可识别的任务目录，下次运行
-    /// 照常使用（没有已完成的分片，按当前任务重新开始）。没删干净时返回留下的原因。
+    /// `.part`）、系统自动生成的元数据文件（见 [`entries::Entry::is_system_file`]）与因此变空的目录；其他文件（例如经符
+    /// 号链接或只差大小写的路径写进来的输出）原样留下。有东西留下时 `job.json` 也留下：目录仍是可识别的任务目录，下次运
+    /// 行照常使用（没有已完成的分片，按当前任务重新开始）。没删干净时返回留下的原因。
     ///
     /// 持锁删掉其余内容，最后删锁文件，再释放锁、删目录：释放锁之后别的任务就能打开这个目录，先删内容保证它看到的
     /// 不会是删到一半的任务；锁文件也在持锁时删，别的任务打开的是新建的锁文件，不会锁上本任务还持有的那个。
@@ -264,178 +209,6 @@ impl WorkDir {
         remove_steps(layout.root, lock, None)
             .await
             .expect("不取消时删除做完才返回")
-    }
-}
-
-/// 持着 `lock` 删除任务目录 `root`，同 [`WorkDir::remove`]；用于不打开任务、直接放弃它。分两步：先删各轨的分片与
-/// init 段，`cancel` 这时已取消即停下、放开锁，报 [`Error::Cancelled`]（记录还在，再放弃即可接着删）；再删记录、锁
-/// 文件与目录本身。
-pub(crate) async fn remove(
-    root: PathBuf,
-    lock: Lock,
-    cancel: &CancellationToken,
-) -> Result<Option<Leftover>, Error> {
-    remove_steps(root, lock, Some(cancel)).await
-}
-
-/// 见 [`remove`]；`cancel` 为 None 时不停下。没删干净时为留下的原因。
-async fn remove_steps(
-    root: PathBuf,
-    lock: Lock,
-    cancel: Option<&CancellationToken>,
-) -> Result<Option<Leftover>, Error> {
-    let tracks = blocking({
-        let root = root.clone();
-        move || (remove_tracks_of(&root), lock)
-    })
-    .await;
-    let removed = match tracks {
-        Ok((Ok(kept), lock)) => {
-            if cancel.is_some_and(CancellationToken::is_cancelled) {
-                return Err(Error::Cancelled);
-            }
-            let root = root.clone();
-            blocking(move || remove_locked(&root, lock, kept)).await
-        }
-        Ok((Err(failure), _)) => Err(failure),
-        Err(failure) => Err(failure),
-    };
-    let cause = match removed.and_then(|r| r) {
-        Ok(kept) => match kept.first() {
-            Some(first) => format!("留有不是本库写的文件：{}", first.display()),
-            None => return Ok(None),
-        },
-        Err(e) => e.to_string(),
-    };
-    Ok(Some(Leftover {
-        path: root,
-        kind: LeftoverKind::WorkDir,
-        cause,
-    }))
-}
-
-/// 删掉任务目录 `root` 下各轨的分片与 init 段（见 [`remove_tracks`]），返回认不得、留下的文件。
-fn remove_tracks_of(root: &Path) -> Result<Vec<PathBuf>, Error> {
-    let tracks = root.join(TRACKS_DIR);
-    let mut kept = Vec::new();
-    match fs::symlink_metadata(&tracks) {
-        Ok(meta) if meta.is_dir() => remove_tracks(&tracks, &mut kept)?,
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(io_error("读取", &tracks)(e)),
-    }
-    Ok(kept)
-}
-
-/// [`WorkDir::remove`] 的第二步：持着 `lock` 删除各轨之外的内容，`kept` 为第一步留下的；返回不是本库写的、留下的
-/// 文件。
-fn remove_locked(root: &Path, lock: Lock, mut kept: Vec<PathBuf>) -> Result<Vec<PathBuf>, Error> {
-    let mut system = Vec::new();
-    let mut job = None;
-    for entry in entries::list(root)? {
-        let (path, kind) = (&entry.path, entry.kind);
-        // job.json 写到一半的、正在写的输出的记录（含写到一半的）
-        let ours = kind.is_file()
-            && entry.name.to_str().is_some_and(|n| {
-                n.strip_suffix(".part") == Some(JOB_FILE)
-                    || n.strip_suffix(".part").unwrap_or(n) == OUTPUTS_FILE
-            });
-        match entry.name.to_str() {
-            Some(LOCK_FILE) => {}
-            Some(JOB_FILE) if kind.is_file() => job = Some(entry.path),
-            // 第一步已删过，还在即里面有留下的（已在 kept 中）
-            Some(TRACKS_DIR) if kind.is_dir() => {}
-            _ if entry.is_system_file() => system.push(entry),
-            _ if ours => {
-                busy::retrying(|| fs::remove_file(path)).map_err(io_error("删除", path))?
-            }
-            _ => kept.push(entry.path),
-        }
-    }
-    let mut remaining = kept.clone();
-    match job {
-        Some(job) if kept.is_empty() => {
-            busy::retrying(|| fs::remove_file(&job)).map_err(io_error("删除", &job))?;
-        }
-        Some(job) => remaining.push(job),
-        None => {}
-    }
-    let lock_path = root.join(LOCK_FILE);
-    fs::remove_file(&lock_path).map_err(io_error("删除", &lock_path))?;
-    for entry in &system {
-        remove_system_file(entry, &remaining)?;
-    }
-    drop(lock);
-    if !kept.is_empty() {
-        return Ok(kept);
-    }
-    match fs::remove_dir(root) {
-        Ok(()) => Ok(kept),
-        // 释放锁后另一个任务已开始使用这个目录：本任务的内容已删完，目录留给它
-        Err(e) if e.kind() == io::ErrorKind::DirectoryNotEmpty => Ok(kept),
-        Err(e) => Err(io_error("删除", root)(e)),
-    }
-}
-
-/// 删掉 `tracks/` 下各轨的分片与 init 段（含写到一半的 `.part`）、系统自动生成的元数据文件与变空的目录；认不得的
-/// 记进 `kept`。
-fn remove_tracks(tracks: &Path, kept: &mut Vec<PathBuf>) -> Result<(), Error> {
-    let before = kept.len();
-    let mut system = Vec::new();
-    for track in entries::list(tracks)? {
-        let dir = &track.path;
-        if track.is_system_file() {
-            system.push(track);
-            continue;
-        }
-        if !(track.kind.is_dir() && track.name.to_str().is_some_and(is_canonical_number)) {
-            kept.push(track.path);
-            continue;
-        }
-        let track_before = kept.len();
-        let mut track_system = Vec::new();
-        for entry in entries::list(dir)? {
-            let ours = entry.kind.is_file()
-                && entry.name.to_str().is_some_and(|n| {
-                    let n = n.strip_suffix(".part").unwrap_or(n);
-                    parse_segment_name(n).is_some() || parse_init_name(n).is_some()
-                });
-            if entry.is_system_file() {
-                track_system.push(entry);
-            } else if ours {
-                busy::retrying(|| fs::remove_file(&entry.path))
-                    .map_err(io_error("删除", &entry.path))?;
-            } else {
-                kept.push(entry.path);
-            }
-        }
-        for entry in &track_system {
-            remove_system_file(entry, &kept[track_before..])?;
-        }
-        if kept.len() == track_before {
-            fs::remove_dir(dir).map_err(io_error("删除", dir))?;
-        }
-    }
-    for entry in &system {
-        remove_system_file(entry, &kept[before..])?;
-    }
-    if kept.len() == before {
-        fs::remove_dir(tracks).map_err(io_error("删除", tracks))?;
-    }
-    Ok(())
-}
-
-/// 删掉系统自动生成的元数据文件 `entry`（见 [`entries::Entry::is_system_file`]）。AppleDouble 文件随它的主文件：
-/// 主文件或主目录里的东西在 `remaining` 中（留下）时它也留下；macOS 删除主文件时已一并删掉它，已不存在不算失败。
-fn remove_system_file(entry: &entries::Entry, remaining: &[PathBuf]) -> Result<(), Error> {
-    if let Some(owner) = entry.apple_double_owner()
-        && remaining.iter().any(|path| path.starts_with(owner))
-    {
-        return Ok(());
-    }
-    match fs::remove_file(&entry.path) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        other => other.map_err(io_error("删除", &entry.path)),
     }
 }
 
@@ -522,32 +295,6 @@ fn ensure_empty(root: &Path) -> Result<(), Error> {
         }
     }
     Ok(())
-}
-
-/// 打开锁文件并加排他锁；已被别的任务锁住时报 [`WorkDirProblem::Locked`]。
-fn acquire(root: &Path) -> Result<Lock, Error> {
-    let path = root.join(LOCK_FILE);
-    // 打开之前拿住登记表，加锁失败时关掉文件之后才放开（`file` 先于它 drop）
-    let mut held = held();
-    let file = File::options()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&path)
-        .map_err(io_error("创建", &path))?;
-    match file.try_lock() {
-        Ok(()) => {
-            static NEXT: AtomicU64 = AtomicU64::new(0);
-            let id = NEXT.fetch_add(1, Ordering::Relaxed);
-            held.0.insert(id, file);
-            Ok(Lock { id })
-        }
-        Err(TryLockError::WouldBlock) => Err(Error::WorkDir {
-            path: root.to_path_buf(),
-            problem: WorkDirProblem::Locked,
-        }),
-        Err(TryLockError::Error(cause)) => Err(io_error("锁定", &path)(cause)),
-    }
 }
 
 /// 目录里有没有已完成的分片。只有 init 段时不算：它们随时可以重新拉取，没有可丢的内容。
