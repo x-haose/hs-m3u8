@@ -75,7 +75,7 @@ struct Signals<'a> {
 }
 
 /// 当前这次停滞：停滞的轨、停滞开始的时刻（见 [`LiveTrack::stall_since`]），与循环察觉它的时刻（进程被挂起时为醒来
-/// 之后）。
+/// 之后；察觉之后循环停住过的，改为醒来的时刻，见 [`Recorder::next_event`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Stall {
     track: usize,
@@ -325,7 +325,8 @@ impl Recorder<'_> {
     }
 
     /// 发起到期的刷新，等下一件事。已完成的后台任务与下载先于停止、停滞处理：停止前已拉到的照常处理，
-    /// 刚录到的分片不被误判为停滞。
+    /// 刚录到的分片不被误判为停滞。停滞检查的时刻过了一个目标时长（各轨中最短的）以上才醒来时，循环停住过（进程被
+    /// 挂起、调试器暂停）：在途的请求可能其间已返回而还没处理到，当前停滞的期限从醒来起重新算。
     async fn next_event(
         &mut self,
         signals: &Signals<'_>,
@@ -350,7 +351,7 @@ impl Recorder<'_> {
                 None => std::future::pending().await,
             }
         };
-        tokio::select! {
+        let event = tokio::select! {
             biased;
             _ = signals.cancel.cancelled() => Err(Error::Cancelled),
             done = self.tasks.next() => Ok(Event::Done(done)),
@@ -358,7 +359,15 @@ impl Recorder<'_> {
             _ = signals.stop.cancelled(), if stoppable => Ok(Event::Stop),
             _ = sleep_until(stall), if stall.is_some() => Ok(Event::StallCheck),
             _ = sleep_until(next_due), if next_due.is_some() => Ok(Event::Due),
+        };
+        let woke = Instant::now();
+        let target = self.refreshing().map(|(_, t)| t.target()).min();
+        if let (Some(at), Some(target)) = (stall, target)
+            && woke.saturating_duration_since(at) >= target
+        {
+            self.stall = self.stall.map(|s| Stall { noticed: woke, ..s });
         }
+        event
     }
 
     fn max_us(&self) -> Option<u64> {

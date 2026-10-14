@@ -254,22 +254,29 @@ impl LiveTrack {
     }
 
     /// 停滞开始于 `since`、在 `noticed` 被察觉时，这条轨在 `now` 的状况有据可依：有在途的请求时它满了期限（见
-    /// [`LiveTrack::deadline`]）；没有时 `since` 之后发起的刷新已经返回，或服务器要求等待（照它的意思等，失败本身即是
-    /// 结论），或刷新已暂停。
+    /// [`LiveTrack::deadline`]）；没有时 `since` 之后发起的刷新已经返回，或服务器要求的等待太长（见
+    /// [`LiveTrack::barred`]）。要求的等待在那之前结束的，等它结束、再刷新一次。
     pub(super) fn settled(&self, since: Instant, noticed: Instant, now: Instant) -> bool {
         match self.deadline(noticed) {
             Some(deadline) => deadline <= now,
-            None => {
-                matches!(self.refresh, Refresh::Suspended)
-                    || self.last_returned.is_some_and(|r| r >= since)
-                    || self.server_waiting(now)
-            }
+            None => self.last_returned.is_some_and(|r| r >= since) || self.barred(noticed),
         }
     }
 
-    /// 服务器在最近一次失败的刷新里要求的等待还没到。
-    fn server_waiting(&self, now: Instant) -> bool {
-        self.server_wait.is_some_and(|until| until > now)
+    /// 服务器在最近一次失败的刷新里要求的等待，到察觉停滞（`noticed`）之后一个目标时长还没结束，或长到无法表示（刷新
+    /// 已暂停）：等不到停滞开始之后的刷新结果，以要求等待的那次失败为据。
+    fn barred(&self, noticed: Instant) -> bool {
+        matches!(self.refresh, Refresh::Suspended)
+            || self.server_wait.is_some_and(|until| {
+                noticed
+                    .checked_add(self.target)
+                    .is_none_or(|limit| until > limit)
+            })
+    }
+
+    /// 目标时长。
+    pub(super) fn target(&self) -> Duration {
+        self.target
     }
 
     /// 在 `since` 之后列出过新分片。
@@ -471,8 +478,8 @@ impl LiveTrack {
     }
 
     /// 作为其他轨（不是停滞的那条）看，在 `now` 有故障：在途的请求满了期限（见 [`LiveTrack::deadline`]），或停滞开始
-    /// 于 `since` 之后最近一次刷新失败（404/410 除外：播放列表已删除，是直播结束的迹象）。没有故障时为 None：在出新
-    /// 分片，或有结束的迹象。
+    /// 于 `since` 之后最近一次刷新失败（服务器要求的等待太长时为要求等待的那次，见 [`LiveTrack::barred`]；404/410
+    /// 除外：播放列表已删除，是直播结束的迹象）。没有故障时为 None：在出新分片，或有结束的迹象。
     pub(super) fn fault(
         &self,
         since: Instant,
@@ -485,7 +492,7 @@ impl LiveTrack {
         {
             return Some(StallError::RefreshPending);
         }
-        let observed = self.last_returned.is_some_and(|r| r >= since) || self.server_waiting(now);
+        let observed = self.last_returned.is_some_and(|r| r >= since) || self.barred(noticed);
         match &self.last_refresh_error {
             Some(cause) if observed && gone(cause).is_none() => {
                 Some(StallError::RefreshFailed(cause.clone()))
