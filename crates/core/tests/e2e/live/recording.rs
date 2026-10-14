@@ -503,8 +503,34 @@ async fn key_failure_fails_the_task() {
     }
 }
 
-/// 引擎的名额被点播任务占满（这里唯一的名额被一个挂着的分片请求占着）时，直播的分片照常下载：直播的请求不占名额，
-/// 不会排在点播的大批下载之后、等到分片滑出窗口。
+/// 直播的分片同样有总上限（直播那份名额）：唯一的名额被一个挂着的分片占着时，下一个分片不发出，挂着的返回后照常
+/// 录完。
+#[tokio::test(flavor = "multi_thread")]
+async fn live_segments_share_the_live_permits() {
+    let dir = test_dir("permits_live_bounded");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1]);
+    server.put("live.m3u8", playlist(&[0, 1], false));
+    let engine = Engine::new(NonZeroUsize::new(1).unwrap());
+    let gate = server.gate("seg0.ts");
+    let live = engine
+        .start(live_request(server.url("live.m3u8"), &dir, STALL))
+        .unwrap();
+    gate.arrived.notified().await;
+    // 刷新照常进行（不占名额）：等下一次刷新的请求到达，下一个分片仍没有发出
+    let refresh = server.gate("live.m3u8");
+    refresh.arrived.notified().await;
+    assert_eq!(server.hits("seg1.ts"), 0);
+
+    server.put("live.m3u8", playlist(&[0, 1], true));
+    server.ungate("live.m3u8");
+    server.ungate("seg0.ts");
+    let output = live.wait().await.unwrap();
+    assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
+}
+
+/// 引擎点播的名额被占满（这里唯一的名额被一个挂着的分片请求占着）时，直播的分片照常下载：直播另占一份名额，不会
+/// 排在点播的大批下载之后、等到分片滑出窗口。
 #[tokio::test(flavor = "multi_thread")]
 async fn live_segments_do_not_wait_for_permits_held_by_vod_downloads() {
     let server = Server::start().await;

@@ -240,8 +240,8 @@ async fn same_file(stored: PathBuf, data: Vec<u8>) -> Result<bool, Error> {
     .await?
 }
 
-/// 拉取 `inits` 所说的新 init 段；各自的失败随结果返回，只有取消中止。不占引擎名额：它们是刷新的一部分，
-/// 排在大批下载之后会让直播停滞。
+/// 拉取 `inits` 所说的新 init 段；各自的失败随结果返回，只有取消中止。它们是刷新的一部分，不占名额（见
+/// [`crate::Engine::new`]）。
 async fn new_inits(
     http: &Http,
     playlist: &MediaPlaylist,

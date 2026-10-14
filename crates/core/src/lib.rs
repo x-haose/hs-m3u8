@@ -40,7 +40,7 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 use std::sync::Arc;
 
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
@@ -82,12 +82,12 @@ pub mod hls {
 
 pub(crate) use blocking::blocking;
 
-use crate::http::{Http, OnReceived};
+use crate::http::{Http, OnReceived, Permits};
 
 /// 下载引擎；持有跨任务共享的在途请求上限。
 #[derive(Clone)]
 pub struct Engine {
-    requests: Arc<Semaphore>,
+    requests: Arc<Permits>,
 }
 
 impl Engine {
@@ -96,14 +96,12 @@ impl Engine {
     pub const DEFAULT_MAX_REQUESTS: NonZeroUsize =
         NonZeroUsize::new(JobRequest::DEFAULT_CONCURRENCY.get() * 4).unwrap();
 
-    /// `max_requests`：所有点播任务合计同时在途的 key、分片与 init 段请求数。播放列表与直播的请求不占名额，只受各自
-    /// 任务的并发数限制：直播的量受实时码率约束，排在其他任务的大批下载之后时分片会滑出窗口、永久缺失。超过
-    /// [`Semaphore::MAX_PERMITS`] 的按它算：它远超能同时发出的请求数，同样相当于不限。
+    /// `max_requests`：所有点播任务合计同时在途的 key、分片与 init 段请求数；所有直播任务的 key 与分片另有同样大小的
+    /// 一份，不与点播共用：直播的分片排在点播的大批下载（或挂住的请求）之后会滑出窗口、永久缺失。播放列表与刷新时
+    /// 拉的 init 段不占名额：每条轨同时最多一个，刷新不排在本任务的分片下载之后。
     pub fn new(max_requests: NonZeroUsize) -> Self {
         Engine {
-            requests: Arc::new(Semaphore::new(
-                max_requests.get().min(Semaphore::MAX_PERMITS),
-            )),
+            requests: Permits::new(max_requests.get()),
         }
     }
 

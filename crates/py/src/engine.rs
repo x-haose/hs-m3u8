@@ -20,8 +20,9 @@ use crate::runtime::{self, Owned};
 /// 之后不可用），开始操作时抛 `RuntimeError`，要用 multiprocessing 的 spawn 方式。在 atexit 处理里第一次导入本库时，
 /// 退出前不会关闭运行时，那样开始的任务要在处理返回前等它结束。
 ///
-/// `max_requests`：所有点播任务合计同时在途的 key、分片与 init 段请求数，至少 1，默认为每个任务默认并发的四倍；播放列表
-/// 与直播的请求不占名额，只受各自任务的并发数限制（直播排在大批下载之后时分片会滑出窗口）。
+/// `max_requests`：所有点播任务合计同时在途的 key、分片与 init 段请求数，至少 1，默认为每个任务默认并发的四倍；所有直播
+/// 任务的 key 与分片另有同样大小的一份，不与点播共用（直播排在大批下载之后时分片会滑出窗口）。播放列表与刷新时拉的
+/// init 段不占名额（每条轨同时最多一个）。
 #[gen_stub_pyclass]
 #[pyclass(module = "hs_m3u8._native", frozen)]
 pub struct Engine {

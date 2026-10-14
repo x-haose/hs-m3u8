@@ -60,7 +60,7 @@ struct Ctx {
     work_dir: PathBuf,
     /// 有值时加密的分片都用它，不取 key
     key_override: Option<KeyOverride>,
-    /// 分片与 key 的请求占不占引擎的名额
+    /// 分片与 key 的请求占哪一份引擎名额
     permit: Permit,
     keys: Mutex<Keys>,
 }
@@ -109,8 +109,8 @@ pub(crate) struct Fetcher {
 }
 
 impl Fetcher {
-    /// `work_dir` 为任务目录，各项的 init 段在其中；`permit` 为分片与 key 的请求占不占引擎的名额：点播的占，直播的不占
-    /// （直播的量受实时码率约束，排在其他任务的大批下载之后时分片会滑出窗口、永久缺失）。
+    /// `work_dir` 为任务目录，各项的 init 段在其中；`permit` 为分片与 key 的请求占哪一份引擎名额（点播的或直播的，见
+    /// [`crate::Engine::new`]）。
     pub(crate) fn new(
         http: Arc<Http>,
         hooks: Arc<dyn Hooks>,

@@ -21,14 +21,32 @@ use crate::ident::bare_url;
 use crate::request::{RetryPolicy, Source, check_header, cookie_pairs};
 use crate::{Error, HttpError, Integrity};
 
-/// 请求是否计入引擎的在途上限。
+/// 请求占哪一份引擎名额（见 [`Permits`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Permit {
-    /// 计入：点播的 key、分片与 init 段，量大
-    Required,
-    /// 不计入：播放列表与直播的请求。前者量小；后者的量受实时码率约束，排在其他任务的大批下载之后会让直播停滞、分片
-    /// 滑出窗口
+    /// 不占名额
     Exempt,
+    /// 占点播的那份
+    Vod,
+    /// 占直播的那份
+    Live,
+}
+
+/// 引擎的请求名额：点播与直播各一份同样大小的，所有任务共享（用途见 [`crate::Engine::new`]）。
+pub(crate) struct Permits {
+    vod: Semaphore,
+    live: Semaphore,
+}
+
+impl Permits {
+    /// 每份 `limit` 个；超过 [`Semaphore::MAX_PERMITS`] 的按它算：它远超能同时发出的请求数，同样相当于不限。
+    pub(crate) fn new(limit: usize) -> Arc<Permits> {
+        let limit = limit.min(Semaphore::MAX_PERMITS);
+        Arc::new(Permits {
+            vod: Semaphore::new(limit),
+            live: Semaphore::new(limit),
+        })
+    }
 }
 
 pub(crate) struct Http {
@@ -41,8 +59,8 @@ pub(crate) struct Http {
     source: url::Origin,
     retry: RetryPolicy,
     hooks: Arc<dyn Hooks>,
-    /// 引擎内所有任务共享；[`Permit::Required`] 的每次尝试从调用 `on_request` 回调到读完响应体占用一个名额
-    requests: Arc<Semaphore>,
+    /// 引擎内所有任务共享；占名额的每次尝试从调用 `on_request` 回调到读完响应体占用一个
+    requests: Arc<Permits>,
     /// 每读到一块响应体，以它的字节数调用；不需要计数（探测）时为 None
     on_received: Option<OnReceived>,
     jitter: std::hash::RandomState,
@@ -62,7 +80,7 @@ impl Http {
     /// 访问 `source` 的客户端（`source.http` 已校验过，见 [`crate::HttpOptions::validate`]）。
     pub(crate) fn new(
         source: &Source,
-        requests: Arc<Semaphore>,
+        requests: Arc<Permits>,
         on_received: Option<OnReceived>,
     ) -> Result<Self, Error> {
         let options = &source.http;
@@ -157,11 +175,16 @@ impl Http {
         permit: Permit,
         cancel: &CancellationToken,
     ) -> Result<Response, Error> {
-        let _permit = match permit {
+        let semaphore = match permit {
             Permit::Exempt => None,
-            Permit::Required => Some(tokio::select! {
+            Permit::Vod => Some(&self.requests.vod),
+            Permit::Live => Some(&self.requests.live),
+        };
+        let _held = match semaphore {
+            None => None,
+            Some(semaphore) => Some(tokio::select! {
                 _ = cancel.cancelled() => return Err(Error::Cancelled),
-                permit = self.requests.acquire() => permit.expect("引擎的信号量从不关闭"),
+                held = semaphore.acquire() => held.expect("引擎的信号量从不关闭"),
             }),
         };
         let parts = self.prepare(purpose, url).await?;

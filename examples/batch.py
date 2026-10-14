@@ -57,7 +57,7 @@ async def download_one(engine: Engine, name: str, url: str) -> str:
 
 
 async def main() -> None:
-    engine = Engine(max_requests=32)  # 所有点播任务合计最多 32 个在途的分片与 key 请求
+    engine = Engine(max_requests=32)  # 所有点播任务合计最多 32 个在途的分片、key 与 init 段请求
     results = await asyncio.gather(*(download_one(engine, name, url) for name, url in SOURCES.items()))
     print("\n".join(results))
 

@@ -117,7 +117,7 @@ async fn store_inits(
     for (track, t) in plan.tracks.iter().enumerate() {
         let mut fingerprints: Vec<Fingerprint> = Vec::with_capacity(t.inits.len());
         for init in &t.inits {
-            let data = fetch_init(http, init, Permit::Required, cancel).await?;
+            let data = fetch_init(http, init, Permit::Vod, cancel).await?;
             let len = data.len() as u64;
             let fingerprint = Fingerprint::of_content(&data);
             workdir::store_init(layout, track, fingerprint, data).await?;
