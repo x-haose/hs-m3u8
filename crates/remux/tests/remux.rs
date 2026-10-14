@@ -1691,6 +1691,27 @@ fn check_finds_what_cannot_go_into_an_mp4_from_the_first_segments() {
     );
 }
 
+/// 第 0 组开头的分片里没有关键帧（从 GOP 中间开始）：逐帧的参数核对留给合并，后面的组换了编码照样报出来。
+#[test]
+fn check_compares_with_a_first_group_that_has_no_keyframe_yet() {
+    let long_gop = track("ts_long_gop");
+    let mid_gop = TrackSegments {
+        segments: long_gop.segments[1..].to_vec(),
+        ..long_gop
+    };
+    let hevc = head("ts_hevc");
+
+    let err = check(&[Streams::Video], &[group([mid_gop]), group([hevc])]).unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::ParamsChanged { group: 1, .. })
+        ),
+        "{err:?}"
+    );
+}
+
 /// 只靠开头的分片判断不了的，核对不报、留给合并：第一个分片里没有音频包（探测不出参数），打包 MP3 的第一个分片只有
 /// 一帧（FFmpeg 要两帧相连才认）。整组合并照常成功；整组都探测不出参数时合并报 ParamsUnknown。第 0 组判断不了时其余
 /// 各组照样核对自身。

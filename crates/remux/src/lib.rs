@@ -240,9 +240,10 @@ pub fn remux(
 /// 各轨的输入、读到每路流的第一个包，核对编码受支持，同类流不来自两条轨，各组的流种类、编码参数与解码配置与第 0 组
 /// 相同，给出的分片有时间戳（打包音频与别的轨同组时），E-AC-3 的帧结构。
 ///
-/// 只靠开头的分片判断不了的不报，留给合并：FFmpeg 打不开（如只有一两帧的 MP3）、探测不出参数（如开头没有这路流的包）或
-/// 开头的分片里没有能开始解码的视频帧的组跳过；第 0 组判断不了时，其余各组只核对自身（编码、E-AC-3 的帧结构等），不与第
-/// 0 组比较。通过不保证合并成功：组内中途的变化、后面的分片缺时间戳、时间戳不递增等要读到才知道。
+/// 只靠开头的分片判断不了的不报，留给合并：FFmpeg 打不开（如只有一两帧的 MP3）或探测不出参数（如开头没有这路流的包）
+/// 的组跳过，第 0 组这样时其余各组只核对自身（编码、E-AC-3 的帧结构等），不与第 0 组比较；开头的分片里没有关键帧的组
+/// 不核对逐帧的参数，流种类、编码参数与解码配置照样比较。通过不保证合并成功：组内中途的变化、后面的分片缺时间戳、
+/// 时间戳不递增等要读到才知道。
 ///
 /// `groups` 的各项为报错时用的组号（合并时这一组的下标）与这一组，按合并的顺序，第一项为第 0 组：可以只核对其中几组，
 /// 如直播录制中拿第 0 组与新录到的一组核对。
@@ -250,14 +251,19 @@ pub fn check(streams: &[Streams], groups: &[(usize, &DiscontinuityGroup)]) -> Re
     init()?;
     validate(streams, groups)?;
     let cancel = Cancel::never();
-    let first = judgeable(
-        open_group(streams, groups[0], None, &cancel).and_then(|first| {
+    // 第 0 组的流布局；它开头的分片预读判断不了（如没有关键帧）时逐包参照留空，流布局与参数照样拿来比较
+    let first = match judgeable(open_group(streams, groups[0], None, &cancel))? {
+        Some(first) => {
             let layout = layout_of(&first)?;
             let outputs = layout.iter().map(Vec::len).sum();
-            let references = references_of(&primed(groups[0].0, first, &layout, &[])?, outputs);
-            Ok((layout, references))
-        }),
-    )?;
+            let references = match judgeable(primed(groups[0].0, first, &layout, &[]))? {
+                Some(sources) => references_of(&sources, outputs),
+                None => vec![None; outputs],
+            };
+            Some((layout, references))
+        }
+        None => None,
+    };
     for &numbered in &groups[1..] {
         let layout = first.as_ref().map(|(layout, _)| layout.as_slice());
         judgeable(open_group(streams, numbered, layout, &cancel).and_then(
