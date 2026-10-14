@@ -15,7 +15,8 @@
    构建脚本不重跑，链接进去的仍是旧库，表现为运行时找不到新启用的协议或组件。
 4. `FFMPEG_DIR` 模式下不链接写死的 Apple 框架列表（AppKit、OpenGL 等 15 个，多数用不到）：所需的框架由本项目 remux
    的 build.rs 按 FFmpeg 安装的 `.pc` 补齐。
-5. 目标是 macOS、不是交叉编译且没设 `BINDGEN_EXTRA_CLANG_ARGS` 时，给 bindgen 加上 `xcrun --show-sdk-path` 的 SDK：
-   它加载的 libclang 不一定带默认的 SDK 路径（如 Homebrew 的 LLVM），那样找不到系统头文件。
+5. 目标是 macOS、没设 `BINDGEN_EXTRA_CLANG_ARGS`、也没有为交叉编译 FFmpeg 求出 sysroot 时，给 bindgen 加上
+   `xcrun --show-sdk-path` 的 SDK：它加载的 libclang 不一定带默认的 SDK 路径（如 Homebrew 的 LLVM），那样找不到系统
+   头文件。
 6. `FFMPEG_DIR` 模式下目录里没有 FFmpeg 的头文件时立即失败并说明怎样编译。上游照常往下走，到 bindgen 才以找不到
    头文件失败；从本项目的 sdist 构建时 `FFMPEG_DIR` 来自 `.cargo/config.toml`，还没运行 build.sh 时会这样。

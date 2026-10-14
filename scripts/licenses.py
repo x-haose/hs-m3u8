@@ -26,8 +26,10 @@ SUPPLIED = ROOT / "third_party/crate-licenses"
 ROOT_CRATE = "hs-m3u8-py"
 # crate 根目录里算作许可证文件的名字（不区分大小写）
 LICENSE_FILE = re.compile(r"^(licen[cs]e|copying|copyright|notice|unlicense)", re.IGNORECASE)
+# SPDX 的许可证标识符（含 LicenseRef-…）
+SPDX_ID = re.compile(r"^[A-Za-z0-9.+-]+$")
 # `cargo tree --format {p}` 的一行：名字、版本，路径依赖另带路径，已列过的带 (*)
-TREE_LINE = re.compile(r"^(\S+) v(\S+)(?: \(/[^)]*\))?(?: \(\*\))?$")
+TREE_LINE = re.compile(r"^(\S+) v(\S+)(?: \([^)]*\))?(?: \(\*\))?$")
 RULE = "-" * 80
 # 本项目与静态链接的 FFmpeg 的许可证
 OWN_LICENSES = ["MIT", "LGPL-2.1-or-later"]
@@ -80,23 +82,26 @@ def dependencies(target: str) -> set[tuple[str, str]]:
 
 
 def crates(names: set[tuple[str, str]]) -> list[Crate]:
-    """`names` 里工作区之外的 crate，按名字与版本排序。"""
+    """`names` 里工作区之外的 crate，按名字与版本排序；有 crate 没写 `license`（只写了 `license-file`）时失败。"""
     metadata = json.loads(cargo("metadata", "--format-version", "1", "--locked"))
     members = set(metadata["workspace_members"])
-    return sorted(
-        (
+    found: list[Crate] = []
+    for package in metadata["packages"]:
+        if (package["name"], package["version"]) not in names or package["id"] in members:
+            continue
+        if not package["license"]:
+            message = f"{package['name']} {package['version']} 没写 license（SPDX 表达式），要人工核对它的许可证"
+            raise SystemExit(message)
+        found.append(
             Crate(
                 name=package["name"],
                 version=package["version"],
-                license=package["license"] or "（未注明）",
+                license=package["license"],
                 repository=package["repository"] or "（未注明）",
                 directory=Path(package["manifest_path"]).parent,
             )
-            for package in metadata["packages"]
-            if (package["name"], package["version"]) in names and package["id"] not in members
-        ),
-        key=lambda crate: (crate.name, crate.version),
-    )
+        )
+    return sorted(found, key=lambda crate: (crate.name, crate.version))
 
 
 def license_files(crate: Crate) -> list[Path]:
@@ -207,11 +212,14 @@ class Clauses:
             if self.take() != ")":
                 self.fail()
             return inner
-        if word in {")", "AND", "OR", "WITH"}:
+        if word in {")", "AND", "OR", "WITH"} or not SPDX_ID.match(word):
             self.fail()
         if self.peek() == "WITH":
             self.take()
-            word = f"{word} WITH {self.take()}"
+            exception = self.take()
+            if not SPDX_ID.match(exception):
+                self.fail()
+            word = f"{word} WITH {exception}"
         return {frozenset([word])}
 
 

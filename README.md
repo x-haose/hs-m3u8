@@ -95,7 +95,7 @@ asyncio.run(main())
 
 ## 用法（Rust，API 未定型）
 
-Rust 库没有发布到 crates.io，可用 git 依赖（`hs-m3u8-core`）。
+Rust 库没有发布到 crates.io。在自己的项目里用 git 依赖（`hs-m3u8-core`）时，还要照抄本仓库根 `Cargo.toml` 的 `[patch.crates-io]`（指向本仓库 `third_party/ffmpeg-sys-next` 的本地修改版），并按 `third_party/ffmpeg/build.sh` 编译 FFmpeg、把 `FFMPEG_DIR` 设为它的安装目录。
 
 ```rust no_run
 use std::num::NonZeroUsize;
@@ -153,6 +153,7 @@ make ffmpeg       # 下载并编译精简 FFmpeg 静态库到 third_party/ffmpeg
 make check        # 全部检查：Rust（格式、依赖方向、禁止压制属性、cargo-deny、随发布包的声明、clippy、文档、测试、覆盖率）与 Python
 make py_develop   # 构建扩展模块并装进 .venv
 make py_test      # Python 端到端测试
+make py_cov       # Python 绑定的覆盖率：插桩后生成一遍存根、跑一遍端到端测试
 make py_stubs     # 改了绑定的类型后重新生成类型存根（python/hs_m3u8）
 make licenses     # 依赖或 FFmpeg 的版本变了之后重新生成 LICENSES 下的声明
 uv run --no-sync python examples/download.py   # 运行示例（先 make ffmpeg 与 make py_develop）

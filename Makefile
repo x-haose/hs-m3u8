@@ -91,7 +91,8 @@ py_test: py_develop
 
 # Python 绑定（对外契约）的覆盖率，行覆盖不低于 80%：插桩构建后生成一遍存根、把扩展模块打成 wheel 装进单独的 venv
 # 跑一遍 Python 的端到端测试，两者即这个 crate 的全部用途。插桩产物与 venv 都在 PY_COV 下：maturin develop 会把扩展
-# 模块就地放进 python/hs_m3u8，不用它，免得插桩版顶替开发环境里的那份
+# 模块就地放进 python/hs_m3u8，不用它，免得插桩版顶替开发环境里的那份。生成存根同 py_stubs，会改写 python/hs_m3u8
+# 下被跟踪的存根
 PY_COV := $(abspath target/py-cov)
 py_cov: py_env ffmpeg_present
 	@cargo llvm-cov --version >/dev/null 2>&1 || { echo "缺少 cargo-llvm-cov，版本见 .github/workflows/rust.yml"; exit 1; }
@@ -103,10 +104,10 @@ py_cov: py_env ffmpeg_present
 	$(STUB_GEN) && \
 	uv run --no-sync maturin build --locked --out $(PY_COV)/dist && \
 	uv pip install --python $(PY_COV)/venv/bin/python $(PY_COV)/dist/*.whl && \
-	uv run --no-sync pytest -p no:cacheprovider && \
+	uv run --no-sync pytest && \
 	cargo llvm-cov report -p hs-m3u8-py --fail-under-lines 80 --summary-only
 
-# Python 绑定的全部检查
+# Python 绑定的检查；端到端测试由 py_test 或 py_cov 跑
 py_check: py_stubs py_develop
 	@# 生成的文件须已提交或暂存：重新生成后与暂存区一致，且没有未纳入版本库的新文件
 	git diff --exit-code -- python/hs_m3u8
@@ -124,4 +125,3 @@ py_check: py_stubs py_develop
 	@# pyo3-stub-gen 不生成 @disjoint_base（PEP 800），而 PyO3 的类在运行时都是 disjoint base；只影响对多重继承原生类的检查
 	uv run --no-sync python -m mypy.stubtest hs_m3u8 --ignore-disjoint-bases
 	uv run --no-sync python scripts/check_python_api.py
-	uv run --no-sync pytest

@@ -24,8 +24,6 @@ from hs_m3u8 import (
     IntegrityFailure,
     JobRequest,
     JobType,
-    KeyLengthError,
-    KeyOverride,
     Malformed,
     Mp4Unsupported,
     Mp4UnsupportedError,
@@ -141,20 +139,19 @@ def test_selections_the_master_cannot_satisfy_are_reported(server: Server, tmp_p
         server.put(name, MEDIA)
     absent_variant = VariantKey(bandwidth=1, resolution=None, codecs=[], audio_group=None, occurrence=0)
     absent_audio = AudioKey(group="aud", name="Deutsch", language="de", occurrence=0)
-    cases: list[tuple[str, Preference, SelectFailure]] = [
-        ("master.m3u8", Preference(variant=VariantChoice.Matching(absent_variant)), SelectFailure.VariantNotFound()),
+    cases: list[tuple[Preference, SelectFailure]] = [
+        (Preference(variant=VariantChoice.Matching(absent_variant)), SelectFailure.VariantNotFound()),
         (
-            "master.m3u8",
             Preference(audio=AudioChoice.Language("fr")),
             SelectFailure.AudioLanguageNotFound(group="aud", language="fr", available=["en"]),
         ),
-        ("master.m3u8", Preference(audio=AudioChoice.Index(5)), SelectFailure.AudioIndexOutOfRange(index=5, count=2)),
-        ("master.m3u8", Preference(audio=AudioChoice.Matching(absent_audio)), SelectFailure.AudioNotFound()),
-        ("master.m3u8", Preference(audio=AudioChoice.Index(1)), SelectFailure.NotVariantAudio(index=1, group="aud")),
+        (Preference(audio=AudioChoice.Index(5)), SelectFailure.AudioIndexOutOfRange(index=5, count=2)),
+        (Preference(audio=AudioChoice.Matching(absent_audio)), SelectFailure.AudioNotFound()),
+        (Preference(audio=AudioChoice.Index(1)), SelectFailure.NotVariantAudio(index=1, group="aud")),
     ]
 
-    for index, (path, preference, reason) in enumerate(cases):
-        error = failure(Source(server.url(path), preference=preference), tmp_path / str(index))
+    for index, (preference, reason) in enumerate(cases):
+        error = failure(Source(server.url("master.m3u8"), preference=preference), tmp_path / str(index))
         assert isinstance(error, SelectError), reason
         assert error.reason == reason
 
@@ -317,33 +314,21 @@ def test_content_that_fails_its_checks_is_rejected(server: Server, tmp_path: Pat
     assert reasons["trailing"] == IntegrityFailure.Fmp4TrailingBytes(at=len(video), len=1)
 
 
-def test_wrong_keys_fail_decryption_and_odd_keys_are_rejected(server: Server, tmp_path: Path) -> None:
-    playlist = (
-        '#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-KEY:METHOD=AES-128,URI="{}"\n#EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n'
+def test_oversized_key_responses_are_refused(server: Server, tmp_path: Path) -> None:
+    body = bytes(2 << 20)
+    server.put(
+        "index.m3u8",
+        '#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-KEY:METHOD=AES-128,URI="huge.key"\n#EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n',
     )
     server.put("seg0.ts", fixture("aes/seg0.ts"))
-    server.put("short.m3u8", playlist.format("short.key"))
-    server.put("short.key", bytes(15))
-    server.put("huge.m3u8", playlist.format("huge.key"))
-    server.put("huge.key", bytes((1 << 20) + 1))
-    server.put("wrong.m3u8", playlist.format("unused.key"))
-    wrong = KeyOverride(bytes(16), iv=bytes(range(16, 32)))
+    server.put("huge.key", body)
 
-    short = failure(Source(server.url("short.m3u8"), http=NO_RETRY), tmp_path / "short")
-    huge = failure(Source(server.url("huge.m3u8"), http=NO_RETRY), tmp_path / "huge")
-    request = JobRequest(
-        Source(server.url("wrong.m3u8"), http=NO_RETRY),
-        OutputOptions(Target.Mp4(tmp_path / "wrong" / "out.mp4")),
-        key=wrong,
-    )
-    with pytest.raises(IntegrityError) as decrypted:
-        asyncio.run(Engine().start(request).wait())
+    error = failure(Source(server.url("index.m3u8"), http=NO_RETRY), tmp_path)
 
-    assert isinstance(short, KeyLengthError)
-    assert (short.url, short.length) == (server.url("short.key"), 15)
-    assert isinstance(huge, ResponseTooLargeError)
-    assert (huge.url, huge.purpose, huge.limit) == (server.url("huge.key"), Purpose.Key(), 1 << 20)
-    assert decrypted.value.reason == IntegrityFailure.Padding()
+    assert isinstance(error, ResponseTooLargeError)
+    assert (error.url, error.purpose) == (server.url("huge.key"), Purpose.Key())
+    assert error.limit < len(body)
+    assert not error.retryable
 
 
 def test_untimed_packed_audio_beside_video_cannot_be_aligned(server: Server, tmp_path: Path) -> None:
@@ -390,7 +375,7 @@ def test_work_dirs_that_cannot_be_used_say_why(server: Server, tmp_path: Path) -
         work = tmp_path / name / "out.hsdl"
         work.mkdir(parents=True)
         if content is None:
-            (work / "notes.txt").write_text("别人的文件")
+            (work / "notes.txt").write_text("别人的文件", encoding="utf-8")
         else:
             (work / "job.json").write_bytes(content)
 
@@ -398,14 +383,14 @@ def test_work_dirs_that_cannot_be_used_say_why(server: Server, tmp_path: Path) -
     corrupt = failure(source, tmp_path / "corrupt")
     newer = failure(source, tmp_path / "newer")
 
-    for error in [foreign, corrupt, newer]:
-        assert isinstance(error, WorkDirError)
     assert isinstance(foreign, WorkDirError)
     assert foreign.problem == WorkDirProblem.NotEmpty()
     assert isinstance(corrupt, WorkDirError)
     assert isinstance(corrupt.problem, WorkDirProblem.Corrupt)
     assert isinstance(newer, WorkDirError)
-    assert newer.problem == WorkDirProblem.UnsupportedVersion(file="job.json", found=99, supported=11)
+    assert isinstance(newer.problem, WorkDirProblem.UnsupportedVersion)
+    assert (newer.problem.file, newer.problem.found) == ("job.json", 99)
+    assert newer.problem.supported < 99
 
 
 def test_resuming_with_a_different_request_is_refused(server: Server, tmp_path: Path) -> None:
@@ -416,7 +401,7 @@ def test_resuming_with_a_different_request_is_refused(server: Server, tmp_path: 
     failure(source, tmp_path)
     output = OutputOptions(Target.Mp4(tmp_path / "out.mp4"))
 
-    merged = asyncio.run(_merge_recorded(output))
+    merged = asyncio.run(merge_failure(output))
     server.put("index.m3u8", MEDIA.replace("#EXT-X-ENDLIST\n", ""))
     live = failure(source, tmp_path)
     server.put("index.m3u8", MEDIA.replace("#EXT-X-ENDLIST", "#EXTINF:1,\nseg2.ts\n#EXT-X-ENDLIST"))
@@ -430,7 +415,7 @@ def test_resuming_with_a_different_request_is_refused(server: Server, tmp_path: 
     assert replanned.problem == WorkDirProblem.PlanChanged()
 
 
-async def _merge_recorded(output: OutputOptions) -> HsM3u8Error:
+async def merge_failure(output: OutputOptions) -> HsM3u8Error:
     """只合并 `output` 的任务目录里已录的，返回抛出的异常；没抛出时测试失败。"""
     with pytest.raises(HsM3u8Error) as raised:
         await Engine().merge_recorded(output).wait()

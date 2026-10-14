@@ -40,5 +40,5 @@ url = "2.5.8"
 windows-registry = "0.6.1"
 
 [patch.crates-io]
-# 去掉 macOS 已移除的 QTKit，见 third_party/ffmpeg-sys-next/PATCHED.md
+# 本地修改版，与上游的差异见 third_party/ffmpeg-sys-next/PATCHED.md
 ffmpeg-sys-next = { path = "third_party/ffmpeg-sys-next" }
