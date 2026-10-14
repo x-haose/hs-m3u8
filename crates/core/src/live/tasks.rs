@@ -20,6 +20,7 @@ use crate::fetch::{self, Direct};
 use crate::hooks::Hooks;
 use crate::http::{Http, Permit};
 use crate::output;
+use crate::resolve::Attempts;
 use crate::{Error, FetchFailure, HttpError, HttpFailure, blocking, resolve};
 
 /// 一个后台任务的结果。
@@ -79,7 +80,9 @@ impl Tasks {
         self.set.spawn(async move {
             let started = Instant::now();
             let result = async {
-                let playlist = resolve::fetch_media(&http, &hooks, &request.url, &cancel).await?;
+                let playlist =
+                    resolve::fetch_media(&http, &hooks, &request.url, Attempts::Once, &cancel)
+                        .await?;
                 let inits = match &request.inits {
                     Some(inits) => Some(new_inits(&http, &playlist, inits, &cancel).await?),
                     None => None,

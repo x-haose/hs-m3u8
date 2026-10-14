@@ -94,7 +94,7 @@ variants! {
 variants! {
     /// 直播一次刷新失败的原因。
     pub enum RefreshReason {
-        /// 取不到：404/410，或重试后仍失败的临时故障
+        /// 取不到：404/410 或临时故障（刷新只发一次请求，失败了等下次刷新）
         Http {
             /// 失败的请求
             failure: HttpFailure,

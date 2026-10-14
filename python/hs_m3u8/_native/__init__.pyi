@@ -2396,7 +2396,7 @@ class RefreshReason:
     @typing.final
     class Http(RefreshReason):
         r"""
-        取不到：404/410，或重试后仍失败的临时故障
+        取不到：404/410 或临时故障（刷新只发一次请求，失败了等下次刷新）
         """
         __match_args__ = ("failure",)
         @property

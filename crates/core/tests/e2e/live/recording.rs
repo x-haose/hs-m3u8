@@ -117,7 +117,7 @@ async fn refresh_errors_have_an_item_per_track_once_recording() {
     );
 }
 
-/// 刷新失败（503，重试后仍失败）时进度里给出哪条轨、什么原因；恢复后清空，录制照常结束。
+/// 刷新失败（503）时进度里给出哪条轨、什么原因；恢复后清空，录制照常结束。
 #[tokio::test(flavor = "multi_thread")]
 async fn refresh_errors_show_in_progress_until_recovered() {
     let dir = test_dir("live_refresh_error");

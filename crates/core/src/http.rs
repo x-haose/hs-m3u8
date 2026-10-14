@@ -150,7 +150,7 @@ impl Http {
         }
     }
 
-    /// GET `url` 一次，不重试；调用方连同对内容的处理一起交给 [`Http::retrying`]。
+    /// GET `url` 一次，不重试（要重试的连同对内容的处理一起交给 [`Http::retrying`]）。
     pub(crate) async fn get_once(
         &self,
         purpose: Purpose,

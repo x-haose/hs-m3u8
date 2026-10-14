@@ -56,7 +56,7 @@ impl Progress {
 /// 直播一次刷新失败的原因；这类失败等下次刷新，不使任务立即失败。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RefreshCause {
-    /// 取不到：404/410，或重试后仍失败的临时故障
+    /// 取不到：404/410 或临时故障（刷新只发一次请求，失败了等下次刷新）
     #[error(transparent)]
     Http(HttpFailure),
     /// 内容为空，多为服务器还没写完

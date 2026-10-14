@@ -62,7 +62,7 @@ pub(crate) async fn resolve(
 ) -> Result<Option<Resolved>, Error> {
     let hooks = &source.hooks;
     Ok(Some(
-        match load_playlist(http, hooks, &source.url, cancel).await? {
+        match load_playlist(http, hooks, &source.url, Attempts::Retrying, cancel).await? {
             Playlist::Media(playlist) => Resolved {
                 tracks: vec![ResolvedTrack {
                     url: source.url.clone(),
@@ -80,10 +80,11 @@ pub(crate) async fn resolve(
                 };
                 let key = SelectionKey::of(&selection, &master);
                 let url = selection.variant.uri.clone();
-                let playlist = fetch_media(http, hooks, &url, cancel).await?;
+                let playlist = fetch_media(http, hooks, &url, Attempts::Retrying, cancel).await?;
                 let mut tracks = vec![ResolvedTrack { url, playlist }];
                 if let Some(audio) = &selection.audio {
-                    let playlist = fetch_media(http, hooks, &audio.uri, cancel).await?;
+                    let playlist =
+                        fetch_media(http, hooks, &audio.uri, Attempts::Retrying, cancel).await?;
                     tracks.push(ResolvedTrack {
                         url: audio.uri.clone(),
                         playlist,
@@ -102,14 +103,24 @@ pub(crate) async fn resolve(
     ))
 }
 
+/// 拉取播放列表的请求失败时再不再试。
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Attempts {
+    /// 可重试的失败按重试策略退避后再试（开始任务时）
+    Retrying,
+    /// 只发一次请求（刷新直播播放列表）：失败交给录制循环，按刷新的节奏再刷新，原因即时放进进度
+    Once,
+}
+
 /// 拉取并解析媒体播放列表（刷新直播播放列表也用它）。
 pub(crate) async fn fetch_media(
     http: &Http,
     hooks: &Arc<dyn Hooks>,
     url: &Url,
+    attempts: Attempts,
     cancel: &CancellationToken,
 ) -> Result<MediaPlaylist, Error> {
-    match load_playlist(http, hooks, url, cancel).await? {
+    match load_playlist(http, hooks, url, attempts, cancel).await? {
         Playlist::Media(media) => Ok(media),
         Playlist::Master(_) => Err(Error::NotMediaPlaylist {
             url: Box::new(url.clone()),
@@ -122,11 +133,14 @@ async fn load_playlist(
     http: &Http,
     hooks: &Arc<dyn Hooks>,
     url: &Url,
+    attempts: Attempts,
     cancel: &CancellationToken,
 ) -> Result<Playlist, Error> {
-    let response = http
-        .get(Purpose::Playlist, url, None, Permit::Exempt, cancel)
-        .await?;
+    let (purpose, permit) = (Purpose::Playlist, Permit::Exempt);
+    let response = match attempts {
+        Attempts::Retrying => http.get(purpose, url, None, permit, cancel).await?,
+        Attempts::Once => http.get_once(purpose, url, None, permit, cancel).await?,
+    };
     let final_url = response.url;
     let hook_url = final_url.clone();
     let body = response.body;
