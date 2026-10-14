@@ -15,16 +15,16 @@ const OTHERS: [&[u8; 4]; 5] = [b"mdat", b"mfra", b"ssix", b"meta", b"uuid"];
 
 /// 一个顶层 box 的头。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BoxHeader {
+pub(crate) struct BoxHeader {
     /// 在文件里的起点，字节
-    pub at: u64,
-    pub kind: [u8; 4],
+    pub(crate) at: u64,
+    pub(crate) kind: [u8; 4],
     /// 头的字节数：8，64 位长度时 16
-    pub head: u64,
+    pub(crate) head: u64,
     /// 整个 box 的字节数，含头
-    pub size: u64,
+    pub(crate) size: u64,
     /// 长度字段写为 0（到文件末尾）；`size` 为到末尾的实际长度
-    pub to_end: bool,
+    pub(crate) to_end: bool,
 }
 
 impl BoxHeader {
@@ -80,7 +80,7 @@ pub fn check(data: &[u8], trex: &HashMap<u32, u32>) -> Result<(), Problem> {
 
 /// 同 [`check`]，从 `reader`（一个 init 段或分片）读，通过时返回顶层 box；读不了时为外层的 `Err`。只读各 box 的头与
 /// moof 的内容。
-pub fn check_reader(
+pub(crate) fn check_reader(
     reader: &mut (impl Read + Seek),
     trex: &HashMap<u32, u32>,
 ) -> io::Result<Result<Vec<BoxHeader>, Problem>> {

@@ -42,6 +42,7 @@ mod write;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use ffmpeg::media;
 use ffmpeg_next as ffmpeg;
@@ -182,8 +183,8 @@ pub struct StreamReport {
     /// 的包），打包音频里切帧时跳过的不完整的帧或标签、认不出的字节，以及片内损坏之后定不了时刻（这一片是最后一片，
     /// 或下一片之前缺了分片）的帧。视频包照常写入，由解码器做错误隐藏
     pub discarded_corrupt_bytes: u64,
-    /// 输出时间线上从最早的呈现时刻到最晚的结束时刻，微秒；含组内时间戳间断（如缺失的分片）留下的空档
-    pub duration_us: u64,
+    /// 输出时间线上从最早的呈现时刻到最晚的结束时刻；含组内时间戳间断（如缺失的分片）留下的空档
+    pub duration: Duration,
 }
 
 /// 合并结果，`streams` 按输出流下标排列。

@@ -146,7 +146,7 @@ async fn refresh_errors_show_in_progress_until_recovered() {
     });
     assert_eq!(failed.refresh_errors, [Some(unavailable)]);
     // 已录 1 秒
-    assert_eq!(failed.duration_us, 1_000_000);
+    assert_eq!(failed.duration, Duration::from_secs(1));
 
     server.put("live.m3u8", playlist(&[0, 1], true));
     let output = job.wait().await.unwrap();

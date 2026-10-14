@@ -1,6 +1,7 @@
 //! 写出 MP4：按第 0 组建立输出流，逐组平移时间戳、交错写出，写完回读核对包数。
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ffmpeg::{Dictionary, Packet, Rational, Rescale, Rounding, codec, encoder, format};
 use ffmpeg_next as ffmpeg;
@@ -39,9 +40,11 @@ impl OutStream {
             skipped_without_dts: self.dropped.without_dts,
             skipped_before_keyframe: self.dropped.before_keyframe,
             discarded_corrupt_bytes: self.dropped.corrupt_bytes,
-            duration_us: match (self.start_us, self.end_us) {
-                (Some(start), Some(end)) => u64::try_from(end - start).unwrap_or(0),
-                _ => 0,
+            duration: match (self.start_us, self.end_us) {
+                (Some(start), Some(end)) => {
+                    Duration::from_micros(u64::try_from(end - start).unwrap_or(0))
+                }
+                _ => Duration::ZERO,
             },
         }
     }

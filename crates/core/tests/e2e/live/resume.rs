@@ -240,7 +240,7 @@ async fn max_duration_counts_earlier_sessions() {
         report(LiveEnd::DurationReached, 2, vec![])
     );
     // 已录时长含之前的会话
-    assert_eq!(progress.borrow().duration_us, 2_000_000);
+    assert_eq!(progress.borrow().duration, Duration::from_secs(2));
     assert_eq!(server.hits("seg2.ts"), 0);
 }
 
@@ -403,8 +403,8 @@ async fn merge_recorded_merges_without_the_network() {
     assert_output(&output, &expected_long(&dir, &[0, 1, 2], &[3]));
     let last = progress.borrow().clone();
     assert_eq!(
-        (last.stage, last.segments.done, last.duration_us),
-        (Stage::Done, 3, 3_000_000)
+        (last.stage, last.segments.done, last.duration),
+        (Stage::Done, 3, Duration::from_secs(3))
     );
     let want = LiveReport {
         end: None,

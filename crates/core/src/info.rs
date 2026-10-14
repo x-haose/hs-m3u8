@@ -1,6 +1,8 @@
 //! 对外描述来源的类型：探测结果与进度里的变体、音轨与各轨概况。不含地址：地址常带令牌，而这些类型常被打进
 //! 日志与界面。
 
+use std::time::Duration;
+
 use hs_m3u8_hls::{
     AudioChoice, AudioKey, MasterPlaylist, MediaPlaylist, Resolution, Selection, VariantChoice,
     VariantKey, audio_renditions,
@@ -94,8 +96,8 @@ pub struct TrackInfo {
     pub segments: usize,
     /// 来源标了 EXT-X-GAP 的分片数（含在 `segments` 里，下载时不取）
     pub gaps: usize,
-    /// 分片声明时长之和，微秒；直播为当前窗口的
-    pub duration_us: u64,
+    /// 分片声明时长之和；直播为当前窗口的
+    pub duration: Duration,
     /// 有 AES-128 加密的分片或 init 段
     pub encrypted: bool,
     /// 有没标 EXT-X-GAP 的分片或它的 init 段加密而所用的 EXT-X-KEY 没写 URI：要给自定义 key
@@ -136,11 +138,13 @@ impl TrackInfo {
             ended: playlist.ended,
             segments: playlist.segments.len(),
             gaps: playlist.segments.iter().filter(|s| s.gap).count(),
-            duration_us: playlist
-                .segments
-                .iter()
-                .map(|s| s.duration_us)
-                .fold(0u64, u64::saturating_add),
+            duration: Duration::from_micros(
+                playlist
+                    .segments
+                    .iter()
+                    .map(|s| s.duration_us)
+                    .fold(0u64, u64::saturating_add),
+            ),
             encrypted: playlist
                 .segments
                 .iter()

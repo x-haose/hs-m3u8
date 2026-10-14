@@ -423,9 +423,9 @@ fn ts_single_group_copies_every_packet_from_zero_with_moov_first() {
     for (stream, timeline) in report.streams.iter().zip([&v_out, &a_out]) {
         let read_back_us = span(timeline) * 1e6;
         assert!(
-            (stream.duration_us as f64 - read_back_us).abs() < 1000.0,
-            "报告 {} µs，回读 {read_back_us} µs",
-            stream.duration_us
+            (stream.duration.as_micros() as f64 - read_back_us).abs() < 1000.0,
+            "报告 {:?}，回读 {read_back_us} µs",
+            stream.duration
         );
     }
     let start = v_out
@@ -2197,7 +2197,7 @@ fn packed_audio_timestamps_wrap_around() {
     .unwrap();
 
     let expected = (segments[0].1 + segments[1].1) as f64 / 90_000.0;
-    let duration = report.streams[0].duration_us as f64 / 1e6;
+    let duration = report.streams[0].duration.as_secs_f64();
     assert!(
         (duration - expected).abs() < 0.001,
         "应连续 {expected} 秒，实际 {duration}"
@@ -2520,10 +2520,22 @@ fn damage_before_a_gap_or_a_frameless_segment_in_packed_audio() {
 /// 样本里 fMP4 分片的 trun 声明的样本数据恰好到分片末尾：mdat 的长度写 0 时少一个字节、或截在 mdat 之前，都看得出
 /// 没写完。合并时同样核对：没写完（截在 mdat 里或 mdat 之前）、最后一个 box 的长度写 0 都报错，不越过文件边界把下一片
 /// 读成这一片的样本。
+/// `data`（fMP4 分片）的顶层 box 依次排开，最后一个须为 `kind`，返回它的起点。只认 32 位长度的 box，样本都是这样。
+fn last_box(data: &[u8], kind: &[u8; 4]) -> usize {
+    let mut at = 0;
+    loop {
+        let size = u32::from_be_bytes(data[at..at + 4].try_into().unwrap()) as usize;
+        if at + size == data.len() {
+            assert_eq!(&data[at + 4..at + 8], kind);
+            return at;
+        }
+        at += size;
+    }
+}
+
 #[test]
 fn fmp4_structure_is_checked() {
     use hs_m3u8_remux::fmp4::{self, Problem};
-    use std::io::Cursor;
 
     let dir = work_dir("fmp4_structure");
     for name in ["fmp4_a/video", "fmp4_a/audio", "fmp4_av1_opus", "fmp4_alac"] {
@@ -2532,13 +2544,9 @@ fn fmp4_structure_is_checked() {
         let trex = fmp4::trex_sample_sizes(&init).unwrap();
         assert_eq!(fmp4::check(&init, &trex), Ok(()), "{name}");
         let data = std::fs::read(&t.segments[0].path).unwrap();
-        let boxes = fmp4::check_reader(&mut Cursor::new(&data), &trex)
-            .unwrap()
-            .unwrap();
-        let mdat = *boxes.last().unwrap();
-        assert_eq!(&mdat.kind, b"mdat", "{name}");
+        let mdat = last_box(&data, b"mdat");
         let mut open = data.clone();
-        open[mdat.at as usize..][..4].fill(0);
+        open[mdat..][..4].fill(0);
         let mut sealed = open.clone();
         assert_eq!(fmp4::seal(&mut sealed, &trex), Ok(()), "{name}");
         assert_eq!(sealed, data, "{name}");
@@ -2548,21 +2556,12 @@ fn fmp4_structure_is_checked() {
             incomplete,
             "{name}"
         );
-        assert_eq!(
-            fmp4::check(&data[..mdat.at as usize], &trex),
-            incomplete,
-            "{name}"
-        );
+        assert_eq!(fmp4::check(&data[..mdat], &trex), incomplete, "{name}");
     }
 
     let video = track("fmp4_a/video");
     let original = std::fs::read(&video.segments[0].path).unwrap();
-    let trex =
-        fmp4::trex_sample_sizes(&std::fs::read(video.init.as_ref().unwrap()).unwrap()).unwrap();
-    let boxes = fmp4::check_reader(&mut Cursor::new(&original), &trex)
-        .unwrap()
-        .unwrap();
-    let mdat = boxes.last().unwrap().at as usize;
+    let mdat = last_box(&original, b"mdat");
     let mut open = original.clone();
     open[mdat..mdat + 4].fill(0);
     let truncated = original[..original.len() - 10].to_vec();
@@ -2823,7 +2822,7 @@ fn untimed_packed_audio_is_used_only_alone() {
     )
     .unwrap();
     let expected = (segments[0].1 + segments[2].1) as f64 / 90_000.0;
-    let duration = report.streams[0].duration_us as f64 / 1e6;
+    let duration = report.streams[0].duration.as_secs_f64();
     assert!(
         (duration - expected).abs() < 0.001,
         "应连续 {expected} 秒，实际 {duration}"

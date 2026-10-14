@@ -77,7 +77,7 @@ async fn aes128_explicit_and_sequence_iv() {
     );
     // 读到的字节：播放列表、两个 key 与四个分片（密文），各一次
     assert_eq!(last.received, served as u64);
-    assert_eq!(last.duration_us, 4_000_000);
+    assert_eq!(last.duration, Duration::from_secs(4));
     assert_eq!((server.hits("k0"), server.hits("k1")), (1, 1));
 }
 
@@ -572,7 +572,7 @@ async fn failure_then_resume() {
     assert_eq!(server.hits("seg0.ts"), 2);
     // 续传前已完成的分片计入时长与字节数
     let last = progress.borrow().clone();
-    assert_eq!(last.duration_us, 2_000_000);
+    assert_eq!(last.duration, Duration::from_secs(2));
     let plain: usize = TS_A
         .map(|n| fixture(&format!("ts_a/{n}")).len())
         .iter()

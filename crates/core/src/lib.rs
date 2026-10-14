@@ -85,6 +85,7 @@ pub use url::Url;
 
 /// 公开接口用到的合并报告与合并错误的类型。
 pub mod remux {
+    pub use hs_m3u8_remux::fmp4::Problem as Fmp4Problem;
     pub use hs_m3u8_remux::{Error, FfmpegError, Report, Shape, StreamKind, StreamReport};
 }
 

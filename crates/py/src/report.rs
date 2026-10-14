@@ -658,7 +658,7 @@ impl From<core::Progress> for Progress {
                 expired: p.segments.expired,
                 gap: p.segments.gap,
             },
-            duration: Duration::from_micros(p.duration_us),
+            duration: p.duration,
             bytes: p.bytes,
             received: p.received,
             retrying: p
@@ -699,7 +699,7 @@ impl From<core::remux::StreamReport> for StreamReport {
             skipped_without_dts: s.skipped_without_dts,
             skipped_before_keyframe: s.skipped_before_keyframe,
             discarded_corrupt_bytes: s.discarded_corrupt_bytes,
-            duration: Duration::from_micros(s.duration_us),
+            duration: s.duration,
         }
     }
 }

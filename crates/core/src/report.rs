@@ -17,8 +17,8 @@ pub struct Progress {
     pub selected: Option<Selected>,
     /// 分片数，各轨合计
     pub segments: SegmentCounts,
-    /// 第 0 条轨已完成分片的声明时长之和，微秒；含续传前已完成的。直播即已录时长
-    pub duration_us: u64,
+    /// 第 0 条轨已完成分片的声明时长之和；含续传前已完成的。直播即已录时长
+    pub duration: Duration,
     /// 任务目录中已完成的分片与 init 段的字节数（解密后）；含续传前已完成的
     pub bytes: u64,
     /// 本次运行从网络读到的响应体字节数，读到即计：含播放列表与 key，含没读完、校验失败与重试前的请求。
@@ -62,7 +62,9 @@ impl Progress {
         self.segments.done += 1;
         self.bytes += len;
         if track == 0 {
-            self.duration_us = self.duration_us.saturating_add(duration_us);
+            self.duration = self
+                .duration
+                .saturating_add(Duration::from_micros(duration_us));
         }
     }
 }

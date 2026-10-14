@@ -221,7 +221,7 @@ impl From<core::TrackInfo> for TrackInfo {
             ended: t.ended,
             segments: t.segments,
             gaps: t.gaps,
-            duration: Duration::from_micros(t.duration_us),
+            duration: t.duration,
             encrypted: t.encrypted,
             needs_custom_key: t.needs_custom_key,
         }

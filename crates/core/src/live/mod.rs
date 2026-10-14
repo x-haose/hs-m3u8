@@ -240,7 +240,7 @@ pub(crate) fn count_stored(stored: &Stored, progress: &watch::Sender<Progress>) 
         p.segments.done = done;
         p.segments.total = done;
         p.bytes = bytes;
-        p.duration_us = duration_us;
+        p.duration = Duration::from_micros(duration_us);
     });
 }
 
