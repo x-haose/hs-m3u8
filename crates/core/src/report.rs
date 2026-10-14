@@ -17,8 +17,8 @@ pub struct Progress {
     pub selected: Option<Selected>,
     /// 已完成的分片，各轨合计；含续传前已完成的
     pub segments_done: usize,
-    /// 要下载的分片，各轨合计：已完成的（含续传前的）加上排入下载的；直播另含列出了但 init 段取不到的，
-    /// 随录制增长。全部处理完时等于 `segments_done` 加 `segments_failed`
+    /// 要下载的分片，各轨合计：已完成的（含续传前的）加上排入下载的；直播另含列出了但 init 段取不到的，随录制增长；点播
+    /// 不含所在组合并不了的分片（见 [`Output::missed`]）。全部处理完时等于 `segments_done` 加 `segments_failed`
     pub segments_total: usize,
     /// 直播本次运行中列出了、但分片或其 init 段取不到的分片，计入 `segments_total`；点播恒为 0
     pub segments_failed: usize,
@@ -123,8 +123,8 @@ pub struct Output {
     pub leftovers: Vec<Leftover>,
     /// 不在输出中的分片，按会话、轨道、序号排列，相接且原因相同的合成一个区间：点播有来源标了 EXT-X-GAP 的及因此合并不
     /// 了的；直播另有窗口滑过、取不到等（见 [`MissReason`]），不含之前的运行里、某个会话第一个已完成分片之前或最后一个
-    /// 之后缺的（原因与范围随那次运行一起丢了）。组内两个已有分片之间缺的，输出里那段留空、保留原时间戳；组首尾缺的、整
-    /// 组不在输出中的不占时间（各组首尾相接）
+    /// 之后缺的（原因与范围随那次运行一起丢了）。缺的分片落在所在组各轨已有内容的时间范围内时，那条轨在那段留空、保留原
+    /// 时间戳；各轨都缺的组首尾与整组不在输出中的不占时间（各组首尾相接）
     pub missed: Vec<Missed>,
     /// 直播的录制结果；点播为 None
     pub live: Option<LiveReport>,

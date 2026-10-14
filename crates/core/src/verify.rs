@@ -88,7 +88,7 @@ pub(crate) fn check(data: &mut [u8], container: &Container) -> Result<(), Conten
 }
 
 /// init 段 `data` 的结构问题：不是 fMP4 而是 TS 的节目表的为 [`ContentError::TsInit`]。节目表的 PAT 与 PMT 各占至少
-/// 一个包，要前两个包的起点都是同步字：只看第一个字节，碰巧以 0x47 起头的（如 GIF 的 `G`）会被认成 TS。
+/// 一个包：前两个包的起点都是同步字才认作 TS。
 fn init_problem(problem: Problem, data: &[u8]) -> ContentError {
     let ts = data.len() >= 2 * TS_PACKET
         && data[TS_PACKET] == 0x47

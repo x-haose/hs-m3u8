@@ -65,7 +65,7 @@ impl Server {
         }
     }
 
-    /// 停止服务：返回时监听已关闭，之后的连接被拒绝。
+    /// 停止服务：返回时监听已关闭，之后的连接被拒绝；已建立的连接不受影响。
     pub(crate) async fn stop(self) {
         self.serving.abort();
         assert!(self.serving.await.unwrap_err().is_cancelled());

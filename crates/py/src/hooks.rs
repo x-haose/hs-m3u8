@@ -74,8 +74,9 @@ impl RequestParts {
 ///
 /// 每次调用都在新的 Python 线程状态里：`threading.local` 与 `contextvars` 里存的东西不留到下一次调用，要跨调用复用
 /// （如每线程一个 HTTP 会话）就存在对象上并自己加锁。回调持着 GIL 时事件循环与其他回调都要等，耗时的计算放进放开
-/// GIL 的调用里。任务在运行时持有回调对象，回调对象可以引用它的 `Job`（如在回调里调用 `Job.stop`）：不再被其他地方
-/// 引用时两者一起被回收、任务随之取消。
+/// GIL 的调用里。`Job` 持有任务所用的回调对象，回调对象可以引用它的 `Job`（如在回调里调用 `Job.stop`）：两者不再被
+/// 其他地方引用时，在垃圾回收器回收这个环时一起被回收、任务随之取消（时间不确定，要立即停止就调用 `Job.cancel`）。
+/// 子类定义 `__slots__` 时不要写 `__weakref__`：本类已有。
 #[gen_stub_pyclass]
 #[pyclass(module = "hs_m3u8._native", subclass, frozen, weakref)]
 pub struct Hooks;
@@ -192,10 +193,10 @@ impl fmt::Display for InvalidReturn {
 
 impl std::error::Error for InvalidReturn {}
 
-/// core 的回调：只调用 Python 子类覆盖了的方法。对回调对象只持弱引用，由 `Job`（或在探测的协程）持有并报给垃圾
-/// 回收器：回调对象常引用它的 `Job`，core 持强引用时这个环回收不了。
+/// core 的回调：只调用 Python 子类覆盖了的方法。对回调对象只持弱引用，由 `Job` 持有并报给垃圾回收器、探测时由协程
+/// 持有到探测结束：回调对象常引用它的 `Job`，core 持强引用时这个环回收不了。
 struct PyHooks {
-    object: Py<PyWeakrefReference>,
+    weak: Py<PyWeakrefReference>,
     playlist: bool,
     request: bool,
     key: bool,
@@ -215,7 +216,7 @@ pub(crate) fn to_core(object: &Bound<'_, Hooks>) -> PyResult<Arc<dyn core::Hooks
         Ok(!found.is(getattr_static.call1((&base, name))?))
     };
     Ok(Arc::new(PyHooks {
-        object: PyWeakrefReference::new(object.as_any())?.unbind(),
+        weak: PyWeakrefReference::new(object.as_any())?.unbind(),
         playlist: overridden("on_playlist")?,
         request: overridden("on_request")?,
         key: overridden("on_key")?,
@@ -239,7 +240,7 @@ impl std::error::Error for Collected {}
 impl PyHooks {
     /// 回调对象；已被回收时为 [`Collected`]。
     fn object<'py>(&self, py: Python<'py>) -> Result<Bound<'py, PyAny>, core::HookError> {
-        self.object
+        self.weak
             .bind(py)
             .upgrade()
             .ok_or_else(|| Box::new(Collected) as core::HookError)
