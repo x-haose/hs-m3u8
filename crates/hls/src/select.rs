@@ -15,8 +15,8 @@ pub struct Preference {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VariantChoice {
-    /// 分辨率最高者，同分辨率取带宽最高，都相同时取靠后的；有带 RESOLUTION 的变体时，不考虑没有 RESOLUTION 的
-    /// （多为纯音频）
+    /// 画质最高者：确定是纯音频的变体（写了 CODECS 且全是音频或字幕编码）在有别的变体时不考虑；其余各变体都写了
+    /// RESOLUTION 时取分辨率最高、同分辨率取带宽最高，有没写的（分辨率比不了）时取带宽最高；都相同时取靠后的
     #[default]
     Best,
     /// `MasterPlaylist::variants` 中的下标
@@ -102,21 +102,42 @@ pub fn select(master: &MasterPlaylist, preference: &Preference) -> Result<Select
     })
 }
 
-/// 分辨率最高者，同分辨率取带宽最高（并列时取靠后的）；有带 RESOLUTION 的变体时，不考虑没有 RESOLUTION 的。
+/// 见 [`VariantChoice::Best`]。
 fn best_variant(master: &MasterPlaylist) -> Option<usize> {
-    let with_video = master.variants.iter().any(|v| v.resolution.is_some());
-    master
-        .variants
-        .iter()
-        .enumerate()
-        .filter(|(_, v)| !with_video || v.resolution.is_some())
+    let all = || master.variants.iter().enumerate();
+    let with_video: Vec<(usize, &Variant)> = all().filter(|(_, v)| !audio_only(v)).collect();
+    let candidates = if with_video.is_empty() {
+        all().collect()
+    } else {
+        with_video
+    };
+    let comparable = candidates.iter().all(|(_, v)| v.resolution.is_some());
+    candidates
+        .into_iter()
         .max_by_key(|(_, v)| {
             let pixels = v
                 .resolution
+                .filter(|_| comparable)
                 .map_or(0, |r| u64::from(r.width) * u64::from(r.height));
             (pixels, v.bandwidth.unwrap_or(0))
         })
         .map(|(index, _)| index)
+}
+
+/// 变体确定是纯音频：写了 CODECS，且列出的都是音频或字幕编码（RFC 6381 的写法，按点号前的那段认）。没写 CODECS、
+/// 或有认不出的编码时不算：可能有视频。
+fn audio_only(variant: &Variant) -> bool {
+    const NOT_VIDEO: [&str; 12] = [
+        "mp4a", "ac-3", "ec-3", "ac-4", "opus", "flac", "alac", "dtsc", "dtse", "dtsh", "wvtt",
+        "stpp",
+    ];
+    !variant.codecs.is_empty()
+        && variant.codecs.iter().all(|codec| {
+            let family = codec.split('.').next().unwrap_or_default();
+            NOT_VIDEO
+                .iter()
+                .any(|known| family.eq_ignore_ascii_case(known))
+        })
 }
 
 /// 主播放列表里的音频 rendition 与它们的位置（口径同 [`AudioChoice::Index`]）。

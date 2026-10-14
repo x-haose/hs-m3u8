@@ -99,6 +99,28 @@ fn best_variant_has_the_highest_resolution_and_ignores_audio_only_variants() {
     );
 }
 
+/// 视频变体没写 RESOLUTION（不合 RFC 8216，但有）时分辨率比不了，按带宽选；只把 CODECS 里全是音频编码的变体当纯音频
+/// 排除。
+#[test]
+fn variants_without_resolution_are_compared_by_bandwidth() {
+    let m = master(
+        "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,CODECS=\"avc1.640028,mp4a.40.2\"\nhigh.m3u8\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\nlow.m3u8\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=9000000,CODECS=\"mp4a.40.2\"\naudio.m3u8\n",
+    );
+    let selection = select(&m, &Preference::default()).unwrap();
+    assert_eq!(selection.variant.bandwidth, Some(5_000_000));
+
+    let only_audio =
+        master("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=64000,CODECS=\"mp4a.40.2\"\na.m3u8\n");
+    assert_eq!(
+        select(&only_audio, &Preference::default())
+            .unwrap()
+            .variant_index,
+        0
+    );
+}
+
 #[test]
 fn equal_resolutions_fall_back_to_bandwidth() {
     let m = master(

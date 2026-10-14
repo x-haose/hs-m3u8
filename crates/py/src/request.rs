@@ -21,8 +21,8 @@ use crate::record::{field_names, record, reduce, variants};
 variants! {
     /// 选哪个变体。
     pub enum VariantChoice {
-        /// 分辨率最高者，同分辨率取带宽最高，都相同时取靠后的；有带 RESOLUTION 的变体时，不考虑没有 RESOLUTION 的
-        /// （多为纯音频）
+        /// 画质最高者：确定是纯音频的变体（写了 CODECS 且全是音频或字幕编码）在有别的变体时不考虑；其余各变体都写了
+        /// RESOLUTION 时取分辨率最高、同分辨率取带宽最高，有没写的（分辨率比不了）时取带宽最高；都相同时取靠后的
         Best {},
         /// 主播放列表里第几个变体（从 0 起，见 `VariantInfo.index`）
         Index {
