@@ -104,25 +104,28 @@ fn check_layout(has_init: &[Vec<bool>]) -> Result<(), Error> {
 }
 
 /// 在准备目录 `stage`（还不存在，上级已建出）里备齐 HLS 输出；`work_dir` 为分片所在的任务目录，用于
-/// 报告目录内容无法识别。失败或取消（每放一个文件前检查）时 `stage` 里可能留有备了一半的内容，由调用方删除。
+/// 报告目录内容无法识别。各组各轨的 init 段（已放过的照样算）与分片每放好一个以 1 调用 `placed`。失败或取消（每放一个
+/// 文件前检查）时 `stage` 里可能留有备了一半的内容，由调用方删除。
 pub(super) fn stage(
     stage: &Path,
     work_dir: &Path,
     groups: &[Vec<GroupTrack>],
     selection: Option<&SelectionKey>,
     cancel: &CancellationToken,
+    placed: &dyn Fn(usize),
 ) -> Result<(), Error> {
     fs::create_dir(stage).map_err(io_error("创建", stage))?;
-    fill(stage, work_dir, groups, selection, cancel)
+    fill(stage, work_dir, groups, selection, cancel, placed)
 }
 
-/// 在 `stage` 里放好各轨的分片、init 段与播放列表。
+/// 在 `stage` 里放好各轨的分片、init 段与播放列表；`placed` 见 [`stage`]。
 fn fill(
     stage: &Path,
     work_dir: &Path,
     groups: &[Vec<GroupTrack>],
     selection: Option<&SelectionKey>,
     cancel: &CancellationToken,
+    placed: &dyn Fn(usize),
 ) -> Result<(), Error> {
     let track_count = groups.first().map_or(0, Vec::len);
     let mut tracks = Vec::with_capacity(track_count);
@@ -134,6 +137,7 @@ fn fill(
             work_dir,
             groups.iter().map(|g| &g[track]),
             cancel,
+            placed,
         )?);
     }
     match (&tracks[..], selection) {
@@ -168,12 +172,13 @@ struct TrackFiles {
     peak_bps: Option<u64>,
 }
 
-/// 放好一条轨各组的分片与 init 段。
+/// 放好一条轨各组的分片与 init 段；`placed` 见 [`stage`]。
 fn fill_track<'a>(
     dir: &Path,
     work_dir: &Path,
     groups: impl Iterator<Item = &'a GroupTrack>,
     cancel: &CancellationToken,
+    placed: &dyn Fn(usize),
 ) -> Result<TrackFiles, Error> {
     let cancellable_place = |src: &Path, dst: &Path| {
         if cancel.is_cancelled() {
@@ -198,6 +203,7 @@ fn fill_track<'a>(
                 if placed_inits.insert(name.clone()) {
                     cancellable_place(path, &dir.join(&name))?;
                 }
+                placed(1);
                 Some(name)
             }
             None => None,
@@ -212,6 +218,7 @@ fn fill_track<'a>(
         for segment in &group.segments {
             let name = format!("{index}.{ext}");
             let len = cancellable_place(&segment.path, &dir.join(&name))?;
+            placed(1);
             if let Some(bps) = bits_per_second(len, segment.duration_us) {
                 written.peak_bps = Some(written.peak_bps.map_or(bps, |peak| peak.max(bps)));
             }

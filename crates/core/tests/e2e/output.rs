@@ -8,10 +8,12 @@ use std::path::{Path, PathBuf};
 use axum::http::StatusCode;
 use hs_m3u8_core::{
     Error, HlsUnsupported, JobRequest, LiveOptions, Mp4Unsupported, Target, Unsupported, Url,
-    WorkDirProblem,
+    WorkDirProblem, Writing,
 };
 use hs_m3u8_hls::{MediaPlaylist, Playlist, parse};
-use hs_m3u8_remux::{Cancel, DiscontinuityGroup, Segment, Streams, TrackSegments, remux};
+use hs_m3u8_remux::{
+    Cancel, DiscontinuityGroup, ReadProgress, Segment, Streams, TrackSegments, remux,
+};
 
 use crate::server::Server;
 #[cfg(unix)]
@@ -117,7 +119,14 @@ fn read_hls(dir: &Path) -> (Vec<Streams>, Vec<DiscontinuityGroup>) {
 fn assert_hls_matches(hls: &Path, mp4: &Path) {
     let (streams, groups) = read_hls(hls);
     let merged = hls.with_extension("check.mp4");
-    remux(&streams, &groups, &merged, &Cancel::never()).unwrap();
+    remux(
+        &streams,
+        &groups,
+        &merged,
+        &Cancel::never(),
+        &ReadProgress::none(),
+    )
+    .unwrap();
     assert_eq!(std::fs::read(merged).unwrap(), std::fs::read(mp4).unwrap());
 }
 
@@ -136,14 +145,16 @@ fn request_to(url: Url, dir: &Path, target: Target) -> JobRequest {
 }
 
 /// 两者都要：音视频分离、两个不连续段组。HLS 的主播放列表码率按文件算、编码照抄来源，各轨分片按顺序编号、
-/// 组间加不连续标记；按它列出的文件合并与 MP4 相同。任务目录与临时名都已删除。
+/// 组间加不连续标记；按它列出的文件合并与 MP4 相同。任务目录与临时名都已删除。写出进度按两种输出各算一遍文件。
 #[tokio::test(flavor = "multi_thread")]
 async fn split_source_writes_both_outputs() {
     let dir = test_dir("output_both");
     let server = Server::start().await;
     let url = put_split_vod(&server);
 
-    let output = run(request_to(url, &dir, both(&dir))).await.unwrap();
+    let job = engine().start(request_to(url, &dir, both(&dir))).unwrap();
+    let progress = job.control().progress();
+    let output = job.wait().await.unwrap();
 
     assert_eq!(names_in(&dir), ["out", "out.mp4"]);
     let hls = dir.join("out");
@@ -179,6 +190,17 @@ async fn split_source_writes_both_outputs() {
     for name in ["0/0.m4s", "0/2.m4s", "1/4.m4s"] {
         assert!(hls.join(name).is_file(), "{name}");
     }
+    let (_, groups) = read_hls(&hls);
+    let files: usize = groups
+        .iter()
+        .flat_map(|g| &g.tracks)
+        .map(|t| t.segments.len() + usize::from(t.init.is_some()))
+        .sum();
+    let writing = Writing {
+        done: 2 * files,
+        total: 2 * files,
+    };
+    assert_eq!(progress.borrow().writing, Some(writing));
 }
 
 /// 目录里各项的名字，排好序。

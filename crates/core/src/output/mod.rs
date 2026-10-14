@@ -7,7 +7,10 @@ mod options;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use hs_m3u8_remux::{Cancel, DiscontinuityGroup, Report, Segment, Streams, TrackSegments};
+use hs_m3u8_remux::{
+    Cancel, DiscontinuityGroup, ReadProgress, Report, Segment, Streams, TrackSegments,
+};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use self::commit::recover_recorded;
@@ -19,7 +22,8 @@ use crate::error::io_error;
 use crate::selection::SelectionKey;
 use crate::workdir::{Layout, OutputKind, SegmentName, WorkDir};
 use crate::{
-    Error, Leftover, LeftoverKind, LiveReport, Missed, Mp4Output, Output, WorkDirProblem, blocking,
+    Error, Leftover, LeftoverKind, LiveReport, Missed, Mp4Output, Output, Progress, WorkDirProblem,
+    Writing, blocking,
 };
 
 /// 交给输出的内容。
@@ -136,14 +140,18 @@ fn check_all(options: &ResolvedOutput) -> Result<Vec<Occupant>, Error> {
         .collect()
 }
 
+/// 写好一个文件（见 [`Writing`]）时调用，参数为写好的个数。
+type Advance = std::sync::Arc<dyn Fn(usize) + Send + Sync>;
+
 /// 写出输出，按选项删除任务目录。`bytes` 为任务目录中已完成的分片与 init 段的字节数。`cancel` 在换上输出之前都生效
-/// （见 [`write_files`]）。
+/// （见 [`write_files`]）。写出的进度计入 `progress`（见 [`Progress::writing`]）。
 pub(crate) async fn write(
     dir: WorkDir,
     content: Content,
     options: &ResolvedOutput,
     bytes: u64,
     cancel: &CancellationToken,
+    progress: &watch::Sender<Progress>,
 ) -> Result<Output, Error> {
     let Content {
         streams,
@@ -153,11 +161,36 @@ pub(crate) async fn write(
         missed,
         live,
     } = content;
+    let per_output: usize = groups
+        .iter()
+        .flatten()
+        .map(|t| t.segments.len() + usize::from(t.init.is_some()))
+        .sum();
+    let total = per_output * options.outputs.len();
+    progress.send_modify(|p| p.writing = Some(Writing { done: 0, total }));
+    let advance: Advance = {
+        let progress = progress.clone();
+        std::sync::Arc::new(move |files| {
+            progress.send_modify(|p| {
+                if let Some(writing) = &mut p.writing {
+                    writing.done += files;
+                }
+            });
+        })
+    };
     let files = options.clone();
     let cancel = cancel.clone();
-    let (mp4, mut leftovers) =
-        blocking(move || write_files(&streams, &groups, selection.as_ref(), &files, &cancel))
-            .await??;
+    let (mp4, mut leftovers) = blocking(move || {
+        write_files(
+            &streams,
+            &groups,
+            selection.as_ref(),
+            &files,
+            &cancel,
+            &advance,
+        )
+    })
+    .await??;
     if !options.keep_work_dir {
         leftovers.extend(dir.remove().await);
     }
@@ -183,6 +216,7 @@ fn write_files(
     selection: Option<&SelectionKey>,
     options: &ResolvedOutput,
     cancel: &CancellationToken,
+    advance: &Advance,
 ) -> Result<(Option<Mp4Output>, Vec<Leftover>), Error> {
     check_all(options)?;
     create_dirs(options)?;
@@ -190,13 +224,14 @@ fn write_files(
         hls::check_content(groups, selection)?;
     }
     let commit = Commit::begin(&options.work_dir, &options.outputs)?;
-    let written = write_temps(streams, groups, selection, options, cancel).and_then(|report| {
-        if cancel.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
-        // 写出期间输出路径可能已被别人占用；开始时检查过，换上前再查一次，按这次的结果换
-        Ok((report, check_all(options)?))
-    });
+    let written =
+        write_temps(streams, groups, selection, options, cancel, advance).and_then(|report| {
+            if cancel.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            // 写出期间输出路径可能已被别人占用；开始时检查过，换上前再查一次，按这次的结果换
+            Ok((report, check_all(options)?))
+        });
     let (report, existing) = match written {
         Ok(written) => written,
         Err(failure) => return Err(commit.abandon(failure)),
@@ -212,13 +247,14 @@ fn write_files(
     Ok((mp4, leftovers))
 }
 
-/// 写出各临时输出；失败时可能留有写了一半的，由调用方删除。
+/// 写出各临时输出，写好一个文件报给 `advance`；失败时可能留有写了一半的，由调用方删除。
 fn write_temps(
     streams: &[Streams],
     groups: &[Vec<GroupTrack>],
     selection: Option<&SelectionKey>,
     options: &ResolvedOutput,
     cancel: &CancellationToken,
+    advance: &Advance,
 ) -> Result<Option<Report>, Error> {
     let report = match options.get(OutputKind::Mp4) {
         Some(mp4) => Some(write_mp4(
@@ -227,27 +263,40 @@ fn write_temps(
             groups,
             &options.work_dir,
             cancel,
+            advance,
         )?),
         None => None,
     };
     if let Some(hls) = options.get(OutputKind::Hls) {
-        hls::stage(hls.temp(), &options.work_dir, groups, selection, cancel)?;
+        hls::stage(
+            hls.temp(),
+            &options.work_dir,
+            groups,
+            selection,
+            cancel,
+            &**advance,
+        )?;
     }
     Ok(report)
 }
 
-/// 合并为 MP4 写到 `temp`；失败或取消时 `temp` 上可能留有写了一半的文件。`work_dir` 为分片所在的任务目录。
+/// 合并为 MP4 写到 `temp`，读完一个输入文件报给 `advance`；失败或取消时 `temp` 上可能留有写了一半的文件。
+/// `work_dir` 为分片所在的任务目录。
 fn write_mp4(
     temp: &Path,
     streams: &[Streams],
     groups: &[Vec<GroupTrack>],
     work_dir: &Path,
     cancel: &CancellationToken,
+    advance: &Advance,
 ) -> Result<Report, Error> {
     let groups: Vec<DiscontinuityGroup> = groups.iter().map(|g| remux_group(g)).collect();
     let token = cancel.clone();
     let cancel = Cancel::new(move || token.is_cancelled());
-    hs_m3u8_remux::remux(streams, &groups, temp, &cancel).map_err(|e| remux_error(e, work_dir))
+    let advance = advance.clone();
+    let progress = ReadProgress::new(move |files| advance(files));
+    hs_m3u8_remux::remux(streams, &groups, temp, &cancel, &progress)
+        .map_err(|e| remux_error(e, work_dir))
 }
 
 /// 下载完之前核对能否合并进 MP4（见 [`hs_m3u8_remux::check`]），各轨只需开头的分片。`groups` 的各项为合并时的组号与

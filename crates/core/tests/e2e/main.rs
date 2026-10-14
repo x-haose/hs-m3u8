@@ -17,7 +17,9 @@ use aes::cipher::{BlockModeEncrypt, KeyIvInit};
 use hs_m3u8_core::{
     Engine, Error, JobRequest, Output, OutputOptions, RetryPolicy, Source, Target, Url,
 };
-use hs_m3u8_remux::{Cancel, DiscontinuityGroup, Segment, Streams, TrackSegments, remux};
+use hs_m3u8_remux::{
+    Cancel, DiscontinuityGroup, ReadProgress, Segment, Streams, TrackSegments, remux,
+};
 
 // ---------- 样本 ----------
 
@@ -66,7 +68,14 @@ fn track(dir: &str, init: Option<&str>, segments: &[&str]) -> TrackSegments {
 /// 直接合并样本文件得到的期望输出。
 fn expected(dir: &Path, streams: &[Streams], groups: &[DiscontinuityGroup]) -> Vec<u8> {
     let path = dir.join("expected.mp4");
-    remux(streams, groups, &path, &Cancel::never()).unwrap();
+    remux(
+        streams,
+        groups,
+        &path,
+        &Cancel::never(),
+        &ReadProgress::none(),
+    )
+    .unwrap();
     std::fs::read(path).unwrap()
 }
 

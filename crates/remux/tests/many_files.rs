@@ -4,7 +4,9 @@
 
 use std::path::{Path, PathBuf};
 
-use hs_m3u8_remux::{Cancel, DiscontinuityGroup, Segment, Streams, TrackSegments, remux};
+use hs_m3u8_remux::{
+    Cancel, DiscontinuityGroup, ReadProgress, Segment, Streams, TrackSegments, remux,
+};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/media/ts_long")
@@ -72,6 +74,7 @@ fn many_segments_in_one_group_stay_within_the_descriptor_limit() {
         &single_group(originals),
         &expected,
         &Cancel::never(),
+        &ReadProgress::none(),
     )
     .unwrap();
 
@@ -82,6 +85,7 @@ fn many_segments_in_one_group_stay_within_the_descriptor_limit() {
         &single_group(chunks),
         &output,
         &Cancel::never(),
+        &ReadProgress::none(),
     )
     .unwrap();
 

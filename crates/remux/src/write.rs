@@ -13,7 +13,8 @@ use crate::group::{OpenTrack, layout_of, open_group, primed, references_of};
 use crate::source::{Dropped, Mapping, Source};
 use crate::timing::{MICROS, align_wraps, group_offset, retime};
 use crate::{
-    Cancel, Error, FfmpegError, Numbered, Report, Shape, StreamReport, Streams, Unsupported,
+    Cancel, Error, FfmpegError, Numbered, ReadProgress, Report, Shape, StreamReport, Streams,
+    Unsupported,
 };
 
 /// 一路输出流：第 0 组决定其编码参数，写出过程中累计统计。`_us` 结尾的时刻为输出时间线上的微秒。
@@ -52,15 +53,16 @@ pub(crate) fn write_verified(
     groups: &[Numbered<'_>],
     path: &str,
     cancel: &Cancel,
+    progress: &ReadProgress,
 ) -> Result<Report, Error> {
-    let first = open_group(streams, groups[0], None, cancel)?;
+    let first = open_group(streams, groups[0], None, cancel, progress)?;
     let layout = layout_of(&first)?;
     let mut muxer = Muxer::open(path, cancel, &first, &layout)?;
     let sources = primed(groups[0].0, first, &layout, &[])?;
     let references = references_of(&sources, muxer.outs.len());
     muxer.write_group(groups[0].0, sources)?;
     for &numbered in &groups[1..] {
-        let opened = open_group(streams, numbered, Some(&layout), cancel)?;
+        let opened = open_group(streams, numbered, Some(&layout), cancel, progress)?;
         let sources = primed(numbered.0, opened, &layout, &references)?;
         muxer.write_group(numbered.0, sources)?;
     }

@@ -36,6 +36,8 @@ pub struct Progress {
     /// 正在退避、等着重试的请求（分片、key、init 段，与开始任务时拉的播放列表；直播的刷新不重试，见
     /// `refresh_errors`）；没有在等的为 None
     pub retrying: Option<Retrying>,
+    /// 写出的进度；[`Stage::Writing`] 之前为 None
+    pub writing: Option<Writing>,
     /// 直播：各轨（下标为轨道编号）最近一次刷新失败的原因。这条轨之后刷新成功、不再刷新或录制结束即清空；
     /// 一直失败到停滞时任务以 [`crate::Error::LiveStalled`] 结束。点播与录制开始前为空
     pub refresh_errors: Vec<Option<RefreshCause>>,
@@ -67,6 +69,14 @@ pub struct Retrying {
     pub purpose: Purpose,
     /// 最近一次要重试的失败
     pub failure: FetchFailure,
+}
+
+/// 写出的进度（[`Progress::writing`]），以文件计：各组各轨的 init 段与分片各算一个（打包音频按分片）。合并 MP4 时每
+/// 读完一个计一，备齐本地 HLS 时每放好一个计一，两者都要时各算一遍；合并完回读核对 MP4 时不再增长。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Writing {
+    pub done: usize,
+    pub total: usize,
 }
 
 /// 直播一次刷新失败的原因；这类失败等下次刷新，不使任务立即失败。

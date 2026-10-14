@@ -14,7 +14,7 @@ use ffmpeg::format::context::StreamIo;
 use ffmpeg::{Dictionary, Packet, format};
 use ffmpeg_next as ffmpeg;
 
-use crate::{Cancel, Error};
+use crate::{Cancel, Error, ReadProgress};
 
 /// 读取中止的原因：FFmpeg 只拿到错误码，这里留下供调用方报告。
 pub(crate) enum Stopped {
@@ -98,6 +98,12 @@ pub(crate) struct SegmentChain {
     open: Option<(usize, File, u64)>,
     failure: Failure,
     cancel: Cancel,
+    /// 读完各个文件时报给它（见 [`SegmentChain::reporting`]）
+    progress: ReadProgress,
+    /// 各文件在流中的结尾，升序
+    ends: Vec<u64>,
+    /// `ends` 里已越过、报过的个数
+    reported: usize,
 }
 
 impl SegmentChain {
@@ -131,8 +137,24 @@ impl SegmentChain {
             open: None,
             failure: failure.clone(),
             cancel,
+            progress: ReadProgress::none(),
+            ends: Vec::new(),
+            reported: 0,
         };
         Ok((chain, failure))
+    }
+
+    /// 读到的位置越过 `ends`（各文件在流中的结尾，升序）里的一项即读完一个文件，报给 `progress`；定位回去重读的不
+    /// 重复报。
+    pub(crate) fn reporting(mut self, progress: &ReadProgress, ends: Vec<u64>) -> Self {
+        self.progress = progress.clone();
+        self.ends = ends;
+        self
+    }
+
+    /// 各段在流中的结尾：每段即一个文件时为各文件的结尾。
+    pub(crate) fn piece_ends(&self) -> Vec<u64> {
+        self.starts[1..].to_vec()
     }
 
     fn total(&self) -> u64 {
@@ -203,6 +225,11 @@ impl Read for SegmentChain {
         self.position += read as u64;
         if let Some((_, _, at)) = &mut self.open {
             *at += read as u64;
+        }
+        let passed = self.ends[self.reported..].partition_point(|&end| end <= self.position);
+        if passed > 0 {
+            self.reported += passed;
+            self.progress.add(passed);
         }
         Ok(read)
     }

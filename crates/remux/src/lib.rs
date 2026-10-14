@@ -217,6 +217,34 @@ impl fmt::Debug for Cancel {
     }
 }
 
+/// 合并时读输入的进度：每读完输入的若干个文件（init 段或分片；打包音频按分片算）以读完的个数调用一次，各组各轨读完
+/// 时合计为它们的 init 段与分片数；回读核对输出不计。在 FFmpeg 的读回调里调用，要求同 [`Cancel::new`]。
+#[derive(Clone)]
+pub struct ReadProgress(Option<Arc<dyn Fn(usize) + Send + Sync>>);
+
+impl ReadProgress {
+    pub fn new(read: impl Fn(usize) + Send + Sync + 'static) -> ReadProgress {
+        ReadProgress(Some(Arc::new(read)))
+    }
+
+    /// 不报。
+    pub fn none() -> ReadProgress {
+        ReadProgress(None)
+    }
+
+    pub(crate) fn add(&self, files: usize) {
+        if let Some(read) = &self.0 {
+            read(files);
+        }
+    }
+}
+
+impl fmt::Debug for ReadProgress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ReadProgress")
+    }
+}
+
 /// 把各不连续段组的分片复制进 `output`（MP4，moov 前置），写完回读核对每路流的包数并落盘。失败或取消时 `output` 上
 /// 可能留有写了一半的文件，由调用方删除；已存在的 `output` 会被替换。`streams[i]` 为第 i 条轨贡献的流种类。
 pub fn remux(
@@ -224,6 +252,7 @@ pub fn remux(
     groups: &[DiscontinuityGroup],
     output: &Path,
     cancel: &Cancel,
+    progress: &ReadProgress,
 ) -> Result<Report, Error> {
     init()?;
     let groups: Vec<Numbered<'_>> = groups.iter().enumerate().collect();
@@ -231,7 +260,7 @@ pub fn remux(
     let Some(path) = ffmpeg_path(output) else {
         return Err(Error::NonUtf8Path(output.to_path_buf()));
     };
-    let report = write_verified(streams, &groups, path, cancel)?;
+    let report = write_verified(streams, &groups, path, cancel, progress)?;
     sync(output)?;
     Ok(report)
 }
@@ -252,7 +281,8 @@ pub fn check(streams: &[Streams], groups: &[(usize, &DiscontinuityGroup)]) -> Re
     validate(streams, groups)?;
     let cancel = Cancel::never();
     // 第 0 组的流布局；它开头的分片预读判断不了（如没有关键帧）时逐包参照留空，流布局与参数照样拿来比较
-    let first = match judgeable(open_group(streams, groups[0], None, &cancel))? {
+    let none = ReadProgress::none();
+    let first = match judgeable(open_group(streams, groups[0], None, &cancel, &none))? {
         Some(first) => {
             let layout = layout_of(&first)?;
             let outputs = layout.iter().map(Vec::len).sum();
@@ -266,15 +296,15 @@ pub fn check(streams: &[Streams], groups: &[(usize, &DiscontinuityGroup)]) -> Re
     };
     for &numbered in &groups[1..] {
         let layout = first.as_ref().map(|(layout, _)| layout.as_slice());
-        judgeable(open_group(streams, numbered, layout, &cancel).and_then(
-            |opened| match &first {
+        judgeable(
+            open_group(streams, numbered, layout, &cancel, &none).and_then(|opened| match &first {
                 Some((layout, references)) => primed(numbered.0, opened, layout, references),
                 None => {
                     let own = layout_of(&opened)?;
                     primed(numbered.0, opened, &own, &[])
                 }
-            },
-        ))?;
+            }),
+        )?;
     }
     Ok(())
 }

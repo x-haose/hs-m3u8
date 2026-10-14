@@ -297,7 +297,7 @@ async fn finish(
     }
     progress.send_modify(|p| p.stage = Stage::Writing);
     let bytes = progress.borrow().bytes;
-    let output = output::write(dir, content, options, bytes, cancel).await?;
+    let output = output::write(dir, content, options, bytes, cancel, progress).await?;
     progress.send_modify(|p| p.stage = Stage::Done);
     Ok(output)
 }

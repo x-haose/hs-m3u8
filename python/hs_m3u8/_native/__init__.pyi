@@ -100,6 +100,7 @@ __all__ = [
     "VolumeUnavailableError",
     "WorkDirError",
     "WorkDirProblem",
+    "Writing",
 ]
 
 class AudioChoice:
@@ -2451,6 +2452,11 @@ class Progress:
         `refresh_errors`）；没有在等的为 None
         """
     @property
+    def writing(self) -> typing.Optional[Writing]:
+        r"""
+        写出的进度；`Stage.Writing` 之前为 None
+        """
+    @property
     def refresh_errors(self) -> builtins.tuple[typing.Optional[RefreshCause], ...]:
         r"""
         直播：各轨（下标为轨道编号）最近一次刷新失败的原因。这条轨之后刷新成功、不再刷新或录制结束即为 None；
@@ -2467,7 +2473,7 @@ class Progress:
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, stage: Stage, selected: typing.Optional[Selected], segments_done: builtins.int, segments_total: builtins.int, segments_failed: builtins.int, segments_expired: builtins.int, segments_gap: builtins.int, duration: datetime.timedelta, bytes: builtins.int, received: builtins.int, retrying: typing.Optional[Retrying], refresh_errors: collections.abc.Sequence[typing.Optional[RefreshCause]], mp4_unsupported: typing.Optional[Mp4Unsupported]) -> Progress:
+    def __new__(cls, *, stage: Stage, selected: typing.Optional[Selected], segments_done: builtins.int, segments_total: builtins.int, segments_failed: builtins.int, segments_expired: builtins.int, segments_gap: builtins.int, duration: datetime.timedelta, bytes: builtins.int, received: builtins.int, retrying: typing.Optional[Retrying], writing: typing.Optional[Writing], refresh_errors: collections.abc.Sequence[typing.Optional[RefreshCause]], mp4_unsupported: typing.Optional[Mp4Unsupported]) -> Progress:
         r"""
         各参数即同名属性。
         """
@@ -4009,4 +4015,28 @@ class WorkDirProblem:
             """
         def __new__(cls, track: builtins.int) -> WorkDirProblem.Unaligned: ...
     
+
+@typing.final
+class Writing:
+    r"""
+    写出的进度（`Progress.writing`），以文件计：各组各轨的 init 段与分片各算一个（打包音频按分片）。合并 MP4 时每读
+    完一个计一，备齐本地 HLS 时每放好一个计一，两者都要时各算一遍；合并完回读核对 MP4 时不再增长。
+    """
+    @property
+    def done(self) -> builtins.int:
+        r"""
+        已写好的
+        """
+    @property
+    def total(self) -> builtins.int:
+        r"""
+        合计
+        """
+    def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
+    def __hash__(self) -> builtins.int: ...
+    def __new__(cls, *, done: builtins.int, total: builtins.int) -> Writing:
+        r"""
+        各参数即同名属性。
+        """
+    def __repr__(self) -> builtins.str: ...
 

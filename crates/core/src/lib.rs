@@ -60,7 +60,7 @@ pub use probe::Probe;
 pub use proxy::{Bypass, ProxySource, SystemProxy, system_proxy};
 pub use report::{
     Leftover, LeftoverKind, LiveEnd, LiveReport, MissReason, Missed, Mp4Output, NewSession, Output,
-    Progress, RefreshCause, Retrying, SourceBreak, Stage, StallCause,
+    Progress, RefreshCause, Retrying, SourceBreak, Stage, StallCause, Writing,
 };
 pub use request::{
     HttpOptions, JobRequest, KeyOverride, LiveOptions, Proxy, RetryPolicy, Source, Timeouts,

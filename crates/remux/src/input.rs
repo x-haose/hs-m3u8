@@ -11,7 +11,7 @@ use ffmpeg_next as ffmpeg;
 
 use crate::chain::{self, Halt, SegmentChain};
 use crate::packed::Packed;
-use crate::{Cancel, Error, Segment, TrackSegments, Unsupported, fmp4, standalone};
+use crate::{Cancel, Error, ReadProgress, Segment, TrackSegments, Unsupported, fmp4, standalone};
 
 pub(crate) enum Input {
     /// TS 与 fMP4：init 段与分片按字节相连，作为一个输入读
@@ -28,12 +28,13 @@ pub(crate) enum Input {
 
 impl Input {
     /// 打开一条轨在一组里的分片。没有 init 段的分片须同一格式（见 [`Unsupported::FormatChangedInGroup`]），不是 TS
-    /// 的为打包音频。`cancel` 取消后打开与读取以 [`Error::Cancelled`] 失败。
+    /// 的为打包音频。`cancel` 取消后打开与读取以 [`Error::Cancelled`] 失败；读完各个文件报给 `progress`。
     pub(crate) fn open(
         segments: &TrackSegments,
         group: usize,
         track: usize,
         cancel: &Cancel,
+        progress: &ReadProgress,
     ) -> Result<Input, Error> {
         let init = segments.init.is_some();
         if !init {
@@ -49,7 +50,7 @@ impl Input {
                 }));
             }
             if heads[0].format != standalone::Format::Ts {
-                return Packed::open(segments, &heads, group, track, cancel)
+                return Packed::open(segments, &heads, group, track, cancel, progress)
                     .map(|packed| Input::Packed(Box::new(packed)));
             }
         }
@@ -87,7 +88,14 @@ impl Input {
             .sum();
         let probe = Probe::first_segment(first_end, &segments.segments[0]);
         let (chain, failure) = new_chain(files, cancel)?;
-        let ictx = open_chain(chain, &failure, probe, group, track)?;
+        let ends = chain.piece_ends();
+        let ictx = open_chain(
+            chain.reporting(progress, ends),
+            &failure,
+            probe,
+            group,
+            track,
+        )?;
         Ok(Input::Chain {
             ictx,
             failure,
