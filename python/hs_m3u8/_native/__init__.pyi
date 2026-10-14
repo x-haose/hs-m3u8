@@ -1962,8 +1962,9 @@ class Mp4Unsupported:
     @typing.final
     class TimestampJump(Mp4Unsupported):
         r"""
-        组内时间戳往前跳，输出里会留下整组都没有内容、比一个最长的声明时长还长的空档：多为来源在时间戳重新开始处
-        漏标了 EXT-X-DISCONTINUITY。一路流单独中断不算；其间有缺片时不核对
+        组内时间戳往前跳，输出里会留下整组都没有内容的空档，扣掉这条轨上一个包所在的片（跨片时）之后仍比一个最长
+        的声明时长还长：多为来源在时间戳重新开始处漏标了 EXT-X-DISCONTINUITY。一路流单独中断不算；其间有缺片时不
+        核对
         """
         __match_args__ = ("group", "track", "kind", "segment", "jump",)
         @property

@@ -23,6 +23,7 @@ mod window;
 
 use std::ops::ControlFlow;
 use std::sync::Arc;
+use std::time::Duration;
 
 use hs_m3u8_hls as hls;
 use hs_m3u8_remux::Streams;
@@ -73,6 +74,9 @@ struct Signals<'a> {
     cancel: &'a CancellationToken,
     stop: &'a CancellationToken,
 }
+
+/// 计时器醒来比定的时刻晚这么多，即循环停住过：远大于正常的调度延迟（毫秒级），又远小于常见的目标时长。
+const FROZEN: Duration = Duration::from_millis(500);
 
 /// 当前这次停滞：停滞的轨、停滞开始的时刻（见 [`LiveTrack::stall_since`]），与循环察觉它的时刻（进程被挂起时为醒来
 /// 之后；察觉之后循环停住过的，改为醒来的时刻，见 [`Recorder::next_event`]）。
@@ -325,8 +329,8 @@ impl Recorder<'_> {
     }
 
     /// 发起到期的刷新，等下一件事。已完成的后台任务与下载先于停止、停滞处理：停止前已拉到的照常处理，
-    /// 刚录到的分片不被误判为停滞。停滞检查的时刻过了一个目标时长（各轨中最短的）以上才醒来时，循环停住过（进程被
-    /// 挂起、调试器暂停）：在途的请求可能其间已返回而还没处理到，当前停滞的期限从醒来起重新算。
+    /// 刚录到的分片不被误判为停滞。比停滞检查的时刻晚了 [`FROZEN`]（或各轨中最短的目标时长，取小的）以上才醒来时，
+    /// 循环停住过（进程被挂起、调试器暂停）：在途的请求可能其间已返回而还没处理到，当前停滞的期限从醒来起重新算。
     async fn next_event(
         &mut self,
         signals: &Signals<'_>,
@@ -361,9 +365,9 @@ impl Recorder<'_> {
             _ = sleep_until(next_due), if next_due.is_some() => Ok(Event::Due),
         };
         let woke = Instant::now();
-        let target = self.refreshing().map(|(_, t)| t.target()).min();
-        if let (Some(at), Some(target)) = (stall, target)
-            && woke.saturating_duration_since(at) >= target
+        let frozen = self.refreshing().map(|(_, t)| t.target()).min();
+        if let (Some(at), Some(frozen)) = (stall, frozen.map(|target| target.min(FROZEN)))
+            && woke.saturating_duration_since(at) >= frozen
         {
             self.stall = self.stall.map(|s| Stall { noticed: woke, ..s });
         }
