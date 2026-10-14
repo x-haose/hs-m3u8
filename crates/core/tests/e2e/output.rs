@@ -60,7 +60,8 @@ fn read_playlist(path: &Path) -> Playlist {
     parse(&text, &Url::from_file_path(path).unwrap()).unwrap()
 }
 
-/// 媒体播放列表按不连续段分组，换成本地文件。
+/// 媒体播放列表按不连续段分组，换成本地文件。用于把读回的 HLS 重新合并、与 MP4 比对字节：HLS 不标出组内缺失的分片，
+/// 这里不知道缺在哪，声明的时长取 0（不核对时间戳推进）。
 fn media_groups(media: &MediaPlaylist) -> Vec<TrackSegments> {
     let mut groups: Vec<TrackSegments> = Vec::new();
     let mut current = None;
@@ -75,7 +76,7 @@ fn media_groups(media: &MediaPlaylist) -> Vec<TrackSegments> {
         }
         groups.last_mut().unwrap().segments.push(Segment {
             path: segment.uri.to_file_path().unwrap(),
-            duration_us: segment.duration_us,
+            duration_us: 0,
         });
     }
     groups

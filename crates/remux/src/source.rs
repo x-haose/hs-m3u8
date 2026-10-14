@@ -43,8 +43,8 @@ pub(crate) struct Source {
     pub(crate) dropped: Vec<Dropped>,
     /// 按输入流下标：视频流在这一组里读到的第一个关键帧的 PTS（没有 PTS 时为 DTS），还没读到时为 None
     keyframe_pts: Vec<Option<i64>>,
-    /// 按输入流下标：要写出的包最近所在的分片与这路流在其中的第一个 DTS（微秒），见 [`Source::check_advance`]
-    segment_starts: Vec<Option<(usize, i64)>>,
+    /// 按输入流下标：上一个要写出的包所在的分片与它的 DTS（微秒），见 [`Source::check_advance`]
+    last_written: Vec<Option<(usize, i64)>>,
     /// 已读出、待写入的包及其映射；包一定带 DTS
     pub(crate) queue: VecDeque<(Packet, Mapping)>,
     /// 读到了末尾（见 [`Source::read_next`]）
@@ -87,7 +87,7 @@ impl Source {
             inband,
             dropped: vec![Dropped::default(); streams],
             keyframe_pts: vec![None; streams],
-            segment_starts: vec![None; streams],
+            last_written: vec![None; streams],
             queue: VecDeque::new(),
             finished: false,
             wrap_us: 0,
@@ -158,25 +158,25 @@ impl Source {
         }
     }
 
-    /// 要写出的包 `packet` 进到下一个分片时，这路流在前后两片的第一个 DTS 之差不超过其间各片声明的时长加容差（见
-    /// [`crate::input::SegmentMap`]），否则报 [`Unsupported::TimestampJump`]。位置未知的包、其间有缺片或声明的时长判断
-    /// 不了时不核对。往回跳的由写出时的 DTS 严格递增拦下。
+    /// 要写出的包 `packet` 进到后面的分片时，输出里这路流的空档不超过容差（见 [`crate::input::SegmentMap`]），否则报
+    /// [`Unsupported::TimestampJump`]。空档为它与这路流上一个包的 DTS 之差，减去其间整片都没有这路流的包的那几片声明的
+    /// 时长：连续的内容在相邻分片之间只差一帧，与 EXTINF 准不准无关。没有位置的包（解析器从一个 PES 拆出的后几帧）归在
+    /// 这路流上一个包所在的分片；其间有缺片或声明的时长判断不了时不核对。往回跳的由写出时的 DTS 严格递增拦下。
     fn check_advance(&mut self, packet: &Packet, mapping: Mapping) -> Result<(), Error> {
         let segments = self.input.segments();
-        let Some(segment) = segments.segment_at(packet.position()) else {
+        let last = self.last_written[packet.stream()];
+        let Some(segment) = segments
+            .segment_at(packet.position())
+            .or(last.map(|(segment, _)| segment))
+        else {
             return Ok(());
         };
         let dts_us = packet
             .dts()
             .expect("要写出的包都带 DTS")
             .rescale(mapping.time_base, MICROS);
-        let start = &mut self.segment_starts[packet.stream()];
-        let previous = match *start {
-            Some((previous, _)) if previous >= segment => return Ok(()),
-            previous => previous,
-        };
-        *start = Some((segment, dts_us));
-        let Some((previous, previous_us)) = previous else {
+        self.last_written[packet.stream()] = Some((segment, dts_us));
+        let Some((previous, previous_us)) = last.filter(|&(previous, _)| previous < segment) else {
             return Ok(());
         };
         let (Some(declared), Some(tolerance)) = (
@@ -185,8 +185,8 @@ impl Source {
         ) else {
             return Ok(());
         };
-        let excess = (dts_us - previous_us).saturating_sub_unsigned(declared);
-        match u64::try_from(excess) {
+        let hole = (dts_us - previous_us).saturating_sub_unsigned(declared);
+        match u64::try_from(hole) {
             Ok(jump_us) if jump_us > tolerance => {
                 Err(Error::Unsupported(Unsupported::TimestampJump {
                     group: self.group,

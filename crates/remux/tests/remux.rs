@@ -1051,7 +1051,8 @@ fn a_segment_shrinking_during_the_merge_is_reported() {
 }
 
 /// 组内时间戳往前跳了约 1000 秒（来源在时间戳重新开始处漏标了 EXT-X-DISCONTINUITY）：照写会在输出里留下一大段空档，
-/// 报 TimestampJump。两片之间缺了分片时，跳过的可能就是缺的那几片的时长，不核对，照常合并。
+/// 报 TimestampJump，报出的就是空档的长度。两片之间缺了分片时，跳过的可能就是缺的那几片的时长，不核对，照常合并；
+/// 声明的时长不准而内容连续时不误报。
 #[test]
 fn a_forward_timestamp_jump_within_a_group_is_rejected() {
     let dir = work_dir("timestamp_jump");
@@ -1086,6 +1087,19 @@ fn a_forward_timestamp_jump_within_a_group_is_rejected() {
     remux(
         &[Streams::All],
         &[group([missing])],
+        &output,
+        &Cancel::never(),
+    )
+    .unwrap();
+
+    // ts_long 每片实际 1 秒，只声明 0.3 秒
+    let mut understated = track("ts_long");
+    for segment in &mut understated.segments {
+        segment.duration_us = 300_000;
+    }
+    remux(
+        &[Streams::All],
+        &[group([understated])],
         &output,
         &Cancel::never(),
     )
@@ -1169,6 +1183,7 @@ fn audio_damaged_at_a_missing_segment_is_dropped_and_counted() {
     let output = dir.join("out.mp4");
     let mut holed = track("ts_cut");
     holed.segments.remove(2);
+    holed.gaps = vec![2];
     let (v_in, a_in) = timelines(&concat_track(&holed, &dir, "in.ts"));
 
     let report = remux(
@@ -1814,7 +1829,7 @@ fn packed_audio_follows_its_id3_timestamps() {
                 Some(start + segments[0].1 + segments[1].1),
             ),
         ]),
-        gaps: Vec::new(),
+        gaps: vec![1],
     };
 
     remux(
