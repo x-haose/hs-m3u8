@@ -1039,7 +1039,8 @@ class IntegrityFailure:
     class Fmp4TrailingBytes(IntegrityFailure):
         r"""
         fMP4 末尾的字节不是完整的 box：不足 8 个凑不成 box 头，或类型认不出而长度写 0 或超出了数据。多为多出的字节
-        （如 CDN 加了换行或填充、`Hooks.on_segment` 没去干净）；trun 声明的样本数据也超出了数据时报 `IncompleteError`
+        （如 CDN 加了换行或填充、`Hooks.on_segment` 没去干净）；trun 声明的样本数据也超出了数据时报
+        `IncompleteError`
         """
         __match_args__ = ("at", "len",)
         @property
@@ -4071,7 +4072,8 @@ class Writing:
     @property
     def mp4(self) -> typing.Optional[FileCount]:
         r"""
-        合并 MP4：写完的输入文件，写到下一个分片的包时上一个才算完，合并完回读核对 MP4 时不再增长；不要 MP4 时为 None
+        合并 MP4：写完的输入文件，写到下一个分片的包时上一个才算完，合并完回读核对 MP4 时不再增长；不要 MP4 时为
+        None
         """
     @property
     def hls(self) -> typing.Optional[FileCount]:

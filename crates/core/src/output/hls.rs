@@ -312,9 +312,9 @@ fn media_playlist(groups: &[PlaylistGroup], prefix: &str) -> String {
     text + "#EXT-X-ENDLIST\n"
 }
 
-/// 视频与独立音频分离时的主播放列表：第 0 条轨为变体，第 1 条为音频 rendition。BANDWIDTH 为 `bandwidth`，分辨率
-/// 与编码照抄来源（来源没写的也不写）；音频组固定为 `audio`。名称与语言照抄来源，带有引号或换行（带引号的字符串里不允许）
-/// 时不用：没有可用的名称时名称为 `audio`，语言不写。
+/// 视频与独立音频分离时的主播放列表：第 0 条轨为变体，第 1 条为音频 rendition。BANDWIDTH 为 `bandwidth`，分辨率与编码照
+/// 抄来源（来源没写的也不写）；音频组固定为 `audio`。名称与语言照抄来源，带有引号或换行（带引号的字符串里不允许）时不
+/// 用：没有可用的名称时名称为 `audio`，语言不写。
 fn master_playlist(selection: &SelectionKey, bandwidth: u64) -> String {
     let audio = selection
         .audio
@@ -491,7 +491,7 @@ mod tests {
         assert_eq!(audio.uri.as_ref().unwrap().path(), "/out/1/index.m3u8");
         assert_eq!(
             (
-                audio.group_id.as_str(),
+                audio.group.as_str(),
                 audio.name.as_deref(),
                 audio.language.as_deref()
             ),

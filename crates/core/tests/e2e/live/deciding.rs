@@ -5,7 +5,7 @@ use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use hs_m3u8_core::{Error, HttpError, LiveEnd, LiveOptions, StallCause, StallError, Url};
+use hs_m3u8_core::{Error, HttpErrorKind, LiveEnd, LiveOptions, StallCause, StallReason, Url};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
 use super::{
@@ -68,7 +68,7 @@ async fn a_waiting_track_stops_while_another_keeps_going() {
             err,
             Error::LiveStalled {
                 track: 1,
-                cause: StallError::TrackStopped(StallCause::NoNewSegments)
+                cause: StallReason::TrackStopped(StallCause::NoNewSegments)
             }
         ),
         "{err}"
@@ -377,7 +377,7 @@ async fn transient_failure_with_a_new_token_is_not_unverified() {
         matches!(
             &err,
             Error::Segment { cause, .. }
-                if matches!(**cause, Error::Http { kind: HttpError::Status(500), .. })
+                if matches!(**cause, Error::Http { kind: HttpErrorKind::Status(500), .. })
         ) && err.retryable(),
         "{err}"
     );

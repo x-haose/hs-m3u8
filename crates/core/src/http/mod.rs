@@ -19,7 +19,7 @@ use self::client::{Clients, Cookies};
 use crate::cookies::Provider;
 use crate::hooks::{HookKind, Hooks, Purpose, RequestParts, run_hook};
 use crate::request::{RetryPolicy, Source, check_header, check_scheme, cookie_pairs};
-use crate::{Error, FetchFailure, HttpError, Integrity};
+use crate::{Error, FetchFailure, HttpErrorKind, IntegrityFailure};
 
 /// 请求占哪一份引擎名额（见 [`Permits`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,7 +313,7 @@ impl Http {
             .flatten();
             return Err(Error::Http {
                 url: Box::new(parts.url.clone()),
-                kind: HttpError::Status(status.as_u16()),
+                kind: HttpErrorKind::Status(status.as_u16()),
                 retry_after,
             });
         }
@@ -321,7 +321,7 @@ impl Http {
             if status != StatusCode::PARTIAL_CONTENT {
                 return Err(http_error(
                     &parts.url,
-                    HttpError::RangeIgnored(status.as_u16()),
+                    HttpErrorKind::RangeIgnored(status.as_u16()),
                 ));
             }
             let content_range = response
@@ -334,7 +334,7 @@ impl Http {
             {
                 return Err(http_error(
                     &parts.url,
-                    HttpError::RangeMismatch(content_range),
+                    HttpErrorKind::RangeMismatch(content_range),
                 ));
             }
         }
@@ -361,7 +361,7 @@ impl Http {
         let final_url = response.url().clone();
         let wrong_range = |expected: u64, found: usize| Error::Integrity {
             url: Box::new(final_url.clone()),
-            kind: Integrity::RangeLength { expected, found },
+            kind: IntegrityFailure::RangeLength { expected, found },
         };
         let limit = body_limit(purpose);
         let mut body = Vec::new();
@@ -440,7 +440,7 @@ fn requested_wait(value: &str, now: SystemTime) -> Option<Duration> {
     Some(at.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
-fn http_error(url: &Url, kind: HttpError) -> Error {
+fn http_error(url: &Url, kind: HttpErrorKind) -> Error {
     Error::Http {
         url: Box::new(url.clone()),
         kind,
@@ -463,22 +463,22 @@ fn backoff_delay(retry: &RetryPolicy, attempt: u32, permille: u32) -> Duration {
 }
 
 /// 归类传输错误；说明文字含各层原因，不含地址（外层的 [`Error::Http`] 已带只到路径的地址）。
-fn classify(error: reqwest::Error) -> HttpError {
+fn classify(error: reqwest::Error) -> HttpErrorKind {
     let error = error.without_url();
     if error.is_timeout() {
-        HttpError::Timeout
+        HttpErrorKind::Timeout
     } else if error.is_redirect() {
-        HttpError::Redirect(chain_text(&error))
+        HttpErrorKind::Redirect(chain_text(&error))
     } else if error.is_builder() {
-        HttpError::InvalidRequest(chain_text(&error))
+        HttpErrorKind::InvalidRequest(chain_text(&error))
     } else if let Some(tls) = invalid_certificate(&error) {
-        HttpError::Certificate(tls.to_string())
+        HttpErrorKind::Certificate(tls.to_string())
     } else if let Some(refusal) = proxy_refusal(&error) {
-        HttpError::Proxy(refusal)
+        HttpErrorKind::Proxy(refusal)
     } else if error.is_connect() {
-        HttpError::Connect(chain_text(&error))
+        HttpErrorKind::Connect(chain_text(&error))
     } else {
-        HttpError::Transport(chain_text(&error))
+        HttpErrorKind::Transport(chain_text(&error))
     }
 }
 

@@ -60,7 +60,7 @@ impl VariantKey {
     }
 }
 
-/// 音频 rendition 的身份。各项取自 [`Rendition`] 的同名属性（`group` 即 [`Rendition::group_id`]）。
+/// 音频 rendition 的身份。各项取自 [`Rendition`] 的同名属性（`group` 即 [`Rendition::group`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioKey {
     /// GROUP-ID
@@ -79,7 +79,7 @@ impl AudioKey {
     pub fn of(master: &MasterPlaylist, index: usize) -> Option<AudioKey> {
         let (_, rendition) = audio_renditions(master).nth(index)?;
         let mut key = AudioKey {
-            group: rendition.group_id.clone(),
+            group: rendition.group.clone(),
             name: rendition.name.clone(),
             language: rendition.language.clone(),
             occurrence: 0,
@@ -106,6 +106,6 @@ impl AudioKey {
             language,
             occurrence: _,
         } = self;
-        rendition.group_id == *group && rendition.name == *name && rendition.language == *language
+        rendition.group == *group && rendition.name == *name && rendition.language == *language
     }
 }

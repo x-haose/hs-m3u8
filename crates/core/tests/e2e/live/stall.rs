@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use hs_m3u8_core::{
-    Error, FetchError, FetchFailure, HttpError, HttpFailure, LiveEnd, MissReason, RefreshCause,
-    StallCause, StallError,
+    Error, FetchErrorKind, FetchFailure, HttpErrorKind, HttpFailure, LiveEnd, MissReason,
+    RefreshReason, StallCause, StallReason,
 };
 
 use super::{
@@ -30,8 +30,8 @@ async fn removed_playlist_ends_recording() {
     let mut progress = job.control().progress();
     progress.wait_for(|p| p.segments.total == 2).await.unwrap();
     server.remove("live.m3u8");
-    let gone = Some(RefreshCause::Http(HttpFailure {
-        kind: HttpError::Status(404),
+    let gone = Some(RefreshReason::Http(HttpFailure {
+        kind: HttpErrorKind::Status(404),
         retry_after: None,
     }));
     progress
@@ -169,8 +169,8 @@ async fn gaps_listed_with_unrecordable_segments_still_stall() {
             err,
             Error::LiveStalled {
                 track: 0,
-                cause: StallError::Unrecordable(FetchFailure::Http(HttpFailure {
-                    kind: HttpError::Status(404),
+                cause: StallReason::Unrecordable(FetchFailure::Http(HttpFailure {
+                    kind: HttpErrorKind::Status(404),
                     ..
                 }))
             }
@@ -254,12 +254,12 @@ async fn one_failing_track_fails_the_recording() {
     match &err {
         Error::LiveStalled {
             track: 1,
-            cause: StallError::RefreshFailed(cause),
+            cause: StallReason::RefreshFailed(cause),
         } => assert!(
             matches!(
                 cause,
-                RefreshCause::Http(HttpFailure {
-                    kind: HttpError::Status(500),
+                RefreshReason::Http(HttpFailure {
+                    kind: HttpErrorKind::Status(500),
                     ..
                 })
             ),
@@ -309,8 +309,8 @@ async fn a_track_that_records_nothing_fails_the_recording() {
             err,
             Error::LiveStalled {
                 track: 1,
-                cause: StallError::Unrecordable(FetchFailure::Http(HttpFailure {
-                    kind: HttpError::Status(404),
+                cause: StallReason::Unrecordable(FetchFailure::Http(HttpFailure {
+                    kind: HttpErrorKind::Status(404),
                     retry_after: None
                 }))
             }
@@ -346,8 +346,8 @@ async fn segments_that_keep_failing_temporarily_are_retryable() {
             err,
             Error::LiveStalled {
                 track: 0,
-                cause: StallError::Unrecordable(FetchFailure::Http(HttpFailure {
-                    kind: HttpError::Status(503),
+                cause: StallReason::Unrecordable(FetchFailure::Http(HttpFailure {
+                    kind: HttpErrorKind::Status(503),
                     ..
                 }))
             }
@@ -383,7 +383,7 @@ async fn playlists_that_stay_empty_stall_retryably() {
             err,
             Error::LiveStalled {
                 track: 0,
-                cause: StallError::RefreshFailed(RefreshCause::Empty),
+                cause: StallReason::RefreshFailed(RefreshReason::Empty),
             }
         ),
         "{err}"
@@ -415,7 +415,7 @@ async fn a_missing_last_segment_does_not_turn_the_end_into_a_failure() {
         track: 0,
         cause: StallCause::NoNewSegments,
     };
-    let not_found = MissReason::Failed(FetchError::Http(HttpError::Status(404)));
+    let not_found = MissReason::Failed(FetchErrorKind::Http(HttpErrorKind::Status(404)));
     assert_eq!(
         outcome(&output),
         report(end, 1, vec![missed(2, 2, not_found)])
@@ -484,7 +484,7 @@ async fn a_frozen_track_fails_while_the_other_keeps_going() {
             err,
             Error::LiveStalled {
                 track: 1,
-                cause: StallError::TrackStopped(StallCause::NoNewSegments)
+                cause: StallReason::TrackStopped(StallCause::NoNewSegments)
             }
         ),
         "{err}"
@@ -522,7 +522,7 @@ async fn endless_retry_after_ends_as_a_refresh_failure() {
             err,
             Error::LiveStalled {
                 track: 0,
-                cause: StallError::RefreshFailed(_),
+                cause: StallReason::RefreshFailed(_),
             }
         ),
         "{err}"
@@ -577,7 +577,7 @@ async fn forbidden_refresh_fails_the_task() {
         matches!(
             err,
             Error::Http {
-                kind: HttpError::Status(403),
+                kind: HttpErrorKind::Status(403),
                 ..
             }
         ),
@@ -617,8 +617,8 @@ async fn a_failing_other_track_is_not_taken_as_the_end() {
             &err,
             Error::LiveStalled {
                 track: 0,
-                cause: StallError::RefreshFailed(RefreshCause::Http(HttpFailure {
-                    kind: HttpError::Status(500),
+                cause: StallReason::RefreshFailed(RefreshReason::Http(HttpFailure {
+                    kind: HttpErrorKind::Status(500),
                     ..
                 })),
             }
@@ -656,7 +656,7 @@ async fn a_refresh_hanging_since_before_the_stall_is_concluded_promptly() {
             err,
             Error::LiveStalled {
                 track: 0,
-                cause: StallError::RefreshPending
+                cause: StallReason::RefreshPending
             }
         ),
         "{err}"
@@ -689,8 +689,8 @@ async fn a_stall_respects_the_servers_retry_after() {
             err,
             Error::LiveStalled {
                 track: 0,
-                cause: StallError::RefreshFailed(RefreshCause::Http(HttpFailure {
-                    kind: HttpError::Status(503),
+                cause: StallReason::RefreshFailed(RefreshReason::Http(HttpFailure {
+                    kind: HttpErrorKind::Status(503),
                     ..
                 })),
             }

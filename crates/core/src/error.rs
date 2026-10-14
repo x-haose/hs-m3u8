@@ -6,7 +6,7 @@
 //!   [`Unsupported::Hls`]（改用另一种输出）；
 //! - 来源本身不行，同样的请求再试也不会成功：[`Error::Playlist`]、[`Error::NotMediaPlaylist`]、[`Error::Unsupported`]
 //!   的其余各项、[`Error::Integrity`]、[`Error::KeyLength`]、[`Error::ResponseTooLarge`]；
-//! - 网络：[`Error::Http`]，看 [`HttpError::retryable`]；
+//! - 网络：[`Error::Http`]，看 [`HttpErrorKind::retryable`]；
 //! - 源站给出没写完的内容：[`Error::Incomplete`]，可重试；
 //! - 说明出在哪里、看包着的原因：[`Error::Segment`]、[`Error::Key`]（哪个分片或 key）、[`Error::LiveStalled`]（直播
 //!   哪条轨停滞）、[`Error::Cleanup`]（失败后收拾也没做完，带残留列表）；
@@ -29,7 +29,7 @@ use url::Url;
 
 use crate::hooks::{HookError, HookKind, Purpose};
 use crate::ident::bare_url;
-use crate::{Leftover, Mp4Unsupported, RefreshCause, StallCause};
+use crate::{Leftover, Mp4Unsupported, RefreshReason, StallCause};
 
 #[derive(thiserror::Error)]
 pub enum Error {
@@ -67,7 +67,7 @@ pub enum Error {
     #[error("请求 {} 失败：{kind}", bare_url(.url))]
     Http {
         url: Box<Url>,
-        kind: HttpError,
+        kind: HttpErrorKind,
         retry_after: Option<Duration>,
     },
     /// 某个分片最终失败；`cause` 为分片请求、回调、解密或校验的错误
@@ -93,7 +93,10 @@ pub enum Error {
         limit: u64,
     },
     #[error("数据校验失败（{}）：{kind}", bare_url(.url))]
-    Integrity { url: Box<Url>, kind: Integrity },
+    Integrity {
+        url: Box<Url>,
+        kind: IntegrityFailure,
+    },
     /// 取到的内容没有写完，多为源站还在写这个文件，可重试：播放列表结尾截在多字节字符中间；分片或 init 段的响应
     /// 为空、fMP4 的 box 或样本数据超出了数据，或 TS、打包音频截在包、帧或标签中间（加密的看解出的内容）。分片与
     /// init 段在下载时已按 [`crate::RetryPolicy`] 重新取过
@@ -108,7 +111,7 @@ pub enum Error {
     NothingRecorded,
     /// 第 `track` 条轨长时间没有录到新分片，且不是直播正常结束（见 [`crate::StallCause`]）
     #[error("直播第 {track} 条轨停滞：{cause}")]
-    LiveStalled { track: usize, cause: StallError },
+    LiveStalled { track: usize, cause: StallReason },
     #[error("{hook}回调出错：{cause}")]
     Hook { hook: HookKind, cause: HookError },
     /// 读写文件 `path` 出错。Windows 上改名或删除时别的进程开着文件，先退避重试一小会儿，仍开着（如播放器开着要
@@ -227,7 +230,7 @@ impl Error {
         match self {
             Error::Http {
                 kind, retry_after, ..
-            } if kind.retryable() || matches!(kind, HttpError::Status(404 | 410)) => {
+            } if kind.retryable() || matches!(kind, HttpErrorKind::Status(404 | 410)) => {
                 Some(HttpFailure {
                     kind: kind.clone(),
                     retry_after: *retry_after,
@@ -353,7 +356,7 @@ pub enum HlsUnsupported {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{kind}")]
 pub struct HttpFailure {
-    pub kind: HttpError,
+    pub kind: HttpErrorKind,
     pub retry_after: Option<Duration>,
 }
 
@@ -370,10 +373,10 @@ pub enum FetchFailure {
 
 impl FetchFailure {
     /// 失败的种类，不带服务器要求的等待（缺失的原因只记它，见 [`crate::MissReason`]）。
-    pub fn kind(&self) -> FetchError {
+    pub fn kind(&self) -> FetchErrorKind {
         match self {
-            FetchFailure::Http(failure) => FetchError::Http(failure.kind.clone()),
-            FetchFailure::Incomplete => FetchError::Incomplete,
+            FetchFailure::Http(failure) => FetchErrorKind::Http(failure.kind.clone()),
+            FetchFailure::Incomplete => FetchErrorKind::Incomplete,
         }
     }
 
@@ -395,17 +398,17 @@ impl FetchFailure {
 
 /// 分片或 init 段取不到的原因的种类。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum FetchError {
+pub enum FetchErrorKind {
     /// 请求取不到：404/410，或重试后仍失败的临时故障
     #[error(transparent)]
-    Http(HttpError),
+    Http(HttpErrorKind),
     /// 重试后取到的内容仍没写完（见 [`Error::Incomplete`]）
     #[error("内容没有写完")]
     Incomplete,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum HttpError {
+pub enum HttpErrorKind {
     #[error("HTTP 状态 {0}")]
     Status(u16),
     #[error("字节范围请求应返回 206，实际 {0}")]
@@ -438,23 +441,25 @@ pub enum HttpError {
     Transport(String),
 }
 
-impl HttpError {
+impl HttpErrorKind {
     pub fn retryable(&self) -> bool {
         match self {
-            HttpError::Status(code) => matches!(code, 408 | 429 | 500..=599),
-            HttpError::Timeout | HttpError::Connect(_) | HttpError::Transport(_) => true,
-            HttpError::RangeIgnored(_)
-            | HttpError::RangeMismatch(_)
-            | HttpError::Certificate(_)
-            | HttpError::Redirect(_)
-            | HttpError::Proxy(_)
-            | HttpError::InvalidRequest(_) => false,
+            HttpErrorKind::Status(code) => matches!(code, 408 | 429 | 500..=599),
+            HttpErrorKind::Timeout | HttpErrorKind::Connect(_) | HttpErrorKind::Transport(_) => {
+                true
+            }
+            HttpErrorKind::RangeIgnored(_)
+            | HttpErrorKind::RangeMismatch(_)
+            | HttpErrorKind::Certificate(_)
+            | HttpErrorKind::Redirect(_)
+            | HttpErrorKind::Proxy(_)
+            | HttpErrorKind::InvalidRequest(_) => false,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum Integrity {
+pub enum IntegrityFailure {
     /// 多为 key 不对（IV 不对不会使填充不合法）；解出的是截断的媒体数据时报 [`Error::Incomplete`]
     #[error("解密后填充不合法（key 不对或数据损坏）")]
     Padding,
@@ -491,10 +496,10 @@ pub enum Integrity {
 
 /// 直播停滞的故障原因。
 #[derive(Debug, thiserror::Error)]
-pub enum StallError {
+pub enum StallReason {
     /// 刷新播放列表一直失败（404/410 之外的取不到，或内容不完整），带最近一次的原因
     #[error("刷新播放列表一直失败，最近一次：{0}")]
-    RefreshFailed(RefreshCause),
+    RefreshFailed(RefreshReason),
     /// 刷新播放列表（或为新分片拉 init 段）的请求，在察觉停滞之后又过了一个目标时长仍未返回
     #[error("刷新播放列表的请求一直没有返回")]
     RefreshPending,
@@ -506,21 +511,21 @@ pub enum StallError {
     TrackStopped(StallCause),
 }
 
-impl StallError {
+impl StallReason {
     fn retryable(&self) -> bool {
         match self {
-            StallError::RefreshFailed(cause) => cause.retryable(),
-            StallError::RefreshPending => true,
-            StallError::Unrecordable(failure) => failure.retryable(),
-            StallError::TrackStopped(cause) => *cause == StallCause::NoNewSegments,
+            StallReason::RefreshFailed(cause) => cause.retryable(),
+            StallReason::RefreshPending => true,
+            StallReason::Unrecordable(failure) => failure.retryable(),
+            StallReason::TrackStopped(cause) => *cause == StallCause::NoNewSegments,
         }
     }
 
     fn retry_after(&self) -> Option<Duration> {
         match self {
-            StallError::RefreshFailed(cause) => cause.retry_after(),
-            StallError::Unrecordable(failure) => failure.retry_after(),
-            StallError::RefreshPending | StallError::TrackStopped(_) => None,
+            StallReason::RefreshFailed(cause) => cause.retry_after(),
+            StallReason::Unrecordable(failure) => failure.retry_after(),
+            StallReason::RefreshPending | StallReason::TrackStopped(_) => None,
         }
     }
 }

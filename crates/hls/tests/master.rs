@@ -55,7 +55,7 @@ fn variants_and_renditions_are_parsed() {
     assert_eq!(zh.kind, RenditionKind::Audio);
     assert_eq!(
         (
-            zh.group_id.as_str(),
+            zh.group.as_str(),
             zh.name.as_deref(),
             zh.language.as_deref()
         ),

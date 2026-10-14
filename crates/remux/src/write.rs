@@ -14,7 +14,7 @@ use crate::group::{OpenTrack, layout_of, open_group, primed, references_of};
 use crate::source::{Dropped, Mapping, Source};
 use crate::timing::{MICROS, align_wraps, group_offset, retime};
 use crate::{
-    Cancel, Control, Error, FfmpegError, Numbered, Report, Shape, StreamReport, Streams,
+    Cancel, Control, Error, FfmpegError, MediaReport, Numbered, Shape, StreamReport, Streams,
     TrackSegments, Unsupported, WriteProgress,
 };
 
@@ -56,7 +56,7 @@ pub(crate) fn write_verified(
     groups: &[Numbered<'_>],
     path: &str,
     control: &Control,
-) -> Result<Report, Error> {
+) -> Result<MediaReport, Error> {
     let cancel = &control.cancel;
     let first = open_group(streams, groups[0], None, cancel)?;
     let layout = layout_of(&first)?;
@@ -72,7 +72,7 @@ pub(crate) fn write_verified(
     }
     let outs = muxer.finish()?;
     verify(Path::new(path), &outs, cancel)?;
-    Ok(Report {
+    Ok(MediaReport {
         streams: outs.into_iter().map(OutStream::report).collect(),
     })
 }

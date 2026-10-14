@@ -44,7 +44,7 @@ use crate::request::LiveOptions;
 use crate::resolve::ResolvedTrack;
 use crate::workdir::{self, Stored, StoredInit, WorkDir};
 use crate::{
-    Error, LiveEnd, MissReason, Missed, Mp4Unsupported, NewSession, Progress, RefreshCause,
+    Error, LiveEnd, MissReason, Missed, Mp4Unsupported, NewSession, Progress, RefreshReason,
     SourceBreak, Stage, WorkDirProblem,
 };
 
@@ -307,7 +307,7 @@ impl Recorder<'_> {
     }
 
     /// 进度里各轨的刷新失败，从各轨的状态推出：录制中、还会刷新的轨报它最近一次刷新失败的原因，其余为 None。
-    fn refresh_errors(&self, recording: bool) -> Vec<Option<RefreshCause>> {
+    fn refresh_errors(&self, recording: bool) -> Vec<Option<RefreshReason>> {
         let max_us = self.max_us();
         self.tracks
             .iter()
@@ -712,19 +712,19 @@ impl Recorder<'_> {
 
 /// 刷新失败中可以等下次刷新的及其原因：取不到（含 404/410，直播结束时常见）、内容为空、截断或语法错误（服务器
 /// 没写完）。其余（401/403 等、内容不是播放列表、DRM、回调出错）为 None，使任务失败。
-fn waitable_refresh_error(error: &Error) -> Option<RefreshCause> {
+fn waitable_refresh_error(error: &Error) -> Option<RefreshReason> {
     match error {
         // 刷新只取播放列表，没写完的只会是它
-        Error::Incomplete { .. } => Some(RefreshCause::Truncated),
+        Error::Incomplete { .. } => Some(RefreshReason::Truncated),
         Error::Playlist { cause, .. } => match &**cause {
-            hls::Malformed::Empty => Some(RefreshCause::Empty),
-            hls::Malformed::Syntax { line, kind } => Some(RefreshCause::Syntax {
+            hls::Malformed::Empty => Some(RefreshReason::Empty),
+            hls::Malformed::Syntax { line, kind } => Some(RefreshReason::Syntax {
                 line: *line,
                 kind: kind.clone(),
             }),
             hls::Malformed::NotAPlaylist | hls::Malformed::NotUtf8 | hls::Malformed::Mixed => None,
         },
-        _ => error.http_failure().map(RefreshCause::Http),
+        _ => error.http_failure().map(RefreshReason::Http),
     }
 }
 

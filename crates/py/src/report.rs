@@ -305,7 +305,8 @@ record! {
 record! {
     /// 写出的进度（`Progress.writing`），以文件计：各组各轨的 init 段与分片各算一个（打包音频按分片）。
     pub struct Writing {
-        /// 合并 MP4：写完的输入文件，写到下一个分片的包时上一个才算完，合并完回读核对 MP4 时不再增长；不要 MP4 时为 None
+        /// 合并 MP4：写完的输入文件，写到下一个分片的包时上一个才算完，合并完回读核对 MP4 时不再增长；不要 MP4 时为
+        /// None
         pub mp4: Option<FileCount>,
         /// 备齐本地 HLS：放好的文件，已放过的 init 段照样算；与任务目录同盘时用硬链接，几乎不花时间。不要本地 HLS 时为
         /// None
@@ -495,30 +496,30 @@ record! {
     }
 }
 
-impl From<core::HttpError> for HttpErrorKind {
-    fn from(kind: core::HttpError) -> Self {
+impl From<core::HttpErrorKind> for HttpErrorKind {
+    fn from(kind: core::HttpErrorKind) -> Self {
         match kind {
-            core::HttpError::Status(code) => HttpErrorKind::Status { code },
-            core::HttpError::RangeIgnored(code) => HttpErrorKind::RangeIgnored { code },
-            core::HttpError::RangeMismatch(content_range) => {
+            core::HttpErrorKind::Status(code) => HttpErrorKind::Status { code },
+            core::HttpErrorKind::RangeIgnored(code) => HttpErrorKind::RangeIgnored { code },
+            core::HttpErrorKind::RangeMismatch(content_range) => {
                 HttpErrorKind::RangeMismatch { content_range }
             }
-            core::HttpError::Timeout => HttpErrorKind::Timeout {},
-            core::HttpError::Certificate(detail) => HttpErrorKind::Certificate { detail },
-            core::HttpError::Redirect(detail) => HttpErrorKind::Redirect { detail },
-            core::HttpError::Connect(detail) => HttpErrorKind::Connect { detail },
-            core::HttpError::Proxy(detail) => HttpErrorKind::Proxy { detail },
-            core::HttpError::InvalidRequest(detail) => HttpErrorKind::InvalidRequest { detail },
-            core::HttpError::Transport(detail) => HttpErrorKind::Transport { detail },
+            core::HttpErrorKind::Timeout => HttpErrorKind::Timeout {},
+            core::HttpErrorKind::Certificate(detail) => HttpErrorKind::Certificate { detail },
+            core::HttpErrorKind::Redirect(detail) => HttpErrorKind::Redirect { detail },
+            core::HttpErrorKind::Connect(detail) => HttpErrorKind::Connect { detail },
+            core::HttpErrorKind::Proxy(detail) => HttpErrorKind::Proxy { detail },
+            core::HttpErrorKind::InvalidRequest(detail) => HttpErrorKind::InvalidRequest { detail },
+            core::HttpErrorKind::Transport(detail) => HttpErrorKind::Transport { detail },
         }
     }
 }
 
-impl From<core::FetchError> for FetchErrorKind {
-    fn from(kind: core::FetchError) -> Self {
+impl From<core::FetchErrorKind> for FetchErrorKind {
+    fn from(kind: core::FetchErrorKind) -> Self {
         match kind {
-            core::FetchError::Http(kind) => FetchErrorKind::Http { kind: kind.into() },
-            core::FetchError::Incomplete => FetchErrorKind::Incomplete {},
+            core::FetchErrorKind::Http(kind) => FetchErrorKind::Http { kind: kind.into() },
+            core::FetchErrorKind::Incomplete => FetchErrorKind::Incomplete {},
         }
     }
 }
@@ -544,16 +545,16 @@ impl From<core::HttpFailure> for HttpFailure {
     }
 }
 
-impl From<core::RefreshCause> for RefreshCause {
-    fn from(cause: core::RefreshCause) -> Self {
+impl From<core::RefreshReason> for RefreshCause {
+    fn from(cause: core::RefreshReason) -> Self {
         let (retryable, retry_after) = (cause.retryable(), cause.retry_after());
         let reason = match cause {
-            core::RefreshCause::Http(failure) => RefreshReason::Http {
+            core::RefreshReason::Http(failure) => RefreshReason::Http {
                 failure: failure.into(),
             },
-            core::RefreshCause::Empty => RefreshReason::Empty {},
-            core::RefreshCause::Truncated => RefreshReason::Truncated {},
-            core::RefreshCause::Syntax { line, kind } => RefreshReason::Syntax {
+            core::RefreshReason::Empty => RefreshReason::Empty {},
+            core::RefreshReason::Truncated => RefreshReason::Truncated {},
+            core::RefreshReason::Syntax { line, kind } => RefreshReason::Syntax {
                 line,
                 detail: kind.to_string(),
             },

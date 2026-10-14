@@ -13,8 +13,8 @@ use super::window::{InitsToFetch, NewInits, Scope, Update, Window};
 use crate::ident::Fingerprint;
 use crate::workdir::SessionStart;
 use crate::{
-    Error, FetchFailure, HttpError, HttpFailure, RefreshCause, SourceBreak, StallCause, StallError,
-    Unsupported,
+    Error, FetchFailure, HttpErrorKind, HttpFailure, RefreshReason, SourceBreak, StallCause,
+    StallReason, Unsupported,
 };
 
 /// 两次刷新之间的最短间隔，防止 TARGETDURATION 为 0 或极小时空转。
@@ -93,7 +93,7 @@ pub(super) struct LiveTrack {
     /// 最近一次取不到分片或 init 段的原因
     last_download_failure: Option<FetchFailure>,
     /// 最近一次刷新失败的原因；刷新成功即清空
-    last_refresh_error: Option<RefreshCause>,
+    last_refresh_error: Option<RefreshReason>,
     /// 服务器在最近一次失败的刷新里要求等到的时刻（Retry-After）；刷新成功即清空
     server_wait: Option<Instant>,
 }
@@ -190,7 +190,7 @@ impl LiveTrack {
     }
 
     /// 最近一次刷新失败的原因；之后刷新成功即清空。
-    pub(super) fn last_refresh_error(&self) -> Option<&RefreshCause> {
+    pub(super) fn last_refresh_error(&self) -> Option<&RefreshReason> {
         self.last_refresh_error.as_ref()
     }
 
@@ -298,7 +298,7 @@ impl LiveTrack {
     }
 
     /// 刷新失败、可以再试：半个目标时长后再刷新，服务器要求等更久时按它的。
-    pub(super) fn refresh_failed(&mut self, cause: RefreshCause, now: Instant) {
+    pub(super) fn refresh_failed(&mut self, cause: RefreshReason, now: Instant) {
         let asked = cause.retry_after();
         let wait = self.half_target().max(asked.unwrap_or_default());
         self.refresh = now
@@ -451,7 +451,7 @@ impl LiveTrack {
         let asked = self
             .last_refresh_error
             .as_ref()
-            .and_then(RefreshCause::retry_after)
+            .and_then(RefreshReason::retry_after)
             .and_then(|wait| now.checked_add(wait));
         self.refresh = if ended {
             Refresh::Ended
@@ -495,16 +495,16 @@ impl LiveTrack {
         since: Instant,
         noticed: Instant,
         now: Instant,
-    ) -> Option<StallError> {
+    ) -> Option<StallReason> {
         if self
             .deadline(noticed)
             .is_some_and(|deadline| deadline <= now)
         {
-            return Some(StallError::RefreshPending);
+            return Some(StallReason::RefreshPending);
         }
         match &self.last_refresh_error {
             Some(cause) if self.observed(since, noticed) && gone(cause).is_none() => {
-                Some(StallError::RefreshFailed(cause.clone()))
+                Some(StallReason::RefreshFailed(cause.clone()))
             }
             _ => None,
         }
@@ -522,12 +522,12 @@ impl LiveTrack {
         since: Instant,
         noticed: Instant,
         others_live: bool,
-    ) -> Result<StallCause, StallError> {
+    ) -> Result<StallCause, StallReason> {
         if self
             .deadline(noticed)
             .is_some_and(|deadline| deadline <= now)
         {
-            return Err(StallError::RefreshPending);
+            return Err(StallReason::RefreshPending);
         }
         let refresh_error = self.last_refresh_error.take();
         let gone = refresh_error.as_ref().and_then(gone);
@@ -535,25 +535,25 @@ impl LiveTrack {
             let failure = self.last_download_failure.clone().expect(
                 "停滞开始后列出过新分片、没有在途的下载又没有录到：新分片都记了缺失，有失败原因",
             );
-            return Err(StallError::Unrecordable(failure));
+            return Err(StallReason::Unrecordable(failure));
         }
         let ended = match (gone, refresh_error) {
             (Some(status), _) => StallCause::PlaylistGone(status),
-            (None, Some(cause)) => return Err(StallError::RefreshFailed(cause)),
+            (None, Some(cause)) => return Err(StallReason::RefreshFailed(cause)),
             (None, None) => StallCause::NoNewSegments,
         };
         if others_live {
-            return Err(StallError::TrackStopped(ended));
+            return Err(StallReason::TrackStopped(ended));
         }
         Ok(ended)
     }
 }
 
 /// 刷新失败说明播放列表已被删除（404/410）时为那个状态码。
-fn gone(cause: &RefreshCause) -> Option<u16> {
+fn gone(cause: &RefreshReason) -> Option<u16> {
     match cause {
-        RefreshCause::Http(HttpFailure {
-            kind: HttpError::Status(status @ (404 | 410)),
+        RefreshReason::Http(HttpFailure {
+            kind: HttpErrorKind::Status(status @ (404 | 410)),
             ..
         }) => Some(*status),
         _ => None,

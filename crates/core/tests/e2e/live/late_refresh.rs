@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use hs_m3u8_core::{Error, JobRequest, LiveEnd, StallError};
+use hs_m3u8_core::{Error, JobRequest, LiveEnd, StallReason};
 
 use super::{expected_split, interrupt, live_request, outcome, report, split_source};
 use crate::server::Server;
@@ -200,7 +200,7 @@ async fn a_stall_while_deciding_does_not_wait_for_a_late_refresh() {
             err,
             Error::LiveStalled {
                 track: 0,
-                cause: StallError::RefreshPending
+                cause: StallReason::RefreshPending
             }
         ),
         "{err}"

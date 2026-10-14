@@ -8,7 +8,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use hs_m3u8_remux::{
-    Cancel, Control, DiscontinuityGroup, Report, Segment, Streams, TrackSegments, WriteProgress,
+    Cancel, Control, DiscontinuityGroup, MediaReport, Segment, Streams, TrackSegments,
+    WriteProgress,
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -279,7 +280,7 @@ fn write_temps(
     options: &ResolvedOutput,
     cancel: &CancellationToken,
     advance: &Advance,
-) -> Result<Option<Report>, Error> {
+) -> Result<Option<MediaReport>, Error> {
     let report = match options.get(OutputKind::Mp4) {
         Some(mp4) => Some(write_mp4(
             mp4.temp(),
@@ -313,7 +314,7 @@ fn write_mp4(
     work_dir: &Path,
     cancel: &CancellationToken,
     advance: &Advance,
-) -> Result<Report, Error> {
+) -> Result<MediaReport, Error> {
     let groups: Vec<DiscontinuityGroup> = groups.iter().map(|g| remux_group(g)).collect();
     let token = cancel.clone();
     let advance = advance.clone();

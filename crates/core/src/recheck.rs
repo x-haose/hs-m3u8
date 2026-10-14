@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::io_error;
 use crate::fetch::Direct;
-use crate::{Error, FetchFailure, HttpError, HttpFailure, blocking};
+use crate::{Error, FetchFailure, HttpErrorKind, HttpFailure, blocking};
 
 /// 重新下载后与已存的比较的结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,7 +63,7 @@ pub(crate) async fn recheck(
             Ok(data) => data,
             Err(e) => match e.missable() {
                 Some(FetchFailure::Http(HttpFailure {
-                    kind: HttpError::Status(404 | 410),
+                    kind: HttpErrorKind::Status(404 | 410),
                     ..
                 })) => continue,
                 Some(_) if on_transient == OnTransient::TryNext => {

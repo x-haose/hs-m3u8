@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::info::Selected;
-use crate::remux::Report;
-use crate::{FetchError, FetchFailure, HttpFailure, Mp4Unsupported, Purpose, hls};
+use crate::remux::MediaReport;
+use crate::{FetchErrorKind, FetchFailure, HttpFailure, Mp4Unsupported, Purpose, hls};
 
 /// 任务进度快照。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -31,7 +31,7 @@ pub struct Progress {
     pub writing: Option<Writing>,
     /// 直播：各轨（下标为轨道编号）最近一次刷新失败的原因。这条轨之后刷新成功、不再刷新或录制结束即清空；
     /// 一直失败到停滞时任务以 [`crate::Error::LiveStalled`] 结束。点播与录制开始前为空
-    pub refresh_errors: Vec<Option<RefreshCause>>,
+    pub refresh_errors: Vec<Option<RefreshReason>>,
     /// 直播且输出含 MP4：录到的内容放不进 MP4 的原因。续录时任务目录里已录齐的组在开始后核对一次，之后每个（会话,
     /// 不连续段）组在各轨都有分片时核对（录制循环结束、收尾时才下完的不核对）；第 0 组开头的分片判断不了时，各组只
     /// 核对自身、不与它比较。组号为核对时的，之后才录齐、排在前面的组会让合并时的组号变大。录制照常进行，停不停由调用
@@ -99,7 +99,7 @@ pub struct FileCount {
 
 /// 直播一次刷新失败的原因；这类失败等下次刷新，不使任务立即失败。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum RefreshCause {
+pub enum RefreshReason {
     /// 取不到：404/410 或临时故障（刷新只发一次请求，失败了等下次刷新）
     #[error(transparent)]
     Http(HttpFailure),
@@ -114,21 +114,21 @@ pub enum RefreshCause {
     Syntax { line: usize, kind: hls::SyntaxError },
 }
 
-impl RefreshCause {
+impl RefreshReason {
     /// 服务器要求的最短等待，下次刷新不早于它。
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
-            RefreshCause::Http(failure) => failure.retry_after,
-            RefreshCause::Empty | RefreshCause::Truncated | RefreshCause::Syntax { .. } => None,
+            RefreshReason::Http(failure) => failure.retry_after,
+            RefreshReason::Empty | RefreshReason::Truncated | RefreshReason::Syntax { .. } => None,
         }
     }
 
-    /// 一直这样失败到停滞（[`crate::StallError::RefreshFailed`]）时，稍后续录可能成功：取不到的看原因；内容不完整
+    /// 一直这样失败到停滞（[`crate::StallReason::RefreshFailed`]）时，稍后续录可能成功：取不到的看原因；内容不完整
     /// 的录制时已当作暂时故障等下次刷新，同样可以。
     pub fn retryable(&self) -> bool {
         match self {
-            RefreshCause::Http(failure) => failure.kind.retryable(),
-            RefreshCause::Empty | RefreshCause::Truncated | RefreshCause::Syntax { .. } => true,
+            RefreshReason::Http(failure) => failure.kind.retryable(),
+            RefreshReason::Empty | RefreshReason::Truncated | RefreshReason::Syntax { .. } => true,
         }
     }
 }
@@ -222,7 +222,7 @@ pub struct Mp4Output {
     /// 绝对路径，相对路径按开始任务时的当前目录补全
     pub path: PathBuf,
     /// 各路输出流的编码参数、包数与时长
-    pub report: Report,
+    pub report: MediaReport,
 }
 
 /// 直播的录制结果。
@@ -273,7 +273,7 @@ pub struct NewSession {
 }
 
 /// 一条轨停滞时看起来已结束的原因：用于 [`LiveEnd::Stalled`]（各轨都已结束），也用于
-/// [`crate::StallError::TrackStopped`]（只有这条轨结束了）。
+/// [`crate::StallReason::TrackStopped`]（只有这条轨结束了）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StallCause {
     /// 刷新成功，但不再出现新分片
@@ -305,9 +305,9 @@ pub enum MissReason {
     /// 两次刷新之间已滑出播放列表窗口，没有被列出过
     Expired,
     /// 列出了，但取不到：404/410，可重试的错误重试后仍失败，或重试后内容仍没写完
-    Failed(FetchError),
+    Failed(FetchErrorKind),
     /// 列出了，但它的 init 段取不到（同上）
-    InitFailed(FetchError),
+    InitFailed(FetchErrorKind),
     /// 所在不连续段不是每条轨都有内容（直播为有轨没录到，点播为有轨只有标了 EXT-X-GAP 的分片），无法合并
     Unmergeable,
     /// 来源标了 EXT-X-GAP：这一片没有内容，不取

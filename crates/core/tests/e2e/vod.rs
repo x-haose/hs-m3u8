@@ -8,8 +8,9 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use hs_m3u8_core::hls::{AudioChoice, Encryption};
 use hs_m3u8_core::{
-    Error, FetchFailure, HookError, Hooks, HttpError, HttpFailure, Integrity, KeyOverride,
-    MissReason, Missed, Purpose, RequestParts, Stage, Unsupported, Url, WorkDirProblem,
+    Error, FetchFailure, HookError, Hooks, HttpErrorKind, HttpFailure, IntegrityFailure,
+    KeyOverride, MissReason, Missed, Purpose, RequestParts, Stage, Unsupported, Url,
+    WorkDirProblem,
 };
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
@@ -457,7 +458,7 @@ async fn retry_waits_show_in_progress() {
         panic!("应只有一个在等：{retrying:?}");
     };
     let failure = FetchFailure::Http(HttpFailure {
-        kind: HttpError::Status(500),
+        kind: HttpErrorKind::Status(500),
         retry_after: None,
     });
     assert_eq!(
@@ -542,7 +543,7 @@ async fn failure_then_resume() {
             matches!(
                 *cause,
                 Error::Http {
-                    kind: HttpError::Status(404),
+                    kind: HttpErrorKind::Status(404),
                     ..
                 }
             ),
@@ -897,7 +898,7 @@ async fn wrong_key_fails_integrity() {
             matches!(
                 *cause,
                 Error::Integrity {
-                    kind: Integrity::Padding | Integrity::UnrecognizedSegment(_),
+                    kind: IntegrityFailure::Padding | IntegrityFailure::UnrecognizedSegment(_),
                     ..
                 }
             ),
@@ -960,7 +961,7 @@ async fn a_truncated_encrypted_segment_is_fetched_again() {
                 matches!(
                     *cause,
                     Error::Integrity {
-                        kind: Integrity::CipherLength(len),
+                        kind: IntegrityFailure::CipherLength(len),
                         ..
                     } if len == body.len()
                 ),
@@ -1401,7 +1402,7 @@ async fn errors_do_not_reveal_credentials_or_tokens() {
         matches!(
             err,
             Error::Http {
-                kind: HttpError::Status(404),
+                kind: HttpErrorKind::Status(404),
                 ..
             }
         ),

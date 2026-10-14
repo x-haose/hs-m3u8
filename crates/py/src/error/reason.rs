@@ -232,7 +232,8 @@ variants! {
             size: u64,
         },
         /// fMP4 末尾的字节不是完整的 box：不足 8 个凑不成 box 头，或类型认不出而长度写 0 或超出了数据。多为多出的字节
-        /// （如 CDN 加了换行或填充、`Hooks.on_segment` 没去干净）；trun 声明的样本数据也超出了数据时报 `IncompleteError`
+        /// （如 CDN 加了换行或填充、`Hooks.on_segment` 没去干净）；trun 声明的样本数据也超出了数据时报
+        /// `IncompleteError`
         #[pyo3(constructor = (*, at, len))]
         Fmp4TrailingBytes {
             /// 多出的字节的起点
@@ -597,9 +598,9 @@ impl From<core::hls::Encryption> for Encryption {
     }
 }
 
-impl From<core::Integrity> for IntegrityFailure {
-    fn from(integrity: core::Integrity) -> Self {
-        use core::Integrity as I;
+impl From<core::IntegrityFailure> for IntegrityFailure {
+    fn from(integrity: core::IntegrityFailure) -> Self {
+        use core::IntegrityFailure as I;
         match integrity {
             I::Padding => IntegrityFailure::Padding {},
             I::CipherLength(length) => IntegrityFailure::CipherLength { length },
@@ -719,9 +720,9 @@ impl From<core::HlsUnsupported> for HlsUnsupported {
     }
 }
 
-impl From<core::StallError> for StallReason {
-    fn from(error: core::StallError) -> Self {
-        use core::StallError as S;
+impl From<core::StallReason> for StallReason {
+    fn from(error: core::StallReason) -> Self {
+        use core::StallReason as S;
         match error {
             S::RefreshFailed(cause) => StallReason::RefreshFailed {
                 cause: cause.into(),

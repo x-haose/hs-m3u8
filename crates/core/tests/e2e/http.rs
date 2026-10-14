@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hs_m3u8_core::{
-    CookieHeader, CookieStore, Error, HttpError, Proxy, Purpose, RetryPolicy, Source, Url,
+    CookieHeader, CookieStore, Error, HttpErrorKind, Proxy, Purpose, RetryPolicy, Source, Url,
 };
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
@@ -47,7 +47,7 @@ async fn untrusted_certificates_are_reported_without_retrying() {
 
     match &err {
         Error::Http {
-            kind: HttpError::Certificate(reason),
+            kind: HttpErrorKind::Certificate(reason),
             ..
         } => assert!(!reason.is_empty()),
         other => panic!("应报证书校验失败：{other}"),
@@ -61,7 +61,7 @@ async fn untrusted_certificates_are_reported_without_retrying() {
         !matches!(
             err,
             Error::Http {
-                kind: HttpError::Certificate(_),
+                kind: HttpErrorKind::Certificate(_),
                 ..
             }
         ),
@@ -85,7 +85,7 @@ async fn redirect_loops_are_reported_without_retrying() {
         matches!(
             err,
             Error::Http {
-                kind: HttpError::Redirect(_),
+                kind: HttpErrorKind::Redirect(_),
                 ..
             }
         ),
@@ -331,9 +331,15 @@ async fn only_proxy_authentication_is_a_refusal_without_retrying() {
             other => panic!("{status}：{other:?}"),
         };
         if refused {
-            assert!(matches!(kind, HttpError::Proxy(_)), "{status}：{kind:?}");
+            assert!(
+                matches!(kind, HttpErrorKind::Proxy(_)),
+                "{status}：{kind:?}"
+            );
         } else {
-            assert!(matches!(kind, HttpError::Connect(_)), "{status}：{kind:?}");
+            assert!(
+                matches!(kind, HttpErrorKind::Connect(_)),
+                "{status}：{kind:?}"
+            );
         }
         assert_eq!(err.retryable(), !refused, "{status}");
         let tries = if refused { 1 } else { 3 };

@@ -61,8 +61,8 @@ use tokio_util::sync::DropGuard;
 
 pub use cookies::{CookieHeader, CookieStore};
 pub use error::{
-    Error, FetchError, FetchFailure, HlsUnsupported, HttpError, HttpFailure, Integrity, JobType,
-    StallError, Unsupported, WorkDirProblem,
+    Error, FetchErrorKind, FetchFailure, HlsUnsupported, HttpErrorKind, HttpFailure,
+    IntegrityFailure, JobType, StallReason, Unsupported, WorkDirProblem,
 };
 pub use hooks::{HookError, HookKind, Hooks, NoHooks, Purpose, RequestParts};
 /// 内容放不进 MP4 的原因（[`Unsupported::Mp4`]）；本地 HLS 表示不了的见 [`HlsUnsupported`]。
@@ -74,7 +74,7 @@ pub use probe::Probe;
 pub use proxy::{Bypass, ProxySource, SystemProxy, system_proxy};
 pub use report::{
     FileCount, Leftover, LeftoverKind, LiveEnd, LiveReport, MissReason, Missed, Mp4Output,
-    NewSession, Output, Progress, RefreshCause, Retrying, SegmentCounts, SourceBreak, Stage,
+    NewSession, Output, Progress, RefreshReason, Retrying, SegmentCounts, SourceBreak, Stage,
     StallCause, Writing,
 };
 pub use request::{
@@ -86,7 +86,7 @@ pub use url::Url;
 /// 公开接口用到的合并报告与合并错误的类型。
 pub mod remux {
     pub use hs_m3u8_remux::fmp4::Problem as Fmp4Problem;
-    pub use hs_m3u8_remux::{Error, FfmpegError, Report, Shape, StreamKind, StreamReport};
+    pub use hs_m3u8_remux::{Error, FfmpegError, MediaReport, Shape, StreamKind, StreamReport};
 }
 
 /// 公开接口用到的播放列表解析与选轨类型。

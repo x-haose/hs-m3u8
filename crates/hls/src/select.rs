@@ -178,7 +178,7 @@ fn audio_by_index<'a>(
                 index,
                 count: audio_renditions(master).count(),
             })?;
-    if group == Some(rendition.group_id.as_str()) {
+    if group == Some(rendition.group.as_str()) {
         Ok((index, rendition))
     } else {
         Err(SelectError::NotVariantAudio {
@@ -194,7 +194,7 @@ fn audio_by_language<'a>(
     group: &str,
     language: &str,
 ) -> Result<(usize, &'a Rendition), SelectError> {
-    let in_group = || audio_renditions(master).filter(|(_, r)| r.group_id == group);
+    let in_group = || audio_renditions(master).filter(|(_, r)| r.group == group);
     in_group()
         .find(|(_, r)| {
             r.language
@@ -210,7 +210,7 @@ fn audio_by_language<'a>(
 
 /// 组里 DEFAULT=YES 的音频，没有则取第一个；组里没有音频时为 None。
 fn default_audio<'a>(master: &'a MasterPlaylist, group: &str) -> Option<(usize, &'a Rendition)> {
-    let in_group = || audio_renditions(master).filter(|(_, r)| r.group_id == group);
+    let in_group = || audio_renditions(master).filter(|(_, r)| r.group == group);
     in_group()
         .find(|(_, r)| r.default)
         .or_else(|| in_group().next())

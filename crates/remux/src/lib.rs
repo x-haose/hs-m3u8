@@ -189,7 +189,7 @@ pub struct StreamReport {
 
 /// 合并结果，`streams` 按输出流下标排列。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Report {
+pub struct MediaReport {
     pub streams: Vec<StreamReport>,
 }
 
@@ -266,7 +266,7 @@ pub fn remux(
     groups: &[DiscontinuityGroup],
     output: &Path,
     control: &Control,
-) -> Result<Report, Error> {
+) -> Result<MediaReport, Error> {
     init()?;
     let groups: Vec<Numbered<'_>> = groups.iter().enumerate().collect();
     validate(streams, &groups)?;
@@ -353,8 +353,8 @@ fn init() -> Result<(), Error> {
     static INIT: OnceLock<Result<(), FfmpegError>> = OnceLock::new();
     INIT.get_or_init(|| {
         ffmpeg::init()?;
-        // FFmpeg 的日志不输出：本库的失败经返回值上抛，带着出在哪一组哪条轨；FFmpeg 的消息里有的只是探测时的过程信息（如
-        // 解码器在参数集出现之前的报错，或判断不了的情形），写到进程的标准错误里，调用方既控制不了、也用不上
+        // FFmpeg 的日志不输出：本库的失败经返回值上抛，带着出在哪一组哪条轨；FFmpeg 的消息里有的只是探测时的过程信息
+        // （如解码器在参数集出现之前的报错，或判断不了的情形），写到进程的标准错误里，调用方既控制不了、也用不上
         ffmpeg::log::set_level(ffmpeg::log::Level::Quiet);
         Ok(())
     })

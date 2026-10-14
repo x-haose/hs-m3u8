@@ -8,7 +8,7 @@ use hs_m3u8_remux::standalone::{self, Format};
 use url::Url;
 
 use crate::crypto::DecryptError;
-use crate::{Error, Integrity, Unsupported};
+use crate::{Error, IntegrityFailure, Unsupported};
 
 /// 取到的内容的格式。
 pub(crate) enum Container {
@@ -25,7 +25,7 @@ pub(crate) enum Container {
 pub(crate) enum ContentError {
     /// 没写完（见 [`Error::Incomplete`]）
     Incomplete,
-    Invalid(Integrity),
+    Invalid(IntegrityFailure),
     /// fMP4 从第 `at` 字节起的 moof 用了绝对位置（见 [`Unsupported::Fmp4BaseDataOffset`]）
     BaseDataOffset {
         at: u64,
@@ -54,12 +54,16 @@ impl ContentError {
         match problem {
             Problem::Incomplete => ContentError::Incomplete,
             Problem::BaseDataOffset { at } => ContentError::BaseDataOffset { at },
-            Problem::NotFmp4 => invalid(Integrity::NotFmp4(head(data))),
-            Problem::TrailingBytes { at, len } => invalid(Integrity::Fmp4TrailingBytes { at, len }),
-            Problem::BoxTooSmall { at, size } => invalid(Integrity::Fmp4BoxTooSmall { at, size }),
-            Problem::Malformed { at } => invalid(Integrity::Fmp4Malformed { at }),
+            Problem::NotFmp4 => invalid(IntegrityFailure::NotFmp4(head(data))),
+            Problem::TrailingBytes { at, len } => {
+                invalid(IntegrityFailure::Fmp4TrailingBytes { at, len })
+            }
+            Problem::BoxTooSmall { at, size } => {
+                invalid(IntegrityFailure::Fmp4BoxTooSmall { at, size })
+            }
+            Problem::Malformed { at } => invalid(IntegrityFailure::Fmp4Malformed { at }),
             Problem::OpenBoxTooLarge { at, size } => {
-                invalid(Integrity::Fmp4OpenBoxTooLarge { at, size })
+                invalid(IntegrityFailure::Fmp4OpenBoxTooLarge { at, size })
             }
         }
     }
@@ -80,9 +84,9 @@ pub(crate) fn check(data: &mut [u8], container: &Container) -> Result<(), Conten
         Container::Standalone => match standalone_head(data) {
             Some(found) if standalone::truncated(data, &found) => Err(ContentError::Incomplete),
             Some(_) => Ok(()),
-            None => Err(ContentError::Invalid(Integrity::UnrecognizedSegment(head(
-                data,
-            )))),
+            None => Err(ContentError::Invalid(
+                IntegrityFailure::UnrecognizedSegment(head(data)),
+            )),
         },
     }
 }
@@ -112,8 +116,8 @@ fn standalone_head(data: &[u8]) -> Option<standalone::Head> {
 /// 字节），填充不合法多为 key 不对。完整的内容之后的填充字节不像 box、TS 包或帧的开头，不会被当成截断。
 pub(crate) fn decrypt_failure(error: DecryptError, container: &Container) -> ContentError {
     let (mut plain, otherwise) = match error {
-        DecryptError::Padding { plain } => (plain, Integrity::Padding),
-        DecryptError::Unaligned { len, whole } => (whole, Integrity::CipherLength(len)),
+        DecryptError::Padding { plain } => (plain, IntegrityFailure::Padding),
+        DecryptError::Unaligned { len, whole } => (whole, IntegrityFailure::CipherLength(len)),
     };
     if check(&mut plain, container) == Err(ContentError::Incomplete) {
         ContentError::Incomplete
@@ -162,9 +166,9 @@ mod tests {
         assert!(check(shifted).is_err());
         assert_eq!(
             check(b"<html>".to_vec()),
-            Err(ContentError::Invalid(Integrity::UnrecognizedSegment(
-                "3c 68 74 6d 6c 3e".into()
-            )))
+            Err(ContentError::Invalid(
+                IntegrityFailure::UnrecognizedSegment("3c 68 74 6d 6c 3e".into())
+            ))
         );
         assert!(check(Vec::new()).is_err());
     }
@@ -177,7 +181,7 @@ mod tests {
         let gif = [&b"GIF89a"[..], &[0; 94]].concat();
         assert!(matches!(
             check(gif),
-            Err(ContentError::Invalid(Integrity::NotFmp4(_)))
+            Err(ContentError::Invalid(IntegrityFailure::NotFmp4(_)))
         ));
     }
 
@@ -209,7 +213,7 @@ mod tests {
         // 错误页面、不足一块、完整的 TS 后面跟着填充（多出了字节）
         let page = b"<html>not found</html>".to_vec();
         let padded_ts = [ts_packets(3), vec![4; 4]].concat();
-        let invalid = ContentError::Invalid(Integrity::CipherLength(1000));
+        let invalid = ContentError::Invalid(IntegrityFailure::CipherLength(1000));
         assert_eq!(
             decrypt_failure(unaligned(page.clone()), &standalone),
             invalid
@@ -218,7 +222,7 @@ mod tests {
         assert_eq!(decrypt_failure(unaligned(Vec::new()), &standalone), invalid);
         assert_eq!(decrypt_failure(unaligned(padded_ts), &standalone), invalid);
         // 填充不合法：key 不对解出的乱码、恰好在包的边界上结束的 TS
-        let invalid = ContentError::Invalid(Integrity::Padding);
+        let invalid = ContentError::Invalid(IntegrityFailure::Padding);
         assert_eq!(decrypt_failure(padding(page), &fmp4), invalid);
         assert_eq!(
             decrypt_failure(padding(ts_packets(3)), &standalone),

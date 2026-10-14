@@ -6,8 +6,8 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use hs_m3u8_core::hls::SyntaxError;
 use hs_m3u8_core::{
-    Engine, Error, FetchError, HttpError, HttpFailure, LiveEnd, LiveOptions, MissReason, Missed,
-    Mp4Unsupported, RefreshCause, Stage, Unsupported,
+    Engine, Error, FetchErrorKind, HttpErrorKind, HttpFailure, LiveEnd, LiveOptions, MissReason,
+    Missed, Mp4Unsupported, RefreshReason, Stage, Unsupported,
 };
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
@@ -140,8 +140,8 @@ async fn refresh_errors_show_in_progress_until_recovered() {
     .expect("刷新失败应出现在进度里")
     .unwrap()
     .clone();
-    let unavailable = RefreshCause::Http(HttpFailure {
-        kind: HttpError::Status(503),
+    let unavailable = RefreshReason::Http(HttpFailure {
+        kind: HttpErrorKind::Status(503),
         retry_after: None,
     });
     assert_eq!(failed.refresh_errors, [Some(unavailable)]);
@@ -168,19 +168,19 @@ async fn half_written_playlists_are_waited_out() {
     let mut progress = job.control().progress();
     progress.wait_for(|p| p.segments.done == 1).await.unwrap();
 
-    let dangling = RefreshCause::Syntax {
+    let dangling = RefreshReason::Syntax {
         line: 6,
         kind: SyntaxError::InfoWithoutUri { tag: "EXTINF" },
     };
     let mut cut = (playlist(&[0], false) + "#EXTINF:1,\n第1段.ts\n").into_bytes();
     cut.truncate(cut.len() - "段.ts\n".len() + 1);
     let half_written = [
-        (Vec::new(), RefreshCause::Empty),
+        (Vec::new(), RefreshReason::Empty),
         (
             (playlist(&[0], false) + "#EXTINF:1,\n").into_bytes(),
             dangling,
         ),
-        (cut, RefreshCause::Truncated),
+        (cut, RefreshReason::Truncated),
     ];
     for (text, cause) in half_written {
         server.put("live.m3u8", text);
@@ -247,7 +247,7 @@ async fn unavailable_segments_are_reported_as_missed() {
         .unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 3], &[2]));
-    let not_found = MissReason::Failed(FetchError::Http(HttpError::Status(404)));
+    let not_found = MissReason::Failed(FetchErrorKind::Http(HttpErrorKind::Status(404)));
     assert_eq!(
         outcome(&output),
         report(LiveEnd::EndList, 1, vec![missed(1, 2, not_found)])
@@ -350,7 +350,7 @@ async fn segments_still_incomplete_after_retries_are_missed() {
         &output,
         &expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]),
     );
-    let incomplete = MissReason::Failed(FetchError::Incomplete);
+    let incomplete = MissReason::Failed(FetchErrorKind::Incomplete);
     assert_eq!(
         outcome(&output),
         report(LiveEnd::EndList, 1, vec![missed(1, 1, incomplete)])
@@ -466,7 +466,7 @@ async fn unavailable_new_init_is_missed() {
     let tracks = vec![track("fmp4_a/video", Some("init.mp4"), &["seg0.m4s"])];
     let want = expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]);
     assert_output(&output, &want);
-    let not_found = MissReason::InitFailed(FetchError::Http(HttpError::Status(404)));
+    let not_found = MissReason::InitFailed(FetchErrorKind::Http(HttpErrorKind::Status(404)));
     assert_eq!(
         outcome(&output),
         report(LiveEnd::EndList, 1, vec![missed(1, 1, not_found)])

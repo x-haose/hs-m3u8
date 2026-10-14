@@ -33,7 +33,7 @@ pub struct Resolution {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rendition {
     pub kind: RenditionKind,
-    pub group_id: String,
+    pub group: String,
     /// NAME；规范要求必填，缺失时为 None
     pub name: Option<String>,
     pub language: Option<String>,
@@ -154,7 +154,7 @@ fn parse_media(value: &str, url: &Url) -> Result<Rendition, SyntaxError> {
     };
     Ok(Rendition {
         kind,
-        group_id: attrs.require("EXT-X-MEDIA", "GROUP-ID")?.to_owned(),
+        group: attrs.require("EXT-X-MEDIA", "GROUP-ID")?.to_owned(),
         name: attrs.get("NAME").map(str::to_owned),
         language: attrs.get("LANGUAGE").map(str::to_owned),
         default: attrs
