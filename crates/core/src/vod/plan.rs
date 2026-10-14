@@ -1,4 +1,4 @@
-//! 点播计划与摘要（纯计算）：每条轨的分片、init 段与不连续段组。
+//! 点播计划与摘要（纯计算）：每条轨要下载的分片、init 段、不连续段组与来源标了 EXT-X-GAP 的分片。
 
 use std::ops::Range;
 
@@ -7,24 +7,32 @@ use sha2::{Digest, Sha256};
 
 use crate::ident::{Fingerprint, hex};
 use crate::resolve::ResolvedTrack;
-use crate::{Error, Unsupported};
+use crate::{Error, MissReason, Missed, Unsupported};
 
 /// 点播计划中的一条轨。
 pub(crate) struct Track {
+    /// 要下载的分片，按播放顺序
     pub segments: Vec<Segment>,
-    /// 本轨用到的 init 段，按完整地址与字节范围去重、按首次出现排序
+    /// 来源标了 EXT-X-GAP 的分片（没有内容，不取），按播放顺序
+    pub gaps: Vec<Segment>,
+    /// 要下载的分片用到的 init 段，按完整地址与字节范围去重、按首次出现排序
     pub inits: Vec<InitSection>,
 }
 
 impl Track {
-    fn new(segments: Vec<Segment>) -> Self {
+    fn new(all: Vec<Segment>) -> Self {
+        let (gaps, segments): (Vec<Segment>, Vec<Segment>) = all.into_iter().partition(|s| s.gap);
         let mut inits: Vec<InitSection> = Vec::new();
         for init in segments.iter().filter_map(|s| s.init.as_ref()) {
             if !inits.contains(init) {
                 inits.push(init.clone());
             }
         }
-        Track { segments, inits }
+        Track {
+            segments,
+            gaps,
+            inits,
+        }
     }
 
     /// 分片所用 init 段在 `inits` 中的下标；无 init 段时为 None。
@@ -42,25 +50,33 @@ pub(crate) struct Plan {
 }
 
 impl Plan {
-    /// 点播计划；每条轨都必须有分片，各轨的不连续段序列必须相同。
+    /// 点播计划；每条轨都必须有要下载的分片，各轨要下载的分片的不连续段序列必须相同（有轨一整段都标了 EXT-X-GAP 时
+    /// 报 [`Unsupported::DiscontinuityMismatch`]）。
     pub(crate) fn new(tracks: Vec<ResolvedTrack>) -> Result<Self, Error> {
         let tracks = tracks
             .into_iter()
             .map(|t| {
-                if t.playlist.segments.is_empty() {
+                let track = Track::new(t.playlist.segments);
+                if track.segments.is_empty() {
                     return Err(Error::Unsupported(Unsupported::EmptyPlaylist(Box::new(
                         t.url,
                     ))));
                 }
-                Ok(Track::new(t.playlist.segments))
+                Ok(track)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let groups = groups(&tracks)?;
         Ok(Plan { tracks, groups })
     }
 
+    /// 要下载的分片数，各轨合计。
     pub(crate) fn segment_count(&self) -> usize {
         self.tracks.iter().map(|t| t.segments.len()).sum()
+    }
+
+    /// 来源标了 EXT-X-GAP 的分片数，各轨合计。
+    pub(crate) fn gap_count(&self) -> usize {
+        self.tracks.iter().map(|t| t.gaps.len()).sum()
     }
 
     /// 检查同一组内每条轨的 init 段内容不变（地址可以不同）。`inits[t][i]` 为第 t 条轨
@@ -86,29 +102,63 @@ impl Plan {
     /// 续传校验用的摘要（SHA-256 十六进制），写进 job.json，口径改变须升格式版本。
     ///
     /// 只覆盖分片的身份：轨道、序号、时长、不连续段序号、分片与 init 段的身份（见
-    /// [`Fingerprint::of_segment`]，与直播比对分片用同一口径）。不含 key 地址与 IV：任务目录里存的是已解密的
-    /// 分片；不含主机、路径前段与查询串：CDN 常在其中放每次会话不同的令牌。
+    /// [`Fingerprint::of_segment`]，与直播比对分片用同一口径），以及哪些标了 EXT-X-GAP。不含 key 地址与 IV：任务目录
+    /// 里存的是已解密的分片；不含主机、路径前段与查询串：CDN 常在其中放每次会话不同的令牌。每条轨先列要下载的，有
+    /// EXT-X-GAP 的再列它们，各一行，同样的写法。
     pub(crate) fn digest(&self) -> String {
         let mut hasher = Sha256::new();
         for (index, track) in self.tracks.iter().enumerate() {
             hasher.update(format!("track {index} {}\n", track.segments.len()));
             for s in &track.segments {
-                let init = s
-                    .init
-                    .as_ref()
-                    .map(|i| Fingerprint::of_segment(&i.uri, i.byte_range).to_string())
-                    .unwrap_or_default();
-                hasher.update(format!(
-                    "{} {} {} {} {init}\n",
-                    s.sequence,
-                    Fingerprint::of_segment(&s.uri, s.byte_range),
-                    s.duration_us,
-                    s.discontinuity,
-                ));
+                hasher.update(segment_line(s));
+            }
+            if !track.gaps.is_empty() {
+                hasher.update(format!("gaps {}\n", track.gaps.len()));
+                for s in &track.gaps {
+                    hasher.update(segment_line(s));
+                }
             }
         }
         hex(&hasher.finalize())
     }
+
+    /// 来源标了 EXT-X-GAP 的分片，按轨道、序号排列，相接的合成一个区间（会话为 0）。
+    pub(crate) fn missed(&self) -> Vec<Missed> {
+        let mut missed: Vec<Missed> = Vec::new();
+        for (track, t) in self.tracks.iter().enumerate() {
+            for s in &t.gaps {
+                match missed.last_mut() {
+                    Some(m) if m.track == track && m.last.checked_add(1) == Some(s.sequence) => {
+                        m.last = s.sequence;
+                    }
+                    _ => missed.push(Missed {
+                        session: 0,
+                        track,
+                        first: s.sequence,
+                        last: s.sequence,
+                        reason: MissReason::Gap,
+                    }),
+                }
+            }
+        }
+        missed
+    }
+}
+
+/// 摘要里一个分片的写法，见 [`Plan::digest`]。
+fn segment_line(s: &Segment) -> String {
+    let init = s
+        .init
+        .as_ref()
+        .map(|i| Fingerprint::of_segment(&i.uri, i.byte_range).to_string())
+        .unwrap_or_default();
+    format!(
+        "{} {} {} {} {init}\n",
+        s.sequence,
+        Fingerprint::of_segment(&s.uri, s.byte_range),
+        s.duration_us,
+        s.discontinuity,
+    )
 }
 
 /// 按不连续段序号切分各轨，并检查各轨的不连续段序列相同。
@@ -162,10 +212,25 @@ mod tests {
         let Ok(Playlist::Media(playlist)) = parse(text, &url) else {
             panic!("应解析为媒体播放列表");
         };
-        let plan = Plan::new(vec![ResolvedTrack { url, playlist }]).unwrap();
+        let plan = Plan::new(vec![ResolvedTrack {
+            url: url.clone(),
+            playlist,
+        }])
+        .unwrap();
         assert_eq!(
             plan.digest(),
             "9709cf9cb7943aae405f447022a77b9764cd6b8dca71c76e459631f92ccb162f"
+        );
+
+        let gap = "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\nseg0.ts\n\
+                   #EXT-X-GAP\n#EXTINF:10,\nseg1.ts\n#EXT-X-ENDLIST\n";
+        let Ok(Playlist::Media(playlist)) = parse(gap, &url) else {
+            panic!("应解析为媒体播放列表");
+        };
+        let plan = Plan::new(vec![ResolvedTrack { url, playlist }]).unwrap();
+        assert_eq!(
+            plan.digest(),
+            "aceef0f11d5959d61cdeede59c33c99607694bf79974a2cbe395a79d343a8c1d"
         );
     }
 }

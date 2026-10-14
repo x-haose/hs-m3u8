@@ -12,7 +12,7 @@ use hs_m3u8_core::{
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
 use super::{
-    STALL, expected_split, live_request, missed, playlist, playlist_in, put_long, report,
+    STALL, expected_split, live_request, missed, outcome, playlist, playlist_in, put_long, report,
     signed_fmp4_playlist, split_source,
 };
 use crate::server::Server;
@@ -42,7 +42,7 @@ async fn records_until_endlist() {
     let output = job.wait().await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
     let last = progress.borrow().clone();
     assert_eq!(
         (last.stage, last.segments_done, last.segments_total),
@@ -214,7 +214,7 @@ async fn window_slide_is_reported_as_missed() {
 
     assert_output(&output, &expected_long(&dir, &[0, 3], &[2]));
     let missed = vec![missed(1, 2, MissReason::Expired)];
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, missed));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, missed));
     let last = progress.borrow().clone();
     assert_eq!(
         (
@@ -248,8 +248,37 @@ async fn unavailable_segments_are_reported_as_missed() {
     assert_output(&output, &expected_long(&dir, &[0, 3], &[2]));
     let not_found = MissReason::Failed(FetchError::Http(HttpError::Status(404)));
     assert_eq!(
-        output.live,
+        outcome(&output),
         report(LiveEnd::EndList, 1, vec![missed(1, 2, not_found)])
+    );
+}
+
+/// 标了 EXT-X-GAP 的分片：不去取，记为缺失（原因为来源标了 GAP），录制继续；进度里另计。
+#[tokio::test(flavor = "multi_thread")]
+async fn gap_segments_are_reported_as_missed_without_fetching() {
+    let dir = test_dir("live_gap");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1, 2]);
+    let gap = playlist(&[0, 1, 2], false)
+        .replace("#EXTINF:1,\nseg1.ts", "#EXT-X-GAP\n#EXTINF:1,\nseg1.ts");
+    server.put_sequence("live.m3u8", vec![gap.clone(), gap + "#EXT-X-ENDLIST\n"]);
+
+    let job = engine()
+        .start(live_request(server.url("live.m3u8"), &dir, STALL))
+        .unwrap();
+    let progress = job.control().progress();
+    let output = job.wait().await.unwrap();
+
+    assert_output(&output, &expected_long(&dir, &[0, 2], &[2]));
+    assert_eq!(
+        outcome(&output),
+        report(LiveEnd::EndList, 1, vec![missed(1, 1, MissReason::Gap)])
+    );
+    assert_eq!(server.hits("seg1.ts"), 0);
+    let last = progress.borrow().clone();
+    assert_eq!(
+        (last.segments_done, last.segments_total, last.segments_gap),
+        (2, 2, 1)
     );
 }
 
@@ -285,7 +314,7 @@ async fn segments_still_incomplete_after_retries_are_missed() {
     );
     let incomplete = MissReason::Failed(FetchError::Incomplete);
     assert_eq!(
-        output.live,
+        outcome(&output),
         report(LiveEnd::EndList, 1, vec![missed(1, 1, incomplete)])
     );
     assert_eq!(server.hits("video/seg1.m4s"), 3);
@@ -307,7 +336,10 @@ async fn max_duration_limits_recording() {
     let output = run(req).await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
-    assert_eq!(output.live, report(LiveEnd::DurationReached, 1, vec![]));
+    assert_eq!(
+        outcome(&output),
+        report(LiveEnd::DurationReached, 1, vec![])
+    );
     assert_eq!(server.hits("seg2.ts"), 0);
 }
 
@@ -327,7 +359,7 @@ async fn split_tracks_with_signed_init_urls() {
         .unwrap();
 
     assert_output(&output, &expected_split(&dir, &video, &audio));
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
     assert_eq!(
         (server.hits("video/init.mp4"), server.hits("audio/init.mp4")),
         (2, 2)
@@ -398,7 +430,7 @@ async fn unavailable_new_init_is_missed() {
     assert_output(&output, &want);
     let not_found = MissReason::InitFailed(FetchError::Http(HttpError::Status(404)));
     assert_eq!(
-        output.live,
+        outcome(&output),
         report(LiveEnd::EndList, 1, vec![missed(1, 1, not_found)])
     );
     assert_eq!(server.hits("b/seg0.m4s"), 0);
@@ -437,7 +469,7 @@ async fn refresh_does_not_wait_for_engine_permits() {
     )];
     let want = expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]);
     assert_output(&output, &want);
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }
 
 /// 视频轨有一个不连续段、音频轨没有：只合并各轨都有的组，视频多出的那组记为无法合并。
@@ -462,7 +494,7 @@ async fn groups_missing_on_a_track_are_unmergeable() {
 
     assert_output(&output, &expected_split(&dir, &video[..1], &audio));
     assert_eq!(
-        output.live,
+        outcome(&output),
         report(
             LiveEnd::EndList,
             1,

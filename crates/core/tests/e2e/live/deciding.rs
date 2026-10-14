@@ -9,9 +9,9 @@ use hs_m3u8_core::{Error, HttpError, LiveEnd, LiveOptions, StallCause, StallErro
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
 use super::{
-    STALL, expected_split, expected_split_long, interrupt, live_request, media_playlist, playlist,
-    playlist_in, put_long, put_split_master, report, run_until_full, signed_fmp4_playlist,
-    slow_retry, split_source,
+    STALL, expected_split, expected_split_long, interrupt, live_request, media_playlist, outcome,
+    playlist, playlist_in, put_long, put_split_master, report, run_until_full,
+    signed_fmp4_playlist, slow_retry, split_source,
 };
 use crate::server::Server;
 use crate::{assert_output, engine, expected, expected_long, fixture, run, test_dir, track};
@@ -38,7 +38,7 @@ async fn in_flight_first_segment_is_refilled() {
     let output = run(req).await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }
 
 /// 判定期间视频已有候选、照常刷新且一直列出新分片，音频的播放列表一直没有分片：视频仍在出，音频不出新分片
@@ -98,7 +98,7 @@ async fn an_ended_live_with_an_emptied_track_ends_normally() {
         track: 1,
         cause: StallCause::NoNewSegments,
     };
-    assert_eq!(output.live, report(end, 1, vec![]));
+    assert_eq!(outcome(&output), report(end, 1, vec![]));
 }
 
 /// 判定期间视频的核对因重试变慢（长于 stall_timeout），音频第一份播放列表恰好没有分片、下一份才有：核对不挡住
@@ -129,7 +129,7 @@ async fn a_slow_check_does_not_stall_a_waiting_track() {
 
     let want = expected_split_long(&dir, &[(&[0, 1, 2, 3], &[0, 1, 2, 3])]);
     assert_output(&output, &want);
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }
 
 /// 判定期间音频一直没有分片，停滞时视频也不再出新分片（它的候选已结束）：按直播已结束收尾，视频候选里新列出的
@@ -156,7 +156,7 @@ async fn a_stall_while_deciding_still_records_listed_segments() {
         track: 1,
         cause: StallCause::NoNewSegments,
     };
-    assert_eq!(output.live, report(end, 1, vec![]));
+    assert_eq!(outcome(&output), report(end, 1, vec![]));
 }
 
 /// 判定期间音频一直没有分片而停滞、看起来直播已结束，这时视频的核对还没完（重试退避使它长于停滞时长）：
@@ -188,7 +188,7 @@ async fn a_stall_while_another_track_is_checking() {
         track: 1,
         cause: StallCause::NoNewSegments,
     };
-    assert_eq!(output.live, report(end, 1, vec![]));
+    assert_eq!(outcome(&output), report(end, 1, vec![]));
 }
 
 /// 会话定下后视频新签名的 init 段一时拉不到（重试退避长于音频的停滞时长），音频不受影响：照常刷新，录到之后
@@ -218,7 +218,7 @@ async fn a_slow_init_fetch_does_not_stall_another_track() {
     let output = run(req).await.unwrap();
 
     assert_output(&output, &expected_split(&dir, &video, &audio));
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }
 
 /// 中断期间直播结束，音频的播放列表只剩 ENDLIST、没有分片，地址还换了令牌：音频这次没有可录的、不影响判定，
@@ -244,7 +244,7 @@ async fn an_ended_track_without_segments_does_not_affect_the_decision() {
 
     let want = expected_split_long(&dir, &[(&[0, 1, 2, 3], &[0, 1])]);
     assert_output(&output, &want);
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }
 
 /// 判定期间两条轨的播放列表一直没有分片：直播看起来已结束，两条轨这次都不录，按停滞收尾、合并已录的。
@@ -306,7 +306,10 @@ async fn a_full_track_does_not_block_the_decision() {
     let output = run(req).await.unwrap();
 
     assert_output(&output, &expected_split_long(&dir, &[(&[0, 1], &[0, 1])]));
-    assert_eq!(output.live, report(LiveEnd::DurationReached, 1, vec![]));
+    assert_eq!(
+        outcome(&output),
+        report(LiveEnd::DurationReached, 1, vec![])
+    );
     assert_eq!(server.hits("a/seg2.ts"), 0);
 }
 
@@ -331,7 +334,7 @@ async fn transient_failure_while_checking_is_reported() {
 
     let output = run(req).await.unwrap();
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }
 
 /// 重叠中最新的分片一直取不到（重试后仍 503），更早的取得到：用更早的核对，接得上就接着原会话录（窗口滑过就录不到
@@ -350,7 +353,7 @@ async fn an_older_overlap_is_checked_when_the_newest_keeps_failing() {
     let output = run(req).await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }
 
 /// 同上，地址还换了令牌：报的是取分片的故障（可重试），不是「无法确认是同一个直播」。
@@ -460,5 +463,5 @@ async fn slow_check_does_not_count_as_a_stall() {
     let output = run(req).await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }

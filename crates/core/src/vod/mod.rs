@@ -41,6 +41,7 @@ pub(crate) async fn download(
     progress.send_modify(|p| {
         p.stage = Stage::Downloading;
         p.segments_total = plan.segment_count();
+        p.segments_gap = plan.gap_count();
     });
     let layout = dir.layout();
     let inits = store_inits(&fetcher.direct(), plan, layout, progress, cancel).await?;

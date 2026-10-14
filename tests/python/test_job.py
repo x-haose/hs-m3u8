@@ -560,7 +560,7 @@ def test_live_recordings_end_at_endlist_and_report_missing_segments(server: Serv
 
     assert output.live is not None
     assert output.live.end == LiveEnd.EndList()
-    assert [(m.first, m.last, m.reason) for m in output.live.missed] == [
+    assert [(m.first, m.last, m.reason) for m in output.missed] == [
         (1, 1, MissReason.Failed(FetchErrorKind.Http(HttpErrorKind.Status(404))))
     ]
     assert (progress.segments_done, progress.segments_failed, progress.segments_expired) == (1, 1, 0)

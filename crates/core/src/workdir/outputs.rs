@@ -226,7 +226,7 @@ mod tests {
         let bytes = encode(&outputs, true);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"format_version":10,"swapped":true,"outputs":[{"kind":"mp4","target":"/d/a.mp4","fingerprint":"0123456789abcdef"},{"kind":"hls","target":"/d/a/","fingerprint":"0123456789abcdef"}]}"#
+            r#"{"format_version":11,"swapped":true,"outputs":[{"kind":"mp4","target":"/d/a.mp4","fingerprint":"0123456789abcdef"},{"kind":"hls","target":"/d/a/","fingerprint":"0123456789abcdef"}]}"#
         );
         assert_eq!(
             decode(&bytes),
@@ -238,13 +238,13 @@ mod tests {
 
         let entry = |kind: &str, target: &str, fingerprint: &str| {
             format!(
-                r#"{{"format_version":10,"swapped":false,"outputs":[{{"kind":"{kind}","target":"{target}","fingerprint":"{fingerprint}"}}]}}"#
+                r#"{{"format_version":11,"swapped":false,"outputs":[{{"kind":"{kind}","target":"{target}","fingerprint":"{fingerprint}"}}]}}"#
             )
         };
         for rejected in [
-            r#"{"format_version":9,"outputs":[]}"#.to_owned(),
-            r#"{"format_version":10,"swapped":false,"outputs":[],"extra":1}"#.to_owned(),
             r#"{"format_version":10,"outputs":[]}"#.to_owned(),
+            r#"{"format_version":11,"swapped":false,"outputs":[],"extra":1}"#.to_owned(),
+            r#"{"format_version":11,"outputs":[]}"#.to_owned(),
             entry("mkv", "/d/a", "0123456789abcdef"),
             entry("mp4", "d/a.mp4", "0123456789abcdef"),
             entry("mp4", "/", "0123456789abcdef"),

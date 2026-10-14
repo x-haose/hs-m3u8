@@ -2,11 +2,11 @@
 
 use std::time::Duration;
 
-use hs_m3u8_core::{LiveEnd, LiveReport, MissReason, NewSession, SourceBreak};
+use hs_m3u8_core::{LiveEnd, LiveReport, MissReason, Missed, NewSession, SourceBreak};
 
 use super::{
-    STALL, expected_split_long, interrupt, live_request, missed, playlist, playlist_in, put_long,
-    put_split_master, report, slow_retry,
+    STALL, expected_split_long, interrupt, live_request, missed, outcome, playlist, playlist_in,
+    put_long, put_split_master, report, slow_retry,
 };
 use crate::server::Server;
 use crate::{assert_output, expected_long, fixture, run, test_dir};
@@ -37,7 +37,7 @@ async fn redirect_to_a_new_path_each_refresh_is_not_a_change() {
         .unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }
 
 /// 服务器不写 EXT-X-DISCONTINUITY-SEQUENCE：带 DISCONTINUITY 的分片滑出窗口后编号整体变小，
@@ -79,7 +79,7 @@ async fn window_jump_with_renumbered_discontinuities_starts_a_new_group() {
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 3], &[1, 1, 1]));
     let missed = vec![missed(2, 2, MissReason::Expired)];
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, missed));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, missed));
 }
 
 /// CDN 返回了更旧的缓存窗口（多出一个更早的不连续段）：与上次重叠部分一致，不算矛盾，录制照常。
@@ -101,7 +101,7 @@ async fn stale_older_window_is_not_inconsistent() {
         .unwrap();
 
     assert_output(&output, &expected_long(&dir, &[1, 2, 3], &[3]));
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
     assert_eq!(server.hits("seg0.ts"), 0);
 }
 
@@ -110,13 +110,13 @@ fn report_with(
     end: LiveEnd,
     session_count: usize,
     new_sessions: Vec<NewSession>,
-) -> Option<LiveReport> {
-    Some(LiveReport {
+) -> (Option<LiveReport>, Vec<Missed>) {
+    let live = LiveReport {
         end: Some(end),
         session_count,
         new_sessions,
-        missed: vec![],
-    })
+    };
+    (Some(live), vec![])
 }
 
 /// 媒体序号回退且与上次窗口不重叠，连续两次即认定编码器重启：只录一条轨，另起会话 1 从新窗口的起点接着录，
@@ -146,7 +146,7 @@ async fn sequence_regression_starts_a_new_session() {
         cause: SourceBreak::Restarted,
     };
     assert_eq!(
-        output.live,
+        outcome(&output),
         report_with(LiveEnd::EndList, 2, vec![restarted])
     );
 }
@@ -177,7 +177,7 @@ async fn a_restart_while_recording_two_tracks_ends_recording() {
         track: 0,
         cause: SourceBreak::Restarted,
     };
-    assert_eq!(output.live, report(end, 1, vec![]));
+    assert_eq!(outcome(&output), report(end, 1, vec![]));
     assert_eq!(server.hits("v/seg0.ts"), 0);
 }
 
@@ -201,7 +201,7 @@ async fn a_single_regression_is_ignored() {
         .unwrap();
 
     assert_output(&output, &expected_long(&dir, &[1, 2, 3], &[3]));
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }
 
 /// 刷新偶尔拿到没有分片的播放列表、或空的响应体（服务器正在重写文件）：等下次刷新，不算回退或失败。
@@ -227,7 +227,7 @@ async fn empty_refreshes_are_waited_out() {
         .unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }
 
 /// 同一序号的分片在两次刷新之间换了文件（服务器错误）：只录一条轨，另起会话 1，跳过已处理到的序号 1，之后的
@@ -254,7 +254,7 @@ async fn a_changed_segment_starts_a_new_session_after_what_was_processed() {
         cause: SourceBreak::Inconsistent { sequence: 1 },
     };
     assert_eq!(
-        output.live,
+        outcome(&output),
         report_with(LiveEnd::EndList, 2, vec![contradicted])
     );
     assert_eq!(server.hits("seg2.ts"), 0);
@@ -293,7 +293,7 @@ async fn a_held_playlist_that_contradicts_starts_a_new_session() {
         cause: SourceBreak::Inconsistent { sequence: 2 },
     };
     assert_eq!(
-        output.live,
+        outcome(&output),
         report_with(LiveEnd::EndList, 2, vec![contradicted])
     );
     assert_eq!(server.hits("other2.ts"), 0);

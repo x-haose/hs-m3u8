@@ -7,8 +7,8 @@ use axum::http::StatusCode;
 use hs_m3u8_core::{Error, LiveEnd, LiveOptions, Url, WorkDirProblem};
 
 use super::{
-    STALL, expected_split, expected_split_long, interrupt, live_request, playlist, playlist_in,
-    put_long, put_split_master, report, run_until_full, split_source,
+    STALL, expected_split, expected_split_long, interrupt, live_request, outcome, playlist,
+    playlist_in, put_long, put_split_master, report, run_until_full, split_source,
 };
 use crate::server::Server;
 use crate::{assert_output, engine, expected_long, fixture, run, test_dir};
@@ -41,7 +41,7 @@ async fn tracks_whose_latest_sessions_differ_continue_the_latest_one() {
     assert_eq!(server.hits("v/seg0.ts"), video_hits);
     let want = expected_split_long(&dir, &[(&[0, 1], &[0, 1]), (&[2, 3], &[2, 3])]);
     assert_output(&output, &want);
-    assert_eq!(output.live, report(LiveEnd::EndList, 2, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 2, vec![]));
 }
 
 /// 会话 0 录在编码器重启前（序号 100、101），会话 1 录重启后的 0、1；运行 3 视频接得上会话 1、音频窗口前移，
@@ -114,7 +114,7 @@ async fn a_fresh_sessions_head_is_refilled_below_an_earlier_maximum() {
     let output = run(req).await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[3, 0, 1, 2, 3], &[1, 4]));
-    assert_eq!(output.live, report(LiveEnd::EndList, 2, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 2, vec![]));
 }
 
 /// 第一次运行音频一个分片都没录到（都 404），之后换了令牌续录：音频没有可核对的，不阻挡接续；视频核对一致，
@@ -143,7 +143,7 @@ async fn a_track_never_recorded_joins_the_session() {
 
     let want = expected_split_long(&dir, &[(&[0, 1, 2, 3], &[0, 1, 2, 3])]);
     assert_output(&output, &want);
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }
 
 /// 第一次运行：视频录到序号 0、1，音频的分片都取不到。返回带令牌 `token`、录制上限 `max` 秒的请求。
@@ -186,7 +186,10 @@ async fn a_full_track_that_matches_verifies_a_new_token() {
 
     let want = expected_split_long(&dir, &[(&[0, 1], &[0, 1])]);
     assert_output(&output, &want);
-    assert_eq!(output.live, report(LiveEnd::DurationReached, 1, vec![]));
+    assert_eq!(
+        outcome(&output),
+        report(LiveEnd::DurationReached, 1, vec![])
+    );
 }
 
 /// 换了令牌续录、视频的窗口已前移（与录到的没有重叠）、音频之前没录到：没有一条轨核对一致，无法确认是同一个直播。
@@ -311,5 +314,8 @@ async fn a_full_track_fetches_no_init() {
 
     assert_eq!(server.hits("video/init.mp4"), init_hits);
     assert_output(&output, &expected_split(&dir, &video[..2], &audio[..2]));
-    assert_eq!(output.live, report(LiveEnd::DurationReached, 1, vec![]));
+    assert_eq!(
+        outcome(&output),
+        report(LiveEnd::DurationReached, 1, vec![])
+    );
 }

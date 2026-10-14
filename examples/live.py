@@ -36,8 +36,8 @@ async def main() -> None:
         signal.signal(signal.SIGINT, previous)
     if output.live is not None:
         print("结束原因：", output.live.end, "，录了", job.progress().duration)
-        for missed in output.live.missed:
-            print("缺失：", missed)
+    for missed in output.missed:
+        print("缺失：", missed)
     print("已保存到", output.mp4.path if output.mp4 else None)
 
 

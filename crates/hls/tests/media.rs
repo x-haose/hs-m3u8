@@ -334,6 +334,14 @@ fn byte_range_without_offset_after_another_resource_is_an_error() {
     );
 }
 
+/// EXT-X-GAP 只作用于下一个分片。
+#[test]
+fn a_gap_applies_to_the_next_segment_only() {
+    let m = media("#EXTM3U\n#EXTINF:4,\na.ts\n#EXT-X-GAP\n#EXTINF:4,\nb.ts\n#EXTINF:4,\nc.ts\n");
+    let gaps: Vec<bool> = m.segments.iter().map(|s| s.gap).collect();
+    assert_eq!(gaps, [false, true, false]);
+}
+
 #[test]
 fn discontinuity_numbers_start_from_the_discontinuity_sequence() {
     let m = media(

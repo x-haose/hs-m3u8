@@ -100,6 +100,8 @@ pub(super) struct Update {
     pub expired: Option<Missed>,
     /// init 段取不到、记为缺失的新分片，每项一个分片
     pub init_failed: Vec<Missed>,
+    /// 来源标了 EXT-X-GAP、记为缺失的新分片，每项一个分片
+    pub gaps: Vec<Missed>,
     /// `init_failed` 中最后一个取不到的原因
     pub init_failure: Option<FetchFailure>,
     /// 出现了要录的新分片（排入下载或记为缺失）
@@ -117,6 +119,7 @@ impl Update {
             init_files: Vec::new(),
             expired: None,
             init_failed: Vec::new(),
+            gaps: Vec::new(),
             init_failure: None,
             any_new: false,
             changed: false,
@@ -393,7 +396,7 @@ impl Window {
         }
     }
 
-    /// 一个新分片：录满 max_duration 后不再录；init 段取不到时记为缺失；其余排入下载。
+    /// 一个新分片：录满 max_duration 后不再录；来源标了 EXT-X-GAP、init 段取不到时记为缺失；其余排入下载。
     fn record_new(
         &mut self,
         scope: &Scope<'_>,
@@ -406,6 +409,16 @@ impl Window {
             return Ok(());
         }
         self.recorded_us = self.recorded_us.saturating_add(segment.duration_us);
+        if segment.gap {
+            update.gaps.push(Missed {
+                session: scope.session,
+                track: scope.track,
+                first: segment.sequence,
+                last: segment.sequence,
+                reason: MissReason::Gap,
+            });
+            return Ok(());
+        }
         let init = match init {
             InitState::Absent => None,
             InitState::Ready(fingerprint) => Some(fingerprint),

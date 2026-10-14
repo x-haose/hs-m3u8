@@ -1408,15 +1408,9 @@ class LiveReport:
         r"""
         本次运行录制中途另起的会话，按先后；只合并时为空
         """
-    @property
-    def missed(self) -> builtins.tuple[Missed, ...]:
-        r"""
-        不在输出中的分片，按会话、轨道、序号排列，相接且原因相同的合成一个区间。不含之前的运行里、某个会话第一个
-        已完成分片之前或最后一个之后缺的（原因与范围随那次运行一起丢了）
-        """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, end: typing.Optional[LiveEnd], session_count: builtins.int, new_sessions: collections.abc.Sequence[NewSession], missed: collections.abc.Sequence[Missed]) -> LiveReport:
+    def __new__(cls, *, end: typing.Optional[LiveEnd], session_count: builtins.int, new_sessions: collections.abc.Sequence[NewSession]) -> LiveReport:
         r"""
         各参数即同名属性。
         """
@@ -1597,6 +1591,14 @@ class MissReason:
         def __new__(cls) -> MissReason.Unmergeable: ...
     
     @typing.final
+    class Gap(MissReason):
+        r"""
+        来源标了 EXT-X-GAP：这一片没有内容，不取
+        """
+        __match_args__ = ()
+        def __new__(cls) -> MissReason.Gap: ...
+    
+    @typing.final
     class Unknown(MissReason):
         r"""
         之前的运行中缺失，原因没有记录
@@ -1636,7 +1638,7 @@ class Missed:
         区间里的分片数，即 `last - first + 1`；超出 64 位整数时为 2**64 - 1
         """
     @property
-    def reason(self) -> MissReason.Expired | MissReason.Failed | MissReason.InitFailed | MissReason.Unmergeable | MissReason.Unknown:
+    def reason(self) -> MissReason.Expired | MissReason.Failed | MissReason.InitFailed | MissReason.Unmergeable | MissReason.Gap | MissReason.Unknown:
         r"""
         缺失的原因
         """
@@ -2148,13 +2150,20 @@ class Output:
         收尾没删掉的东西：被替换的旧输出、没删干净的任务目录等；输出不受影响。都删干净时为空
         """
     @property
+    def missed(self) -> builtins.tuple[Missed, ...]:
+        r"""
+        不在输出中的分片（输出里那段时间留空、保留原时间戳），按会话、轨道、序号排列，相接且原因相同的合成一个区间：
+        点播只有来源标了 EXT-X-GAP 的；直播另有窗口滑过、取不到等（见 `MissReason`），不含之前的运行里、某个会话
+        第一个已完成分片之前或最后一个之后缺的（原因与范围随那次运行一起丢了）
+        """
+    @property
     def live(self) -> typing.Optional[LiveReport]:
         r"""
         直播的录制结果；点播为 None
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, mp4: typing.Optional[Mp4Output], hls: typing.Optional[builtins.str | os.PathLike[str]], segments: builtins.int, bytes: builtins.int, leftovers: collections.abc.Sequence[Leftover], live: typing.Optional[LiveReport]) -> Output:
+    def __new__(cls, *, mp4: typing.Optional[Mp4Output], hls: typing.Optional[builtins.str | os.PathLike[str]], segments: builtins.int, bytes: builtins.int, leftovers: collections.abc.Sequence[Leftover], missed: collections.abc.Sequence[Missed], live: typing.Optional[LiveReport]) -> Output:
         r"""
         各参数即同名属性。
         """
@@ -2367,6 +2376,11 @@ class Progress:
         直播本次运行中两次刷新之间已滑出窗口、没有列出过的分片，不在 `segments_total` 里；点播恒为 0
         """
     @property
+    def segments_gap(self) -> builtins.int:
+        r"""
+        来源标了 EXT-X-GAP（没有内容）、不取的分片，不在 `segments_total` 里；直播为本次运行中列出的
+        """
+    @property
     def duration(self) -> datetime.timedelta:
         r"""
         第 0 条轨已完成分片的声明时长之和；含续传前已完成的。直播即已录时长
@@ -2399,7 +2413,7 @@ class Progress:
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, stage: Stage, selected: typing.Optional[Selected], segments_done: builtins.int, segments_total: builtins.int, segments_failed: builtins.int, segments_expired: builtins.int, duration: datetime.timedelta, bytes: builtins.int, received: builtins.int, refresh_errors: collections.abc.Sequence[typing.Optional[RefreshCause]], mp4_unsupported: typing.Optional[Mp4Unsupported]) -> Progress:
+    def __new__(cls, *, stage: Stage, selected: typing.Optional[Selected], segments_done: builtins.int, segments_total: builtins.int, segments_failed: builtins.int, segments_expired: builtins.int, segments_gap: builtins.int, duration: datetime.timedelta, bytes: builtins.int, received: builtins.int, refresh_errors: collections.abc.Sequence[typing.Optional[RefreshCause]], mp4_unsupported: typing.Optional[Mp4Unsupported]) -> Progress:
         r"""
         各参数即同名属性。
         """

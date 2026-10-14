@@ -24,6 +24,8 @@ pub struct Progress {
     pub segments_failed: usize,
     /// 直播本次运行中两次刷新之间已滑出窗口、没有列出过的分片，不在 `segments_total` 里；点播恒为 0
     pub segments_expired: usize,
+    /// 来源标了 EXT-X-GAP（没有内容）、不取的分片，不在 `segments_total` 里；直播为本次运行中列出的
+    pub segments_gap: usize,
     /// 第 0 条轨已完成分片的声明时长之和，微秒；含续传前已完成的。直播即已录时长
     pub duration_us: u64,
     /// 任务目录中已完成的分片与 init 段的字节数（解密后）；含续传前已完成的
@@ -119,6 +121,10 @@ pub struct Output {
     pub bytes: u64,
     /// 收尾没删掉的东西：被替换的旧输出、没删干净的任务目录等；输出不受影响。都删干净时为空
     pub leftovers: Vec<Leftover>,
+    /// 不在输出中的分片（输出里那段时间留空、保留原时间戳），按会话、轨道、序号排列，相接且原因相同的合成一个区间：
+    /// 点播只有来源标了 EXT-X-GAP 的；直播另有窗口滑过、取不到等（见 [`MissReason`]），不含之前的运行里、某个会话
+    /// 第一个已完成分片之前或最后一个之后缺的（原因与范围随那次运行一起丢了）
+    pub missed: Vec<Missed>,
     /// 直播的录制结果；点播为 None
     pub live: Option<LiveReport>,
 }
@@ -186,9 +192,6 @@ pub struct LiveReport {
     pub session_count: usize,
     /// 本次运行录制中途另起的会话，按先后；只合并时为空
     pub new_sessions: Vec<NewSession>,
-    /// 不在输出中的分片，按会话、轨道、序号排列，相接且原因相同的合成一个区间。不含之前的运行里、
-    /// 某个会话第一个已完成分片之前或最后一个之后缺的（原因与范围随那次运行一起丢了）
-    pub missed: Vec<Missed>,
 }
 
 /// 本次运行的录制如何结束。
@@ -264,6 +267,8 @@ pub enum MissReason {
     InitFailed(FetchError),
     /// 所在不连续段不是每条轨都录到，无法合并
     Unmergeable,
+    /// 来源标了 EXT-X-GAP：这一片没有内容，不取
+    Gap,
     /// 之前的运行中缺失，原因没有记录
     Unknown,
 }

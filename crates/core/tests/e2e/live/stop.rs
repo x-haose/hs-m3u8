@@ -6,7 +6,8 @@ use std::time::Duration;
 use hs_m3u8_core::LiveEnd;
 
 use super::{
-    STALL, expected_split, interrupt, live_request, playlist, put_long, report, split_source,
+    STALL, expected_split, interrupt, live_request, outcome, playlist, put_long, report,
+    split_source,
 };
 use crate::server::Server;
 use crate::{assert_output, engine, expected_long, test_dir};
@@ -28,7 +29,7 @@ async fn stop_merges_what_was_recorded() {
     let output = job.wait().await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
-    assert_eq!(output.live, report(LiveEnd::Stopped, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::Stopped, 1, vec![]));
 }
 
 /// 核对用的分片请求挂住时调用 stop：不等它返回，按停止收尾，合并已录的部分。
@@ -54,7 +55,7 @@ async fn stop_is_observed_while_checking() {
     server.ungate("seg1.ts");
 
     assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
-    assert_eq!(output.live, report(LiveEnd::Stopped, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::Stopped, 1, vec![]));
 }
 
 /// 视频与音频都要先拉 init 段，启动后立即 stop：两轨首次拉到的播放列表都照常处理，每次都两轨都进成片。
@@ -70,7 +71,7 @@ async fn stop_right_after_start_records_every_track() {
         job.control().stop();
         let output = job.wait().await.unwrap();
         assert_output(&output, &expected_split(&dir, &video, &audio));
-        assert_eq!(output.live, report(LiveEnd::Stopped, 1, vec![]));
+        assert_eq!(outcome(&output), report(LiveEnd::Stopped, 1, vec![]));
     }
 }
 
@@ -88,6 +89,6 @@ async fn stop_right_after_start_records_the_first_playlist() {
         job.control().stop();
         let output = job.wait().await.unwrap();
         assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
-        assert_eq!(output.live, report(LiveEnd::Stopped, 1, vec![]));
+        assert_eq!(outcome(&output), report(LiveEnd::Stopped, 1, vec![]));
     }
 }

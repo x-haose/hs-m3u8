@@ -9,8 +9,8 @@ use hs_m3u8_core::{
 };
 
 use super::{
-    STALL, expected_split, live_request, missed, playlist, playlist_in, playlist_with_target,
-    put_long, put_split_master, report, split_source,
+    STALL, expected_split, live_request, missed, outcome, playlist, playlist_in,
+    playlist_with_target, put_long, put_split_master, report, split_source,
 };
 use crate::server::Server;
 use crate::{assert_output, engine, expected_long, fixture, run, test_dir};
@@ -45,7 +45,7 @@ async fn removed_playlist_ends_recording() {
         track: 0,
         cause: StallCause::PlaylistGone(404),
     };
-    assert_eq!(output.live, report(end, 1, vec![]));
+    assert_eq!(outcome(&output), report(end, 1, vec![]));
     assert_eq!(progress.borrow().refresh_errors, [None]);
 }
 
@@ -70,7 +70,7 @@ async fn no_new_segments_ends_recording() {
         track: 0,
         cause: StallCause::NoNewSegments,
     };
-    assert_eq!(output.live, report(end, 1, vec![]));
+    assert_eq!(outcome(&output), report(end, 1, vec![]));
 }
 
 /// 进程整个停住（如 Windows 上合盖睡眠，单调时钟照走）超过停滞时长，其间直播出了新分片：醒来时停滞已到，先刷新一次
@@ -102,7 +102,7 @@ async fn a_stall_after_the_process_was_suspended_is_judged_on_a_fresh_refresh() 
         track: 0,
         cause: StallCause::NoNewSegments,
     };
-    assert_eq!(output.live, report(end, 1, vec![]));
+    assert_eq!(outcome(&output), report(end, 1, vec![]));
 }
 
 /// 音频轨的播放列表在首次之后被删除、视频轨照常：按音频轨的直播已结束收尾。
@@ -342,7 +342,10 @@ async fn a_missing_last_segment_does_not_turn_the_end_into_a_failure() {
         cause: StallCause::NoNewSegments,
     };
     let not_found = MissReason::Failed(FetchError::Http(HttpError::Status(404)));
-    assert_eq!(output.live, report(end, 1, vec![missed(2, 2, not_found)]));
+    assert_eq!(
+        outcome(&output),
+        report(end, 1, vec![missed(2, 2, not_found)])
+    );
 }
 
 /// 音频轨的分片排在视频的一个慢分片后面、迟迟轮不到下载：在等本任务的下载队列，不算停滞。
@@ -372,7 +375,7 @@ async fn queued_segments_do_not_stall_a_track() {
     let output = job.wait().await.unwrap();
 
     assert_output(&output, &expected_split(&dir, &video, &audio));
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }
 
 /// 视频轨一直有新分片，音频轨的播放列表卡住不再更新（打包器故障）：不当作直播结束，任务失败、目录保留，
@@ -477,7 +480,7 @@ async fn long_target_duration_extends_the_stall_deadline() {
     .unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }
 
 /// 刷新返回 403（如令牌过期）：任务失败，不当作直播自然结束。

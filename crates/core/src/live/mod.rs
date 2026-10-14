@@ -602,15 +602,18 @@ impl Recorder<'_> {
             }
         }
         let failed = update.init_failed.len();
+        let gaps = update.gaps.len();
         let expired = update.expired.as_ref().map_or(0, Missed::count);
         let listed = update.items.len() + failed;
         self.progress.send_modify(|p| {
             p.segments_total += listed;
             p.segments_failed += failed;
+            p.segments_gap += gaps;
             p.segments_expired = p.segments_expired.saturating_add(expired);
         });
         self.missed.extend(update.expired);
         self.missed.extend(update.init_failed);
+        self.missed.extend(update.gaps);
         for item in update.items {
             fetcher.push(item);
         }

@@ -10,8 +10,8 @@ use aes::cipher::{BlockModeEncrypt, KeyIvInit};
 use axum::http::StatusCode;
 use hs_m3u8_core::hls::{AudioChoice, Encryption};
 use hs_m3u8_core::{
-    Error, HookError, Hooks, HttpError, Integrity, KeyOverride, Purpose, RequestParts, Stage,
-    Unsupported, Url, WorkDirProblem,
+    Error, HookError, Hooks, HttpError, Integrity, KeyOverride, MissReason, Missed, Purpose,
+    RequestParts, Stage, Unsupported, Url, WorkDirProblem,
 };
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
@@ -299,6 +299,46 @@ async fn encrypted_init_sections_are_decrypted_and_ts_ones_are_unsupported() {
     assert!(
         matches!(&err, Error::Unsupported(Unsupported::TsInit(url)) if **url == server.url("pat.ts")),
         "{err}"
+    );
+}
+
+/// 标了 EXT-X-GAP 的分片：不去取，不算失败；成片里那段留空、保留原时间戳，结果与进度里报出来。
+#[tokio::test(flavor = "multi_thread")]
+async fn gap_segments_are_skipped_and_reported() {
+    let dir = test_dir("vod_gap");
+    let server = Server::start().await;
+    for i in [0, 2] {
+        server.put(
+            &format!("seg{i}.ts"),
+            fixture(&format!("ts_long/seg{i}.ts")),
+        );
+    }
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXT-X-GAP\n#EXTINF:1,\nseg1.ts\n\
+         #EXTINF:1,\nseg2.ts\n#EXT-X-ENDLIST\n",
+    );
+
+    let job = engine()
+        .start(request(server.url("index.m3u8"), &dir))
+        .unwrap();
+    let progress = job.control().progress();
+    let output = job.wait().await.unwrap();
+
+    assert_output(&output, &expected_long(&dir, &[0, 2], &[2]));
+    let gap = Missed {
+        session: 0,
+        track: 0,
+        first: 1,
+        last: 1,
+        reason: MissReason::Gap,
+    };
+    assert_eq!(output.missed, [gap]);
+    assert_eq!(server.hits("seg1.ts"), 0);
+    let last = progress.borrow().clone();
+    assert_eq!(
+        (last.segments_done, last.segments_total, last.segments_gap),
+        (2, 2, 1)
     );
 }
 

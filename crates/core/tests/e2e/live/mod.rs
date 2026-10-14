@@ -15,8 +15,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use hs_m3u8_core::{
-    Error, JobRequest, LiveEnd, LiveOptions, LiveReport, MissReason, Missed, Progress, RetryPolicy,
-    Url,
+    Error, JobRequest, LiveEnd, LiveOptions, LiveReport, MissReason, Missed, Output, Progress,
+    RetryPolicy, Url,
 };
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
@@ -91,13 +91,23 @@ async fn run_until_full(req: &JobRequest) {
     std::fs::remove_file(req.output.target.mp4().unwrap()).unwrap();
 }
 
-fn report(end: LiveEnd, session_count: usize, missed: Vec<Missed>) -> Option<LiveReport> {
-    Some(LiveReport {
+/// 录制的报告与缺失的分片，同 [`report`] 的写法。
+fn outcome(output: &Output) -> (Option<LiveReport>, Vec<Missed>) {
+    (output.live.clone(), output.missed.clone())
+}
+
+/// 录制结束原因为 `end`、合并了 `session_count` 个会话、中途没有另起会话，缺失的分片为 `missed`。
+fn report(
+    end: LiveEnd,
+    session_count: usize,
+    missed: Vec<Missed>,
+) -> (Option<LiveReport>, Vec<Missed>) {
+    let live = LiveReport {
         end: Some(end),
         session_count,
         new_sessions: vec![],
-        missed,
-    })
+    };
+    (Some(live), missed)
 }
 
 /// 第 0 个会话第 0 条轨的缺失区间。

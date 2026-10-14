@@ -19,7 +19,7 @@ use crate::error::io_error;
 use crate::selection::SelectionKey;
 use crate::workdir::{Layout, OutputKind, SegmentName, WorkDir};
 use crate::{
-    Error, Leftover, LeftoverKind, LiveReport, Mp4Output, Output, WorkDirProblem, blocking,
+    Error, Leftover, LeftoverKind, LiveReport, Missed, Mp4Output, Output, WorkDirProblem, blocking,
 };
 
 /// 交给输出的内容。
@@ -32,6 +32,8 @@ pub(crate) struct Content {
     pub segments: usize,
     /// 记进任务目录的选轨身份；来源本身是媒体播放列表时为 None
     pub selection: Option<SelectionKey>,
+    /// 见 [`Output::missed`]
+    pub missed: Vec<Missed>,
     pub live: Option<LiveReport>,
 }
 
@@ -148,6 +150,7 @@ pub(crate) async fn write(
         groups,
         segments,
         selection,
+        missed,
         live,
     } = content;
     let files = options.clone();
@@ -166,6 +169,7 @@ pub(crate) async fn write(
         segments,
         bytes,
         leftovers,
+        missed,
         live,
     })
 }

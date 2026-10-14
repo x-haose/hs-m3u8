@@ -165,6 +165,7 @@ async fn run_vod(
         groups,
         segments: plan.segment_count(),
         selection: dir.record().selection.clone(),
+        missed: plan.missed(),
         live: None,
     };
     task.finish(dir, input).await
@@ -238,11 +239,11 @@ fn merge_live(
         end,
         session_count: plan.sessions,
         new_sessions,
-        missed: live::report_missed(&plan, known),
     };
     Ok(Content {
         streams,
         segments: plan.segments,
+        missed: live::report_missed(&plan, known),
         groups: plan.groups,
         selection: dir.record().selection.clone(),
         live: Some(report),

@@ -8,7 +8,7 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use hs_m3u8_core::{Error, JobRequest, LiveEnd, StallError};
 
-use super::{expected_split, interrupt, live_request, report, split_source};
+use super::{expected_split, interrupt, live_request, outcome, report, split_source};
 use crate::server::Server;
 use crate::{assert_output, engine, run, test_dir};
 
@@ -95,7 +95,7 @@ async fn a_late_refresh_with_a_new_init_is_prepared_and_recorded() {
     let dir = req.output.target.mp4().unwrap().parent().unwrap();
     let want = expected_split(dir, &["seg0.m4s", "seg1.m4s"], &["seg0.m4s", "seg1.m4s"]);
     assert_output(&output, &want);
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }
 
 /// 会话定下时视频的刷新还挂着：暂存的候选照常处理（录到 seg1）；随后 stop 不等那次刷新，按停止收尾。
@@ -137,7 +137,7 @@ async fn stop_after_the_decision_does_not_wait_for_a_late_refresh() {
     let dir = req.output.target.mp4().unwrap().parent().unwrap();
     let want = expected_split(dir, &["seg0.m4s", "seg1.m4s"], &["seg0.m4s", "seg1.m4s"]);
     assert_output(&output, &want);
-    assert_eq!(output.live, report(LiveEnd::Stopped, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::Stopped, 1, vec![]));
 }
 
 /// 晚到的刷新失败（404），之后的刷新窗口已滑过 seg1：暂存的候选仍先处理，seg1 照常录到，不被越过。
@@ -171,7 +171,7 @@ async fn a_failed_late_refresh_does_not_skip_held_playlists() {
     let dir = req.output.target.mp4().unwrap().parent().unwrap();
     let want = expected_split(dir, &["seg0.m4s", "seg1.m4s"], &["seg0.m4s", "seg1.m4s"]);
     assert_output(&output, &want);
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }
 
 /// 判定期间音频一直没有分片而停滞，这时视频的刷新挂着：视频轨的情况不明，不当作直播结束；察觉停滞后再过一个目标

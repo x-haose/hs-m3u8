@@ -43,6 +43,8 @@ pub struct Segment {
     pub key: Option<SegmentKey>,
     /// fMP4 的 init 段（EXT-X-MAP）
     pub init: Option<InitSection>,
+    /// 标了 EXT-X-GAP：来源说这一片没有内容，不要去取（RFC 8216 4.4.4.7）
+    pub gap: bool,
 }
 
 /// 分片的 AES-128 解密参数。
@@ -86,6 +88,7 @@ struct Pending {
     /// (EXT-X-BYTERANGE 所在行, 长度, 偏移)
     range: Option<(usize, u64, Option<u64>)>,
     discontinuity: bool,
+    gap: bool,
 }
 
 /// 逐行解析时的状态：各标签的作用范围持续到被下一个同类标签替换。
@@ -143,6 +146,7 @@ impl Parser<'_> {
                 self.pending.range = Some((line, length, offset));
             }
             "EXT-X-DISCONTINUITY" => self.pending.discontinuity = true,
+            "EXT-X-GAP" => self.pending.gap = true,
             "EXT-X-KEY" => self.key(line, required("EXT-X-KEY")?).map_err(at)?,
             "EXT-X-MAP" => self.map(line, required("EXT-X-MAP")?)?,
             "EXT-X-MEDIA-SEQUENCE" => {
@@ -283,6 +287,7 @@ impl Parser<'_> {
             discontinuity: self.discontinuity,
             key,
             init: self.init.clone(),
+            gap: std::mem::take(&mut self.pending.gap),
             uri,
         });
         Ok(())

@@ -10,8 +10,8 @@ use hs_m3u8_core::{
 use hs_m3u8_remux::{DiscontinuityGroup, StreamKind, Streams};
 
 use super::{
-    STALL, expected_split_long, interrupt, live_request, missed, playlist, playlist_in, put_long,
-    put_split_master, report,
+    STALL, expected_split_long, interrupt, live_request, missed, outcome, playlist, playlist_in,
+    put_long, put_split_master, report,
 };
 use crate::server::Server;
 use crate::{assert_output, engine, expected, expected_long, fixture, run, test_dir, track};
@@ -31,7 +31,7 @@ async fn disjoint_window_starts_a_new_session() {
     let output = run(req).await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[2, 2]));
-    assert_eq!(output.live, report(LiveEnd::EndList, 2, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 2, vec![]));
 }
 
 /// 续录另起的会话换了分辨率（之前录的 160x90，之后 320x180）：录制中以合并时的第 0 组（之前运行录的）为准核对，进度
@@ -156,7 +156,7 @@ async fn overlapping_window_continues_the_session() {
     let output = run(req).await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
     // 重叠中最新的 seg1 再下载一次，与已存的比对内容
     assert_eq!((server.hits("seg0.ts"), server.hits("seg1.ts")), (1, 2));
 }
@@ -175,7 +175,7 @@ async fn event_playlist_records_each_segment_once() {
     let output = run(req).await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }
 
 /// 上次中断时没录到的分片还在窗口里：续录补上，成片里没有缺口。
@@ -193,7 +193,7 @@ async fn segments_missing_from_the_session_are_refilled() {
     let output = run(req).await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
     assert_eq!(server.hits("seg0.ts"), 1);
 }
 
@@ -212,7 +212,7 @@ async fn holes_from_an_earlier_run_are_unknown() {
 
     assert_output(&output, &expected_long(&dir, &[0, 2, 3], &[3]));
     let missed = vec![missed(1, 1, MissReason::Unknown)];
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, missed));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, missed));
 }
 
 /// max_duration 计入之前各会话录到的时长：中断前录了 1 秒，续录只再录 1 秒。
@@ -235,7 +235,10 @@ async fn max_duration_counts_earlier_sessions() {
     let output = job.wait().await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1], &[1, 1]));
-    assert_eq!(output.live, report(LiveEnd::DurationReached, 2, vec![]));
+    assert_eq!(
+        outcome(&output),
+        report(LiveEnd::DurationReached, 2, vec![])
+    );
     // 已录时长含之前的会话
     assert_eq!(progress.borrow().duration_us, 2_000_000);
     assert_eq!(server.hits("seg2.ts"), 0);
@@ -407,9 +410,8 @@ async fn merge_recorded_merges_without_the_network() {
         end: None,
         session_count: 1,
         new_sessions: vec![],
-        missed: vec![],
     };
-    assert_eq!(output.live, Some(want));
+    assert_eq!(outcome(&output), (Some(want), vec![]));
     assert_eq!(server.hits("live.m3u8"), hits);
 }
 
@@ -540,7 +542,7 @@ async fn encoder_restart_with_reused_names_starts_a_new_session() {
     let output = run(req).await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3, 2, 3], &[4, 2]));
-    assert_eq!(output.live, report(LiveEnd::EndList, 2, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 2, vec![]));
 }
 
 /// 视频与独立音频：第二次运行视频接得上、音频接不上，另起会话、视频跳过已录的序号；第三次运行两轨都接得上会话 1，
@@ -591,7 +593,7 @@ async fn empty_first_playlist_does_not_decide_the_session() {
     let output = run(req).await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
-    assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }
 
 /// 上次只落盘了 init 段、一个分片都没录到：换了令牌照常录，不要求「接得上」。
