@@ -17,7 +17,8 @@ use super::{
 };
 use crate::server::Server;
 use crate::{
-    assert_output, engine, expected, expected_long, fixture, request, run, test_dir, track,
+    assert_output, encrypt, engine, expected, expected_long, fixture, hex, request, run, test_dir,
+    track,
 };
 
 /// 刷新一次多一个分片、窗口前移，直到出现 EXT-X-ENDLIST。stall_timeout 大到无法表示时视为不限。
@@ -473,28 +474,44 @@ async fn unavailable_new_init_is_missed() {
     assert_eq!(server.hits("b/seg0.m4s"), 0);
 }
 
-/// 引擎的在途名额被本任务一个慢分片占满时，刷新与刷新中新出现的 init 段（签名每次不同）仍照常进行。
+/// 引擎的在途名额被本任务一个慢分片占满时，刷新与刷新中新出现的加密 init 段及其 key（签名每次不同）仍照常进行。
 #[tokio::test(flavor = "multi_thread")]
 async fn refresh_does_not_wait_for_engine_permits() {
     let dir = test_dir("live_permits");
     let server = Server::start().await;
+    let (key, iv) = ([0x5A; 16], [0x11; 16]);
     for name in ["init.mp4", "seg0.m4s", "seg1.m4s"] {
-        server.put(
-            &format!("video/{name}"),
-            fixture(&format!("fmp4_a/video/{name}")),
-        );
+        let plain = fixture(&format!("fmp4_a/video/{name}"));
+        server.put(&format!("video/{name}"), encrypt(&plain, &key, &iv));
     }
-    server.put("v.m3u8", signed_fmp4_playlist("video", "0.1", 1, 0, false));
+    server.put("key", key.to_vec());
+    let playlist = |count, sig, end| {
+        let key = format!(
+            "#EXT-X-KEY:METHOD=AES-128,URI=\"key?sig={sig}\",IV=0x{}\n",
+            hex(&iv)
+        );
+        signed_fmp4_playlist("video", "0.1", count, sig, end).replacen(
+            "#EXT-X-MAP",
+            &(key + "#EXT-X-MAP"),
+            1,
+        )
+    };
+    server.put("v.m3u8", playlist(1, 0, false));
     let gate = server.gate("video/seg0.m4s");
     let engine = Engine::new(NonZeroUsize::new(1).unwrap());
     let job = engine
         .start(live_request(server.url("v.m3u8"), &dir, STALL))
         .unwrap();
     let mut progress = job.control().progress();
-    // seg0 占着唯一的名额；此后的刷新须拉新签名的 init 段
+    // seg0 占着唯一的名额；此后的刷新须拉新签名的 init 段与 key
     gate.arrived.notified().await;
-    server.put("v.m3u8", signed_fmp4_playlist("video", "0.1", 2, 1, true));
-    progress.wait_for(|p| p.segments_total == 2).await.unwrap();
+    server.put("v.m3u8", playlist(2, 1, true));
+    // 刷新等名额时，要到 seg0 的请求读超时（30 秒）放开名额才出新分片：上限远小于它
+    let refreshed = progress.wait_for(|p| p.segments_total == 2);
+    tokio::time::timeout(Duration::from_secs(10), refreshed)
+        .await
+        .expect("刷新不应等 seg0 放开名额")
+        .unwrap();
     server.ungate("video/seg0.m4s");
 
     let output = job.wait().await.unwrap();

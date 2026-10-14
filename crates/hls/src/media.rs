@@ -60,9 +60,17 @@ pub struct SegmentKey {
 pub struct InitSection {
     pub uri: Url,
     pub byte_range: Option<ByteRange>,
-    /// EXT-X-MAP 处生效的 AES-128 解密参数，IV 取自那个 EXT-X-KEY（加密的 init 段须写明，RFC 8216 4.3.2.5）；None 表示
-    /// 不加密
-    pub key: Option<SegmentKey>,
+    /// EXT-X-MAP 处生效的 AES-128 解密参数；None 表示不加密
+    pub key: Option<InitKey>,
+}
+
+/// init 段的 AES-128 解密参数，取自 EXT-X-MAP 处生效的 EXT-X-KEY。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitKey {
+    /// 同 [`SegmentKey::uri`]
+    pub uri: Option<Url>,
+    /// 那个 EXT-X-KEY 写明的 IV；None 为没写（RFC 8216 4.3.2.5 要求写明：init 段没有媒体序号可推出 IV）
+    pub iv: Option<[u8; 16]>,
 }
 
 /// 资源中的一段字节：[offset, offset + length)。解析结果保证 length ≥ 1 且 offset + length 不溢出。
@@ -216,7 +224,7 @@ impl Parser<'_> {
         Ok(())
     }
 
-    /// 第 `line` 行的 EXT-X-MAP；其 BYTERANGE 必须带偏移，加密时所用的 EXT-X-KEY 必须写 IV（RFC 8216 4.3.2.5）。
+    /// 第 `line` 行的 EXT-X-MAP；其 BYTERANGE 必须带偏移（RFC 8216 4.3.2.5）。
     fn map(&mut self, line: usize, value: &str) -> Result<(), Error> {
         let at = |kind| Error::from(Malformed::Syntax { line, kind });
         let attrs = Attributes::parse(value).map_err(at)?;
@@ -231,13 +239,10 @@ impl Parser<'_> {
             },
             None => None,
         };
-        let key = match key_in_effect(&self.keys)? {
-            Some(tag) => Some(SegmentKey {
-                uri: tag.uri.clone(),
-                iv: tag.iv.ok_or(at(SyntaxError::InitWithoutIv))?,
-            }),
-            None => None,
-        };
+        let key = key_in_effect(&self.keys)?.map(|tag| InitKey {
+            uri: tag.uri.clone(),
+            iv: tag.iv,
+        });
         self.init = Some(InitSection {
             uri,
             byte_range,

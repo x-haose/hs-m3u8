@@ -12,6 +12,8 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use aes::cipher::block_padding::Pkcs7;
+use aes::cipher::{BlockModeEncrypt, KeyIvInit};
 use hs_m3u8_core::{
     Engine, Error, JobRequest, Output, OutputOptions, RetryPolicy, Source, Target, Url,
 };
@@ -21,6 +23,23 @@ use hs_m3u8_remux::{Cancel, DiscontinuityGroup, Segment, Streams, TrackSegments,
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/media")
+}
+
+/// AES-128-CBC 加密，PKCS#7 填充（HLS 的 METHOD=AES-128）。
+fn encrypt(plain: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Vec<u8> {
+    let mut buf = plain.to_vec();
+    buf.resize(plain.len() + 16, 0);
+    let len = cbc::Encryptor::<aes::Aes128>::new(key.into(), iv.into())
+        .encrypt_padded::<Pkcs7>(&mut buf, plain.len())
+        .unwrap()
+        .len();
+    buf.truncate(len);
+    buf
+}
+
+/// 写进 EXT-X-KEY 的 IV 属性用的十六进制，不带 `0x`。
+fn hex(bytes: &[u8; 16]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn fixture(path: &str) -> Vec<u8> {

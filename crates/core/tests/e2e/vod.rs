@@ -5,8 +5,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aes::cipher::block_padding::Pkcs7;
-use aes::cipher::{BlockModeEncrypt, KeyIvInit};
 use axum::http::StatusCode;
 use hs_m3u8_core::hls::{AudioChoice, Encryption};
 use hs_m3u8_core::{
@@ -17,8 +15,8 @@ use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
 use crate::server::Server;
 use crate::{
-    assert_output, engine, expected, expected_long, fixture, fixtures, request, run, test_dir,
-    track,
+    assert_output, encrypt, engine, expected, expected_long, fixture, fixtures, hex, request, run,
+    test_dir, track,
 };
 
 /// ts_a 的分片（H.264 + AAC 的 TS）。
@@ -28,21 +26,6 @@ const TS_A: [&str; 2] = ["seg0.ts", "seg1.ts"];
 fn expected_ts_a(dir: &Path) -> Vec<u8> {
     let tracks = vec![track("ts_a", None, &TS_A)];
     expected(dir, &[Streams::All], &[DiscontinuityGroup { tracks }])
-}
-
-fn encrypt(plain: &[u8], key: &[u8; 16], iv: &[u8; 16]) -> Vec<u8> {
-    let mut buf = plain.to_vec();
-    buf.resize(plain.len() + 16, 0);
-    let len = cbc::Encryptor::<aes::Aes128>::new(key.into(), iv.into())
-        .encrypt_padded::<Pkcs7>(&mut buf, plain.len())
-        .unwrap()
-        .len();
-    buf.truncate(len);
-    buf
-}
-
-fn hex(bytes: &[u8; 16]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// ts_long 的四个分片：第一个用显式 IV，其余三个换了 key 并用媒体序号推出的 IV。
@@ -254,8 +237,8 @@ async fn byte_ranges() {
     assert_eq!(server.hits("video.mp4"), 3);
 }
 
-/// 加密的 init 段（RFC 8216 4.3.2.5）：EXT-X-MAP 之前的 EXT-X-KEY 写明 IV，init 段与分片都用它解密。init 段是 TS
-/// 的节目表时明确报不支持，不当作数据损坏。
+/// 加密的 init 段（RFC 8216 4.3.2.5）：EXT-X-MAP 之前的 EXT-X-KEY 写明 IV，init 段与分片都用它解密；没写 IV 时
+/// init 段按全零 IV 解（同 hls.js），分片照常按媒体序号。init 段是 TS 的节目表时明确报不支持，不当作数据损坏。
 #[tokio::test(flavor = "multi_thread")]
 async fn encrypted_init_sections_are_decrypted_and_ts_ones_are_unsupported() {
     let dir = test_dir("encrypted_init");
@@ -274,21 +257,34 @@ async fn encrypted_init_sections_are_decrypted_and_ts_ones_are_unsupported() {
         )
     };
     server.put("index.m3u8", playlist("init.mp4"));
+    let want = |dir: &Path| {
+        let segments = ["seg0.m4s", "seg1.m4s"];
+        let tracks = vec![track("fmp4_a/video", Some("init.mp4"), &segments)];
+        expected(dir, &[Streams::All], &[DiscontinuityGroup { tracks }])
+    };
 
     let output = run(request(server.url("index.m3u8"), &dir)).await.unwrap();
+    assert_output(&output, &want(&dir));
 
-    let want = expected(
-        &dir,
-        &[Streams::All],
-        &[DiscontinuityGroup {
-            tracks: vec![track(
-                "fmp4_a/video",
-                Some("init.mp4"),
-                &["seg0.m4s", "seg1.m4s"],
-            )],
-        }],
+    let no_iv = test_dir("encrypted_init_no_iv");
+    for (sequence, name) in [
+        (None, "init.mp4"),
+        (Some(0u128), "seg0.m4s"),
+        (Some(1), "seg1.m4s"),
+    ] {
+        let plain = fixture(&format!("fmp4_a/video/{name}"));
+        let iv = sequence.map_or([0; 16], u128::to_be_bytes);
+        server.put(&format!("no_iv/{name}"), encrypt(&plain, &key, &iv));
+    }
+    server.put(
+        "no_iv/index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-KEY:METHOD=AES-128,URI=\"../key\"\n\
+         #EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\nseg0.m4s\n#EXTINF:1,\nseg1.m4s\n#EXT-X-ENDLIST\n",
     );
-    assert_output(&output, &want);
+    let output = run(request(server.url("no_iv/index.m3u8"), &no_iv))
+        .await
+        .unwrap();
+    assert_output(&output, &want(&no_iv));
 
     let ts = test_dir("ts_init");
     server.put("pat.ts", encrypt(&fixture("ts_a/seg0.ts"), &key, &iv));

@@ -8,7 +8,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use hs_m3u8_hls::{InitSection, Segment, SegmentKey};
+use hs_m3u8_hls::{InitSection, Segment};
 use hs_m3u8_remux::fmp4;
 use tokio::sync::{OnceCell, watch};
 use tokio::task::JoinSet;
@@ -220,8 +220,8 @@ impl Direct {
             .map_err(|e| segment_error(track, segment, e))
     }
 
-    /// 拉取 init 段，解密（见 [`decryption`]）并校验（见 [`check`]，须为 fMP4）；没写完的与请求的临时故障一起重试。
-    /// `permit` 为 init 段的请求占哪一份引擎名额（key 的请求同分片）。
+    /// 拉取 init 段，解密并校验（见 [`check`]，须为 fMP4）；没写完的与请求的临时故障一起重试。`permit` 为 init 段与它的
+    /// key 的请求占哪一份引擎名额。IV 依次取自定义的、EXT-X-KEY 写明的，都没有时用 [`INIT_IV`]。
     pub(crate) async fn fetch_init(
         &self,
         init: &InitSection,
@@ -229,7 +229,16 @@ impl Direct {
         cancel: &CancellationToken,
     ) -> Result<Vec<u8>, Error> {
         let ctx = &self.ctx;
-        let key = decryption(ctx, init.key.as_ref(), cancel).await?;
+        let key = match &init.key {
+            Some(k) => {
+                let iv = ctx.key_override.and_then(|given| given.iv).or(k.iv);
+                Some((
+                    key(ctx, k.uri.as_ref(), permit, cancel).await?,
+                    iv.unwrap_or(INIT_IV),
+                ))
+            }
+            None => None,
+        };
         ctx.http
             .retrying(&init.uri, cancel, || async move {
                 let response = ctx
@@ -290,7 +299,7 @@ async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
     (id, result)
 }
 
-/// 拉取分片，经 `on_segment` 回调后解密（见 [`decryption`]）并校验内容（见 [`check`]，`init` 见 [`Item`]；解密失败见
+/// 拉取分片，经 `on_segment` 回调后解密（有自定义的 key、IV 时用它们）并校验内容（见 [`check`]，`init` 见 [`Item`]；解密失败见
 /// [`decrypt_failure`]）。请求、回调、解密与校验作为一次尝试，没写完的与请求的临时故障一起重试。来源标了 EXT-X-GAP
 /// 的分片不取（RFC 8216 4.4.4.7），交到这里是本库的错误。
 async fn fetch_segment(
@@ -300,7 +309,13 @@ async fn fetch_segment(
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>, Error> {
     assert!(!segment.gap, "EXT-X-GAP 的分片在排入下载与核对之前已排除");
-    let key = decryption(ctx, segment.key.as_ref(), cancel).await?;
+    let key = match &segment.key {
+        Some(k) => {
+            let iv = ctx.key_override.and_then(|given| given.iv).unwrap_or(k.iv);
+            Some((key(ctx, k.uri.as_ref(), ctx.permit, cancel).await?, iv))
+        }
+        None => None,
+    };
     let container = &match init {
         Some(path) => Container::Fmp4 {
             trex: stored_trex(&ctx.work_dir, path).await?,
@@ -338,24 +353,23 @@ async fn fetch_segment(
         .await
 }
 
-/// 按 `key` 解密用的 key 与 IV；不加密时为 None。有自定义 key 时用它（IV 没给的用 `key` 的），否则按 `key` 的地址取
-/// （见 [`key_for`]），没有地址报 [`Unsupported::KeyWithoutUri`]。
-async fn decryption(
+/// 加密的 init 段所用的 EXT-X-KEY 没写 IV（RFC 8216 4.3.2.5 要求写明）、也没有自定义的 IV 时用的 IV：同 hls.js，按序号
+/// 0 算。猜错时 CBC 只错第一块（ftyp 的长度与类型），init 段的校验会拦下。
+const INIT_IV: [u8; 16] = [0; 16];
+
+/// 解密用的 key：有自定义 key 时用它，否则按 EXT-X-KEY 的地址 `uri` 取（见 [`key_for`]，请求占 `permit`），没有地址报
+/// [`Unsupported::KeyWithoutUri`]。
+async fn key(
     ctx: &Ctx,
-    key: Option<&SegmentKey>,
+    uri: Option<&Url>,
+    permit: Permit,
     cancel: &CancellationToken,
-) -> Result<Option<([u8; 16], [u8; 16])>, Error> {
-    let Some(key) = key else {
-        return Ok(None);
-    };
+) -> Result<[u8; 16], Error> {
     if let Some(given) = ctx.key_override {
-        return Ok(Some((given.key, given.iv.unwrap_or(key.iv))));
+        return Ok(given.key);
     }
-    let url = key
-        .uri
-        .as_ref()
-        .ok_or(Error::Unsupported(Unsupported::KeyWithoutUri))?;
-    Ok(Some((key_for(ctx, url, cancel).await?, key.iv)))
+    let url = uri.ok_or(Error::Unsupported(Unsupported::KeyWithoutUri))?;
+    key_for(ctx, url, permit, cancel).await
 }
 
 /// 源站返回空的内容（多为文件刚建出、还没写进内容）时为取自 `url` 的内容没写完。
@@ -380,9 +394,15 @@ async fn stored_trex(work_dir: &Path, path: &Path) -> Result<HashMap<u32, u32>, 
     })
 }
 
-/// 取 key：在缓存里的地址只拉取一次（见 [`Keys`]）。`on_key` 回调不改时拉到的必须是 16 字节。拉取失败不缓存，下次
-/// 重新拉取。请求与回调的错误包装为 [`Error::Key`]（取消除外）。
-async fn key_for(ctx: &Ctx, url: &Url, cancel: &CancellationToken) -> Result<[u8; 16], Error> {
+/// 取 key：在缓存里的地址只拉取一次（见 [`Keys`]），同一地址正在拉取时等那次请求（它可能占着别的名额）。请求占
+/// `permit`。`on_key` 回调不改时拉到的必须是 16 字节。拉取失败不缓存，下次重新拉取。请求与回调的错误包装为
+/// [`Error::Key`]（取消除外）。
+async fn key_for(
+    ctx: &Ctx,
+    url: &Url,
+    permit: Permit,
+    cancel: &CancellationToken,
+) -> Result<[u8; 16], Error> {
     let cell = ctx
         .keys
         .lock()
@@ -399,7 +419,7 @@ async fn key_for(ctx: &Ctx, url: &Url, cancel: &CancellationToken) -> Result<[u8
             };
             let body = ctx
                 .http
-                .get(Purpose::Key, url, None, ctx.permit, cancel)
+                .get(Purpose::Key, url, None, permit, cancel)
                 .await
                 .map_err(wrap)?
                 .body;

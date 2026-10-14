@@ -1,8 +1,8 @@
 //! 媒体播放列表的解析与规范化。
 
 use hs_m3u8_hls::{
-    ByteRange, Encryption, Error, Feature, InitSection, Malformed, MediaPlaylist, Playlist,
-    PlaylistType, SegmentKey, SyntaxError, Url, parse, parse_bytes,
+    ByteRange, Encryption, Error, Feature, InitKey, InitSection, Malformed, MediaPlaylist,
+    Playlist, PlaylistType, SegmentKey, SyntaxError, Url, parse, parse_bytes,
 };
 
 fn url(s: &str) -> Url {
@@ -263,7 +263,7 @@ fn init_section_follows_map_tags() {
 }
 
 /// 加密的 init 段：EXT-X-MAP 处生效的 key 连同它写明的 IV 记在 init 段上（之后换了 key 的分片不影响它）；那个
-/// EXT-X-KEY 没写 IV 时报错（分片缺省的 IV 由媒体序号推出，init 段没有序号）。
+/// EXT-X-KEY 没写 IV 时照记，IV 为空（init 段没有媒体序号可推出 IV）。
 #[test]
 fn an_encrypted_init_section_takes_the_key_in_effect_at_its_map() {
     let m = media(
@@ -273,9 +273,9 @@ fn an_encrypted_init_section_takes_the_key_in_effect_at_its_map() {
     let init = m.segments[0].init.clone().unwrap();
     assert_eq!(
         init.key,
-        Some(SegmentKey {
+        Some(InitKey {
             uri: Some(url("https://cdn.example.com/video/720p/k1")),
-            iv: core::array::from_fn(|i| i as u8),
+            iv: Some(core::array::from_fn(|i| i as u8)),
         })
     );
     assert_eq!(
@@ -283,15 +283,11 @@ fn an_encrypted_init_section_takes_the_key_in_effect_at_its_map() {
         Some(url("https://cdn.example.com/video/720p/k2"))
     );
 
-    assert_eq!(
-        malformed(
-            "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\"\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4,\na.m4s\n"
-        ),
-        Malformed::Syntax {
-            line: 3,
-            kind: SyntaxError::InitWithoutIv
-        }
+    let m = media(
+        "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\"\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4,\na.m4s\n",
     );
+    let key = m.segments[0].init.as_ref().unwrap().key.as_ref().unwrap();
+    assert_eq!(key.iv, None);
 }
 
 #[test]

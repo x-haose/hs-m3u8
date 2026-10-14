@@ -15,7 +15,9 @@ mod select;
 
 pub use key::{AudioKey, VariantKey};
 pub use master::{MasterPlaylist, Rendition, RenditionKind, Resolution, Variant};
-pub use media::{ByteRange, InitSection, MediaPlaylist, PlaylistType, Segment, SegmentKey};
+pub use media::{
+    ByteRange, InitKey, InitSection, MediaPlaylist, PlaylistType, Segment, SegmentKey,
+};
 pub use select::{
     AudioChoice, Preference, SelectError, SelectedAudio, Selection, VariantChoice,
     audio_renditions, select,
@@ -113,8 +115,6 @@ pub enum SyntaxError {
     SequenceAfterSegments,
     #[error("媒体序号或不连续段序号超出 64 位整数范围")]
     SequenceOverflow,
-    #[error("加密的 init 段（EXT-X-MAP）要求所用的 EXT-X-KEY 写 IV")]
-    InitWithoutIv,
 }
 
 /// 不支持的加密方式。

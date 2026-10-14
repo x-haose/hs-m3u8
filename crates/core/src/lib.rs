@@ -97,9 +97,10 @@ impl Engine {
     pub const DEFAULT_MAX_REQUESTS: NonZeroUsize =
         NonZeroUsize::new(JobRequest::DEFAULT_CONCURRENCY.get() * 4).unwrap();
 
-    /// `max_requests`：所有点播任务合计同时在途的 key、分片与 init 段请求数；所有直播任务的 key 与分片另有同样大小的
-    /// 一份，不与点播共用：直播的分片排在点播的大批下载（或挂住的请求）之后会滑出窗口、永久缺失。播放列表与刷新时
-    /// 拉的 init 段不占名额：每条轨同时最多一个，刷新不排在本任务的分片下载之后。
+    /// `max_requests`：所有点播任务合计同时在途的 key、分片与 init 段请求数；所有直播任务的 key 与分片另有同样大小的一
+    /// 份，不与点播共用：直播的分片排在点播的大批下载（或挂住的请求）之后会滑出窗口、永久缺失。播放列表与刷新时拉的
+    /// init 段（连同它的 key）不占名额：每条轨同时最多一个，刷新不排在本任务的分片下载之后；那个 key 正由分片请求时等那
+    /// 次请求。
     pub fn new(max_requests: NonZeroUsize) -> Self {
         Engine {
             requests: Permits::new(max_requests.get()),
