@@ -113,7 +113,7 @@ pub(crate) enum Mismatch {
     Eac3Substreams,
 }
 
-/// E-AC-3 的帧结构 MP4 封装器能否处理（FFmpeg 9.0.2 movenc 的 handle_eac3）。
+/// E-AC-3 的帧结构 MP4 封装器能否处理（链接的 FFmpeg 中 movenc 的 handle_eac3）。
 fn check_eac3(frames: &[frame::Ac3Frame]) -> Result<(), Mismatch> {
     for frame in frames {
         if frame.blocks < 6 {

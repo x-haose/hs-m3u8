@@ -3,7 +3,7 @@
 用的是 Unified Streaming 公开的直播测试流。录制从播放列表里已列出的分片开始（这个流列出最近约 10 分钟，几十秒内
 下完），之后跟着直播实时录；按分片的时长算最多录 15 分钟。按 Ctrl+C 停止刷新，把已列出的分片下完后写出；再按一次
 取消，已录到的分片留在任务目录。录制中断（如断网、取消、进程被杀）后再运行一次即续录；不再联网、只想把已录到的
-写出来，用 `Engine().merge_recorded(OutputOptions(...))`。
+写出来，用 `await Engine().merge_recorded(OutputOptions(...)).wait()`。
 """
 
 import asyncio

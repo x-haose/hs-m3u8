@@ -212,8 +212,8 @@ impl Packed {
         unwrap_pts(timestamp, first).rescale(CLOCK_90K, time_base)
     }
 
-    /// 第 `segment` 片损坏之后的包 `packets`（至少一个）读完了：下一片在输入里且紧接这一片时，平移到最后一包结束在下一片
-    /// 的时间戳处、待交出；否则定不了时刻，计入丢弃。
+    /// 第 `segment` 片损坏之后的包 `packets`（至少一个）读完了：下一片在输入里且紧接这一片时，平移到最后一包结束在下一
+    /// 片的时间戳处、待交出；否则定不了时刻，计入丢弃。
     fn settle(&mut self, segment: usize, packets: Vec<Packet>) {
         if !self.followed[segment] {
             self.discarded += packets.iter().map(|p| p.size() as u64).sum::<u64>();
@@ -319,7 +319,7 @@ fn synced(data: &[u8], at: usize, format: Format, reference: Option<&frame::Head
 }
 
 /// MPEG 音频帧是 Xing、Info 或 VBRI 标签帧：只看 Layer III，Xing 与 Info 在帧头之后、按版本与声道数定的偏移处，VBRI
-/// 恒在帧头之后 32 字节处（FFmpeg 9.0.2 mp3dec 的 mp3_parse_vbr_tags）。
+/// 恒在帧头之后 32 字节处（链接的 FFmpeg 中 mp3dec 的 mp3_parse_vbr_tags）。
 fn vbr_tag_frame(data: &[u8]) -> bool {
     let Some((header, _)) = frame::mpeg_audio(data) else {
         return false;

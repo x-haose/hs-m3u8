@@ -2,7 +2,7 @@
 # 生成 remux 与 core 的测试样本：ffmpeg 合成画面与正弦音，按 1 秒切成 HLS 分片，不含第三方内容。
 # 每个目录是一条轨在一个不连续段组里的分片（fMP4 另带 init.mp4）；各节目的时间戳都从头开始，
 # 前后拼接即构成 EXT-X-DISCONTINUITY。需要带 libx264、libx265、libmp3lame、libaom、libvpx、libopus 的
-# ffmpeg 命令行；ts_he_aac 另要 macOS 上的 aac_at。
+# ffmpeg 命令行；ts_he_aac、fmp4_aac_at、fmp4_he_aac 另要 macOS 上的 aac_at。
 # 产物已提交到仓库，仅在需要重建时运行。
 set -euo pipefail
 

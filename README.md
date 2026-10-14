@@ -111,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 开发
 
-需要：Rust（版本由 `rust-toolchain.toml` 固定）、[uv](https://docs.astral.sh/uv/) 0.13.0、cargo-deny 0.20.2、cargo-llvm-cov 0.9.1；macOS 另需 Xcode 命令行工具。Python 开发工具由 uv 按 `uv.lock` 装进 `.venv`（默认 Python 3.12）。
+需要：Rust（版本由 `rust-toolchain.toml` 固定）、[uv](https://docs.astral.sh/uv/) 0.13.0、cargo-deny 0.20.2、cargo-llvm-cov 0.9.1；macOS 另需 Xcode 命令行工具，Linux 与 Windows 另需 libclang（bindgen 用）；编译 FFmpeg 还要 C 编译器、make、curl 与 xz。Python 开发工具由 uv 按 `uv.lock` 装进 `.venv`（默认 Python 3.12）。
 
 ```bash
 make ffmpeg       # 下载并编译精简 FFmpeg 静态库到 third_party/ffmpeg/dist，只需一次

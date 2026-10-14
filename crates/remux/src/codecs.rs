@@ -23,7 +23,7 @@ const MP4_CODECS: [(codec::Id, StreamKind, &str); 12] = [
     (codec::Id::ALAC, StreamKind::Audio, "ALAC"),
 ];
 
-/// MP4 封装器收的 MP3 最低采样率，Hz（FFmpeg 9.0.2 movenc 的 mov_init）。
+/// MP4 封装器收的 MP3 最低采样率，Hz（链接的 FFmpeg 中 movenc 的 mov_init）。
 pub(crate) const MP3_MIN_SAMPLE_RATE: u32 = 16_000;
 
 /// 编码 `id` 能否放进 MP4；`standalone` 为输入没有 init 段（TS 与打包音频）。

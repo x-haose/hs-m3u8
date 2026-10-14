@@ -1,5 +1,5 @@
 //! 裸音频帧的帧头：ADTS（AAC）、AC-3 与 E-AC-3、MPEG 音频。读出编码参数（逐包核对用，见 [`crate::inband`]）与整帧的
-//! 字节数（打包音频按它切帧，见 [`crate::packed`]）。合法性的判定与 FFmpeg 9.0.2 的帧头解析一致，帧头不合法时为 None；
+//! 字节数（打包音频按它切帧，见 [`crate::packed`]）。合法性的判定与链接的 FFmpeg 的帧头解析一致，帧头不合法时为 None；
 //! 从字节里认 ADTS 另有要求（见 [`is_adts`]）。另读 MP4 里 AAC 解码配置的编码类型。
 
 /// ADTS 帧头里 MP4 的 AudioSpecificConfig 由之写成的三项（ISO/IEC 14496-3 1.A.2.2）。
@@ -15,7 +15,7 @@ pub(crate) fn adts(data: &[u8]) -> Option<(Adts, usize)> {
     adts_with_layer(data).map(|(adts, _, len)| (adts, len))
 }
 
-/// 从字节里认格式时 `data` 开头是不是 ADTS 帧头：另要求 layer 为 0（与 FFmpeg 9.0.2 探测 AAC 的 adts_aac_probe 一致），
+/// 从字节里认格式时 `data` 开头是不是 ADTS 帧头：另要求 layer 为 0（与链接的 FFmpeg 探测 AAC 的 adts_aac_probe 一致），
 /// 否则与 MPEG 音频的同步字分不开。
 pub(crate) fn is_adts(data: &[u8]) -> bool {
     adts_with_layer(data).is_some_and(|(_, layer, _)| layer == 0)
@@ -160,7 +160,7 @@ pub(crate) struct Mpeg {
     pub mono: bool,
 }
 
-/// 各版本、各层的码率，kbps，下标为 bitrate_index（FFmpeg 9.0.2 的 ff_mpa_bitrate_tab）：先 MPEG-1，后 MPEG-2 与
+/// 各版本、各层的码率，kbps，下标为 bitrate_index（链接的 FFmpeg 的 ff_mpa_bitrate_tab）：先 MPEG-1，后 MPEG-2 与
 /// 2.5；每组依次为 Layer I、II、III。
 const MPEG_KBPS: [[[usize; 15]; 3]; 2] = [
     [

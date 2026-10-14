@@ -18,6 +18,10 @@
 //!
 //! 输出写完回读核对每路流的包数并落盘；失败或取消（见 [`Cancel`]）时输出上可能留有写了一半的文件。输出要么完整、要么
 //! 不存在由调用方写到临时路径、成功后改名、失败时删除来保证。错误信息已包含原因，不经 `source()` 重复给出。
+//!
+//! 依照链接的 FFmpeg 的这些内部行为（各处注释写作「链接的 FFmpeg …」）：movenc 的 mov_init（MP3 最低采样率）与
+//! handle_eac3（E-AC-3 的帧结构），mov 解复用器的 mov_read_tfhd、mov_read_trun（fMP4 样本的位置），mp3dec 的
+//! mp3_parse_vbr_tags（Info/Xing 帧），ADTS、MPEG 音频、AC-3 的帧头解析与 adts_aac_probe、ff_mpa_bitrate_tab。
 
 mod chain;
 mod codecs;

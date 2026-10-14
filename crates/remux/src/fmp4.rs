@@ -66,7 +66,7 @@ pub enum Problem {
 /// - 顶层 box 首尾相接、恰好铺满。认得出类型的 box 超出了数据为没写完；末尾不足 8 个字节、或类型认不出而长度写 0
 ///   或超出了数据的为多出的字节。
 /// - 各 moof 的 trun 声明的样本数据都在 `data` 里，否则为没写完；这时末尾多出的字节也按没写完（截断落在 box 头里）。
-///   样本数据的位置按 FFmpeg 9.0.2 mov 解复用器的算法（mov.c 的 mov_read_tfhd、mov_read_trun）：从基准加 trun 的
+///   样本数据的位置按链接的 FFmpeg 中 mov 解复用器的算法（mov.c 的 mov_read_tfhd、mov_read_trun）：从基准加 trun 的
 ///   data_offset（没写时为 0）起；基准在 tfhd 写了 default-base-is-moof 时为 moof 的起点，否则为上一个 trun 的数据
 ///   终点（moof 里第一个为 moof 的起点）；tfhd 写了 base_data_offset 的报 [`Problem::BaseDataOffset`]。样本长度依次
 ///   取 trun、tfhd、`trex` 里写的；`trex` 里没有的轨 FFmpeg 不读，这里也跳过。
