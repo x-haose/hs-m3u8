@@ -60,6 +60,12 @@ impl Processed {
                 r.skipped_through.is_none_or(|s| sequence > s) && !r.done.contains(&sequence)
             })
     }
+
+    /// 分片 `segment` 要不要去取：要录，且来源没有标 EXT-X-GAP（RFC 8216 4.4.4.7：客户端不取它）。拉新 init 段与
+    /// 处理播放列表都按它：拉的正是这些分片引用的 init 段。
+    pub(super) fn fetches(&self, segment: &Segment) -> bool {
+        !segment.gap && self.is_new(segment.sequence)
+    }
 }
 
 /// 与上一份比对后怎么处理这份播放列表。
@@ -84,7 +90,7 @@ pub(super) struct Scope<'a> {
 /// 新分片引用、上一份播放列表里没有的 init 段，及其拉取结果。
 pub(super) type NewInits = Vec<(InitSection, Result<Vec<u8>, Error>)>;
 
-/// 拉哪些新 init 段：要录的分片（见 [`Processed::is_new`]）引用、又不在 `known` 中的。
+/// 拉哪些新 init 段：要去取的分片（见 [`Processed::fetches`]）引用、又不在 `known` 中的。
 pub(super) struct InitsToFetch {
     /// 上一份播放列表引用、内容已知的 init 段
     pub known: Vec<InitSection>,
@@ -313,11 +319,12 @@ impl Window {
                 .processed
                 .last
                 .map_or(s.sequence, |l| l.max(s.sequence));
+            let fetches = self.processed.fetches(s);
             self.processed.last = Some(last);
             let discontinuity = u64::try_from(number)
                 .expect("要录的分片编号为负时在处理之前已查出（见 ungroupable）");
-            let init = new_segment_init(s, &listing.inits, failed);
-            self.record_new(scope, s, discontinuity, init, update)?;
+            let init = || new_segment_init(s, &listing.inits, failed);
+            self.record_new(scope, s, discontinuity, fetches.then_some(init), update)?;
         }
         Ok(listing)
     }
@@ -396,20 +403,21 @@ impl Window {
         }
     }
 
-    /// 一个新分片：录满 max_duration 后不再录；来源标了 EXT-X-GAP、init 段取不到时记为缺失；其余排入下载。
+    /// 一个新分片：录满 max_duration 后不再录；不去取（`init` 为 None，来源标了 EXT-X-GAP，见
+    /// [`Processed::fetches`]）、init 段取不到时记为缺失；其余排入下载。`init` 给出要去取的分片的 init 段的状态。
     fn record_new(
         &mut self,
         scope: &Scope<'_>,
         segment: &Segment,
         discontinuity: u64,
-        init: InitState,
+        init: Option<impl FnOnce() -> InitState>,
         update: &mut Update,
     ) -> Result<(), Error> {
         if scope.max_us.is_some_and(|max| self.recorded_us >= max) {
             return Ok(());
         }
         self.recorded_us = self.recorded_us.saturating_add(segment.duration_us);
-        if segment.gap {
+        let Some(init) = init else {
             update.gaps.push(Missed {
                 session: scope.session,
                 track: scope.track,
@@ -418,8 +426,8 @@ impl Window {
                 reason: MissReason::Gap,
             });
             return Ok(());
-        }
-        let init = match init {
+        };
+        let init = match init() {
             InitState::Absent => None,
             InitState::Ready(fingerprint) => Some(fingerprint),
             InitState::Failed(failure) => {
@@ -475,7 +483,7 @@ impl Window {
     }
 }
 
-/// 新分片所用 init 段的状况；`inits` 为本次内容已知的 init 段。
+/// 要去取的新分片所用 init 段的状况；`inits` 为本次内容已知的 init 段。
 fn new_segment_init(
     segment: &Segment,
     inits: &[(InitSection, Fingerprint)],
@@ -541,7 +549,8 @@ fn listed_of(recorded: &LatestSession) -> HashMap<u64, Listed> {
         .collect()
 }
 
-/// `playlist` 与 `recorded` 重叠、身份与编号都一致时，重叠的分片，序号从大到小；有矛盾或没有重叠时为空。
+/// `playlist` 与 `recorded` 重叠、身份与编号都一致时，重叠的分片，序号从大到小，不含来源标了 EXT-X-GAP 的（不去取
+/// 它们）；有矛盾或没有重叠时为空。
 pub(super) fn overlaps<'p>(
     recorded: &LatestSession,
     playlist: &'p MediaPlaylist,
@@ -552,7 +561,7 @@ pub(super) fn overlaps<'p>(
             .segments
             .iter()
             .rev()
-            .filter(|s| previous.contains_key(&s.sequence))
+            .filter(|s| !s.gap && previous.contains_key(&s.sequence))
             .collect(),
         _ => Vec::new(),
     }

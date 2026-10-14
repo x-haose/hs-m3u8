@@ -291,13 +291,15 @@ async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
 }
 
 /// 拉取分片，经 `on_segment` 回调后解密（见 [`decryption`]）并校验内容（见 [`check`]，`init` 见 [`Item`]；解密失败见
-/// [`decrypt_failure`]）。请求、回调、解密与校验作为一次尝试，没写完的与请求的临时故障一起重试。
+/// [`decrypt_failure`]）。请求、回调、解密与校验作为一次尝试，没写完的与请求的临时故障一起重试。来源标了 EXT-X-GAP
+/// 的分片不取（RFC 8216 4.4.4.7），交到这里是本库的错误。
 async fn fetch_segment(
     ctx: &Ctx,
     segment: &Segment,
     init: Option<&Path>,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>, Error> {
+    assert!(!segment.gap, "EXT-X-GAP 的分片在排入下载与核对之前已排除");
     let key = decryption(ctx, segment.key.as_ref(), cancel).await?;
     let container = &match init {
         Some(path) => Container::Fmp4 {

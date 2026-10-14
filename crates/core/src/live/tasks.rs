@@ -180,7 +180,7 @@ async fn new_inits(
 ) -> Result<NewInits, Error> {
     let mut fetched = NewInits::new();
     for s in &playlist.segments {
-        if s.gap || !inits.processed.is_new(s.sequence) {
+        if !inits.processed.fetches(s) {
             continue;
         }
         if let Some(init) = &s.init

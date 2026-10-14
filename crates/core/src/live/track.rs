@@ -79,7 +79,7 @@ pub(super) struct LiveTrack {
     preparing: Option<Instant>,
     /// 之前各会话已录到的时长，微秒
     recorded_us: u64,
-    /// 最近一次有分片下载成功的时刻（或录制开始、会话定下的时刻）
+    /// 最近一次有分片下载成功或列出 EXT-X-GAP 的新分片（直播还在，只是这段没有内容）的时刻，或录制开始、会话定下的时刻
     last_recorded: Instant,
     /// 最近一次发起的刷新的发起时刻
     last_started: Option<Instant>,
@@ -417,6 +417,9 @@ impl LiveTrack {
         }
         if update.any_new {
             self.last_listed = now;
+        }
+        if !update.gaps.is_empty() {
+            self.last_recorded = now;
         }
         if let Some(failure) = &update.init_failure {
             self.last_download_failure = Some(failure.clone());

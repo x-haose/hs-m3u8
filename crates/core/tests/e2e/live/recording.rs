@@ -282,6 +282,43 @@ async fn gap_segments_are_reported_as_missed_without_fetching() {
     );
 }
 
+/// fMP4：窗口里第一个分片标了 EXT-X-GAP，它的 init 段还没拉过：不为它拉 init 段，记为缺失；之后的分片照常拉 init 段、
+/// 录到。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gap_before_its_init_is_fetched_is_skipped() {
+    let dir = test_dir("live_gap_init");
+    let server = Server::start().await;
+    for name in ["init.mp4", "seg1.m4s"] {
+        server.put(
+            &format!("video/{name}"),
+            fixture(&format!("fmp4_a/video/{name}")),
+        );
+    }
+    let head = "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MEDIA-SEQUENCE:0\n\
+                #EXT-X-MAP:URI=\"video/init.mp4\"\n#EXT-X-GAP\n#EXTINF:1,\nvideo/seg0.m4s\n";
+    server.put_sequence(
+        "live.m3u8",
+        vec![
+            head.to_owned(),
+            format!("{head}#EXTINF:1,\nvideo/seg1.m4s\n#EXT-X-ENDLIST\n"),
+        ],
+    );
+
+    let output = run(live_request(server.url("live.m3u8"), &dir, STALL))
+        .await
+        .unwrap();
+
+    let group = DiscontinuityGroup {
+        tracks: vec![track("fmp4_a/video", Some("init.mp4"), &["seg1.m4s"])],
+    };
+    assert_output(&output, &expected(&dir, &[Streams::All], &[group]));
+    assert_eq!(
+        outcome(&output),
+        report(LiveEnd::EndList, 1, vec![missed(0, 0, MissReason::Gap)])
+    );
+    assert_eq!(server.hits("video/seg0.m4s"), 0);
+}
+
 /// fMP4 分片一直没写完（mdat 截断）：按重试策略取完次数后仍不完整，记为缺失，录制继续。
 #[tokio::test(flavor = "multi_thread")]
 async fn segments_still_incomplete_after_retries_are_missed() {

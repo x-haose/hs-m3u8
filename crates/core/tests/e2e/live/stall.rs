@@ -105,6 +105,39 @@ async fn a_stall_after_the_process_was_suspended_is_judged_on_a_fresh_refresh() 
     assert_eq!(outcome(&output), report(end, 1, vec![]));
 }
 
+/// 来源断流期间一直写 EXT-X-GAP（超过停滞时长）：直播还在，不算停滞，录制照常进行，直到出现 ENDLIST；GAP 记为缺失。
+#[tokio::test(flavor = "multi_thread")]
+async fn continuous_gaps_are_not_a_stall() {
+    let dir = test_dir("live_gap_stall");
+    let server = Server::start().await;
+    put_long(&server, "", &[0]);
+    let window = |gaps: u64| {
+        let mut text =
+            "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1,\nseg0.ts\n"
+                .to_owned();
+        for i in 1..=gaps {
+            text += &format!("#EXT-X-GAP\n#EXTINF:1,\nseg{i}.ts\n");
+        }
+        text
+    };
+    // 每次刷新多一个 GAP，合计远长于 0.5 秒的停滞时长
+    let mut windows: Vec<String> = (0..=15).map(window).collect();
+    windows.push(window(15) + "#EXT-X-ENDLIST\n");
+    server.put_sequence("live.m3u8", windows);
+
+    let output = run(live_request(
+        server.url("live.m3u8"),
+        &dir,
+        Duration::from_millis(500),
+    ))
+    .await
+    .unwrap();
+
+    assert_output(&output, &expected_long(&dir, &[0], &[1]));
+    let gaps = missed(1, 15, MissReason::Gap);
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![gaps]));
+}
+
 /// 音频轨的播放列表在首次之后被删除、视频轨照常：按音频轨的直播已结束收尾。
 #[tokio::test(flavor = "multi_thread")]
 async fn one_track_whose_playlist_is_removed_ends_the_recording() {
