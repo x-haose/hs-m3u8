@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::fetch::Fetcher;
 use crate::http::{Http, Permit};
-use crate::ident::{source_digest, url_digest};
+use crate::ident::url_digest;
 use crate::info::Selected;
 use crate::live::{self, Context, Outcome};
 use crate::output::{self, Content, ResolvedOutput};
@@ -17,7 +17,7 @@ use crate::request::JobRequest;
 use crate::resolve::{self, Resolved};
 use crate::vod::{self, Plan};
 use crate::workdir::{
-    self, JobRecord, Lock, OutputKind, RecordKind, Stored, WorkDir, read_resumable,
+    self, JobRecord, Lock, OutputKind, RecordKind, SourceId, Stored, WorkDir, read_resumable,
 };
 use crate::{
     Error, Leftover, LeftoverKind, LiveReport, Output, Progress, Stage, Unsettled, WorkDirProblem,
@@ -53,12 +53,20 @@ pub(crate) async fn run(
         progress,
     };
     let (request, root) = (&task.request, &task.output.work_dir);
-    let source = source_digest(&request.source.url, &request.source.preference);
-    // 任务目录里有同一来源、可续的记录时，按记录的选轨找回同一条轨；记录的是直播且请求开启了直播时按直播继续，
-    // 即使播放列表已出现 ENDLIST（中断期间直播结束了）。没开启直播时按点播运行，由 WorkDir::open 报类型不符
-    let recorded = read_resumable(root.clone())
-        .await?
-        .filter(|r| r.source_digest == source);
+    let source = SourceId::of(&request.source);
+    // 任务目录里有可续的记录时，身份不符在联网之前就报（WorkDir::open 加锁后照样核对）；相符时按记录的选轨找回同一条
+    // 轨，记录的是直播且请求开启了直播时按直播继续，即使播放列表已出现 ENDLIST（中断期间直播结束了）。没开启直播时按
+    // 点播运行，由 WorkDir::open 报类型不符
+    let recorded = read_resumable(root.clone()).await?;
+    if let Some(problem) = recorded
+        .as_ref()
+        .and_then(|r| r.source.mismatch(&source, request.adopt_address))
+    {
+        return Err(Error::WorkDir {
+            path: root.clone(),
+            problem,
+        });
+    }
     let continuing_live = recorded
         .as_ref()
         .is_some_and(|r| matches!(r.kind, RecordKind::Live { .. }));
@@ -96,19 +104,19 @@ async fn prepare(output: &ResolvedOutput) -> Result<Option<Lock>, Error> {
 /// 直播：录制，再合并任务目录中录到的全部分片。
 async fn run_live(
     task: Task,
-    source: String,
+    source: SourceId,
     resolved: Resolved,
     lock: Option<Lock>,
 ) -> Result<Output, Error> {
     let options = task.request.live.ok_or(Error::LiveNotEnabled)?;
     let record = JobRecord {
-        source_digest: source,
+        source,
         selection: resolved.selection_key(),
         kind: RecordKind::Live {
             url_digest: url_digest(&task.request.source.url),
         },
     };
-    let dir = WorkDir::open(task.output.work_dir.clone(), record, lock).await?;
+    let dir = task.open(record, lock).await?;
     let mut fetcher = task.fetcher(&dir, Permit::Live);
     let ctx = Context {
         http: task.http.clone(),
@@ -133,7 +141,7 @@ async fn run_live(
 /// 点播：下载计划中尚未完成的部分，再合并。
 async fn run_vod(
     task: Task,
-    source: String,
+    source: SourceId,
     resolved: Resolved,
     lock: Option<Lock>,
 ) -> Result<Output, Error> {
@@ -141,13 +149,13 @@ async fn run_vod(
     let selection = resolved.selection_key();
     let plan = Plan::new(resolved.tracks)?;
     let record = JobRecord {
-        source_digest: source,
+        source,
         selection,
         kind: RecordKind::Vod {
             plan_digest: plan.digest(),
         },
     };
-    let dir = WorkDir::open(task.output.work_dir.clone(), record, lock).await?;
+    let dir = task.open(record, lock).await?;
     let mut fetcher = task.fetcher(&dir, Permit::Vod);
     let mp4 = task.output.get(OutputKind::Mp4).map(|_| streams.as_slice());
     let groups = vod::download(
@@ -187,7 +195,7 @@ pub(crate) async fn merge_recorded(
             problem: WorkDirProblem::NotLiveRecording,
         });
     }
-    let dir = WorkDir::open(root, record, lock).await?;
+    let dir = WorkDir::open(root, record, false, lock).await?;
     let streams = dir.record().streams();
     let stored = dir.scan(streams.len()).await?;
     live::count_stored(&stored, &progress);
@@ -250,6 +258,12 @@ fn merge_live(
 }
 
 impl Task {
+    /// 打开任务目录，见 [`WorkDir::open`]。
+    async fn open(&self, record: JobRecord, lock: Option<Lock>) -> Result<WorkDir, Error> {
+        let root = self.output.work_dir.clone();
+        WorkDir::open(root, record, self.request.adopt_address, lock).await
+    }
+
     /// 下载任务目录 `dir` 的分片的下载器；`permit` 见 [`Fetcher::new`]。
     fn fetcher(&self, dir: &WorkDir, permit: Permit) -> Fetcher {
         Fetcher::new(

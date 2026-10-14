@@ -1,27 +1,58 @@
 //! `job.json`：任务目录记录的任务，及其序列化格式（契约）。
 
-use std::path::Path;
-
 use hs_m3u8_hls::{AudioKey, Resolution, VariantKey};
 use hs_m3u8_remux::Streams;
 use serde::{Deserialize, Serialize};
 
+use crate::ident::{address_digest, preference_digest};
 use crate::selection::{SelectionKey, track_streams};
-use crate::{Error, JobType, WorkDirProblem};
+use crate::{JobType, Source, WorkDirProblem};
 
 /// 任务目录格式的版本：job.json 与 outputs.json 的字段，分片与 init 段的文件名、其中指纹与摘要的编码，以及下载时对
 /// 文件内容的改写（fMP4 长度写 0 的最后一个 box 改为实际长度）。任何一项改变都要升；两个文件都带它，读到别的版本
 /// 一律拒绝。
-pub(super) const FORMAT_VERSION: u32 = 8;
+pub(super) const FORMAT_VERSION: u32 = 9;
 
 /// 任务目录记录的任务；续传、续录时须与当前请求相符。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct JobRecord {
-    /// 见 [`crate::ident::source_digest`]
-    pub source_digest: String,
+    pub source: SourceId,
     /// 所选的变体与音频；来源本身是媒体播放列表时为 None
     pub selection: Option<SelectionKey>,
     pub kind: RecordKind,
+}
+
+/// 任务的身份：来源地址与选轨偏好（见 [`crate::Source::url`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourceId {
+    /// 见 [`address_digest`]
+    pub address_digest: String,
+    /// 见 [`preference_digest`]
+    pub preference_digest: String,
+}
+
+impl SourceId {
+    pub(crate) fn of(source: &Source) -> Self {
+        SourceId {
+            address_digest: address_digest(&source.url),
+            preference_digest: preference_digest(&source.preference),
+        }
+    }
+
+    /// 记录的身份 `self` 与当前的 `current` 不符之处；`adopt_address` 见 [`crate::JobRequest::adopt_address`]。
+    pub(crate) fn mismatch(
+        &self,
+        current: &SourceId,
+        adopt_address: bool,
+    ) -> Option<WorkDirProblem> {
+        if self.preference_digest != current.preference_digest {
+            Some(WorkDirProblem::PreferenceChanged)
+        } else if self.address_digest != current.address_digest && !adopt_address {
+            Some(WorkDirProblem::AddressChanged)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,14 +62,6 @@ pub(crate) enum RecordKind {
     /// 直播：完整来源地址（含查询串）的摘要。地址变了仍可沿用目录，由录制确认窗口与已录内容衔接后
     /// 再用 [`super::WorkDir::adopt_url`] 更新
     Live { url_digest: String },
-}
-
-/// 记录与当前请求不符之处。
-pub(super) enum Conflict {
-    Source,
-    Kind { recorded: JobType, current: JobType },
-    Tracks,
-    Plan,
 }
 
 impl JobRecord {
@@ -62,43 +85,31 @@ impl JobRecord {
         }
     }
 
-    /// 记录为 `self` 的目录能否用于当前请求 `current`；直播的完整地址不比较。
-    pub(super) fn conflict(&self, current: &JobRecord) -> Option<Conflict> {
-        if self.source_digest != current.source_digest {
-            return Some(Conflict::Source);
+    /// 记录为 `self` 的目录不能用于当前请求 `current` 的原因；`adopt_address` 见
+    /// [`crate::JobRequest::adopt_address`]。来源地址（允许不同时）与直播的完整地址不比较。
+    pub(super) fn conflict(
+        &self,
+        current: &JobRecord,
+        adopt_address: bool,
+    ) -> Option<WorkDirProblem> {
+        if let Some(problem) = self.source.mismatch(&current.source, adopt_address) {
+            return Some(problem);
         }
         let (recorded, current_type) = (self.job_type(), current.job_type());
         if recorded != current_type {
-            return Some(Conflict::Kind {
+            return Some(WorkDirProblem::KindMismatch {
                 recorded,
                 current: current_type,
             });
         }
         if self.selection != current.selection {
-            return Some(Conflict::Tracks);
+            return Some(WorkDirProblem::TracksMismatch);
         }
         match (&self.kind, &current.kind) {
             (RecordKind::Vod { plan_digest: a }, RecordKind::Vod { plan_digest: b }) if a != b => {
-                Some(Conflict::Plan)
+                Some(WorkDirProblem::PlanChanged)
             }
             _ => None,
-        }
-    }
-}
-
-impl Conflict {
-    pub(super) fn into_error(self, root: &Path) -> Error {
-        let problem = match self {
-            Conflict::Plan => WorkDirProblem::PlanChanged,
-            Conflict::Source => WorkDirProblem::SourceMismatch,
-            Conflict::Kind { recorded, current } => {
-                WorkDirProblem::KindMismatch { recorded, current }
-            }
-            Conflict::Tracks => WorkDirProblem::TracksMismatch,
-        };
-        Error::WorkDir {
-            path: root.to_path_buf(),
-            problem,
         }
     }
 }
@@ -109,13 +120,15 @@ impl Conflict {
 enum JobFile {
     Vod {
         format_version: u32,
-        source_digest: String,
+        address_digest: String,
+        preference_digest: String,
         selection: Option<SelectionFile>,
         plan_digest: String,
     },
     Live {
         format_version: u32,
-        source_digest: String,
+        address_digest: String,
+        preference_digest: String,
         selection: Option<SelectionFile>,
         url_digest: String,
     },
@@ -172,18 +185,23 @@ pub(super) fn check_version(bytes: &[u8], file: &'static str) -> Result<(), Work
 
 pub(super) fn encode(record: &JobRecord) -> Vec<u8> {
     let format_version = FORMAT_VERSION;
-    let source_digest = record.source_digest.clone();
+    let SourceId {
+        address_digest,
+        preference_digest,
+    } = record.source.clone();
     let selection = record.selection.as_ref().map(SelectionFile::from);
     let file = match &record.kind {
         RecordKind::Vod { plan_digest } => JobFile::Vod {
             format_version,
-            source_digest,
+            address_digest,
+            preference_digest,
             selection,
             plan_digest: plan_digest.clone(),
         },
         RecordKind::Live { url_digest } => JobFile::Live {
             format_version,
-            source_digest,
+            address_digest,
+            preference_digest,
             selection,
             url_digest: url_digest.clone(),
         },
@@ -195,23 +213,38 @@ pub(super) fn encode(record: &JobRecord) -> Vec<u8> {
 pub(super) fn decode(bytes: &[u8]) -> Result<JobRecord, WorkDirProblem> {
     let unreadable = |e| WorkDirProblem::Corrupt(format!("job.json 无法解析：{e}"));
     check_version(bytes, "job.json")?;
-    let (source_digest, selection, kind) =
+    let (address_digest, preference_digest, selection, kind) =
         match serde_json::from_slice(bytes).map_err(unreadable)? {
             JobFile::Vod {
-                source_digest,
+                address_digest,
+                preference_digest,
                 selection,
                 plan_digest,
                 ..
-            } => (source_digest, selection, RecordKind::Vod { plan_digest }),
+            } => (
+                address_digest,
+                preference_digest,
+                selection,
+                RecordKind::Vod { plan_digest },
+            ),
             JobFile::Live {
-                source_digest,
+                address_digest,
+                preference_digest,
                 selection,
                 url_digest,
                 ..
-            } => (source_digest, selection, RecordKind::Live { url_digest }),
+            } => (
+                address_digest,
+                preference_digest,
+                selection,
+                RecordKind::Live { url_digest },
+            ),
         };
     Ok(JobRecord {
-        source_digest,
+        source: SourceId {
+            address_digest,
+            preference_digest,
+        },
         selection: selection.map(SelectionKey::from),
         kind,
     })
@@ -299,8 +332,12 @@ mod tests {
 
     #[test]
     fn job_file_round_trips_and_rejects_other_versions_and_fields() {
+        let source = SourceId {
+            address_digest: "ab".into(),
+            preference_digest: "ef".into(),
+        };
         let live = JobRecord {
-            source_digest: "ab".into(),
+            source: source.clone(),
             selection: Some(SelectionKey {
                 variant: VariantKey {
                     bandwidth: Some(2000),
@@ -326,33 +363,34 @@ mod tests {
         let bytes = encode(&live);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"kind":"live","format_version":8,"source_digest":"ab","selection":{"variant":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"],"audio_group":"aud","occurrence":1},"audio":{"group_id":"aud","language":"en","name":null,"occurrence":2}},"url_digest":"cd"}"#
+            r#"{"kind":"live","format_version":9,"address_digest":"ab","preference_digest":"ef","selection":{"variant":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"],"audio_group":"aud","occurrence":1},"audio":{"group_id":"aud","language":"en","name":null,"occurrence":2}},"url_digest":"cd"}"#
         );
         assert_eq!(decode(&bytes), Ok(live));
         let vod = JobRecord {
-            source_digest: "ab".into(),
+            source,
             selection: None,
             kind: RecordKind::Vod {
-                plan_digest: "ef".into(),
+                plan_digest: "12".into(),
             },
         };
         assert_eq!(decode(&encode(&vod)), Ok(vod));
 
         assert_eq!(
-            decode(br#"{"kind":"vod","format_version":9}"#),
+            decode(br#"{"kind":"vod","format_version":10}"#),
             Err(WorkDirProblem::UnsupportedVersion {
                 file: "job.json",
-                found: 9,
-                supported: 8
+                found: 10,
+                supported: 9
             })
         );
         for rejected in [
             r#"{"kind":"vod","format_version":1,"plan_digest":"cd"}"#,
-            r#"{"kind":"vod","format_version":6,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
-            r#"{"kind":"vod","format_version":8,"source_digest":"a","selection":null,"plan_digest":"p","extra":1}"#,
-            r#"{"format_version":8,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
-            r#"{"kind":"vod","format_version":8,"source_digest":"a","selection":null,"url_digest":"u"}"#,
-            r#"{"kind":"live","format_version":8,"source_digest":"a","selection":{"variant":{"bandwidth":1,"resolution":null,"codecs":[],"audio_group":null,"occurrence":0,"uri":"x"},"audio":null},"url_digest":"u"}"#,
+            r#"{"kind":"vod","format_version":8,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
+            r#"{"kind":"vod","format_version":9,"address_digest":"a","preference_digest":"b","selection":null,"plan_digest":"p","extra":1}"#,
+            r#"{"format_version":9,"address_digest":"a","preference_digest":"b","selection":null,"plan_digest":"p"}"#,
+            r#"{"kind":"vod","format_version":9,"address_digest":"a","preference_digest":"b","selection":null,"url_digest":"u"}"#,
+            r#"{"kind":"vod","format_version":9,"source_digest":"a","selection":null,"plan_digest":"p"}"#,
+            r#"{"kind":"live","format_version":9,"address_digest":"a","preference_digest":"b","selection":{"variant":{"bandwidth":1,"resolution":null,"codecs":[],"audio_group":null,"occurrence":0,"uri":"x"},"audio":null},"url_digest":"u"}"#,
         ] {
             assert!(decode(rejected.as_bytes()).is_err(), "{rejected}");
         }

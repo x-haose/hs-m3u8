@@ -47,10 +47,14 @@ impl fmt::Display for Fingerprint {
     }
 }
 
-/// 来源摘要（SHA-256 十六进制）：来源地址（见 [`source_address`]）与选轨偏好。语言代码与选轨一样不区分
-/// ASCII 大小写；按身份选的写成 job.json 里同样的 JSON（换行转义）。每项一行；地址与语言里不会有换行（语言由
-/// [`crate::Source`] 的校验保证），编码没有歧义。
-pub(crate) fn source_digest(url: &Url, preference: &Preference) -> String {
+/// 来源地址的摘要（SHA-256 十六进制），见 [`source_address`]。
+pub(crate) fn address_digest(url: &Url) -> String {
+    digest_hex(source_address(url))
+}
+
+/// 选轨偏好的摘要（SHA-256 十六进制）。语言代码与选轨一样不区分 ASCII 大小写；按身份选的写成 job.json 里同样的
+/// JSON（其中换行已转义）。每项一行；语言里不会有换行（由 [`crate::Source`] 的校验保证），编码没有歧义。
+pub(crate) fn preference_digest(preference: &Preference) -> String {
     let variant = match &preference.variant {
         VariantChoice::Best => "best".to_owned(),
         VariantChoice::Index(index) => format!("index {index}"),
@@ -62,14 +66,11 @@ pub(crate) fn source_digest(url: &Url, preference: &Preference) -> String {
         AudioChoice::Index(index) => format!("index {index}"),
         AudioChoice::Matching(key) => format!("matching {}", audio_json(key)),
     };
-    digest_hex(format!(
-        "url {}\nvariant {variant}\naudio {audio}\n",
-        source_address(url)
-    ))
+    digest_hex(format!("variant {variant}\naudio {audio}\n"))
 }
 
-/// 来源摘要里的地址：去掉用户名、密码、查询串与片段，这些部分常带每次会话不同的凭据或令牌。属于任务目录
-/// 格式，输出改变须升 job.json 的格式版本。
+/// 来源地址：去掉用户名、密码、查询串与片段，这些部分常带每次会话不同的凭据或令牌。属于任务目录格式，输出改变须升
+/// job.json 的格式版本。
 fn source_address(url: &Url) -> String {
     match url.host_str() {
         Some(host) => {
@@ -177,21 +178,25 @@ mod tests {
         );
 
         let source = Url::parse("https://user:pw@a.example:8443/live.m3u8?token=1").unwrap();
+        assert_eq!(
+            address_digest(&source),
+            "d1b44fe15e4e8518281ca728a3234e973fffea2d5cb09d1a2e4e63bfa5824e75"
+        );
         let best = Preference {
             variant: VariantChoice::Best,
             audio: AudioChoice::Language("EN".into()),
         };
         assert_eq!(
-            source_digest(&source, &best),
-            "a9106f2006973de9187a043d77a969aa977790875deb871ecc8da7c70e9dee62"
+            preference_digest(&best),
+            "aa17c2345a7d79ea2ddd8272b3b49122c3ec2f442df4591cac5b68ba9a56501c"
         );
         let index = Preference {
             variant: VariantChoice::Index(2),
             audio: AudioChoice::Default,
         };
         assert_eq!(
-            source_digest(&source, &index),
-            "0e42d3b0802e2f2d74ae0d8dc420518949c503b570451b6a988c73e8930028d5"
+            preference_digest(&index),
+            "9f08ffbf33ebf4575933b5c13a4429b0263dbb652e42f3396f8ffcd2d6a10c6e"
         );
         let matching = Preference {
             variant: VariantChoice::Matching(VariantKey {
@@ -212,8 +217,8 @@ mod tests {
             }),
         };
         assert_eq!(
-            source_digest(&source, &matching),
-            "425ee82b402582123bc6c94953587aa0762fecd6a1bac8c07c7f75fc926955ce"
+            preference_digest(&matching),
+            "a5365611d46baa11482543112e12f2603d178d19052f8522f3a3a33826240ccf"
         );
 
         let live = Url::parse("https://a.example:8443/live.m3u8?token=1").unwrap();
@@ -234,43 +239,31 @@ mod tests {
     }
 
     #[test]
-    fn source_digest_ignores_query_and_language_case_only() {
-        let url = |s: &str| Url::parse(s).unwrap();
-        let preference = |variant, language: Option<&str>| Preference {
-            variant,
-            audio: language.map_or(AudioChoice::Default, |l| AudioChoice::Language(l.into())),
-        };
-        let base = source_digest(
-            &url("https://a.example/live.m3u8?token=1"),
-            &preference(VariantChoice::Best, Some("EN")),
-        );
+    fn address_digest_ignores_credentials_query_and_fragment_only() {
+        let digest = |s: &str| address_digest(&Url::parse(s).unwrap());
+        let base = digest("https://a.example/v/live.m3u8?token=1");
+        assert_eq!(base, digest("https://u:p@a.example/v/live.m3u8?token=2#t"));
+        for other in [
+            "https://b.example/v/live.m3u8",
+            "https://a.example/w/live.m3u8",
+            "http://a.example/v/live.m3u8",
+        ] {
+            assert_ne!(base, digest(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn preference_digest_ignores_language_case_only() {
+        let digest = |variant, audio| preference_digest(&Preference { variant, audio });
+        let base = digest(VariantChoice::Best, AudioChoice::Language("EN".into()));
         assert_eq!(
             base,
-            source_digest(
-                &url("https://a.example/live.m3u8?token=2"),
-                &preference(VariantChoice::Best, Some("en")),
-            )
+            digest(VariantChoice::Best, AudioChoice::Language("en".into()))
         );
         for other in [
-            source_digest(
-                &url("https://a.example/other.m3u8"),
-                &preference(VariantChoice::Best, Some("en")),
-            ),
-            source_digest(
-                &url("https://a.example/live.m3u8"),
-                &preference(VariantChoice::Index(0), Some("en")),
-            ),
-            source_digest(
-                &url("https://a.example/live.m3u8"),
-                &preference(VariantChoice::Best, None),
-            ),
-            source_digest(
-                &url("https://a.example/live.m3u8"),
-                &Preference {
-                    variant: VariantChoice::Best,
-                    audio: AudioChoice::Index(0),
-                },
-            ),
+            digest(VariantChoice::Index(0), AudioChoice::Language("en".into())),
+            digest(VariantChoice::Best, AudioChoice::Default),
+            digest(VariantChoice::Best, AudioChoice::Index(0)),
         ] {
             assert_ne!(base, other);
         }

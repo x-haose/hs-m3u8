@@ -467,16 +467,19 @@ variants! {
         },
         /// 只合并只用于直播录制，目录里是点播的下载；点播用同样的请求正常运行即可续传
         NotLiveRecording {},
-        /// 来源（地址去掉用户名、密码、查询串与片段，连同选轨偏好）与记录的不同
-        SourceMismatch {},
+        /// 来源地址（见 `Source.url`）与记录的不同。确是同一个任务（如重新获取的地址换了主机或路径里的令牌）时设
+        /// `JobRequest.adopt_address` 续传；否则换一个任务目录，或放弃任务（`Engine.discard`）
+        AddressChanged {},
+        /// 选轨偏好与记录的不同：换了选轨即是另一个任务，换一个任务目录，或放弃任务（`Engine.discard`）
+        PreferenceChanged {},
         /// 来源的轨道（所选变体、有无独立音频）与记录的不同
         TracksMismatch {},
         /// 点播：播放列表的分片与记录的不一致，不能续传
         PlanChanged {},
         /// 记录的变体或音频已不在主播放列表中：已录的直播可用 `Engine.merge_recorded` 合并，或换一个任务目录重新开始
         SelectionGone {},
-        /// 直播：地址与记录的不同（如换了令牌），且接不上之前录到的（有轨内容不同，或没有一条轨核对一致，见
-        /// `LiveOptions`），无法确认是同一个直播。可用原来的地址续录、用 `Engine.merge_recorded` 合并已录的部分，或换
+        /// 直播：完整地址与记录的不同，且接不上之前录到的（有轨内容不同，或没有一条轨核对一致，见 `LiveOptions`），
+        /// 无法确认是同一个直播。可用原来的地址续录、用 `Engine.merge_recorded` 合并已录的部分，或换
         /// 一个任务目录重新录
         SourceUnverified {},
         /// 直播续录：之前录到的接不上（要另起会话），而这条轨这次不录（已录满 max_duration，或这次没有内容）：另起的
@@ -727,7 +730,8 @@ impl From<core::WorkDirProblem> for WorkDirProblem {
                 current: current.into(),
             },
             W::NotLiveRecording => WorkDirProblem::NotLiveRecording {},
-            W::SourceMismatch => WorkDirProblem::SourceMismatch {},
+            W::AddressChanged => WorkDirProblem::AddressChanged {},
+            W::PreferenceChanged => WorkDirProblem::PreferenceChanged {},
             W::TracksMismatch => WorkDirProblem::TracksMismatch {},
             W::PlanChanged => WorkDirProblem::PlanChanged {},
             W::SelectionGone => WorkDirProblem::SelectionGone {},

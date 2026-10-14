@@ -547,9 +547,13 @@ pub enum WorkDirProblem {
     /// 只合并（[`crate::Engine::merge_recorded`]）只用于直播录制，目录里是点播的下载；点播用同样的请求正常运行即可续传
     #[error("目录里是点播的下载，只合并只用于直播录制")]
     NotLiveRecording,
-    /// 来源（见 [`crate::Source::url`]）与记录的不同
-    #[error("记录的是另一个来源或选轨偏好")]
-    SourceMismatch,
+    /// 来源地址（见 [`crate::Source::url`]）与记录的不同。确是同一个任务（如重新获取的地址换了主机或路径里的令牌）时
+    /// 设 [`crate::JobRequest::adopt_address`] 续传；否则换一个任务目录，或放弃任务（[`crate::Engine::discard`]）
+    #[error("来源地址与记录的不同")]
+    AddressChanged,
+    /// 选轨偏好与记录的不同：换了选轨即是另一个任务，换一个任务目录，或放弃任务（[`crate::Engine::discard`]）
+    #[error("选轨偏好与记录的不同")]
+    PreferenceChanged,
     /// 来源的轨道（所选变体、有无独立音频）与记录的不同
     #[error("来源的轨道与记录的不同")]
     TracksMismatch,
@@ -560,8 +564,8 @@ pub enum WorkDirProblem {
     /// 或换一个任务目录重新开始
     #[error("记录的变体或音频已不在主播放列表中")]
     SelectionGone,
-    /// 直播：来源相同而完整地址与记录的不同（如换了令牌），且接不上之前录到的（有轨内容不同，或没有一条轨核对一致，
-    /// 见 [`crate::LiveOptions`]），无法确认是同一个直播。可用原来的地址续录、用 [`crate::Engine::merge_recorded`]
+    /// 直播：完整地址与记录的不同，且接不上之前录到的（有轨内容不同，或没有一条轨核对一致，见
+    /// [`crate::LiveOptions`]），无法确认是同一个直播。可用原来的地址续录、用 [`crate::Engine::merge_recorded`]
     /// 合并已录的部分，或换一个任务目录重新录
     #[error("地址与记录的不同，且当前内容与已录的接不上，无法确认是同一个直播")]
     SourceUnverified,

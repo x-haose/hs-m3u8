@@ -403,6 +403,49 @@ async fn resume_survives_tokens_in_the_path() {
     assert_eq!(server.hits("tok2/seg0.ts"), 0);
 }
 
+/// 重新获取的地址换了路径里的令牌（来源地址变了）：不设 adopt_address 时联网之前就报 AddressChanged；设了且分片与
+/// 记录的一致时续传，只补缺的分片，并改记新地址，之后用新地址不必再设。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_address_resumes_only_when_adopted() {
+    let dir = test_dir("resume_new_address");
+    let server = Server::start().await;
+    for token in ["tok1", "tok2"] {
+        server.put(
+            &format!("{token}/index.m3u8"),
+            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n#EXT-X-ENDLIST\n",
+        );
+        server.put(&format!("{token}/seg0.ts"), fixture("ts_a/seg0.ts"));
+    }
+    assert!(
+        run(request(server.url("tok1/index.m3u8"), &dir))
+            .await
+            .is_err()
+    );
+
+    let req = request(server.url("tok2/index.m3u8"), &dir);
+    let err = run(req.clone()).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::WorkDir {
+                problem: WorkDirProblem::AddressChanged,
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert_eq!(server.hits("tok2/index.m3u8"), 0);
+    // seg1 仍取不到：这次失败，但新地址已改记
+    let mut adopted = req.clone();
+    adopted.adopt_address = true;
+    assert!(run(adopted).await.is_err());
+
+    server.put("tok2/seg1.ts", fixture("ts_a/seg1.ts"));
+    let output = run(req).await.unwrap();
+    assert_output(&output, &expected_ts_a(&dir));
+    assert_eq!(server.hits("tok2/seg0.ts"), 0);
+}
+
 /// 主播放列表里有两个属性完全相同的变体（冗余流）：续传按排位选回上次那个。两者分片文件名相同、计划摘要
 /// 也相同，选错了不会报错，只能看续传时的请求落在哪个变体上。
 #[tokio::test(flavor = "multi_thread")]

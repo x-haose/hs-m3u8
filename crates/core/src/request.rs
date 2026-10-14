@@ -15,11 +15,12 @@ use crate::{Error, hls};
 /// 来源与访问它的方式；探测（[`crate::Engine::probe`]）与下载（[`JobRequest::source`]）共用。
 #[derive(Clone)]
 pub struct Source {
-    /// 主播放列表或媒体播放列表的地址。它去掉用户名、密码、查询串与片段后，连同 `preference`，称为来源：
-    /// 任务目录记录的来源不同即是另一个任务（[`crate::WorkDirProblem::SourceMismatch`]）；来源相同而完整地址
-    /// 不同（如换了令牌）时，直播续录见 [`LiveOptions`]
+    /// 主播放列表或媒体播放列表的地址。它去掉用户名、密码、查询串与片段后称为来源地址，连同 `preference` 是任务的
+    /// 身份：任务目录记录的来源地址不同报 [`crate::WorkDirProblem::AddressChanged`]（确是同一个任务时见
+    /// [`JobRequest::adopt_address`]）；只是查询串不同（如换了令牌）时照常续传，直播续录见 [`LiveOptions`]
     pub url: Url,
-    /// 选轨偏好，属于来源（见 `url`）。任务目录里有已完成的分片时按记录的变体与音频找回同一条轨，不按偏好重新选
+    /// 选轨偏好，属于任务的身份（见 `url`），与记录的不同报 [`crate::WorkDirProblem::PreferenceChanged`]。任务目录里
+    /// 有已完成的分片时按记录的变体与音频找回同一条轨，不按偏好重新选
     pub preference: hls::Preference,
     pub http: HttpOptions,
     pub hooks: Arc<dyn Hooks>,
@@ -146,6 +147,10 @@ pub struct JobRequest {
     pub concurrency: NonZeroUsize,
     /// 直播的录制方式；None 时拒绝直播（[`Error::LiveNotEnabled`]）
     pub live: Option<LiveOptions>,
+    /// 来源地址（见 [`Source::url`]）与任务目录记录的不同时，仍当作同一个任务续传并改记新地址，用于重新获取的地址换了
+    /// 主机或路径里的令牌：点播要求播放列表的分片与记录的一致（否则 [`crate::WorkDirProblem::PlanChanged`]），直播
+    /// 要求接得上之前录到的（见 [`LiveOptions`]）。为 false 时地址不同报 [`crate::WorkDirProblem::AddressChanged`]
+    pub adopt_address: bool,
 }
 
 /// 自定义 key：加密的分片一律用它解密，不请求播放列表里的 key 地址，也不经过 [`crate::Hooks::on_key`]。用于
@@ -170,6 +175,7 @@ impl JobRequest {
             key: None,
             concurrency: Self::DEFAULT_CONCURRENCY,
             live: Some(LiveOptions::default()),
+            adopt_address: false,
         }
     }
 
@@ -239,9 +245,10 @@ pub(crate) fn check_header(name: &str, value: &str) -> Result<(), String> {
 /// 续录：任务中断后用同样的请求再次运行。至少一条轨当前的窗口与之前录到的接得上（重叠的分片重新下载后内容相同；已录
 /// 满、这次不录的轨同样核对），且没有一条轨内容不同时，接着录：补上窗口内之前没录完的分片，时间线连续，之前没录到的轨
 /// 从窗口起点并入；否则另起一段，与之前的首尾相接（中断期间的内容不在输出中），之前录过的分片不重录，另起的一段里有轨
-/// 这次不录（已录满或没有内容）时报 [`crate::WorkDirProblem::Unaligned`]。最后一并合并。来源相同而完整地址与记录的不同
-/// （如换了令牌）时，接着录才改记新地址，另起一段报 [`crate::WorkDirProblem::SourceUnverified`]；这次没有要录的轨（都已
-/// 录满或已结束）时不改记，直接合并。不联网、只合并已录到的部分用 [`crate::Engine::merge_recorded`]。
+/// 这次不录（已录满或没有内容）时报 [`crate::WorkDirProblem::Unaligned`]。最后一并合并。完整地址与记录的不同（查询串
+/// 变了，或设了 [`JobRequest::adopt_address`] 而来源地址变了）时，接着录才改记新地址，另起一段报
+/// [`crate::WorkDirProblem::SourceUnverified`]；这次没有要录的轨（都已录满或已结束）时不改记，直接合并。不联网、只合并
+/// 已录到的部分用 [`crate::Engine::merge_recorded`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveOptions {
     /// 每条轨的分片声明时长之和达到此值后不再录，各轨都达到即结束；计入之前各会话已录到的、本次排入下载的、

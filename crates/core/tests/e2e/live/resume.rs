@@ -331,6 +331,41 @@ async fn new_token_continues_only_when_the_window_overlaps() {
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
 }
 
+/// 来源地址变了（路径里的令牌）：不设 adopt_address 时联网之前就报 AddressChanged；设了时同只换查询串，窗口接得上即
+/// 续录。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_address_continues_only_when_adopted() {
+    let dir = test_dir("resume_new_address");
+    let server = Server::start().await;
+    put_long(&server, "tok1/", &[0, 1]);
+    put_long(&server, "tok2/", &[0, 1, 2, 3]);
+    server.put("tok1/live.m3u8", playlist(&[0, 1], false));
+    interrupt(
+        &live_request(server.url("tok1/live.m3u8"), &dir, STALL),
+        |p| p.segments_done == 2,
+    )
+    .await;
+
+    server.put("tok2/live.m3u8", playlist(&[1, 2, 3], true));
+    let mut req = live_request(server.url("tok2/live.m3u8"), &dir, STALL);
+    let err = run(req.clone()).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::WorkDir {
+                problem: WorkDirProblem::AddressChanged,
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert_eq!(server.hits("tok2/live.m3u8"), 0);
+
+    req.adopt_address = true;
+    let output = run(req).await.unwrap();
+    assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));
+}
+
 /// 目录里是直播录制、中断期间直播结束了，续传的请求却没开启直播：按点播运行，报类型不符，目录保留。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_live_directory_without_live_options_is_a_kind_mismatch() {
@@ -479,7 +514,7 @@ async fn changed_preference_is_rejected() {
         matches!(
             err,
             Error::WorkDir {
-                problem: WorkDirProblem::SourceMismatch,
+                problem: WorkDirProblem::PreferenceChanged,
                 ..
             }
         ),
