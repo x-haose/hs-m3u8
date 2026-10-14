@@ -7,12 +7,12 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use ffmpeg::format::context::StreamIo;
-use ffmpeg::{Packet, format};
+use ffmpeg::{Dictionary, Packet, format};
 use ffmpeg_next as ffmpeg;
 
 use crate::chain::{self, SegmentChain};
 use crate::packed::Packed;
-use crate::{Error, TrackSegments, Unsupported, fmp4, standalone};
+use crate::{Error, Segment, TrackSegments, Unsupported, fmp4, standalone};
 
 pub(crate) enum Input {
     /// TS 与 fMP4：init 段与分片按字节相连，作为一个输入读
@@ -77,8 +77,15 @@ impl Input {
         if init {
             starts.remove(0);
         }
+        // 第一个分片（fMP4 连同 init 段）的结尾
+        let first_end = files
+            .iter()
+            .take(if init { 2 } else { 1 })
+            .map(|(_, range)| range.end - range.start)
+            .sum();
+        let probe = Probe::first_segment(first_end, &segments.segments[0]);
         let (chain, failure) = new_chain(files)?;
-        let ictx = open_chain(chain, &failure, group, track)?;
+        let ictx = open_chain(chain, &failure, probe, group, track)?;
         Ok(Input::Chain {
             ictx,
             failure,
@@ -244,15 +251,48 @@ pub(crate) fn new_chain(
     })
 }
 
-/// 把分片链当作一个输入交给 FFmpeg 打开，格式由开头的内容识别。
+/// 打开输入时 FFmpeg 探测流参数最多读多少：至少读完第一个分片，探测不出的参数即第一个分片里没有（见
+/// [`crate::Unsupported::ParamsUnknown`]）。各流的参数都探测出后 FFmpeg 就停下，读不到这么多。
+pub(crate) struct Probe {
+    /// 字节，不小于 FFmpeg 的默认值
+    bytes: u64,
+    /// 微秒，不小于 FFmpeg 的默认值
+    duration_us: u64,
+}
+
+impl Probe {
+    /// FFmpeg 探测的默认字节数（libavformat options_table.h 的 probesize）。
+    const DEFAULT_BYTES: u64 = 5_000_000;
+    /// FFmpeg 探测的默认时长，微秒：没设 analyzeduration 时 TS 的流按 7 秒、其余按 5 秒（libavformat demux.c 的
+    /// avformat_find_stream_info），取大的。
+    const DEFAULT_DURATION_US: u64 = 7_000_000;
+
+    /// 第一个分片在输入里到第 `end` 字节为止，`first` 为它声明的时长。
+    pub(crate) fn first_segment(end: u64, first: &Segment) -> Probe {
+        Probe {
+            bytes: end.max(Probe::DEFAULT_BYTES),
+            duration_us: first.duration_us.max(Probe::DEFAULT_DURATION_US),
+        }
+    }
+
+    fn options(&self) -> Dictionary<'static> {
+        let mut options = Dictionary::new();
+        options.set("probesize", &self.bytes.to_string());
+        options.set("analyzeduration", &self.duration_us.to_string());
+        options
+    }
+}
+
+/// 把分片链当作一个输入交给 FFmpeg 打开，格式由开头的内容识别，探测读到 `probe` 为止。
 pub(crate) fn open_chain(
     chain: SegmentChain,
     failure: &chain::Failure,
+    probe: Probe,
     group: usize,
     track: usize,
 ) -> Result<format::context::Input, Error> {
     StreamIo::from_read_seek(chain)
-        .and_then(|io| format::input_from_stream(io, None, None))
+        .and_then(|io| format::input_from_stream(io, None, Some(probe.options())))
         .map_err(|cause| {
             read_failure(failure).unwrap_or(Error::OpenInput {
                 group,
