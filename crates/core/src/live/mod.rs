@@ -32,7 +32,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use self::merge::{merge_plan, report_missed};
-use self::mp4_check::Mp4Check;
+use self::mp4_check::{Batch, Mp4Check};
 use self::session::Verdicts;
 use self::tasks::{Done, Tasks};
 use self::track::{Fetched, LiveTrack};
@@ -140,7 +140,29 @@ pub(crate) async fn record(
     options: LiveOptions,
     mp4: Option<Vec<Streams>>,
 ) -> Result<Outcome, Error> {
-    let (mut recorder, first) = Recorder::new(&ctx, tracks, options, mp4).await?;
+    let dir = ctx.dir;
+    let stored = dir.scan(tracks.len()).await?;
+    count_stored(&stored, ctx.progress);
+    let now = Instant::now();
+    let phase = initial_phase(&stored, dir)?;
+    let (mp4, batches) = match mp4 {
+        Some(streams) => {
+            let (check, batches) = mp4_check(streams, &stored, dir)?;
+            (Some(check), batches)
+        }
+        None => (None, Vec::new()),
+    };
+    let states = live_tracks(&tracks, &stored, now)?;
+    let mut recorder = Recorder::new(&ctx, options, states, phase, mp4);
+    recorder.start_mp4_check(batches);
+    recorder.announce_recording();
+    let first = tracks
+        .into_iter()
+        .map(|t| Fetched {
+            playlist: t.playlist,
+            started: now,
+        })
+        .collect();
     let signals = Signals {
         cancel: ctx.cancel,
         stop: ctx.stop,
@@ -152,6 +174,28 @@ pub(crate) async fn record(
     recorder.tasks.shutdown().await;
     recorder.publish_refresh_errors(false);
     recorder.settle(result, ctx.fetcher).await
+}
+
+/// 录制开始时的阶段：目录里有录过的分片时先判定接着哪个会话录，没有时直接录第 0 个会话。
+fn initial_phase(stored: &Stored, dir: &WorkDir) -> Result<Phase, Error> {
+    let verdicts = Verdicts::new(stored).map_err(|reason| Error::WorkDir {
+        path: dir.layout().root().to_path_buf(),
+        problem: WorkDirProblem::Corrupt(reason),
+    })?;
+    Ok(match verdicts {
+        Some(verdicts) => Phase::Deciding(verdicts),
+        None => Phase::Decided { session: 0 },
+    })
+}
+
+/// 录制中能否放进 MP4 的核对（`streams` 为各轨的取流方式），与核对目录里已录齐的组的各批（见 [`Mp4Check::new`]）。
+fn mp4_check(
+    streams: Vec<Streams>,
+    stored: &Stored,
+    dir: &WorkDir,
+) -> Result<(Mp4Check, Vec<Batch>), Error> {
+    let plan = merge_plan(&stored.segments, dir.layout())?;
+    Ok(Mp4Check::new(streams, &plan, stored))
 }
 
 /// 各轨的录制状态；之前各会话已录到的时长计入 max_duration。
@@ -188,42 +232,20 @@ pub(crate) fn count_stored(stored: &Stored, progress: &watch::Sender<Progress>) 
 }
 
 impl<'a> Recorder<'a> {
-    /// 开始录制时的状态：目录里已录的分片计入进度，续录时先判定会话；输出含 MP4 时在后台核对之前录齐的组。另返回
-    /// 各轨首次拉到的播放列表。
-    async fn new(
+    fn new(
         ctx: &Context<'a>,
-        tracks: Vec<ResolvedTrack>,
         options: LiveOptions,
-        mp4: Option<Vec<Streams>>,
-    ) -> Result<(Recorder<'a>, Vec<Fetched>), Error> {
-        let (dir, progress) = (ctx.dir, ctx.progress);
-        let stored = dir.scan(tracks.len()).await?;
-        count_stored(&stored, progress);
-        let now = Instant::now();
-        // 目录里没有录过的分片时直接录第 0 个会话
-        let verdicts = Verdicts::new(&stored).map_err(|reason| Error::WorkDir {
-            path: dir.layout().root().to_path_buf(),
-            problem: WorkDirProblem::Corrupt(reason),
-        })?;
-        let phase = match verdicts {
-            Some(verdicts) => Phase::Deciding(verdicts),
-            None => Phase::Decided { session: 0 },
-        };
-        let (mp4, batches) = match mp4 {
-            Some(streams) => {
-                let plan = merge_plan(&stored.segments, dir.layout())?;
-                let (check, batches) = Mp4Check::new(streams, &plan, &stored);
-                (Some(check), batches)
-            }
-            None => (None, Vec::new()),
-        };
-        let mut recorder = Recorder {
+        tracks: Vec<LiveTrack>,
+        phase: Phase,
+        mp4: Option<Mp4Check>,
+    ) -> Recorder<'a> {
+        Recorder {
             http: ctx.http.clone(),
             hooks: ctx.hooks.clone(),
-            dir,
-            progress,
+            dir: ctx.dir,
+            progress: ctx.progress,
             options,
-            tracks: live_tracks(&tracks, &stored, now)?,
+            tracks,
             missed: Vec::new(),
             new_sessions: Vec::new(),
             tasks: Tasks::new(ctx.cancel),
@@ -232,28 +254,27 @@ impl<'a> Recorder<'a> {
             ending: None,
             mp4,
             stall: None,
-        };
-        if let Some(check) = &recorder.mp4
+        }
+    }
+
+    /// 在后台按顺序核对目录里已录齐的组（`batches`，见 [`Mp4Check::new`]）；不输出 MP4 或没有录齐的组时什么也不做。
+    fn start_mp4_check(&mut self, batches: Vec<Batch>) {
+        if let Some(check) = &self.mp4
             && !batches.is_empty()
         {
-            let root = dir.layout().root().to_path_buf();
-            recorder
-                .tasks
+            let root = self.dir.layout().root().to_path_buf();
+            self.tasks
                 .check_mp4(check.streams().to_vec(), batches, root);
         }
-        let refresh_errors = recorder.refresh_errors(true);
-        progress.send_modify(|p| {
+    }
+
+    /// 进度进入录制阶段，带上各轨当前的刷新失败。
+    fn announce_recording(&self) {
+        let refresh_errors = self.refresh_errors(true);
+        self.progress.send_modify(|p| {
             p.stage = Stage::Recording;
             p.refresh_errors = refresh_errors;
         });
-        let first = tracks
-            .into_iter()
-            .map(|t| Fetched {
-                playlist: t.playlist,
-                started: now,
-            })
-            .collect();
-        Ok((recorder, first))
     }
 
     /// 按节奏刷新、处理各种事件，直到结束，返回结束原因。

@@ -13,6 +13,9 @@ wheels/
 # uv python pin 写的本地 Python 版本；开发用的版本由 Makefile 的 UV_PYTHON 定
 .python-version
 
+# examples/ 与 README 示例的默认输出目录
+downloads/
+
 # pycharm
 .idea
 

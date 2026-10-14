@@ -58,7 +58,7 @@ impl Packed {
         track: usize,
         cancel: &Cancel,
     ) -> Result<Packed, Error> {
-        let Frames {
+        let Joined {
             pieces,
             starts,
             resumes,
@@ -199,8 +199,8 @@ impl Packed {
     }
 }
 
-/// 一条轨在一组里各分片切出的音频帧，相连之后的布局。
-struct Frames {
+/// 一条轨在一组里各分片切出的音频帧相连之后的布局。
+struct Joined {
     /// 各段音频帧所在的分片文件与字节区间，按相连的顺序
     pieces: Vec<(PathBuf, Range<u64>)>,
     /// 各分片的音频帧在相连之后的输入里的起点
@@ -218,7 +218,7 @@ fn cut_segments(
     segments: &TrackSegments,
     heads: &[Head],
     cancel: &Cancel,
-) -> Result<Frames, Error> {
+) -> Result<Joined, Error> {
     let count = segments.segments.len();
     let mut pieces = Vec::new();
     let mut starts = Vec::with_capacity(count);
@@ -259,7 +259,7 @@ fn cut_segments(
         }
         resumes.push(resume);
     }
-    Ok(Frames {
+    Ok(Joined {
         pieces,
         starts,
         resumes,

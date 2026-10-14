@@ -1,6 +1,10 @@
-//! 轨道与分片：音视频分离、独立音频取代变体里混着的、字节范围、标了 EXT-X-GAP 的分片。
+//! 轨道与分片：音视频分离、独立音频取代变体里混着的、字节范围、标了 EXT-X-GAP 的分片、只差查询串的 init 段。
 
-use hs_m3u8_core::{Error, MissReason, Missed, Unsupported};
+use std::sync::Arc;
+
+use hs_m3u8_core::{
+    Error, HookError, Hooks, MissReason, Missed, Purpose, RequestParts, Unsupported,
+};
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
 use super::{TS_A, put_ts_a};
@@ -284,4 +288,65 @@ async fn a_group_with_only_gaps_in_one_track_is_left_out() {
         "{err}"
     );
     assert!(!dir.join("out.hsdl").exists());
+}
+
+/// 把 init 段地址 `init?p=<目录>` 改写为 `<目录>/init.mp4`：模拟按查询串区分内容的站点。
+struct InitByQuery;
+
+impl Hooks for InitByQuery {
+    fn on_request(&self, purpose: Purpose, request: &mut RequestParts) -> Result<(), HookError> {
+        if purpose == Purpose::Init
+            && let Some(program) = request.url.query().and_then(|q| q.strip_prefix("p="))
+        {
+            request.url = request.url.join(&format!("{program}/init.mp4"))?;
+            request.url.set_query(None);
+        }
+        Ok(())
+    }
+}
+
+/// 两个 init 段的地址只差查询串（站点按查询串区分内容）：各拉各的，不当成同一个。
+#[tokio::test(flavor = "multi_thread")]
+async fn inits_differing_only_in_query_are_distinct() {
+    let dir = test_dir("init_query");
+    let server = Server::start().await;
+    for program in ["fmp4_a", "fmp4_b"] {
+        for name in ["init.mp4", "seg0.m4s"] {
+            server.put(
+                &format!("{program}/{name}"),
+                fixture(&format!("{program}/video/{name}")),
+            );
+        }
+    }
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"init?p=fmp4_a\"\n\
+         #EXTINF:1,\nfmp4_a/seg0.m4s\n#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"init?p=fmp4_b\"\n\
+         #EXTINF:1,\nfmp4_b/seg0.m4s\n#EXT-X-ENDLIST\n",
+    );
+    let mut req = request(server.url("index.m3u8"), &dir);
+    req.source.hooks = Arc::new(InitByQuery);
+
+    let output = run(req).await.unwrap();
+
+    let program = |name: &str| DiscontinuityGroup {
+        tracks: vec![track(
+            &format!("{name}/video"),
+            Some("init.mp4"),
+            &["seg0.m4s"],
+        )],
+    };
+    let want = expected(
+        &dir,
+        &[Streams::All],
+        &[program("fmp4_a"), program("fmp4_b")],
+    );
+    assert_output(&output, &want);
+    assert_eq!(
+        (
+            server.hits("fmp4_a/init.mp4"),
+            server.hits("fmp4_b/init.mp4")
+        ),
+        (1, 1)
+    );
 }

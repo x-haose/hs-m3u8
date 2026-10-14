@@ -244,3 +244,25 @@ fn ac3_eac3_and_mp3_audio_are_copied() {
         assert_eq!(ac3_layout(&output, codec), five_one(codec), "{packed}");
     }
 }
+
+#[test]
+fn hevc_output_is_tagged_hvc1() {
+    let dir = work_dir("hevc");
+    let output = dir.join("out.mp4");
+    let hevc = track("ts_hevc");
+
+    remux(
+        &[Streams::All],
+        &[group([hevc.clone()])],
+        &output,
+        &Control::default(),
+    )
+    .unwrap();
+
+    let (v_in, a_in) = timelines(&concat_track(&hevc, &dir, "in.ts"));
+    let (v_out, a_out) = timelines(&output);
+    assert_eq!((v_out.len(), a_out.len()), (v_in.len(), a_in.len()));
+    let data = std::fs::read(&output).unwrap();
+    let has = |tag: &[u8]| data.windows(4).any(|w| w == tag);
+    assert!(has(b"hvc1") && !has(b"hev1"), "HEVC 输出流应标 hvc1");
+}

@@ -230,7 +230,7 @@ mod tests {
     use super::*;
 
     /// 每个测试写的文件，放在独立的目录里；测试通过后删除目录，失败时留着查看。读这些文件的分片链要在它之后声明，
-    /// 先放下：Windows 上开着的文件删不掉。
+    /// 从而先被释放：Windows 上开着的文件删不掉。
     struct Files {
         dir: PathBuf,
         paths: Vec<PathBuf>,

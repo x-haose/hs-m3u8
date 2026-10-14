@@ -74,7 +74,7 @@ pub(crate) async fn download(
     Ok(group_input(plan, &names, layout, Range::clone))
 }
 
-/// 各轨各分片的下载项：`items[t][i]` 为第 t 条轨第 i 个分片的。
+/// 各轨各分片的下载项：`items[t][i]` 为第 t 条轨第 i 个分片的，先下的取走后为 None。
 fn items(plan: &Plan, names: &[Vec<SegmentName>], layout: &Layout) -> Vec<Vec<Option<Item>>> {
     plan.tracks
         .iter()
@@ -115,7 +115,7 @@ async fn verify_completed(
     cancel: &CancellationToken,
 ) -> Result<(), Error> {
     let layout = dir.layout();
-    let groups = groups(plan, names, layout);
+    let groups = recheck_candidates(plan, names, layout);
     let (tracks, url_changed) = (plan.tracks.len(), dir.url_changed());
     let Some(picked) = blocking(move || to_verify(groups, tracks, url_changed)).await?? else {
         return Ok(());
@@ -136,7 +136,7 @@ async fn verify_completed(
 }
 
 /// 计划里各组各轨的分片，作为核对的候选。
-fn groups(plan: &Plan, names: &[Vec<SegmentName>], layout: &Layout) -> Vec<Group> {
+fn recheck_candidates(plan: &Plan, names: &[Vec<SegmentName>], layout: &Layout) -> Vec<Group> {
     plan.groups
         .iter()
         .flat_map(|ranges| ranges.iter().enumerate())

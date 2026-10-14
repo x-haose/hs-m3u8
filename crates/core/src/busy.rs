@@ -34,15 +34,31 @@ pub(crate) fn held_open(error: &io::Error) -> bool {
 mod tests {
     use std::fs;
     use std::os::windows::fs::OpenOptionsExt;
+    use std::path::PathBuf;
 
     use super::*;
+
+    /// 测试用的目录：测试通过后删除，失败时留着查看。要在用到其中文件的句柄之前声明，从而最后被释放。
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            if !std::thread::panicking() {
+                fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+    }
 
     /// 别的句柄不共享地一直开着文件：改名退避重试后仍失败，失败为共享冲突，可重试。
     #[test]
     fn renaming_a_file_held_open_fails_as_held_open() {
-        let dir = std::env::temp_dir().join(format!("hs-m3u8-busy-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let scratch =
+            Scratch(std::env::temp_dir().join(format!("hs-m3u8-busy-{}", std::process::id())));
+        let dir = &scratch.0;
+        if dir.exists() {
+            fs::remove_dir_all(dir).unwrap();
+        }
+        fs::create_dir_all(dir).unwrap();
         let from = dir.join("a");
         fs::write(&from, b"x").unwrap();
         let _held = fs::OpenOptions::new()

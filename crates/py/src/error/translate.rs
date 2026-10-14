@@ -5,10 +5,18 @@ use std::path::Path;
 
 use hs_m3u8_core as core;
 use pyo3::exceptions::PyOSError;
+use pyo3::prelude::*;
 use pyo3::{PyClass, PyClassInitializer, PyTraverseError, PyVisit};
 
 use super::reason::{SegmentRef, SourceUnsupported};
-use super::*;
+use super::{
+    FileError, HlsUnsupportedError, HookError, HsM3u8Error, HttpClientInitError, HttpError,
+    IncompleteError, IntegrityError, InvalidInputError, JobCancelledError, KeyLengthError,
+    LiveNotEnabledError, LiveStalledError, Mp4UnsupportedError, NotMediaPlaylistError,
+    NothingRecordedError, OutputExistsError, OutputOccupiedError, Parent, PlaylistError,
+    RemuxError, RequestError, ResponseTooLargeError, SelectError, SourceError,
+    SourceUnsupportedError, SystemProxyError, VolumeUnavailableError, WorkDirError,
+};
 use crate::convert::{Address, PyPath, Seq};
 use crate::hooks::PyHookError;
 use crate::report::Leftover;
