@@ -67,34 +67,42 @@ pub(crate) fn ac3(data: &[u8]) -> Option<(Ac3Frame, usize)> {
     let bsid = u32::from(data.get(5)? >> 3);
     let mut b = Bits::new(data);
     b.expect(16, 0x0B77)?;
-    if bsid <= 10 {
-        b.read(16)?; // crc1
-        let fscod = b.read(2)?;
-        let size = ac3_frame_size(fscod, b.read(6)?)?;
-        b.read(5 + 3)?; // bsid、bsmod
-        let acmod = b.read(3)?;
-        if acmod & 1 != 0 && acmod != 1 {
-            b.read(2)?; // cmixlev
-        }
-        if acmod & 4 != 0 {
-            b.read(2)?; // surmixlev
-        }
-        if acmod == 2 {
-            b.read(2)?; // dsurmod
-        }
-        let frame = Ac3Frame {
-            substream: None,
-            sample_rate: (fscod, bsid.saturating_sub(8)),
-            acmod,
-            lfe: b.read(1)? == 1,
-            chanmap: None,
-            blocks: 6,
-        };
-        return Some((frame, size));
+    match bsid {
+        0..=10 => ac3_after_sync(&mut b, bsid),
+        11..=16 => eac3_after_sync(&mut b),
+        _ => None,
     }
-    if bsid > 16 {
-        return None;
+}
+
+/// AC-3 同步帧在同步字之后的部分；`bsid` 为预先读出的（见 [`ac3`]）。
+fn ac3_after_sync(b: &mut Bits<'_>, bsid: u32) -> Option<(Ac3Frame, usize)> {
+    b.read(16)?; // crc1
+    let fscod = b.read(2)?;
+    let size = ac3_frame_size(fscod, b.read(6)?)?;
+    b.read(5 + 3)?; // bsid、bsmod
+    let acmod = b.read(3)?;
+    if acmod & 1 != 0 && acmod != 1 {
+        b.read(2)?; // cmixlev
     }
+    if acmod & 4 != 0 {
+        b.read(2)?; // surmixlev
+    }
+    if acmod == 2 {
+        b.read(2)?; // dsurmod
+    }
+    let frame = Ac3Frame {
+        substream: None,
+        sample_rate: (fscod, bsid.saturating_sub(8)),
+        acmod,
+        lfe: b.read(1)? == 1,
+        chanmap: None,
+        blocks: 6,
+    };
+    Some((frame, size))
+}
+
+/// E-AC-3 同步帧在同步字之后的部分。
+fn eac3_after_sync(b: &mut Bits<'_>) -> Option<(Ac3Frame, usize)> {
     let strmtyp = b.read(2)?;
     let substreamid = b.read(3)?;
     let size = (b.read(11)? as usize + 1) * 2;

@@ -35,8 +35,7 @@ impl Input {
         track: usize,
         cancel: &Cancel,
     ) -> Result<Input, Error> {
-        let init = segments.init.is_some();
-        if !init {
+        if segments.init.is_none() {
             let heads = segments
                 .segments
                 .iter()
@@ -53,6 +52,17 @@ impl Input {
                     .map(|packed| Input::Packed(Box::new(packed)));
             }
         }
+        Input::chain(segments, group, track, cancel)
+    }
+
+    /// TS 与 fMP4：init 段与分片按字节相连打开，fMP4 的各片先核对（见 [`fmp4_len`]）。
+    fn chain(
+        segments: &TrackSegments,
+        group: usize,
+        track: usize,
+        cancel: &Cancel,
+    ) -> Result<Input, Error> {
+        let init = segments.init.is_some();
         let trex = segments.init.as_deref().map(init_trex).transpose()?;
         let paths = segments
             .init

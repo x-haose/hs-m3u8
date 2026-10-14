@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::io;
 use std::ops::Range;
+use std::path::PathBuf;
 
 use ffmpeg::{Packet, Rational, Rescale, format, media};
 use ffmpeg_next as ffmpeg;
@@ -57,46 +58,14 @@ impl Packed {
         track: usize,
         cancel: &Cancel,
     ) -> Result<Packed, Error> {
+        let Frames {
+            pieces,
+            starts,
+            resumes,
+            total,
+            discarded,
+        } = cut_segments(segments, heads, cancel)?;
         let count = segments.segments.len();
-        let mut pieces = Vec::new();
-        let mut starts = Vec::with_capacity(count);
-        let mut resumes = Vec::with_capacity(count);
-        let mut total = 0;
-        let mut discarded = 0;
-        let mut reference = None;
-        for (path, head) in segments.segments.iter().map(|s| &s.path).zip(heads) {
-            if cancel.is_cancelled() {
-                return Err(Error::Cancelled);
-            }
-            let read_failed = |cause| Error::Io {
-                action: "读取",
-                path: path.clone(),
-                cause,
-            };
-            let data = std::fs::read(path).map_err(read_failed)?;
-            // 开头的信息是先前读的，文件随后变短时起点会超出
-            let data_start = usize::try_from(head.data_start)
-                .ok()
-                .filter(|&start| start <= data.len())
-                .ok_or_else(|| {
-                    read_failed(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "文件比开始合并时短（合并期间被改动）",
-                    ))
-                })?;
-            let cut = cut_frames(&data, data_start, head.format, &mut reference);
-            discarded += cut.discarded;
-            starts.push(total);
-            let mut resume = None;
-            for (index, range) in cut.ranges.into_iter().enumerate() {
-                if cut.resume == Some(index) {
-                    resume = Some(total);
-                }
-                total += range.end - range.start;
-                pieces.push((path.clone(), range));
-            }
-            resumes.push(resume);
-        }
         let followed = (1..=count)
             .map(|next| next < count && !segments.gaps.contains(&next))
             .collect();
@@ -228,6 +197,75 @@ impl Packed {
             self.ready.push_back(earlier);
         }
     }
+}
+
+/// 一条轨在一组里各分片切出的音频帧，相连之后的布局。
+struct Frames {
+    /// 各段音频帧所在的分片文件与字节区间，按相连的顺序
+    pieces: Vec<(PathBuf, Range<u64>)>,
+    /// 各分片的音频帧在相连之后的输入里的起点
+    starts: Vec<u64>,
+    /// 各分片第一处损坏之后的第一帧在相连之后的输入里的起点；没有时为 None
+    resumes: Vec<Option<u64>>,
+    /// 相连之后的字节数
+    total: u64,
+    /// 切帧时跳过的损坏字节数
+    discarded: u64,
+}
+
+/// 读出各分片（`heads` 为各片开头的信息，格式相同），切出音频帧（见 [`cut_frames`]）；每读一片之前查取消。
+fn cut_segments(
+    segments: &TrackSegments,
+    heads: &[Head],
+    cancel: &Cancel,
+) -> Result<Frames, Error> {
+    let count = segments.segments.len();
+    let mut pieces = Vec::new();
+    let mut starts = Vec::with_capacity(count);
+    let mut resumes = Vec::with_capacity(count);
+    let mut total = 0;
+    let mut discarded = 0;
+    let mut reference = None;
+    for (path, head) in segments.segments.iter().map(|s| &s.path).zip(heads) {
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let read_failed = |cause| Error::Io {
+            action: "读取",
+            path: path.clone(),
+            cause,
+        };
+        let data = std::fs::read(path).map_err(read_failed)?;
+        // 开头的信息是先前读的，文件随后变短时起点会超出
+        let data_start = usize::try_from(head.data_start)
+            .ok()
+            .filter(|&start| start <= data.len())
+            .ok_or_else(|| {
+                read_failed(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "文件比开始合并时短（合并期间被改动）",
+                ))
+            })?;
+        let cut = cut_frames(&data, data_start, head.format, &mut reference);
+        discarded += cut.discarded;
+        starts.push(total);
+        let mut resume = None;
+        for (index, range) in cut.ranges.into_iter().enumerate() {
+            if cut.resume == Some(index) {
+                resume = Some(total);
+            }
+            total += range.end - range.start;
+            pieces.push((path.clone(), range));
+        }
+        resumes.push(resume);
+    }
+    Ok(Frames {
+        pieces,
+        starts,
+        resumes,
+        total,
+        discarded,
+    })
 }
 
 /// 包的时间戳平移 `shift`（包所属流的时间基）。
