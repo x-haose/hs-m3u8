@@ -282,7 +282,7 @@ class FetchErrorKind:
         """
         __match_args__ = ("kind",)
         @property
-        def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
+        def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.Proxy | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
             r"""
             请求失败的原因
             """
@@ -554,7 +554,7 @@ class HttpError(HsM3u8Error):
         请求的地址（可能带令牌；异常的说明里只显示到路径）
         """
     @property
-    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
+    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.Proxy | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
         r"""
         失败的原因
         """
@@ -636,7 +636,7 @@ class HttpErrorKind:
     @typing.final
     class Connect(HttpErrorKind):
         r"""
-        连接失败
+        连不上服务器或代理
         """
         __match_args__ = ("detail",)
         @property
@@ -645,6 +645,20 @@ class HttpErrorKind:
             说明
             """
         def __new__(cls, detail: builtins.str) -> HttpErrorKind.Connect: ...
+    
+    @typing.final
+    class Proxy(HttpErrorKind):
+        r"""
+        代理拒绝了这次连接或要求认证：HTTP 代理对 CONNECT 回了非成功的状态（如 407），或 SOCKS 代理的认证与连接
+        请求被拒。要检查代理设置与口令
+        """
+        __match_args__ = ("detail",)
+        @property
+        def detail(self) -> builtins.str:
+            r"""
+            说明
+            """
+        def __new__(cls, detail: builtins.str) -> HttpErrorKind.Proxy: ...
     
     @typing.final
     class InvalidRequest(HttpErrorKind):
@@ -679,7 +693,7 @@ class HttpFailure:
     取不到的请求：失败的原因，与服务器要求的最短等待。
     """
     @property
-    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
+    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.Proxy | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
         r"""
         失败的原因
         """

@@ -397,11 +397,39 @@ fn classify(error: reqwest::Error) -> HttpError {
         HttpError::InvalidRequest(chain_text(&error))
     } else if let Some(tls) = invalid_certificate(&error) {
         HttpError::Certificate(tls.to_string())
+    } else if let Some(refusal) = proxy_refusal(&error) {
+        HttpError::Proxy(refusal)
     } else if error.is_connect() {
         HttpError::Connect(chain_text(&error))
     } else {
         HttpError::Transport(chain_text(&error))
     }
+}
+
+/// 原因链上代理拒绝的那一层的说明：HTTP 代理的 CONNECT 没有成功（要求认证、回了别的非成功状态），或 SOCKS 握手、
+/// 认证、连接请求被拒；连不上代理、与代理之间读写出错的不算。
+///
+/// 简化：hyper-util 0.1.21 不导出 TunnelError 与 SocksError，按它们的说明文字认（`tunnel error: `、`SOCKS error: `
+/// 起头，见 hyper-util 的 client/legacy/connect/proxy）；它导出这些类型后改按类型认。
+fn proxy_refusal(error: &(dyn std::error::Error + 'static)) -> Option<String> {
+    let transport = [
+        "failed to create underlying connection",
+        "io error establishing tunnel",
+        "unexpected end of file",
+        "io error during SOCKS handshake",
+    ];
+    let mut next = error.source();
+    while let Some(layer) = next {
+        let text = layer.to_string();
+        let detail = text
+            .strip_prefix("tunnel error: ")
+            .or_else(|| text.strip_prefix("SOCKS error: "));
+        if let Some(detail) = detail {
+            return (!transport.contains(&detail)).then(|| detail.to_owned());
+        }
+        next = layer.source();
+    }
+    None
 }
 
 /// 错误本身与各层原因的说明，以「：」相连。

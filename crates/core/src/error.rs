@@ -395,8 +395,13 @@ pub enum HttpError {
     /// 跟随重定向失败（循环、次数过多）
     #[error("重定向失败：{0}")]
     Redirect(String),
+    /// 连不上服务器或代理
     #[error("连接失败：{0}")]
     Connect(String),
+    /// 代理拒绝了这次连接或要求认证：HTTP 代理对 CONNECT 回了非成功的状态（如 407），或 SOCKS 代理的认证与连接
+    /// 请求被拒。要检查代理设置与口令
+    #[error("代理拒绝：{0}")]
+    Proxy(String),
     /// 请求无法构造：地址能解析，HTTP 库却不接受（如超过 65534 字节，播放列表里的与回调改出的都可能）。回调改出的
     /// 地址不是 http/https、或请求头不合法时报 [`Error::Hook`]
     #[error("请求不合法：{0}")]
@@ -414,6 +419,7 @@ impl HttpError {
             HttpError::RangeIgnored(_)
             | HttpError::Certificate(_)
             | HttpError::Redirect(_)
+            | HttpError::Proxy(_)
             | HttpError::InvalidRequest(_) => false,
         }
     }

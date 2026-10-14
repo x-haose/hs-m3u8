@@ -1,5 +1,5 @@
 //! HTTP 请求：证书校验失败与重定向失败不重试，原因写在错误里；重定向后保留调用方给的 Referer；HTTP 库用不上的代理
-//! 报参数错误；Cookie 与 Authorization 的发送范围，调用方的 Cookie 存储；响应体的上限。
+//! 报参数错误，拒绝 CONNECT 的代理报代理拒绝；Cookie 与 Authorization 的发送范围，调用方的 Cookie 存储；响应体的上限。
 
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -269,4 +269,65 @@ async fn an_oversized_key_response_is_rejected_without_retrying() {
     );
     assert!(!err.retryable());
     assert_eq!(server.hits("key.bin"), 1);
+}
+
+/// 只回一种状态的 HTTP 代理：对每个连接读完请求头后回 `status`（如 `407 Proxy Authentication Required`）并关闭，
+/// 返回代理地址与收到的连接数。
+async fn refusing_proxy(status: &'static str) -> (Url, Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let counted = connections.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            counted.fetch_add(1, Ordering::Relaxed);
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut buf = [0u8; 1024];
+                while !request.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => request.extend_from_slice(&buf[..n]),
+                    }
+                }
+                let response = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
+                let _ = stream.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    (url, connections)
+}
+
+/// 经 HTTP 代理访问 https 地址，代理对 CONNECT 回 407（要认证）或 403（不允许）：报代理拒绝，不重试。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_proxy_refusing_connect_is_reported_without_retrying() {
+    for status in ["407 Proxy Authentication Required", "403 Forbidden"] {
+        let (proxy, connections) = refusing_proxy(status).await;
+        let mut source = Source::new(Url::parse("https://example.com/index.m3u8").unwrap());
+        source.http.proxy = Proxy::Url(proxy);
+        source.http.retry.attempts = NonZeroU32::new(3).unwrap();
+
+        let err = engine().probe(&source).await.unwrap_err();
+
+        assert!(
+            matches!(
+                &err,
+                Error::Http {
+                    kind: HttpError::Proxy(_),
+                    ..
+                }
+            ),
+            "{status}：{err:?}"
+        );
+        assert!(!err.retryable(), "{status}");
+        assert_eq!(
+            connections.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "{status}"
+        );
+    }
 }

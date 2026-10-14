@@ -35,8 +35,14 @@ variants! {
             /// 说明
             detail: String,
         },
-        /// 连接失败
+        /// 连不上服务器或代理
         Connect {
+            /// 说明
+            detail: String,
+        },
+        /// 代理拒绝了这次连接或要求认证：HTTP 代理对 CONNECT 回了非成功的状态（如 407），或 SOCKS 代理的认证与连接
+        /// 请求被拒。要检查代理设置与口令
+        Proxy {
             /// 说明
             detail: String,
         },
@@ -438,6 +444,7 @@ impl From<core::HttpError> for HttpErrorKind {
             core::HttpError::Certificate(detail) => HttpErrorKind::Certificate { detail },
             core::HttpError::Redirect(detail) => HttpErrorKind::Redirect { detail },
             core::HttpError::Connect(detail) => HttpErrorKind::Connect { detail },
+            core::HttpError::Proxy(detail) => HttpErrorKind::Proxy { detail },
             core::HttpError::InvalidRequest(detail) => HttpErrorKind::InvalidRequest { detail },
             core::HttpError::Transport(detail) => HttpErrorKind::Transport { detail },
         }
