@@ -3,6 +3,8 @@ name = "hs-m3u8"
 dynamic = ["version"]
 description = "HLS（m3u8）下载：并发拉取、AES-128 解密与校验、断点续传、直播录制，输出 MP4 或可直接播放的本地 HLS"
 authors = [{ name = "昊色居士", email = "xhrtxh@gmail.com" }]
+# 本项目，与 wheel 里静态链接的 FFmpeg：LGPL 给用户换用修改过的库的权利，要让用户看得到；其余捆绑的 crate 都是宽松
+# 许可证，原文见 LICENSES/THIRD-PARTY-RUST.txt
 license = "MIT AND LGPL-2.1-or-later"
 license-files = ["LICENSE", "LICENSES/*"]
 readme = "README.md"
@@ -45,6 +47,8 @@ dev = [
 ]
 
 [tool.uv]
+# uv 的版本：本地不符时 uv 报错，CI 的 setup-uv 照它安装
+required-version = "==0.13.0"
 # 本项目的扩展模块由 maturin develop 构建安装，uv sync 只装开发工具
 package = false
 

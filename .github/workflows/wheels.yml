@@ -10,9 +10,9 @@ on:
   workflow_dispatch:
 
 env:
-  # macOS 的最低系统版本：build.sh 编译 FFmpeg 与 maturin 定 wheel 的平台标签都读它
-  MACOSX_DEPLOYMENT_TARGET: "11.0"
   UV_PYTHON: "3.12"
+  # 推 tag 时 FFmpeg 不用缓存，从核对过 SHA-256 的源码包现编，发布产物里链接的不是缓存里的二进制
+  RELEASE: ${{ startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   sdist:
@@ -21,9 +21,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # uv 的版本取 pyproject.toml 的 required-version
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          version: "0.13.0"
 
       - name: Python 开发环境
         run: uv sync --locked
@@ -47,6 +46,16 @@ jobs:
           cd "$RUNNER_TEMP"/sdist/*/
           PATH="$RUNNER_TEMP/no-curl:$PATH" bash third_party/ffmpeg/build.sh
           "$GITHUB_WORKSPACE/.venv/bin/maturin" build --release --locked --out "$RUNNER_TEMP/from-sdist"
+
+      # 开发环境里只有开发工具、没有从源码装的 hs_m3u8，测试用的即从 sdist 构建的 wheel
+      - name: 装上从 sdist 构建的 wheel 测试
+        run: |
+          uv pip install "$RUNNER_TEMP"/from-sdist/*.whl
+          uv run --no-sync pytest
+
+      # PyPI 显示的元数据与 README 能否通过检查（twine 7.0.0，2026-10-15 查）
+      - name: 核对元数据
+        run: uvx --from twine==7.0.0 twine check --strict dist/*.tar.gz "$RUNNER_TEMP"/from-sdist/*.whl
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -79,20 +88,13 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      - name: 缓存 FFmpeg
-        id: ffmpeg-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: FFmpeg
+        uses: ./.github/actions/ffmpeg
         with:
-          path: third_party/ffmpeg/dist
-          key: ffmpeg-${{ matrix.image }}-${{ hashFiles('third_party/ffmpeg/build.sh') }}
+          cache-key: ${{ env.RELEASE != 'true' && matrix.image || '' }}
 
-      - name: 编译 FFmpeg
-        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        run: bash third_party/ffmpeg/build.sh
-
+      # uv 的版本取 pyproject.toml 的 required-version
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          version: "0.13.0"
 
       - name: Python 开发环境
         run: uv sync --locked
@@ -111,6 +113,7 @@ jobs:
           name: wheel-linux-${{ matrix.arch }}
           path: dist/*.whl
 
+  # 比 rust.yml 的 macOS 旧一代：构建与测试的系统离 wheel 声称的最低版本近一些
   macos:
     runs-on: macos-15
     timeout-minutes: 60
@@ -121,20 +124,13 @@ jobs:
       - name: bindgen 的 SDK 路径
         run: echo "BINDGEN_EXTRA_CLANG_ARGS=--sysroot=$(xcrun --show-sdk-path)" >> "$GITHUB_ENV"
 
-      - name: 缓存 FFmpeg
-        id: ffmpeg-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: FFmpeg
+        uses: ./.github/actions/ffmpeg
         with:
-          path: third_party/ffmpeg/dist
-          key: ffmpeg-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('third_party/ffmpeg/build.sh') }}
+          cache-key: ${{ env.RELEASE != 'true' && 'macos-15' || '' }}
 
-      - name: 编译 FFmpeg
-        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        run: bash third_party/ffmpeg/build.sh
-
+      # uv 的版本取 pyproject.toml 的 required-version
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          version: "0.13.0"
 
       - name: Python 开发环境
         run: uv sync --locked
@@ -163,15 +159,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: MSVC 环境
-        shell: pwsh
-        run: |
-          # 找到带 VC 工具的 VS，执行 vcvarsall 后把环境变量传给后续步骤
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) { throw "找不到带 VC 工具的 Visual Studio" }
-          $vars = cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" x64 >nul && set"
-          if ($LASTEXITCODE -ne 0) { throw "vcvarsall.bat 执行失败（退出码 $LASTEXITCODE）" }
-          $vars | Where-Object { $_ -match '^[^=]+=' } | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        uses: ./.github/actions/msvc-env
 
       - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
@@ -180,24 +168,13 @@ jobs:
           update: false
           install: make diffutils xz
 
-      - name: 缓存 FFmpeg
-        id: ffmpeg-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: FFmpeg
+        uses: ./.github/actions/ffmpeg
         with:
-          path: third_party/ffmpeg/dist
-          key: ffmpeg-windows-2025-${{ hashFiles('third_party/ffmpeg/build.sh') }}
+          cache-key: ${{ env.RELEASE != 'true' && 'windows-2025' || '' }}
 
-      - name: 编译 FFmpeg
-        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        shell: msys2 {0}
-        run: |
-          # MSYS2 coreutils 的 link.exe 会遮住 MSVC 的链接器
-          if [ -f /usr/bin/link.exe ]; then mv /usr/bin/link.exe /usr/bin/link.exe.msys; fi
-          bash third_party/ffmpeg/build.sh
-
+      # uv 的版本取 pyproject.toml 的 required-version
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          version: "0.13.0"
 
       - name: Python 开发环境
         run: uv sync --locked

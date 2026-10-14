@@ -1,9 +1,9 @@
 """生成 LICENSES 下随发布包分发的声明：NOTICE.txt 与 THIRD-PARTY-RUST.txt。`--check` 时只核对已有的是否最新。
 
-THIRD-PARTY-RUST.txt 收录 Python 扩展模块在各发布平台（deny.toml 的 `[graph] targets`）上链接的 Rust crate：从
-`hs-m3u8-py` 沿正常依赖走到的、工作区之外的 crate，过程宏不进产物、不算。各 crate 根目录里的许可证文件原样收录，内容
-相同的只收一份；包里没有许可证文件的列出许可证表达式与源码地址。NOTICE.txt 里 FFmpeg 的版本与源码包的 SHA-256 取自
-third_party/ffmpeg/build.sh。
+THIRD-PARTY-RUST.txt 收录 Python 扩展模块在各发布平台（deny.toml 的 `[graph] targets`）上依赖的 Rust crate：按
+`cargo tree` 解析特性后 `hs-m3u8-py` 的正常依赖，过程宏与工作区成员不算。各 crate 根目录里的许可证文件原样收录，内容
+相同的只收一份；包里没有许可证文件的，取 third_party/crate-licenses/<名字>-<版本>/ 下的，那里也没有即失败。NOTICE.txt
+里 FFmpeg 的版本与源码包的 SHA-256 取自 third_party/ffmpeg/build.sh。
 """
 
 import argparse
@@ -18,15 +18,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "LICENSES"
+SUPPLIED = ROOT / "third_party/crate-licenses"
 ROOT_CRATE = "hs-m3u8-py"
 # crate 根目录里算作许可证文件的名字（不区分大小写）
 LICENSE_FILE = re.compile(r"^(licen[cs]e|copying|copyright|notice|unlicense)", re.IGNORECASE)
+# `cargo tree --format {p}` 的一行：名字、版本，路径依赖另带路径，已列过的带 (*)
+TREE_LINE = re.compile(r"^(\S+) v(\S+)(?: \(/[^)]*\))?(?: \(\*\))?$")
 RULE = "-" * 80
 
 
 @dataclass(frozen=True)
 class Crate:
-    """链接进扩展模块的一个 crate。"""
+    """扩展模块依赖的一个 crate。"""
 
     name: str
     version: str
@@ -39,78 +42,98 @@ class Crate:
         return f"{self.name} {self.version}"
 
 
+def cargo(*args: str) -> str:
+    """运行 cargo，返回标准输出；cargo 的报错照常输出到 stderr，失败时抛 CalledProcessError。"""
+    return subprocess.run(["cargo", *args], cwd=ROOT, stdout=subprocess.PIPE, text=True, check=True).stdout
+
+
 def release_targets() -> list[str]:
-    """deny.toml 里的发布平台。"""
+    """deny.toml 里的发布平台；cargo-deny 允许写成目标三元组的字符串或带 `triple` 的表。"""
     config = tomllib.loads((ROOT / "deny.toml").read_text(encoding="utf-8"))
-    targets: list[str] = config["graph"]["targets"]
-    return targets
+    entries: list[str | dict[str, str]] = config["graph"]["targets"]
+    return [entry if isinstance(entry, str) else entry["triple"] for entry in entries]
 
 
-def linked_crates(target: str) -> list[Crate]:
-    """`target` 上扩展模块链接的工作区之外的 crate。"""
-    output = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--locked", "--filter-platform", target],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    metadata = json.loads(output)
-    packages = {package["id"]: package for package in metadata["packages"]}
-    nodes = {node["id"]: node for node in metadata["resolve"]["nodes"]}
+def dependencies(target: str) -> set[tuple[str, str]]:
+    """`target` 上扩展模块的依赖（含工作区成员）的名字与版本。"""
+    output = cargo(
+        "tree",
+        "--locked",
+        *("-p", ROOT_CRATE, "-e", "normal,no-proc-macro", "--target", target),
+        *("--prefix", "none", "--format", "{p}"),
+    )
+    found: set[tuple[str, str]] = set()
+    for line in output.splitlines():
+        match = TREE_LINE.match(line)
+        if match is None:
+            message = f"认不出 cargo tree 的输出：{line!r}"
+            raise SystemExit(message)
+        found.add((match[1], match[2]))
+    return found
+
+
+def crates(names: set[tuple[str, str]]) -> list[Crate]:
+    """`names` 里工作区之外的 crate，按名字与版本排序。"""
+    metadata = json.loads(cargo("metadata", "--format-version", "1", "--locked"))
     members = set(metadata["workspace_members"])
-    root = next(id_ for id_ in members if packages[id_]["name"] == ROOT_CRATE)
-
-    def proc_macro(id_: str) -> bool:
-        return any("proc-macro" in target["kind"] for target in packages[id_]["targets"])
-
-    seen: set[str] = set()
-    pending = [root]
-    while pending:
-        id_ = pending.pop()
-        if id_ in seen or proc_macro(id_):
-            continue
-        seen.add(id_)
-        pending.extend(
-            dep["pkg"] for dep in nodes[id_]["deps"] if any(kind["kind"] is None for kind in dep["dep_kinds"])
-        )
-    return [
-        Crate(
-            name=packages[id_]["name"],
-            version=packages[id_]["version"],
-            license=packages[id_]["license"] or "（未注明）",
-            repository=packages[id_]["repository"] or "（未注明）",
-            directory=Path(packages[id_]["manifest_path"]).parent,
-        )
-        for id_ in seen
-        if id_ not in members
-    ]
+    return sorted(
+        (
+            Crate(
+                name=package["name"],
+                version=package["version"],
+                license=package["license"] or "（未注明）",
+                repository=package["repository"] or "（未注明）",
+                directory=Path(package["manifest_path"]).parent,
+            )
+            for package in metadata["packages"]
+            if (package["name"], package["version"]) in names and package["id"] not in members
+        ),
+        key=lambda crate: (crate.name, crate.version),
+    )
 
 
 def license_files(crate: Crate) -> list[Path]:
-    """`crate` 根目录里的许可证文件，按名字排序。"""
-    return sorted(path for path in crate.directory.iterdir() if path.is_file() and LICENSE_FILE.match(path.name))
+    """`crate` 的许可证文件，按名字排序：包里有的取包里的，否则取 third_party/crate-licenses 下的。"""
+
+    def found(directory: Path) -> list[Path]:
+        return sorted(path for path in directory.iterdir() if path.is_file() and LICENSE_FILE.match(path.name))
+
+    if files := found(crate.directory):
+        return files
+    supplied = SUPPLIED / f"{crate.name}-{crate.version}"
+    if supplied.is_dir() and (files := found(supplied)):
+        return files
+    message = (
+        f"{crate.label()} 的包里没有许可证文件，{supplied.relative_to(ROOT)} 下也没有；"
+        "从它发布时的提交（包里 .cargo_vcs_info.json 记的）取许可证文件放到那里"
+    )
+    raise SystemExit(message)
+
+
+def read_text(path: Path) -> str:
+    """许可证文件的原文；不是 UTF-8 时失败，不替换字符。"""
+    try:
+        return path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError as error:
+        message = f"{path} 不是 UTF-8 文本：{error}"
+        raise SystemExit(message) from error
 
 
 def third_party(crates: list[Crate]) -> str:
     """THIRD-PARTY-RUST.txt 的内容。"""
     lines = [
-        "hs-m3u8 的 Python 扩展模块在各发布平台上静态链接的 Rust crate（合计），及其许可证文件的原文。",
+        "hs-m3u8 的 Python 扩展模块在各发布平台上依赖的 Rust crate（合计），及其许可证文件的原文。",
         "由 scripts/licenses.py 生成。",
         "",
         "== 清单 ==",
         "",
     ]
     lines += [f"{crate.label()}  {crate.license}  {crate.repository}" for crate in crates]
-    without = [crate for crate in crates if not license_files(crate)]
-    if without:
-        lines += ["", "== 包里没有附许可证文件的 crate（许可证见源码地址） ==", ""]
-        lines += [f"{crate.label()}  {crate.license}  {crate.repository}" for crate in without]
     # 内容相同的文件只收一份：按内容归组，组的顺序按第一个用到它的 crate
     groups: dict[str, tuple[str, list[str]]] = {}
     for crate in crates:
         for path in license_files(crate):
-            text = path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").rstrip()
+            text = read_text(path).replace("\r\n", "\n").rstrip()
             digest = hashlib.sha256(text.encode()).hexdigest()
             groups.setdefault(digest, (text, []))[1].append(f"{crate.label()}：{path.name}")
     lines += ["", "== 许可证文件 =="]
@@ -138,8 +161,8 @@ def notice() -> str:
    https://ffmpeg.org/releases/{tarball} 取得，SHA-256 为
    {sha256[1]}。
 
-   换用修改过的 FFmpeg：在本项目源码目录里按 build.sh 的参数编译安装 FFmpeg（运行 bash third_party/ffmpeg/build.sh
-   <安装目录>，或照它的参数自行编译），再以 FFMPEG_DIR=<安装目录> maturin build --release 重新构建扩展模块。
+   换用修改过的 FFmpeg：按 build.sh 里的 configure 参数编译修改过的 FFmpeg 源码并安装到某个目录，再在本项目源码目录
+   里以 FFMPEG_DIR=<该目录> maturin build --release 重新构建扩展模块。
 
 2. Rust crate，各自的许可证见 THIRD-PARTY-RUST.txt；Rust 标准库按 MIT 或 Apache-2.0 授权
    （https://github.com/rust-lang/rust）。
@@ -151,12 +174,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="生成或核对 LICENSES 下随发布包分发的声明")
     parser.add_argument("--check", action="store_true", help="只核对，不写文件")
     args = parser.parse_args()
-    found: dict[tuple[str, str], Crate] = {}
+    names: set[tuple[str, str]] = set()
     for target in release_targets():
-        for crate in linked_crates(target):
-            found[(crate.name, crate.version)] = crate
-    crates = sorted(found.values(), key=lambda crate: (crate.name, crate.version))
-    expected = {"NOTICE.txt": notice(), "THIRD-PARTY-RUST.txt": third_party(crates)}
+        names |= dependencies(target)
+    expected = {"NOTICE.txt": notice(), "THIRD-PARTY-RUST.txt": third_party(crates(names))}
     stale: list[str] = []
     for name, content in expected.items():
         path = OUT / name

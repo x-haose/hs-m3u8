@@ -1,0 +1,14 @@
+name: MSVC 环境
+description: 找到带 VC 工具的 Visual Studio，执行 vcvarsall（x64）后把环境变量传给后续步骤
+
+runs:
+  using: composite
+  steps:
+    - shell: pwsh
+      run: |
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+        if (-not $vs) { throw "找不到带 VC 工具的 Visual Studio" }
+        $vars = cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" x64 >nul && set"
+        if ($LASTEXITCODE -ne 0) { throw "vcvarsall.bat 执行失败（退出码 $LASTEXITCODE）" }
+        $vars | Where-Object { $_ -match '^[^=]+=' } | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8

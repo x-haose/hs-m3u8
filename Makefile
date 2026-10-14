@@ -33,7 +33,7 @@ rs_fmt:
 rs_lint: py_env
 	scripts/check_deps.sh
 	scripts/check_no_suppression.sh
-	@cargo deny --version >/dev/null 2>&1 || { echo "缺少 cargo-deny：cargo install cargo-deny --version 0.20.2 --locked"; exit 1; }
+	@cargo deny --version >/dev/null 2>&1 || { echo "缺少 cargo-deny，版本见 .github/workflows/rust.yml"; exit 1; }
 	cargo deny --locked check
 	uv run --no-sync python scripts/licenses.py --check
 
@@ -53,7 +53,7 @@ rs_test: ffmpeg_present py_env
 
 # 数据正确性模块（hls、core、remux）的行覆盖各自不低于 80%
 rs_cov: ffmpeg_present
-	@cargo llvm-cov --version >/dev/null 2>&1 || { echo "缺少 cargo-llvm-cov：cargo install cargo-llvm-cov --version 0.9.1 --locked"; exit 1; }
+	@cargo llvm-cov --version >/dev/null 2>&1 || { echo "缺少 cargo-llvm-cov，版本见 .github/workflows/rust.yml"; exit 1; }
 	# 源码改动后旧的插桩产物会混进统计，先清掉
 	cargo llvm-cov clean --workspace
 	cargo llvm-cov -p hs-m3u8-hls --fail-under-lines 80 --summary-only

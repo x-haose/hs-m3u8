@@ -1164,9 +1164,9 @@ fn main() {
         // 从 sdist 构建时 FFMPEG_DIR 来自 .cargo/config.toml，还没编译 FFmpeg 就在这里说清，不让 bindgen 以找不到头文件失败
         if !ffmpeg_dir.join("include/libavutil/avutil.h").is_file() {
             panic!(
-                "FFMPEG_DIR（{}）里没有编译好的 FFmpeg。这个平台没有预编译的 wheel，从源码构建要先运行 \
-                 bash third_party/ffmpeg/build.sh（需要 C 编译器、make 与 xz；Windows 上在已加载 MSVC 环境的 MSYS2 里运行），\
-                 它把 FFmpeg 装到 third_party/ffmpeg/dist；或把 FFMPEG_DIR 设为按它的参数编译安装的 FFmpeg 目录",
+                "FFMPEG_DIR（{}）里没有编译好的 FFmpeg。这个平台没有预编译的 wheel，从源码构建要先编译 FFmpeg，\
+                 见 https://github.com/x-haose/hs-m3u8#从源码构建；或把环境变量 FFMPEG_DIR 设为按 \
+                 third_party/ffmpeg/build.sh 的参数编译安装的 FFmpeg 目录后再安装",
                 ffmpeg_dir.display()
             );
         }

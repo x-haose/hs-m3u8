@@ -20,15 +20,7 @@ jobs:
 
       - name: MSVC 环境（Windows）
         if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # 找到带 VC 工具的 VS，执行 vcvarsall 后把环境变量传给后续步骤
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if (-not $vs) { throw "找不到带 VC 工具的 Visual Studio" }
-          $vars = cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" x64 >nul && set"
-          if ($LASTEXITCODE -ne 0) { throw "vcvarsall.bat 执行失败（退出码 $LASTEXITCODE）" }
-          $vars | Where-Object { $_ -match '^[^=]+=' } | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        uses: ./.github/actions/msvc-env
 
       - name: MSYS2（Windows）
         if: runner.os == 'Windows'
@@ -39,31 +31,16 @@ jobs:
           update: false
           install: make diffutils xz
 
-      - name: 缓存 FFmpeg
-        id: ffmpeg-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: FFmpeg
+        uses: ./.github/actions/ffmpeg
         with:
-          path: third_party/ffmpeg/dist
-          key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('third_party/ffmpeg/build.sh') }}
-
-      - name: 编译 FFmpeg（Windows）
-        if: runner.os == 'Windows' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        shell: msys2 {0}
-        run: |
-          # MSYS2 coreutils 的 link.exe 会遮住 MSVC 的链接器
-          if [ -f /usr/bin/link.exe ]; then mv /usr/bin/link.exe /usr/bin/link.exe.msys; fi
-          third_party/ffmpeg/build.sh
-
-      - name: 编译 FFmpeg（macOS / Linux）
-        if: runner.os != 'Windows' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        run: third_party/ffmpeg/build.sh
+          cache-key: ${{ runner.os }}-${{ runner.arch }}
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # Python 开发环境（.venv，Python 3.12 即支持的最低版本）：绑定 crate 的构建脚本要用，Python 的检查与测试也用
+      # uv 的版本取 pyproject.toml 的 required-version
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        with:
-          version: "0.13.0"
 
       - name: Python 开发环境
         run: uv sync --locked

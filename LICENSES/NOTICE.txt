@@ -8,8 +8,8 @@ hs-m3u8 按 MIT 许可证发布，见 LICENSE。由 scripts/licenses.py 生成�
    https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz 取得，SHA-256 为
    8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e。
 
-   换用修改过的 FFmpeg：在本项目源码目录里按 build.sh 的参数编译安装 FFmpeg（运行 bash third_party/ffmpeg/build.sh
-   <安装目录>，或照它的参数自行编译），再以 FFMPEG_DIR=<安装目录> maturin build --release 重新构建扩展模块。
+   换用修改过的 FFmpeg：按 build.sh 里的 configure 参数编译修改过的 FFmpeg 源码并安装到某个目录，再在本项目源码目录
+   里以 FFMPEG_DIR=<该目录> maturin build --release 重新构建扩展模块。
 
 2. Rust crate，各自的许可证见 THIRD-PARTY-RUST.txt；Rust 标准库按 MIT 或 Apache-2.0 授权
    （https://github.com/rust-lang/rust）。

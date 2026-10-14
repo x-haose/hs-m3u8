@@ -12,7 +12,13 @@ pip install hs-m3u8
 
 ## 能力
 
-- 点播：TS、fMP4 与打包音频分片，AES-128（含加密的 init 段）、字节范围、不连续段，视频与独立音频 rendition 合并为一个 MP4，不重编码（fMP4 里 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、MP3、MP2、FLAC、Opus、ALAC 音频，TS 与打包音频里 H.264、HEVC 视频与 AAC、AC-3、E-AC-3、MP3、MP2 音频；MP3 采样率不低于 16 kHz，TS 与打包音频里的 E-AC-3 每帧 6 块、只有一个独立子流）；也可输出可直接播放的本地 HLS 目录，或两者都要。MP4 里每条轨只取第一路视频与第一路音频（如 TS 里有多路音频时只取第一路），本地 HLS 原样保留全部。MP4 里的 MP3、MP2 音轨，苹果基于 AVFoundation 的播放器（QuickTime Player、Safari 等）认不出。来源标了 EXT-X-GAP 的分片不取，在结果里如实报告。
+- 点播：TS、fMP4 与打包音频分片，AES-128（含加密的 init 段）、字节范围、不连续段；视频与独立音频 rendition 合并为一个 MP4，不重编码，也可输出可直接播放的本地 HLS 目录，或两者都要。来源标了 EXT-X-GAP 的分片不取，在结果里如实报告。
+- 合并成 MP4 的编码：
+  - fMP4 里：H.264、HEVC、AV1、VP9 视频，AAC、AC-3、E-AC-3、MP3、MP2、FLAC、Opus、ALAC 音频；
+  - TS 与打包音频里：H.264、HEVC 视频，AAC、AC-3、E-AC-3、MP3、MP2 音频；
+  - MP3 采样率不低于 16 kHz，TS 与打包音频里的 E-AC-3 每帧 6 块、只有一个独立子流；
+  - 每条轨只取第一路视频与第一路音频（如 TS 里有多路音频时只取第一路），本地 HLS 原样保留全部；
+  - MP4 里的 MP3、MP2 音轨，苹果基于 AVFoundation 的播放器（QuickTime Player、Safari 等）认不出。
 - 续传：分片落盘即完整，中断后再次运行只补缺的；播放列表变了时明确拒绝。
 - 下载时校验分片：解密失败、不是媒体数据的内容拒收；空的响应、fMP4 的顶层 box 或 moof 里声明的样本数据超出数据、TS 或打包音频截在包或帧中间（加密的看解出的内容）时，按没写完重新取，直播里仍没写完的记为缺失。恰好截在 TS 包、音频帧或两组 moof/mdat 之间的看不出，合并出的内容比声明的时长短。
 - 直播录制：按 RFC 8216 的节奏刷新，窗口滑过、取不到或来源标了 EXT-X-GAP 的分片在结果里如实报告；只录一条轨时编码器重启（序号回退）后另起会话接着录；中断后续录，或不联网只合并已录到的。
@@ -89,6 +95,8 @@ asyncio.run(main())
 
 ## 用法（Rust，API 未定型）
 
+Rust 库没有发布到 crates.io，可用 git 依赖（`hs-m3u8-core`）。
+
 ```rust no_run
 use std::num::NonZeroUsize;
 
@@ -125,7 +133,7 @@ bash third_party/ffmpeg/build.sh
 pip install .
 ```
 
-Windows 上在已加载 MSVC 环境的 MSYS2 里运行 `build.sh`。
+Windows 上在已加载 MSVC 环境的 MSYS2 里运行 `build.sh`。已按 `build.sh` 的参数编译安装过 FFmpeg 时，把环境变量 `FFMPEG_DIR` 设为它的安装目录，再直接 `pip install hs-m3u8` 即可。
 
 ## 开发
 
@@ -138,7 +146,7 @@ Windows 上在已加载 MSVC 环境的 MSYS2 里运行 `build.sh`。
 
 桌面应用（Tauri）未开始。
 
-需要：Rust（版本由 `rust-toolchain.toml` 固定）、[uv](https://docs.astral.sh/uv/) 0.13.0、cargo-deny 0.20.2、cargo-llvm-cov 0.9.1；macOS 另需 Xcode 命令行工具，Linux 与 Windows 另需 libclang（bindgen 用）；编译 FFmpeg 还要 C 编译器、make、curl 与 xz。Python 开发工具由 uv 按 `uv.lock` 装进 `.venv`（默认 Python 3.12）。
+需要：Rust（版本由 `rust-toolchain.toml` 固定）、[uv](https://docs.astral.sh/uv/)（版本见 `pyproject.toml` 的 `required-version`）、cargo-deny 与 cargo-llvm-cov（版本见 `.github/workflows/rust.yml`）；macOS 另需 Xcode 命令行工具，Linux 与 Windows 另需 libclang（bindgen 用）；编译 FFmpeg 还要 C 编译器、make、curl 与 xz。Python 开发工具由 uv 按 `uv.lock` 装进 `.venv`（默认 Python 3.12）。
 
 ```bash
 make ffmpeg       # 下载并编译精简 FFmpeg 静态库到 third_party/ffmpeg/dist，只需一次

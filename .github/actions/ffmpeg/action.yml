@@ -1,0 +1,31 @@
+name: FFmpeg
+description: 恢复缓存的精简 FFmpeg 静态库，没有时用 third_party/ffmpeg/build.sh 编译到 third_party/ffmpeg/dist。Windows 上要先有 MSVC 环境与 MSYS2
+
+inputs:
+  cache-key:
+    description: 缓存键里区分构建环境的部分（运行机、容器镜像）；为空时不用缓存，从核对过 SHA-256 的源码包现编
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: 缓存 FFmpeg
+      id: cache
+      if: inputs.cache-key != ''
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: third_party/ffmpeg/dist
+        key: ffmpeg-${{ inputs.cache-key }}-${{ hashFiles('third_party/ffmpeg/build.sh') }}
+
+    - name: 编译 FFmpeg（Windows）
+      if: steps.cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
+      shell: msys2 {0}
+      run: |
+        # MSYS2 coreutils 的 link.exe 会遮住 MSVC 的链接器
+        if [ -f /usr/bin/link.exe ]; then mv /usr/bin/link.exe /usr/bin/link.exe.msys; fi
+        bash third_party/ffmpeg/build.sh
+
+    - name: 编译 FFmpeg
+      if: steps.cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
+      shell: bash
+      run: bash third_party/ffmpeg/build.sh
