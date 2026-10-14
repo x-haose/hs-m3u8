@@ -937,32 +937,116 @@ fn parameter_changes_within_a_group_are_rejected() {
     }
 }
 
-/// 取消后合并在下一处检查以 Cancelled 停下：打开输入、写出每个包、FFmpeg 读写输出文件（含 moov 前置的第二遍）与回读
-/// 核对，在哪一处检查时取消都是 Cancelled，不会报成别的错误。
-#[test]
-fn a_merge_cancelled_at_any_check_stops_as_cancelled() {
+/// 在第 `at` 次检查取消时（返回真之前）做 `act`、并返回它的结果的取消信号，另返回已检查的次数。
+fn counting_cancel(
+    act: impl Fn(usize) -> bool + Send + Sync + 'static,
+) -> (Cancel, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    let checks = Arc::new(AtomicUsize::new(0));
+    let counted = checks.clone();
+    let cancel = Cancel::new(move || act(counted.fetch_add(1, Ordering::Relaxed)));
+    (cancel, checks)
+}
+
+/// 取消后合并在下一处检查以 Cancelled 停下：打开输入（含探测时读后面的数据）、写出每个包、FFmpeg 读写输出文件（含
+/// moov 前置的第二遍）与回读核对，在哪一处检查时取消都是 Cancelled，不会报成别的错误。逐个检查点都试：音频晚 1.2 秒
+/// 开始的 TS（探测要读到后面），与音视频分离的 fMP4。
+#[test]
+fn a_merge_cancelled_at_any_check_stops_as_cancelled() {
+    use std::sync::atomic::Ordering;
+
     let dir = work_dir("cancelled");
     let output = dir.join("out.mp4");
-    let groups = [group([track("ts_long")])];
-    // 从第 `from` 次检查起取消，返回检查的次数与结果
-    let run = |from: usize| {
-        let checks = Arc::new(AtomicUsize::new(0));
-        let counted = checks.clone();
-        let cancel = Cancel::new(move || counted.fetch_add(1, Ordering::Relaxed) >= from);
-        let result = remux(&[Streams::All], &groups, &output, &cancel);
-        (checks.load(Ordering::Relaxed), result)
+    let cases = [
+        (vec![Streams::All], vec![group([track("ts_late_audio")])]),
+        (
+            vec![Streams::Video, Streams::Audio],
+            vec![group([track("fmp4_a/video"), track("fmp4_a/audio")])],
+        ),
+    ];
+    for (streams, groups) in &cases {
+        let (cancel, checks) = counting_cancel(|_| false);
+        remux(streams, groups, &output, &cancel).unwrap();
+        let total = checks.load(Ordering::Relaxed);
+        for from in 0..total {
+            let (cancel, _) = counting_cancel(move |n| n >= from);
+            let result = remux(streams, groups, &output, &cancel);
+            assert!(
+                matches!(result, Err(Error::Cancelled)),
+                "第 {from} 次检查（共 {total} 次）起取消：{result:?}"
+            );
+        }
+    }
+}
+
+/// 合并中途分片文件变短（在第 n 次检查时把第 2 片截掉一半）：报读文件出错，或在截短之前已读完这一片而照常合并出完整
+/// 的输出；不会读了一半就当作读完，合并出缺内容的 MP4 而报成功。逐个检查点都试。
+#[test]
+fn a_segment_shrinking_during_the_merge_is_reported() {
+    use std::sync::atomic::Ordering;
+
+    let dir = work_dir("shrinking");
+    let output = dir.join("out.mp4");
+    let source = track("ts_long");
+    let complete = {
+        let report = remux(
+            &[Streams::All],
+            &[group([source.clone()])],
+            &output,
+            &Cancel::never(),
+        )
+        .unwrap();
+        report.streams.iter().map(|s| s.packets).collect::<Vec<_>>()
     };
-    let (total, result) = run(usize::MAX);
-    result.unwrap();
-    for from in [0, total / 4, total / 2, total * 3 / 4, total - 1] {
-        let (_, result) = run(from);
-        assert!(
-            matches!(result, Err(Error::Cancelled)),
-            "第 {from} 次检查（共 {total} 次）起取消：{result:?}"
-        );
+    let (cancel, checks) = counting_cancel(|_| false);
+    remux(
+        &[Streams::All],
+        &[group([source.clone()])],
+        &output,
+        &cancel,
+    )
+    .unwrap();
+    let total = checks.load(Ordering::Relaxed);
+    for at in 0..total {
+        let copy = dir.join(format!("copy{at}"));
+        std::fs::create_dir_all(&copy).unwrap();
+        let segments: Vec<Segment> = source
+            .segments
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let path = copy.join(format!("seg{i}.ts"));
+                std::fs::copy(&s.path, &path).unwrap();
+                Segment {
+                    path,
+                    duration_us: s.duration_us,
+                }
+            })
+            .collect();
+        let victim = segments[2].path.clone();
+        let (cancel, _) = counting_cancel(move |n| {
+            if n == at {
+                let file = std::fs::File::options().write(true).open(&victim).unwrap();
+                let len = file.metadata().unwrap().len();
+                file.set_len(len / 2).unwrap();
+            }
+            false
+        });
+        let shrinking = TrackSegments {
+            segments,
+            ..source.clone()
+        };
+        match remux(&[Streams::All], &[group([shrinking])], &output, &cancel) {
+            Ok(report) => assert_eq!(
+                report.streams.iter().map(|s| s.packets).collect::<Vec<_>>(),
+                complete,
+                "第 {at} 次检查时截短：照常合并的应完整"
+            ),
+            Err(Error::Io { .. }) => {}
+            Err(other) => panic!("第 {at} 次检查时截短：应报读文件出错，实际 {other:?}"),
+        }
     }
 }
 

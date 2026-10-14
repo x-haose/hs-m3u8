@@ -285,7 +285,8 @@ impl Probe {
     }
 }
 
-/// 把分片链当作一个输入交给 FFmpeg 打开，格式由开头的内容识别，探测读到 `probe` 为止。
+/// 把分片链当作一个输入交给 FFmpeg 打开，格式由开头的内容识别，探测读到 `probe` 为止。分片链记下的中止原因（读文件
+/// 出错、取消）优先：FFmpeg 探测时把读错误当作读到末尾，有流的参数齐了就照样打开成功。
 pub(crate) fn open_chain(
     chain: SegmentChain,
     failure: &chain::Failure,
@@ -293,19 +294,21 @@ pub(crate) fn open_chain(
     group: usize,
     track: usize,
 ) -> Result<format::context::Input, Error> {
-    StreamIo::from_read_seek(chain)
-        .and_then(|io| format::input_from_stream(io, None, Some(probe.options())))
-        .map_err(|cause| {
-            read_failure(failure).unwrap_or(Error::OpenInput {
-                group,
-                track,
-                cause: cause.into(),
-            })
-        })
+    let opened = StreamIo::from_read_seek(chain)
+        .and_then(|io| format::input_from_stream(io, None, Some(probe.options())));
+    if let Some(stopped) = read_failure(failure) {
+        return Err(stopped);
+    }
+    opened.map_err(|cause| Error::OpenInput {
+        group,
+        track,
+        cause: cause.into(),
+    })
 }
 
 /// 读下一个包；读到末尾返回 false。用 `Packet::read` 而不是 ffmpeg-next 的 `packets()` 迭代器：后者把读错误当作读到
-/// 末尾，并静默跳过 `InvalidData` 的包。
+/// 末尾，并静默跳过 `InvalidData` 的包。分片链记下的中止原因优先：FFmpeg 把一部分读错误报成读到末尾（如 TS 读到不足
+/// 一个包的数据时），只看它的结果会把读了一半的输入当作读完。
 pub(crate) fn read_packet(
     ictx: &mut format::context::Input,
     failure: &chain::Failure,
@@ -313,14 +316,18 @@ pub(crate) fn read_packet(
     group: usize,
     track: usize,
 ) -> Result<bool, Error> {
-    match packet.read(ictx) {
+    let read = packet.read(ictx);
+    if let Some(stopped) = read_failure(failure) {
+        return Err(stopped);
+    }
+    match read {
         Ok(()) => Ok(true),
         Err(ffmpeg::Error::Eof) => Ok(false),
-        Err(cause) => Err(read_failure(failure).unwrap_or(Error::Read {
+        Err(cause) => Err(Error::Read {
             group,
             track,
             cause: cause.into(),
-        })),
+        }),
     }
 }
 
