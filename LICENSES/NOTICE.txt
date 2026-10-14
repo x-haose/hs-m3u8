@@ -1,0 +1,15 @@
+hs-m3u8 按 MIT 许可证发布，见 LICENSE。由 scripts/licenses.py 生成。
+
+二进制分发包（Python wheel）里的扩展模块静态链接了以下软件：
+
+1. FFmpeg 9.0.2（https://ffmpeg.org），按 GNU Lesser General Public License（LGPL）2.1 或更高版本授权，全文见
+   FFmpeg-LGPL-2.1.txt。FFmpeg 的源码未作修改，只编译了转封装用到的组件，configure 参数见本项目源码里的
+   third_party/ffmpeg/build.sh。对应的源码包 ffmpeg-9.0.2.tar.xz 随本项目的源码分发包（sdist）一同发布，也可从
+   https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz 取得，SHA-256 为
+   8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e。
+
+   换用修改过的 FFmpeg：在本项目源码目录里按 build.sh 的参数编译安装 FFmpeg（运行 bash third_party/ffmpeg/build.sh
+   <安装目录>，或照它的参数自行编译），再以 FFMPEG_DIR=<安装目录> maturin build --release 重新构建扩展模块。
+
+2. Rust crate，各自的许可证见 THIRD-PARTY-RUST.txt；Rust 标准库按 MIT 或 Apache-2.0 授权
+   （https://github.com/rust-lang/rust）。

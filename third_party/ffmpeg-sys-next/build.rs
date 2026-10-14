@@ -1090,6 +1090,9 @@ fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
 
     let sysroot = find_sysroot();
+    // FFMPEG_DIR 模式：静态库依赖的系统框架由使用方按 FFmpeg 安装的 .pc 补齐（本项目 remux 的 build.rs），下面不再链接
+    // 写死的一份全集，免得多链接用不到的框架
+    let prebuilt = env::var("CARGO_FEATURE_BUILD").is_err() && env::var("FFMPEG_DIR").is_ok();
     let include_paths: Vec<PathBuf> = if env::var("CARGO_FEATURE_BUILD").is_ok() {
         println!(
             "cargo:rustc-link-search=native={}",
@@ -1158,6 +1161,15 @@ fn main() {
     // Use prebuilt library
     else if let Ok(ffmpeg_dir) = env::var("FFMPEG_DIR") {
         let ffmpeg_dir = PathBuf::from(ffmpeg_dir);
+        // 从 sdist 构建时 FFMPEG_DIR 来自 .cargo/config.toml，还没编译 FFmpeg 就在这里说清，不让 bindgen 以找不到头文件失败
+        if !ffmpeg_dir.join("include/libavutil/avutil.h").is_file() {
+            panic!(
+                "FFMPEG_DIR（{}）里没有编译好的 FFmpeg。这个平台没有预编译的 wheel，从源码构建要先运行 \
+                 bash third_party/ffmpeg/build.sh（需要 C 编译器、make 与 xz；Windows 上在已加载 MSVC 环境的 MSYS2 里运行），\
+                 它把 FFmpeg 装到 third_party/ffmpeg/dist；或把 FFMPEG_DIR 设为按它的参数编译安装的 FFmpeg 目录",
+                ffmpeg_dir.display()
+            );
+        }
         // 静态库会被打包进本 crate 的 rlib、头文件决定绑定：两者变化时都要重新运行，否则沿用旧库
         println!("cargo:rerun-if-changed={}", ffmpeg_dir.join("lib").display());
         println!("cargo:rerun-if-changed={}", ffmpeg_dir.join("include").display());
@@ -1268,6 +1280,7 @@ fn main() {
     };
 
     if statik
+        && !prebuilt
         && matches!(
             env::var("CARGO_CFG_TARGET_OS").as_deref(),
             Ok("macos") | Ok("ios") | Ok("tvos")

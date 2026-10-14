@@ -13,3 +13,7 @@
 3. `FFMPEG_DIR` 模式下对 `$FFMPEG_DIR/lib` 与 `$FFMPEG_DIR/include` 声明 `rerun-if-changed`。上游只声明了
    `rerun-if-env-changed=FFMPEG_DIR`，而静态库会被打包进本 crate 的 rlib：FFmpeg 重新编译后（如增减组件）
    构建脚本不重跑，链接进去的仍是旧库，表现为运行时找不到新启用的协议或组件。
+4. `FFMPEG_DIR` 模式下不链接写死的 Apple 框架列表（AppKit、OpenGL 等 15 个，多数用不到）：所需的框架由本项目 remux
+   的 build.rs 按 FFmpeg 安装的 `.pc` 补齐。
+5. `FFMPEG_DIR` 模式下目录里没有 FFmpeg 的头文件时立即失败并说明怎样编译。上游照常往下走，到 bindgen 才以找不到
+   头文件失败；从本项目的 sdist 构建时 `FFMPEG_DIR` 来自 `.cargo/config.toml`，还没运行 build.sh 时会这样。

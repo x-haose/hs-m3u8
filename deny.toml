@@ -1,9 +1,14 @@
 # cargo-deny 0.20 配置：Rust 依赖的安全公告、许可证白名单、禁用包与来源。make check 与 CI 执行。
-# 静态链接的 FFmpeg 不是 crate，其 LGPL 合规由 third_party/ffmpeg/build.sh 检查。
+# 静态链接的 FFmpeg 不是 crate：build.sh 确认配置出的是 LGPL，随发布包分发的声明见 LICENSES/NOTICE.txt。
 
 [graph]
-# 发布平台
-targets = ["aarch64-apple-darwin", "x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+# 发布 wheel 的平台；scripts/licenses.py 按它们汇总第三方声明
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
 
 [advisories]
 # 漏洞公告一律报错；被撤回的版本报错；unsound 覆盖传递依赖；unmaintained 只看工作区的直接依赖，

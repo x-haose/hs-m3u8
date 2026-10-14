@@ -39,7 +39,8 @@ fn main() {
                     .strip_prefix("-l")
                     .or_else(|| token.strip_suffix(".lib"))
                 {
-                    if FFMPEG_LIBS.contains(&name) {
+                    // libm 由 Rust 标准库在 Unix 上链接，再给一次 macOS 的链接器会警告重复的库
+                    if FFMPEG_LIBS.contains(&name) || name == "m" {
                         continue;
                     }
                     name.to_owned()

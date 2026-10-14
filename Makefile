@@ -1,4 +1,4 @@
-.PHONY: check ffmpeg ffmpeg_present \
+.PHONY: check ffmpeg ffmpeg_present licenses \
 	rs_check rs_fmt rs_lint rs_clippy rs_doc rs_test rs_cov \
 	py_check py_env py_develop py_stubs py_test
 
@@ -29,12 +29,17 @@ rs_check: rs_fmt rs_lint rs_clippy rs_doc rs_test rs_cov
 rs_fmt:
 	cargo fmt --all --check
 
-# 与平台无关的检查：依赖方向、压制属性与注释、依赖的安全公告与许可证
-rs_lint:
+# 与平台无关的检查：依赖方向、压制属性与注释、依赖的安全公告与许可证、随发布包分发的声明是否最新
+rs_lint: py_env
 	scripts/check_deps.sh
 	scripts/check_no_suppression.sh
 	@cargo deny --version >/dev/null 2>&1 || { echo "缺少 cargo-deny：cargo install cargo-deny --version 0.20.2 --locked"; exit 1; }
 	cargo deny --locked check
+	uv run --no-sync python scripts/licenses.py --check
+
+# 依赖或 FFmpeg 版本变了之后重新生成 LICENSES 下的声明
+licenses: py_env
+	uv run --no-sync python scripts/licenses.py
 
 rs_clippy: ffmpeg_present py_env
 	cargo clippy --workspace --all-targets -- -D warnings

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 下载并编译本项目使用的精简 FFmpeg 静态库，安装到 third_party/ffmpeg/dist（可用第一个参数改安装目录，
-# 该目录会被整个删除重建，所以只接受不存在、为空或由本脚本装过的目录）。
+# 该目录会被整个删除重建，所以只接受不存在、为空或由本脚本装过的目录）。第一个参数为 --fetch 时只下载并核对源码包
+# （打 sdist 前用）；源码包已在 build/ 下且核对一致时不再下载。
 # 组件只含转封装所需；configure 得出的许可证不是 LGPL 时失败。
 # Windows：在已加载 MSVC 环境的 MSYS2 bash 中运行，产物为 MSVC 静态库（*.lib）。
 set -euo pipefail
@@ -10,6 +11,11 @@ VERSION=9.0.2
 SHA256=8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
 
 ROOT=$(cd "$(dirname "$0")" && pwd)
+FETCH_ONLY=false
+if [[ ${1:-} == --fetch ]]; then
+  FETCH_ONLY=true
+  shift
+fi
 PREFIX=${1:-$ROOT/dist}
 # configure 在源码目录里运行，安装目录须为绝对路径
 [[ "$PREFIX" == /* ]] || PREFIX=$PWD/$PREFIX
@@ -25,6 +31,12 @@ case "$(uname -s)" in
   Linux) PLATFORM=linux ;;
   *) echo "不支持的平台: $(uname -s)" >&2; exit 1 ;;
 esac
+
+# macOS：静态库的最低系统版本须与 wheel 的平台标签一致（maturin 在 arm64 上默认 11.0），不设时 clang 按 SDK 的版本
+# 编译，链接时报「built for newer macOS version」，wheel 声称支持的旧系统未必能用
+if [[ $PLATFORM == macos ]]; then
+  export MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-11.0}
+fi
 
 sha256_of() {
   if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi
@@ -51,6 +63,10 @@ actual=$(sha256_of "$TARBALL")
 if [[ "$actual" != "$SHA256" ]]; then
   echo "ffmpeg-$VERSION.tar.xz 的 SHA-256 不符：期望 $SHA256，实际 $actual" >&2
   exit 1
+fi
+if $FETCH_ONLY; then
+  echo "已取得 $TARBALL"
+  exit 0
 fi
 
 rm -rf -- "${SRC:?}" "${PREFIX:?}"
