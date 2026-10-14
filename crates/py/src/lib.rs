@@ -18,7 +18,8 @@ mod runtime;
 
 use pyo3::prelude::*;
 
-#[pymodule]
+// 没在自由线程版上测过：导入时让解释器重新开启 GIL（解释器同时给出警告）
+#[pymodule(gil_used = true)]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     engine::register(module)?;
     error::register(module)?;

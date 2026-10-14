@@ -8,7 +8,7 @@ HLS（m3u8）下载：并发拉取、AES-128 解密与校验、断点续传、�
 pip install hs-m3u8
 ```
 
-需要 CPython 3.12 及以上（自由线程版不支持）。预编译的 wheel 覆盖 Linux x86_64 与 aarch64（glibc 2.28 及以上）、macOS 11 及以上的 Apple 芯片机型、Windows x86_64；其他平台从源码构建，见「从源码构建」。
+需要 CPython 3.12 及以上。自由线程版不支持：没有 wheel，从源码构建后导入时解释器会重新开启 GIL。预编译的 wheel 覆盖 Linux x86_64 与 aarch64（glibc 2.28 及以上）、macOS 11 及以上的 Apple 芯片机型、Windows x86_64；其他平台从源码构建，见「从源码构建」。
 
 ## 能力
 
@@ -77,20 +77,20 @@ asyncio.run(main())
 | `run()`（默认 `del_hls=False`）：MP4 之外留下可直接播放的 HLS 目录 | `Target.Both(mp4=..., hls=...)`；只要 MP4（`del_hls=True`）用 `Target.Mp4`。`OutputOptions(keep_work_dir=True)` 留下的是续传用的任务目录，不能直接播放 |
 | `run(merge=False)` | `Target.Hls`：可直接播放的本地 HLS 目录 |
 | `headers` | `download(..., headers=...)`，或 `HttpOptions(headers=...)` |
-| `max_workers` | `JobRequest(concurrency=...)`；所有任务合计另受 `Engine(max_requests=...)` 限制，并发调大时一并调大 |
-| `key=M3u8Key(key, iv)`，key 任意长度，iv 可写十六进制字符串 | `JobRequest(key=KeyOverride(key, iv=...))`，key 须 16 字节，iv 是 16 字节的 `bytes`（十六进制字符串用 `bytes.fromhex(iv.removeprefix("0x"))` 转） |
+| `max_workers`：只限拉播放列表的请求，分片一次全部发出 | `JobRequest(concurrency=...)` 限每个任务同时下载的分片数；所有任务合计另受 `Engine(max_requests=...)` 限制，并发调大时一并调大 |
+| `key=M3u8Key(key, iv)`：key 不校验长度（16、24、32 字节可用，其他长度合并时抛 `ValueError`），iv 可写十六进制字符串 | `JobRequest(key=KeyOverride(key, iv=...))`，key 须 16 字节（AES-128），iv 是 16 字节的 `bytes`（十六进制字符串用 `bytes.fromhex(iv.removeprefix("0x"))` 转） |
 | `is_decrypt` | 不需要：按播放列表的 `EXT-X-KEY` 解密 |
 | `get_m3u8_func`、`m3u8_response_after` | `Hooks.on_playlist`（返回改写后的文本） |
 | `m3u8_request_before`、`key_request_before`、`ts_request_before` | `Hooks.on_request`（`purpose` 区分用途）：只改地址与请求头，不能改请求方法、请求体、代理、超时与重试，也不能直接给出响应 |
 | `key_response_after` | `Hooks.on_key` |
 | `ts_response_after` | `Hooks.on_segment`，init 段（`EXT-X-MAP`）为 `Hooks.on_init` |
-| 回调可以是协程 | 回调是普通函数，在后台线程里并发调用，有状态的回调要自己加锁（见 `Hooks`） |
+| 回调可以是协程（`get_m3u8_func` 除外），都在事件循环所在的线程里执行 | 回调是普通函数，在后台线程里并发调用，有状态的回调要自己加锁（见 `Hooks`） |
 | 不校验 TLS 证书 | 默认校验；来源可信而证书有问题时设 `HttpOptions(insecure=True)` |
-| 代理只看环境变量 | 默认 `Proxy.System()` 还看 macOS 与 Windows 的系统设置，系统设置用了 PAC 时报 `SystemProxyError`，改用 `Proxy.Direct()` 或 `Proxy.Url(...)` |
+| 代理：先看环境变量，没设时 macOS 与 Windows 上读系统设置里的 HTTP/HTTPS 代理，系统设置用了 PAC 时直连 | 默认 `Proxy.System()` 读同样的来源（环境变量另认 `all_proxy` 与 socks 地址）；系统设置用了 PAC 或自动发现时报 `SystemProxyError`，改用 `Proxy.Direct()` 或 `Proxy.Url(...)` |
 | 日志（loguru、`<save_path>/<名>.log`） | 不写日志：进度看 `job.progress()`，失败看异常 |
-| TS 里的各种编码都合并成 MP4 | 放不进 MP4 的编码（如 TS 里的 Opus、MPEG-2 视频）报 `Mp4UnsupportedError`，改用 `Target.Hls` |
-| `M3u8Key`、`start()`、`merge()`、`ts_to_mp4()` | 已移除，对应的用法见上面各行 |
-| 纯 Python，各平台都能装 | 预编译的 wheel 只覆盖「安装」一节列的平台，其他平台从源码构建 |
+| FFmpeg 的 MP4 封装器收的编码都合并（如 TS 里的 Opus、MPEG-2 视频），不收的抛 PyAV 的异常 | 放不进 MP4 的编码（如 TS 里的 Opus、MPEG-2 视频）报 `Mp4UnsupportedError`，改用 `Target.Hls` |
+| `M3u8Key`、`start()`、`merge()`、`ts_to_mp4()`、`get_ts_list()`、`save_file()` | 已移除，对应的用法见上面各行 |
+| 包本身是纯 Python，依赖 PyAV、curl_cffi 等二进制包，能装的平台以它们的 wheel 为准 | 预编译的 wheel 只覆盖「安装」一节列的平台（不含 Intel Mac 与 musl Linux），其他平台从源码构建 |
 | Python ≥ 3.10 | Python ≥ 3.12 |
 
 ## 用法（Rust，API 未定型）
