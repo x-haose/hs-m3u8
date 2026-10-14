@@ -47,8 +47,7 @@ use ffmpeg_next as ffmpeg;
 pub use crate::error::{Error, FfmpegError, Unsupported};
 
 use crate::chain::ffmpeg_path;
-use crate::compare::layout_of;
-use crate::group::{open_group, primed, references_of};
+use crate::group::{layout_of, open_group, primed, references_of};
 use crate::write::write_verified;
 
 /// 一个不连续段组里某条轨的分片，按播放顺序；fMP4 时 `init` 是该组使用的 init 段。fMP4 的 init 段与各分片须通过

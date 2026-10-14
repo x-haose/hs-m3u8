@@ -1,6 +1,5 @@
 //! 后续组与第 0 组的流布局、编码参数与解码配置的比较：MP4 的样本描述由第 0 组的写成，其余组须相同。
 
-use crate::group::{OpenTrack, Selected};
 use crate::{Error, Shape, StreamKind, Unsupported, ffi};
 
 impl Shape {
@@ -136,19 +135,19 @@ impl Compared {
     }
 }
 
-/// 一条轨这一组选中的流与第 0 组的 `first` 比较：种类、编码参数或解码配置不同时报错；其余各项相同、有项只有一边
-/// 探测出时返回第一路这样的流的种类。
+/// 一条轨这一组选中的流 `found` 与第 0 组的 `first` 比较：种类、编码参数或解码配置不同时报错；其余各项相同、有项
+/// 只有一边探测出时返回第一路这样的流的种类。
 pub(crate) fn same_streams(
-    selected: &[Selected],
+    found: &[&Desc],
     first: &[Desc],
     group: usize,
     track: usize,
 ) -> Result<Option<StreamKind>, Error> {
-    if selected.len() != first.len()
-        || selected
+    if found.len() != first.len()
+        || found
             .iter()
             .zip(first)
-            .any(|(s, f)| s.desc.shape.kind() != f.shape.kind())
+            .any(|(d, f)| d.shape.kind() != f.shape.kind())
     {
         return Err(Error::Unsupported(Unsupported::LayoutChanged {
             group,
@@ -156,16 +155,16 @@ pub(crate) fn same_streams(
         }));
     }
     let mut unknown = None;
-    for (s, f) in selected.iter().zip(first) {
+    for (d, f) in found.iter().zip(first) {
         let kind = f.shape.kind();
-        let (shape, config) = s.desc.compare(f);
+        let (shape, config) = d.compare(f);
         if shape == Compared::Differs {
             return Err(Error::Unsupported(Unsupported::ParamsChanged {
                 group,
                 track,
                 kind,
                 first: f.shape,
-                found: s.desc.shape,
+                found: d.shape,
             }));
         }
         if config == Compared::Differs {
@@ -180,28 +179,4 @@ pub(crate) fn same_streams(
         }
     }
     Ok(unknown)
-}
-
-/// 第 0 组各轨选中的流，下标为轨道号；依次排开即各路输出流。同一类流只能来自一条轨，各轨合起来至少一路。
-pub(crate) fn layout_of(first: &[OpenTrack]) -> Result<Vec<Vec<Desc>>, Error> {
-    let mut layout: Vec<Vec<Desc>> = Vec::new();
-    for t in first {
-        let duplicate = t.selected.iter().find(|s| {
-            layout
-                .iter()
-                .flatten()
-                .any(|d| d.shape.kind() == s.desc.shape.kind())
-        });
-        if let Some(s) = duplicate {
-            return Err(Error::DuplicateKind {
-                track: t.track,
-                kind: s.desc.shape.kind(),
-            });
-        }
-        layout.push(t.selected.iter().map(|s| s.desc.clone()).collect());
-    }
-    if layout.iter().all(Vec::is_empty) {
-        return Err(Error::Unsupported(Unsupported::NoStreams));
-    }
-    Ok(layout)
 }

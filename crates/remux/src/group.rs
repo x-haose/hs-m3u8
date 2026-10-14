@@ -74,7 +74,7 @@ pub(crate) struct OpenTrack {
 }
 
 /// 打开第 `group` 组的各轨并选流（见 [`open_selected`]）。`layout` 为第 0 组各轨选中的流（见
-/// [`crate::compare::layout_of`]），其余组的流种类、参数与解码配置须与它相同（见 [`same_streams`]），各轨都没有确定的
+/// [`layout_of`]），其余组的流种类、参数与解码配置须与它相同（见 [`same_streams`]），各轨都没有确定的
 /// 不同、而有项只有一边探测出时报 [`Unsupported::ParamsUnknown`]；打开第 0 组时为 None。
 pub(crate) fn open_group(
     streams: &[Streams],
@@ -86,8 +86,9 @@ pub(crate) fn open_group(
     let mut unknown = None;
     for (track, segments) in tracks.tracks.iter().enumerate() {
         let (input, selected) = open_selected(segments, streams[track], group, track, cancel)?;
+        let found: Vec<&Desc> = selected.iter().map(|s| &s.desc).collect();
         if let Some(layout) = layout
-            && let Some(kind) = same_streams(&selected, &layout[track], group, track)?
+            && let Some(kind) = same_streams(&found, &layout[track], group, track)?
         {
             unknown.get_or_insert((track, kind));
         }
@@ -106,6 +107,30 @@ pub(crate) fn open_group(
         })),
         None => Ok(opened),
     }
+}
+
+/// 第 0 组各轨选中的流，下标为轨道号；依次排开即各路输出流。同一类流只能来自一条轨，各轨合起来至少一路。
+pub(crate) fn layout_of(first: &[OpenTrack]) -> Result<Vec<Vec<Desc>>, Error> {
+    let mut layout: Vec<Vec<Desc>> = Vec::new();
+    for t in first {
+        let duplicate = t.selected.iter().find(|s| {
+            layout
+                .iter()
+                .flatten()
+                .any(|d| d.shape.kind() == s.desc.shape.kind())
+        });
+        if let Some(s) = duplicate {
+            return Err(Error::DuplicateKind {
+                track: t.track,
+                kind: s.desc.shape.kind(),
+            });
+        }
+        layout.push(t.selected.iter().map(|s| s.desc.clone()).collect());
+    }
+    if layout.iter().all(Vec::is_empty) {
+        return Err(Error::Unsupported(Unsupported::NoStreams));
+    }
+    Ok(layout)
 }
 
 /// 一组里有打包音频的轨没有时间戳时，只有它一条轨贡献流才能定时。

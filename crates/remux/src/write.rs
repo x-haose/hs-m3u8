@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use ffmpeg::{Dictionary, Packet, Rational, Rescale, Rounding, codec, encoder, format};
 use ffmpeg_next as ffmpeg;
 
-use crate::compare::{Desc, layout_of};
+use crate::compare::Desc;
 use crate::error::file_error;
 use crate::ffi::{self, OpenFailure, OutputFile};
-use crate::group::{OpenTrack, open_group, primed, references_of};
+use crate::group::{OpenTrack, layout_of, open_group, primed, references_of};
 use crate::source::{Dropped, Mapping, Source};
 use crate::timing::{MICROS, align_wraps, group_offset, retime};
 use crate::{
