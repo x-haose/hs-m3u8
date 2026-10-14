@@ -267,7 +267,7 @@ async fn existing_hls_directories_are_replaced_only_when_written_by_the_library(
 }
 
 /// 两者都要时，HLS 目录在下载期间被别人放进了文件：写出前的检查发现后报错，MP4 与 HLS 都没有写出、
-/// 也不留临时文件，任务目录保留；腾出来后再运行，已下载的分片不重下。
+/// 也不留临时文件，任务目录保留；腾出来后再运行，已下载的分片不重下（续传前核对内容时取过一次）。
 #[tokio::test(flavor = "multi_thread")]
 async fn outputs_taken_during_the_download_leave_nothing_behind() {
     let dir = test_dir("output_taken");
@@ -297,7 +297,7 @@ async fn outputs_taken_during_the_download_leave_nothing_behind() {
     std::fs::remove_dir_all(dir.join("out")).unwrap();
     let output = run(req).await.unwrap();
     assert_hls_matches(&dir.join("out"), &output.mp4.unwrap().path);
-    assert_eq!(server.hits("seg0.ts"), 1);
+    assert_eq!(server.hits("seg0.ts"), 2);
 }
 
 /// 两个任务（任务目录不同）同时输出到同一个 HLS 目录：各在自己的准备目录里备齐，先改名的成功，另一个报已存在；
@@ -415,7 +415,7 @@ async fn live_holes_and_sessions_in_hls() {
 }
 
 /// 编码放不进 MP4（TS 里的 Opus 音频）：下了第一个分片、核对出来就报错，其余分片不下，任务目录保留；改为输出 HLS 后用同
-/// 一个默认任务目录接着下，已下的不重下。HLS 目录路径带结尾的分隔符也照常。
+/// 一个默认任务目录接着下，已下的不重下（续传前核对内容时取过一次）。HLS 目录路径带结尾的分隔符也照常。
 #[tokio::test(flavor = "multi_thread")]
 async fn switching_to_hls_after_an_unsupported_codec_reuses_the_download() {
     let dir = test_dir("output_switch");
@@ -448,7 +448,7 @@ async fn switching_to_hls_after_an_unsupported_codec_reuses_the_download() {
     assert!(dir.join("out/0/2.ts").is_file());
     assert_eq!(output.leftovers, []);
     assert!(!dir.join("out.hsdl").exists());
-    assert_eq!(hits(), [1, 1, 1]);
+    assert_eq!(hits(), [2, 1, 1]);
 }
 
 /// 打包音频前的 ID3 标签很长（带封面图）：下载时整片校验通过，本地 HLS 按标签长度跳过后识别出 AAC。

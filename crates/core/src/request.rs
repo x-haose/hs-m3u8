@@ -15,9 +15,10 @@ use crate::{Error, hls};
 /// 来源与访问它的方式；探测（[`crate::Engine::probe`]）与下载（[`JobRequest::source`]）共用。
 #[derive(Clone)]
 pub struct Source {
-    /// 主播放列表或媒体播放列表的地址。与任务目录记录的不同（换了令牌、主机或路径）时，先核对新地址取到的与已下载的
-    /// 是同一份内容才续传，并改记新地址：点播为每条轨最近的一个已完成的分片（取不到的换前一个）按新地址重新下载后与
-    /// 已存的逐字节相同，直播见 [`LiveOptions`]；不是时报 [`crate::WorkDirProblem::SourceUnverified`]
+    /// 主播放列表或媒体播放列表的地址，续传时可以与上次的不同（换了令牌、主机或路径）。续传先核对这次取到的与已下载的
+    /// 是同一份内容：点播每条轨的每个不连续段组，取已完成的分片里字节数最大的重新下载（取不到的换次大的），与已存的
+    /// 逐字节比较；直播见 [`LiveOptions`]。不是时报 [`crate::WorkDirProblem::SourceUnverified`]。点播的轨 init 段内容
+    /// 变了时，已完成的分片不沿用，重新下载
     pub url: Url,
     /// 选轨偏好。来源是主播放列表时，与任务目录记录的不同报 [`crate::WorkDirProblem::PreferenceChanged`]；任务目录里
     /// 有已完成的分片时按记录的变体与音频找回同一条轨，不按偏好重新选。按身份选的（`Matching`）续传时要给当初那个，

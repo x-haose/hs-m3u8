@@ -254,7 +254,8 @@ def test_cancelled_jobs_keep_their_segments_and_resume(server: Server, tmp_path:
     assert_survives_pickle(progress)
     assert request.output.resolved_work_dir().is_dir()
     assert run(request).segments == 2
-    assert server.hits("seg0.ts") == 1
+    # 第一次运行下载的，与续传前核对内容时取的
+    assert server.hits("seg0.ts") == 2
 
 
 def test_waiting_outside_asyncio_fails_without_cancelling_the_job(server: Server, tmp_path: Path) -> None:

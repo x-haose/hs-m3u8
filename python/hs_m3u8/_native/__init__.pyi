@@ -2944,9 +2944,10 @@ class Source:
     def url(self) -> builtins.str:
         r"""
         主播放列表或媒体播放列表的地址，只支持 http/https；读到的是解析后的规范写法（主机名小写、补上路径 `/`、
-        百分号编码等），可能与传入的不同。与任务目录记录的不同（换了令牌、主机或路径）时，先核对新地址取到的与已下载
-        的是同一份内容才续传，并改记新地址：点播为每条轨最近的一个已完成的分片（取不到的换前一个）按新地址重新下载后
-        与已存的逐字节相同，直播见 `LiveOptions`；不是时报 `WorkDirProblem.SourceUnverified`
+        百分号编码等），可能与传入的不同。续传时可以与上次的不同（换了令牌、主机或路径）：续传先核对这次取到的与已下载
+        的是同一份内容，点播每条轨的每个不连续段组，取已完成的分片里字节数最大的重新下载（取不到的换次大的），与已存的
+        逐字节比较；直播见 `LiveOptions`。不是时报 `WorkDirProblem.SourceUnverified`。点播的轨 init 段内容变了时，已完成
+        的分片不沿用，重新下载
         """
     @property
     def preference(self) -> Preference:
@@ -3844,10 +3845,10 @@ class WorkDirProblem:
     @typing.final
     class SourceUnverified(WorkDirProblem):
         r"""
-        地址与记录的不同，且核对不上新地址取到的与已下载的是同一份内容：点播为有轨已完成的分片按新地址重新下载后
-        内容不同或都已取不到（见 `Source.url`），多为另一个视频或同一视频的另一档；直播为接不上之前录到的（有轨内容
-        不同，或没有一条轨核对一致，见 `LiveOptions`）。记录不变：可用原来的地址续传、（直播）用
-        `Engine.merge_recorded` 合并已录的部分，或换一个任务目录、放弃任务
+        核对不上这次取到的与已下载的是同一份内容：点播为有一组已完成的分片重新下载后内容不同（见 `Source.url`），多
+        为另一个视频、同一视频的另一档或同一地址换了内容；直播为地址与记录的不同，且接不上之前录到的（有轨内容不同，
+        或没有一条轨核对一致，见 `LiveOptions`）。记录不变：直播可用原来的地址续录、用 `Engine.merge_recorded` 合并
+        已录的部分；或换一个任务目录、放弃任务
         """
         __match_args__ = ()
         def __new__(cls) -> WorkDirProblem.SourceUnverified: ...

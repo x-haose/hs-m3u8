@@ -2,6 +2,7 @@
 
 mod plan;
 
+use std::cmp::Reverse;
 use std::ops::Range;
 
 use hs_m3u8_hls::Segment;
@@ -22,10 +23,11 @@ use crate::{Error, Progress, Stage, WorkDirProblem, blocking};
 /// `mp4` 为各轨的取流方式：先下各组各轨的第一个分片，核对能否放进 MP4（见 [`output::check_mp4`]），放不进的不必下完
 /// 才报。
 ///
-/// 完整来源地址与记录的不同（见 [`WorkDir::url_changed`]）时，先核对取到的是同一份内容：各轨已完成的分片从新到旧，按新
-/// 地址重新下载第一个取得到的，与已存的比较（见 [`recheck`]），都相同才改记新地址；有轨不同或都已取不到（404/410）报
-/// [`WorkDirProblem::SourceUnverified`]，记录不变。分片名与时长相同的两个视频（只靠查询串区分的、同一视频的另一档）计划
-/// 摘要相同，只能这样分开。
+/// 任务目录里有已完成的分片时，先核对这次取到的是同一份内容：每条轨的每个不连续段组，已完成的分片按字节数从大到小
+/// （大的不像黑场、静音那样容易彼此相同），重新下载第一个取得到的，与已存的比较（见 [`recheck`]，取不到的即 404/410
+/// 最多换到第 [`RECHECK_TRIES`] 个）。有组不同报 [`WorkDirProblem::SourceUnverified`]，都取不到报最后那个的失败。分片
+/// 名与时长相同的两个视频（只靠查询串区分的、同一视频的另一档、同一地址换了内容的）计划摘要相同，只能这样分开；按组
+/// 核对，各视频共用的片头片尾（单独的组）不会让别的组蒙混过关。
 ///
 /// init 段每次都重新拉取（地址常带每次会话不同的签名，内容决定文件名）；任一项失败时取消其余项并返回该错误，
 /// 任务被取消时返回 [`Error::Cancelled`]。
@@ -46,10 +48,7 @@ pub(crate) async fn download(
     let inits = store_inits(http, plan, layout, progress, cancel).await?;
     plan.check_inits(&inits)?;
     let names = names(plan, &inits);
-    if dir.url_changed() {
-        verify_new_url(fetcher, plan, &names, dir, cancel).await?;
-        dir.adopt_url().await?;
-    }
+    verify_completed(fetcher, plan, &names, layout, cancel).await?;
 
     let mut items: Vec<Vec<Option<Item>>> = plan
         .tracks
@@ -94,67 +93,74 @@ pub(crate) async fn download(
     Ok(group_input(plan, &names, layout, Range::clone))
 }
 
-/// 见 [`download`]：各轨已完成的分片按新地址重新下载，与已存的比较。
-async fn verify_new_url(
+/// 核对已完成的分片时，每组最多重新下载几个：取不到（404/410）的才换下一个，几个都取不到多半是这次的播放列表本身
+/// 列错了，不再逐个试。
+const RECHECK_TRIES: usize = 3;
+
+/// 见 [`download`]：各轨各组已完成的分片重新下载，与已存的比较。
+async fn verify_completed(
     fetcher: &Fetcher,
     plan: &Plan,
     names: &[Vec<SegmentName>],
-    dir: &WorkDir,
+    layout: &Layout,
     cancel: &CancellationToken,
 ) -> Result<(), Error> {
-    let layout = dir.layout();
-    let tracks: Vec<Vec<Candidate>> = plan
-        .tracks
+    let groups: Vec<(usize, Vec<Candidate>)> = plan
+        .groups
         .iter()
-        .zip(names)
-        .enumerate()
-        .map(|(track, (t, names))| {
-            t.segments
-                .iter()
-                .zip(names)
-                .rev()
-                .map(|(segment, name)| Candidate {
-                    segment: segment.clone(),
-                    stored: layout.segment(track, name),
-                    init: layout.segment_init(track, name),
+        .flat_map(|ranges| ranges.iter().enumerate())
+        .map(|(track, range)| {
+            let candidates = range
+                .clone()
+                .map(|i| Candidate {
+                    segment: plan.tracks[track].segments[i].clone(),
+                    stored: layout.segment(track, &names[track][i]),
+                    init: layout.segment_init(track, &names[track][i]),
                 })
-                .collect()
+                .collect();
+            (track, candidates)
         })
         .collect();
-    let tracks = blocking(move || {
-        tracks
+    let groups = blocking(move || {
+        groups
             .into_iter()
-            .map(completed)
-            .collect::<Result<Vec<_>, _>>()
+            .map(|(track, candidates)| Ok((track, largest_completed(candidates)?)))
+            .collect::<Result<Vec<_>, Error>>()
     })
     .await??;
     let direct = fetcher.direct();
-    for (track, candidates) in tracks.into_iter().enumerate() {
+    for (track, candidates) in groups {
         if candidates.is_empty() {
             continue;
         }
         match recheck(&direct, track, candidates, cancel).await? {
             Recheck::Same => {}
-            Recheck::Different | Recheck::Gone => {
+            Recheck::Different => {
                 return Err(Error::WorkDir {
                     path: layout.root().to_path_buf(),
                     problem: WorkDirProblem::SourceUnverified,
                 });
             }
+            Recheck::Gone(failure) => return Err(failure),
         }
     }
     Ok(())
 }
 
-/// `candidates` 里已在任务目录中的，顺序不变。
-fn completed(candidates: Vec<Candidate>) -> Result<Vec<Candidate>, Error> {
-    let mut kept = Vec::new();
+/// `candidates` 里已在任务目录中的，按字节数从大到小，最多 [`RECHECK_TRIES`] 个。
+fn largest_completed(candidates: Vec<Candidate>) -> Result<Vec<Candidate>, Error> {
+    let mut sized = Vec::new();
     for candidate in candidates {
-        if workdir::completed_len(&candidate.stored)?.is_some() {
-            kept.push(candidate);
+        if let Some(len) = workdir::completed_len(&candidate.stored)? {
+            sized.push((len, candidate));
         }
     }
-    Ok(kept)
+    sized.sort_by_key(|(len, _)| Reverse(*len));
+    Ok(sized
+        .into_iter()
+        .take(RECHECK_TRIES)
+        .map(|(_, candidate)| candidate)
+        .collect())
 }
 
 /// 下载 `items` 中尚未在任务目录里的，已在的计入进度；任一项失败时取消其余项并返回该错误。

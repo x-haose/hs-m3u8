@@ -48,8 +48,8 @@ impl Recorder<'_> {
         let verdicts = self.verdicts();
         let verdict = match overlap {
             Recheck::Same => Verdict::Matches,
-            Recheck::Gone if verdicts.is_full(track) => Verdict::Unverifiable,
-            Recheck::Different | Recheck::Gone => Verdict::Differs,
+            Recheck::Gone(_) if verdicts.is_full(track) => Verdict::Unverifiable,
+            Recheck::Different | Recheck::Gone(_) => Verdict::Differs,
         };
         verdicts.conclude(track, verdict);
         self.decide_if_complete().await

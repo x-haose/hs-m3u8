@@ -365,7 +365,8 @@ async fn failure_then_resume() {
     let output = job.wait().await.unwrap();
     let want = expected_ts_a(&dir);
     assert_output(&output, &want);
-    assert_eq!(server.hits("seg0.ts"), 1);
+    // 第一次运行下载的，与续传前核对内容时取的
+    assert_eq!(server.hits("seg0.ts"), 2);
     // 续传前已完成的分片计入时长与字节数
     let last = progress.borrow().clone();
     assert_eq!(last.duration_us, 2_000_000);
@@ -376,33 +377,6 @@ async fn failure_then_resume() {
     assert_eq!(last.bytes, plain as u64);
 }
 
-/// CDN 在路径里放每次会话不同的令牌：续传时分片的地址都变了，但身份（地址最后一段）不变，照常续传。
-#[tokio::test(flavor = "multi_thread")]
-async fn resume_survives_tokens_in_the_path() {
-    let dir = test_dir("resume_path_token");
-    let server = Server::start().await;
-    let playlist = |token: &str| {
-        format!(
-            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\n{token}/seg0.ts\n\
-             #EXTINF:1,\n{token}/seg1.ts\n#EXT-X-ENDLIST\n"
-        )
-    };
-    server.put("tok1/seg0.ts", fixture("ts_a/seg0.ts"));
-    server.put("index.m3u8", playlist("tok1"));
-    let req = request(server.url("index.m3u8"), &dir);
-    assert!(run(req.clone()).await.is_err());
-
-    for name in TS_A {
-        server.put(&format!("tok2/{name}"), fixture(&format!("ts_a/{name}")));
-    }
-    server.put("index.m3u8", playlist("tok2"));
-    let output = run(req).await.unwrap();
-
-    let want = expected_ts_a(&dir);
-    assert_output(&output, &want);
-    assert_eq!(server.hits("tok2/seg0.ts"), 0);
-}
-
 /// 两个分片、各声明 1 秒的点播播放列表，分片地址为 `<dir>/seg<i>.ts`。
 fn two_segments_in(dir: &str) -> String {
     format!(
@@ -411,11 +385,11 @@ fn two_segments_in(dir: &str) -> String {
     )
 }
 
-/// 重新获取的地址换了路径里的令牌：每条轨最近的一个已完成分片按新地址重新下载，与已存的相同，续传并改记新地址；之后
-/// 用新地址不再核对，已完成的不重新下载。
+/// CDN 在播放列表与分片的路径里放每次会话不同的令牌：续传时地址都变了，分片的身份（地址最后一段）不变；核对内容相同
+/// （重新下载已完成的 seg0 一次），照常续传，不重下已完成的。
 #[tokio::test(flavor = "multi_thread")]
-async fn a_new_address_with_the_same_content_resumes() {
-    let dir = test_dir("resume_new_address");
+async fn resume_survives_tokens_in_the_path() {
+    let dir = test_dir("resume_path_token");
     let server = Server::start().await;
     for token in ["tok1", "tok2"] {
         server.put(&format!("{token}/index.m3u8"), two_segments_in("."));
@@ -427,20 +401,16 @@ async fn a_new_address_with_the_same_content_resumes() {
             .is_err()
     );
 
-    // seg1 仍取不到：这次失败，但核对过、已改记新地址
-    let req = request(server.url("tok2/index.m3u8"), &dir);
-    let err = run(req.clone()).await.unwrap_err();
-    assert!(matches!(err, Error::Segment { sequence: 1, .. }), "{err}");
-    assert_eq!(server.hits("tok2/seg0.ts"), 1);
-
     server.put("tok2/seg1.ts", fixture("ts_a/seg1.ts"));
-    let output = run(req).await.unwrap();
+    let output = run(request(server.url("tok2/index.m3u8"), &dir))
+        .await
+        .unwrap();
     assert_output(&output, &expected_ts_a(&dir));
     assert_eq!(server.hits("tok2/seg0.ts"), 1);
 }
 
 /// 地址变了（这里只是查询串），新地址列出的分片名、时长都与记录的相同，内容却不同（只靠查询串区分的另一个视频，或
-/// 同一视频的另一档）：计划摘要相同也不续传，报 SourceUnverified，别的分片一个也不下；记录不变，原来的地址照常续传。
+/// 同一视频的另一档）：计划摘要相同也不续传，报 SourceUnverified，别的分片一个也不下；原来的地址照常续传。
 #[tokio::test(flavor = "multi_thread")]
 async fn different_content_at_a_new_address_is_not_resumed() {
     let dir = test_dir("resume_other_content");
@@ -470,7 +440,44 @@ async fn different_content_at_a_new_address_is_not_resumed() {
     server.put("index.m3u8", two_segments_in("v1"));
     let output = run(request(url(1), &dir)).await.unwrap();
     assert_output(&output, &expected_ts_a(&dir));
-    assert_eq!(server.hits("v1/seg0.ts"), 1);
+    assert_eq!(server.hits("v1/seg0.ts"), 2);
+}
+
+/// 两个视频共用单独成组的片尾（逐字节相同），主体的分片名、时长也相同：按组核对，主体那组比较出内容不同，报
+/// SourceUnverified，不因片尾相同而续传。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shared_ending_does_not_vouch_for_the_rest() {
+    let dir = test_dir("resume_shared_ending");
+    let server = Server::start().await;
+    let url = |id: u32| Url::parse(&format!("{}?id={id}", server.url("index.m3u8"))).unwrap();
+    let playlist = |dir: &str| {
+        format!(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\n{dir}/seg0.ts\n#EXTINF:1,\n{dir}/seg1.ts\n\
+             #EXT-X-DISCONTINUITY\n#EXTINF:1,\ncommon/end.ts\n#EXT-X-ENDLIST\n"
+        )
+    };
+    server.put("common/end.ts", fixture("ts_b/seg0.ts"));
+    server.put("v1/seg0.ts", fixture("ts_a/seg0.ts"));
+    server.put("index.m3u8", playlist("v1"));
+    // 合并 MP4 时先下各组的第一个分片：seg0 与片尾都已完成，v1/seg1 取不到
+    assert!(run(request(url(1), &dir)).await.is_err());
+    assert_eq!(server.hits("common/end.ts"), 1);
+
+    server.put("v2/seg0.ts", fixture("ts_long/seg0.ts"));
+    server.put("v2/seg1.ts", fixture("ts_long/seg1.ts"));
+    server.put("index.m3u8", playlist("v2"));
+    let err = run(request(url(2), &dir)).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::WorkDir {
+                problem: WorkDirProblem::SourceUnverified,
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert_eq!(server.hits("v2/seg1.ts"), 0);
 }
 
 /// 主播放列表里有两个属性完全相同的变体（冗余流）：续传按排位选回上次那个。两者分片文件名相同、计划摘要
@@ -635,7 +642,8 @@ async fn cancel_lock_and_resume() {
     let output = run(req).await.unwrap();
     let want = expected_ts_a(&dir);
     assert_output(&output, &want);
-    assert_eq!(server.hits("seg0.ts"), 1);
+    // 第一次运行下载的，与续传前核对内容时取的
+    assert_eq!(server.hits("seg0.ts"), 2);
 }
 
 /// key 不对：解密后的填充或内容校验失败，不写盘。

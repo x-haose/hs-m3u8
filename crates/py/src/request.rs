@@ -344,9 +344,10 @@ impl HttpOptions {
 #[pyclass(module = "hs_m3u8._native", frozen, eq, hash, get_all)]
 pub struct Source {
     /// 主播放列表或媒体播放列表的地址，只支持 http/https；读到的是解析后的规范写法（主机名小写、补上路径 `/`、
-    /// 百分号编码等），可能与传入的不同。与任务目录记录的不同（换了令牌、主机或路径）时，先核对新地址取到的与已下载
-    /// 的是同一份内容才续传，并改记新地址：点播为每条轨最近的一个已完成的分片（取不到的换前一个）按新地址重新下载后
-    /// 与已存的逐字节相同，直播见 `LiveOptions`；不是时报 `WorkDirProblem.SourceUnverified`
+    /// 百分号编码等），可能与传入的不同。续传时可以与上次的不同（换了令牌、主机或路径）：续传先核对这次取到的与已下载
+    /// 的是同一份内容，点播每条轨的每个不连续段组，取已完成的分片里字节数最大的重新下载（取不到的换次大的），与已存的
+    /// 逐字节比较；直播见 `LiveOptions`。不是时报 `WorkDirProblem.SourceUnverified`。点播的轨 init 段内容变了时，已完成
+    /// 的分片不沿用，重新下载
     pub url: Address,
     /// 选轨偏好
     pub preference: Preference,

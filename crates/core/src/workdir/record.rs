@@ -19,9 +19,6 @@ pub(super) const FORMAT_VERSION: u32 = 10;
 pub(crate) struct JobRecord {
     /// 见 [`preference_digest`]；来源是媒体播放列表（`selection` 为 None）时选轨偏好不起作用，不核对
     pub preference_digest: String,
-    /// 见 [`url_digest`]。地址变了仍可沿用目录：核对过已下载的内容与新地址取到的相同之后，用
-    /// [`super::WorkDir::adopt_url`] 改记
-    pub url_digest: String,
     /// 所选的变体与音频；来源本身是媒体播放列表时为 None
     pub selection: Option<SelectionKey>,
     pub kind: RecordKind,
@@ -29,11 +26,12 @@ pub(crate) struct JobRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RecordKind {
-    /// 点播：计划摘要（见 [`crate::vod::Plan::digest`]）相同才能续传
-    Vod {
-        plan_digest: String,
-    },
-    Live,
+    /// 点播：计划摘要（见 [`crate::vod::Plan::digest`]）相同才能续传；地址不记，续传一律核对内容（见
+    /// [`crate::vod::download`]）
+    Vod { plan_digest: String },
+    /// 直播：完整来源地址的摘要（见 [`url_digest`]）。地址变了仍可沿用目录，录制确认接得上之后用
+    /// [`super::WorkDir::adopt_url`] 改记
+    Live { url_digest: String },
 }
 
 impl JobRecord {
@@ -42,10 +40,18 @@ impl JobRecord {
         track_streams(self.selection.as_ref())
     }
 
+    /// 直播记录的完整来源地址摘要；点播为 None。
+    pub(super) fn url_digest(&self) -> Option<&str> {
+        match &self.kind {
+            RecordKind::Vod { .. } => None,
+            RecordKind::Live { url_digest } => Some(url_digest),
+        }
+    }
+
     fn job_type(&self) -> JobType {
         match self.kind {
             RecordKind::Vod { .. } => JobType::Vod,
-            RecordKind::Live => JobType::Live,
+            RecordKind::Live { .. } => JobType::Live,
         }
     }
 
@@ -56,7 +62,7 @@ impl JobRecord {
             .then_some(WorkDirProblem::PreferenceChanged)
     }
 
-    /// 记录为 `self` 的目录不能用于当前请求 `current` 的原因；地址不比较（见 `url_digest`）。
+    /// 记录为 `self` 的目录不能用于当前请求 `current` 的原因；直播的完整地址不比较。
     pub(super) fn conflict(&self, current: &JobRecord) -> Option<WorkDirProblem> {
         if let Some(problem) = self.preference_conflict(&current.preference_digest) {
             return Some(problem);
@@ -114,15 +120,14 @@ enum JobFile {
     Vod {
         format_version: u32,
         preference_digest: String,
-        url_digest: String,
         selection: Option<SelectionFile>,
         plan_digest: String,
     },
     Live {
         format_version: u32,
         preference_digest: String,
-        url_digest: String,
         selection: Option<SelectionFile>,
+        url_digest: String,
     },
 }
 
@@ -178,21 +183,19 @@ pub(super) fn check_version(bytes: &[u8], file: &'static str) -> Result<(), Work
 pub(super) fn encode(record: &JobRecord) -> Vec<u8> {
     let format_version = FORMAT_VERSION;
     let preference_digest = record.preference_digest.clone();
-    let url_digest = record.url_digest.clone();
     let selection = record.selection.as_ref().map(SelectionFile::from);
     let file = match &record.kind {
         RecordKind::Vod { plan_digest } => JobFile::Vod {
             format_version,
             preference_digest,
-            url_digest,
             selection,
             plan_digest: plan_digest.clone(),
         },
-        RecordKind::Live => JobFile::Live {
+        RecordKind::Live { url_digest } => JobFile::Live {
             format_version,
             preference_digest,
-            url_digest,
             selection,
+            url_digest: url_digest.clone(),
         },
     };
     serde_json::to_vec(&file).expect("JobFile 只含字符串、整数、数组与枚举，序列化不会失败")
@@ -202,30 +205,31 @@ pub(super) fn encode(record: &JobRecord) -> Vec<u8> {
 pub(super) fn decode(bytes: &[u8]) -> Result<JobRecord, WorkDirProblem> {
     let unreadable = |e| WorkDirProblem::Corrupt(format!("job.json 无法解析：{e}"));
     check_version(bytes, "job.json")?;
-    let (preference_digest, url_digest, selection, kind) =
+    let (preference_digest, selection, kind) =
         match serde_json::from_slice(bytes).map_err(unreadable)? {
             JobFile::Vod {
                 preference_digest,
-                url_digest,
                 selection,
                 plan_digest,
                 ..
             } => (
                 preference_digest,
-                url_digest,
                 selection,
                 RecordKind::Vod { plan_digest },
             ),
             JobFile::Live {
                 preference_digest,
-                url_digest,
                 selection,
+                url_digest,
                 ..
-            } => (preference_digest, url_digest, selection, RecordKind::Live),
+            } => (
+                preference_digest,
+                selection,
+                RecordKind::Live { url_digest },
+            ),
         };
     Ok(JobRecord {
         preference_digest,
-        url_digest,
         selection: selection.map(SelectionKey::from),
         kind,
     })
@@ -327,22 +331,22 @@ mod tests {
     fn job_file_round_trips_and_rejects_other_versions_and_fields() {
         let live = JobRecord {
             preference_digest: "ab".into(),
-            url_digest: "cd".into(),
             selection: Some(SelectionKey {
                 variant: variant_key(),
                 audio: Some(audio_key()),
             }),
-            kind: RecordKind::Live,
+            kind: RecordKind::Live {
+                url_digest: "cd".into(),
+            },
         };
         let bytes = encode(&live);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"kind":"live","format_version":10,"preference_digest":"ab","url_digest":"cd","selection":{"variant":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020","mp4a.40.2"],"audio_group":"aud","occurrence":1},"audio":{"group":"aud","name":"Eng\n\"lish\"","language":"en","occurrence":0}}}"#
+            r#"{"kind":"live","format_version":10,"preference_digest":"ab","selection":{"variant":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020","mp4a.40.2"],"audio_group":"aud","occurrence":1},"audio":{"group":"aud","name":"Eng\n\"lish\"","language":"en","occurrence":0}},"url_digest":"cd"}"#
         );
         assert_eq!(decode(&bytes), Ok(live));
         let vod = JobRecord {
             preference_digest: "ab".into(),
-            url_digest: "cd".into(),
             selection: None,
             kind: RecordKind::Vod {
                 plan_digest: "ef".into(),
@@ -361,10 +365,10 @@ mod tests {
         for rejected in [
             r#"{"kind":"vod","format_version":1,"plan_digest":"cd"}"#,
             r#"{"kind":"vod","format_version":9,"address_digest":"a","preference_digest":"b","selection":null,"plan_digest":"p"}"#,
-            r#"{"kind":"vod","format_version":10,"preference_digest":"a","url_digest":"u","selection":null,"plan_digest":"p","extra":1}"#,
-            r#"{"format_version":10,"preference_digest":"a","url_digest":"u","selection":null,"plan_digest":"p"}"#,
-            r#"{"kind":"vod","format_version":10,"preference_digest":"a","url_digest":"u","selection":null}"#,
-            r#"{"kind":"live","format_version":10,"preference_digest":"a","url_digest":"u","selection":{"variant":{"bandwidth":1,"resolution":null,"codecs":[],"audio_group":null,"occurrence":0,"uri":"x"},"audio":null}}"#,
+            r#"{"kind":"vod","format_version":10,"preference_digest":"a","selection":null,"plan_digest":"p","extra":1}"#,
+            r#"{"format_version":10,"preference_digest":"a","selection":null,"plan_digest":"p"}"#,
+            r#"{"kind":"vod","format_version":10,"preference_digest":"a","selection":null,"url_digest":"u"}"#,
+            r#"{"kind":"live","format_version":10,"preference_digest":"a","selection":{"variant":{"bandwidth":1,"resolution":null,"codecs":[],"audio_group":null,"occurrence":0,"uri":"x"},"audio":null},"url_digest":"u"}"#,
         ] {
             assert!(decode(rejected.as_bytes()).is_err(), "{rejected}");
         }

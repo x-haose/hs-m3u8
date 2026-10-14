@@ -24,12 +24,6 @@ use crate::{
     blocking,
 };
 
-/// 本次请求记进任务目录的选轨偏好与完整来源地址的摘要（见 [`JobRecord`]）。
-struct SourceDigests {
-    preference_digest: String,
-    url_digest: String,
-}
-
 /// 一次运行用到的共享对象。
 struct Task {
     request: JobRequest,
@@ -59,17 +53,14 @@ pub(crate) async fn run(
         progress,
     };
     let (request, root) = (&task.request, &task.output.work_dir);
-    let source = SourceDigests {
-        preference_digest: preference_digest(&request.source.preference),
-        url_digest: url_digest(&request.source.url),
-    };
+    let preference = preference_digest(&request.source.preference);
     // 任务目录里有可续的记录时，选轨偏好不符在联网之前就报（WorkDir::open 加锁后照样核对）；相符时按记录的选轨找回
     // 同一条轨，记录的是直播且请求开启了直播时按直播继续，即使播放列表已出现 ENDLIST（中断期间直播结束了）。没开启
     // 直播时按点播运行，由 WorkDir::open 报类型不符
     let recorded = read_resumable(root.clone()).await?;
     if let Some(problem) = recorded
         .as_ref()
-        .and_then(|r| r.preference_conflict(&source.preference_digest))
+        .and_then(|r| r.preference_conflict(&preference))
     {
         return Err(Error::WorkDir {
             path: root.clone(),
@@ -78,7 +69,7 @@ pub(crate) async fn run(
     }
     let continuing_live = recorded
         .as_ref()
-        .is_some_and(|r| matches!(r.kind, RecordKind::Live));
+        .is_some_and(|r| matches!(r.kind, RecordKind::Live { .. }));
     let selection = recorded.as_ref().and_then(|r| r.selection.as_ref());
     let resolved = resolve::resolve(&task.http, &request.source, selection, &task.cancel)
         .await?
@@ -92,9 +83,9 @@ pub(crate) async fn run(
         .map(|m| Selected::of(&m.playlist, &m.selection));
     task.progress.send_modify(|p| p.selected = selection);
     if resolved.is_live() || continuing_live && request.live.is_some() {
-        run_live(task, source, resolved, lock).await
+        run_live(task, preference, resolved, lock).await
     } else {
-        run_vod(task, source, resolved, lock).await
+        run_vod(task, preference, resolved, lock).await
     }
 }
 
@@ -113,16 +104,17 @@ async fn prepare(output: &ResolvedOutput) -> Result<Option<Lock>, Error> {
 /// 直播：录制，再合并任务目录中录到的全部分片。
 async fn run_live(
     task: Task,
-    source: SourceDigests,
+    preference_digest: String,
     resolved: Resolved,
     lock: Option<Lock>,
 ) -> Result<Output, Error> {
     let options = task.request.live.ok_or(Error::LiveNotEnabled)?;
     let record = JobRecord {
-        preference_digest: source.preference_digest,
-        url_digest: source.url_digest,
+        preference_digest,
         selection: resolved.selection_key(),
-        kind: RecordKind::Live,
+        kind: RecordKind::Live {
+            url_digest: url_digest(&task.request.source.url),
+        },
     };
     let dir = WorkDir::open(task.output.work_dir.clone(), record, lock).await?;
     let mut fetcher = task.fetcher(&dir, Permit::Live);
@@ -149,7 +141,7 @@ async fn run_live(
 /// 点播：下载计划中尚未完成的部分，再合并。
 async fn run_vod(
     task: Task,
-    source: SourceDigests,
+    preference_digest: String,
     resolved: Resolved,
     lock: Option<Lock>,
 ) -> Result<Output, Error> {
@@ -157,8 +149,7 @@ async fn run_vod(
     let selection = resolved.selection_key();
     let plan = Plan::new(resolved.tracks)?;
     let record = JobRecord {
-        preference_digest: source.preference_digest,
-        url_digest: source.url_digest,
+        preference_digest,
         selection,
         kind: RecordKind::Vod {
             plan_digest: plan.digest(),
