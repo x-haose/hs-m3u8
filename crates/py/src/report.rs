@@ -5,7 +5,7 @@ use std::time::Duration;
 use hs_m3u8_core as core;
 use pyo3::prelude::*;
 
-use crate::convert::{PyPath, Seq};
+use crate::convert::{PyPath, Seq, wait_seconds};
 use crate::error::Mp4Unsupported;
 use crate::info::Selected;
 use crate::record::{record, variants};
@@ -71,7 +71,7 @@ record! {
         pub kind: HttpErrorKind,
         /// 临时故障，重试可能成功：超时、连接与传输错误，408、429 与 5xx
         pub retryable: bool,
-        /// 服务器在 429/503 中要求（Retry-After）的最短等待，秒；没有要求时为 None
+        /// 服务器在 429/503 中要求（Retry-After）的最短等待，秒，向上取整；没有要求时为 None
         pub retry_after: Option<u64>,
     }
 }
@@ -132,7 +132,7 @@ record! {
         pub reason: RefreshReason,
         /// 一直这样失败到停滞时，稍后续录可能成功：取不到的看原因；内容不完整的当作暂时故障，同样可以
         pub retryable: bool,
-        /// 服务器要求的最短等待，秒，下次刷新不早于它；没有要求时为 None
+        /// 服务器要求的最短等待，秒，向上取整，下次刷新不早于它；没有要求时为 None
         pub retry_after: Option<u64>,
     }
 }
@@ -484,7 +484,7 @@ impl From<core::HttpFailure> for HttpFailure {
         HttpFailure {
             retryable: failure.kind.retryable(),
             kind: failure.kind.into(),
-            retry_after: failure.retry_after.map(|wait| wait.as_secs()),
+            retry_after: failure.retry_after.map(wait_seconds),
         }
     }
 }
@@ -506,7 +506,7 @@ impl From<core::RefreshCause> for RefreshCause {
         RefreshCause {
             reason,
             retryable,
-            retry_after: retry_after.map(|wait| wait.as_secs()),
+            retry_after: retry_after.map(wait_seconds),
         }
     }
 }

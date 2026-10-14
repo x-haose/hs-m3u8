@@ -516,7 +516,7 @@ class HsM3u8Error(builtins.Exception):
     @property
     def retry_after(self) -> typing.Optional[builtins.int]:
         r"""
-        服务器在 429/503 中要求（Retry-After）的最短等待，秒；没有要求时为 None
+        服务器在 429/503 中要求（Retry-After）的最短等待，秒，向上取整；没有要求时为 None
         """
     @property
     def segment(self) -> typing.Optional[SegmentRef]:
@@ -718,7 +718,7 @@ class HttpFailure:
     @property
     def retry_after(self) -> typing.Optional[builtins.int]:
         r"""
-        服务器在 429/503 中要求（Retry-After）的最短等待，秒；没有要求时为 None
+        服务器在 429/503 中要求（Retry-After）的最短等待，秒，向上取整；没有要求时为 None
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
@@ -2431,7 +2431,7 @@ class RefreshCause:
     @property
     def retry_after(self) -> typing.Optional[builtins.int]:
         r"""
-        服务器要求的最短等待，秒，下次刷新不早于它；没有要求时为 None
+        服务器要求的最短等待，秒，向上取整，下次刷新不早于它；没有要求时为 None
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
