@@ -48,13 +48,7 @@ impl Source {
 
     /// 来源地址只支持 http/https。
     pub fn check_url(url: &Url) -> Result<(), Error> {
-        if !matches!(url.scheme(), "http" | "https") {
-            return Err(Error::InvalidInput(format!(
-                "只支持 http/https 地址：{}",
-                bare_url(url)
-            )));
-        }
-        Ok(())
+        check_scheme(url).map_err(Error::InvalidInput)
     }
 
     /// 音频语言不能有换行：选轨偏好的摘要按行编码，播放列表里的语言也不会有换行。
@@ -211,6 +205,14 @@ pub(crate) fn cookie_pairs(value: &str) -> impl Iterator<Item = Option<&str>> {
                 .is_some_and(|(name, _)| !name.trim().is_empty())
                 .then_some(pair)
         })
+}
+
+/// 地址是 http/https（本库只发这两种请求）；不是时返回原因。
+pub(crate) fn check_scheme(url: &Url) -> Result<(), String> {
+    if matches!(url.scheme(), "http" | "https") {
+        return Ok(());
+    }
+    Err(format!("只支持 http/https 地址：{}", bare_url(url)))
 }
 
 /// 请求头名与值能否放进 HTTP 请求、且不是本库控制的头；不能时返回原因。

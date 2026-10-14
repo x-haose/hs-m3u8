@@ -18,8 +18,7 @@ use url::Url;
 use self::client::{Clients, Cookies};
 use crate::cookies::Provider;
 use crate::hooks::{HookKind, Hooks, Purpose, RequestParts, run_hook};
-use crate::ident::bare_url;
-use crate::request::{RetryPolicy, Source, check_header, cookie_pairs};
+use crate::request::{RetryPolicy, Source, check_header, check_scheme, cookie_pairs};
 use crate::{Error, FetchFailure, HttpError, Integrity};
 
 /// 请求占哪一份引擎名额（见 [`Permits`]）。
@@ -272,12 +271,7 @@ impl Http {
             hook: HookKind::Request,
             cause: message.into(),
         };
-        if !matches!(parts.url.scheme(), "http" | "https") {
-            return Err(invalid(format!(
-                "只支持 http/https 地址：{}",
-                bare_url(&parts.url)
-            )));
-        }
+        check_scheme(&parts.url).map_err(invalid)?;
         for (name, value) in &parts.headers {
             check_header(name, value).map_err(invalid)?;
         }

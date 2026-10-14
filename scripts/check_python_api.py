@@ -4,14 +4,17 @@
   存根里，运行时看不到；枚举取值的构造函数由存根生成器按字段生成，参数即取值类的属性，不查）。
 - 公开方法的说明在存根与运行时一致：存根手写的方法（存根生成认不出它的参数）说明在两处各写一份。
 - 两个以上字段的枚举取值只收关键字参数：同类型的字段（如几个下标）按位置写反时不报错。
+- 说明里写的默认值与运行时的一致：默认值由 core 定，Python 的说明里另写了一遍，core 改了默认值时这里报出。
 """
 
 import ast
 import inspect
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import hs_m3u8
+from hs_m3u8 import JobRequest, LiveOptions, OutputOptions, RetryPolicy, Source, Target, Timeouts
 
 STUB = Path(hs_m3u8.__file__).parent / "_native" / "__init__.pyi"
 
@@ -60,6 +63,29 @@ def mismatched_docs(stub: ast.Module, exported: list[tuple[str, object]]) -> lis
     return found
 
 
+def stale_defaults() -> list[str]:
+    """说明里写的默认值与运行时的默认值不符的，按 `类.属性` 列出。"""
+
+    def seconds(value: timedelta) -> str:
+        return f"{value.total_seconds():g} 秒"
+
+    timeouts, retry, live = Timeouts(), RetryPolicy(), LiveOptions()
+    request = JobRequest(Source("https://example.com/a.m3u8"), OutputOptions(Target.Mp4("a.mp4")))
+    expected = [
+        ("Timeouts.connect", Timeouts.connect, f"默认 {seconds(timeouts.connect)}"),
+        ("Timeouts.read_idle", Timeouts.read_idle, f"默认 {seconds(timeouts.read_idle)}"),
+        ("Timeouts.request", Timeouts.request, f"默认 {seconds(timeouts.request)}"),
+        (
+            "RetryPolicy",
+            RetryPolicy,
+            f"默认 {retry.attempts} 次、{seconds(retry.base_delay)}起、上限 {seconds(retry.max_delay)}",
+        ),
+        ("LiveOptions.stall_timeout", LiveOptions.stall_timeout, f"默认 {seconds(live.stall_timeout)}"),
+        ("JobRequest.concurrency", JobRequest.concurrency, f"默认 {request.concurrency}"),
+    ]
+    return [name for name, owner, text in expected if text not in (inspect.getdoc(owner) or "")]
+
+
 def positional_variants(owner: type, path: str) -> list[str]:
     """`owner` 里两个以上参数能按位置传的枚举取值，按 `path.取值` 列出。"""
     found: list[str] = []
@@ -83,6 +109,7 @@ def main() -> int:
     stub = ast.parse(STUB.read_text(encoding="utf-8"))
     problems += [f"存根里的构造函数没有说明：{item}" for item in undocumented_constructors(stub)]
     problems += [f"存根与运行时的说明不同：{item}" for item in mismatched_docs(stub, exported)]
+    problems += [f"说明里的默认值与运行时的不符：{item}" for item in stale_defaults()]
     problems += [
         f"两个以上字段能按位置传：{item}"
         for name, owner in exported
