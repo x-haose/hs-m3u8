@@ -25,7 +25,7 @@ pyo3 = { version = "0.29.3", features = ["abi3-py312", "experimental-async", "mu
 # 默认特性带 numpy 等类型的存根支持，用不上；infer_signature 生成参数默认值的写法
 pyo3-stub-gen = { version = "0.23.1", default-features = false, features = ["infer_signature"] }
 reqwest = { version = "0.13.5", features = ["cookies", "socks"] }
-rustls = { version = "0.23.45", default-features = false, features = ["std"] }
+rustls = { version = "0.23.46", default-features = false, features = ["std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
