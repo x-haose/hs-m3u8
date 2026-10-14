@@ -209,8 +209,9 @@ pub enum Unsupported {
         track: usize,
         kind: StreamKind,
     },
-    /// 组内时间戳往前跳，输出里会留下整组都没有内容、比一个最长的声明时长（见 [`crate::Segment::duration_us`]）还长
-    /// 的空档：多为来源在时间戳重新开始处漏标了 `EXT-X-DISCONTINUITY`。一路流单独中断不算；其间有缺片时不核对
+    /// 组内时间戳往前跳，输出里会留下整组都没有内容的空档，扣掉这条轨上一个包所在的片（跨片时）之后仍比一个最长的
+    /// 声明时长（见 [`crate::Segment::duration_us`]）还长：多为来源在时间戳重新开始处漏标了 `EXT-X-DISCONTINUITY`。
+    /// 一路流单独中断不算；其间有缺片时不核对
     #[error(
         "第 {group} 组第 {track} 条轨的{kind}时间戳在第 {segment} 个分片里往前跳，输出里会留下至少 {jump_us} 微秒的空档，无法放进同一条 MP4 轨"
     )]

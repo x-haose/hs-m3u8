@@ -1077,9 +1077,9 @@ fn a_full_disk_while_writing_is_reported_as_a_file_error() {
     );
 }
 
-/// 组内时间戳往前跳了约 1000 秒（来源在时间戳重新开始处漏标了 EXT-X-DISCONTINUITY）：照写会在输出里留下一大段空档，
-/// 报 TimestampJump，报出的空档长度为跳过的时长减去上一片声明的时长。两片之间缺了分片时，跳过的可能就是缺的那几片的时长，不核对，照常合并；
-/// 声明的时长不准而内容连续时不误报。
+/// 组内时间戳往前跳了约 1000 秒（来源在时间戳重新开始处漏标了 EXT-X-DISCONTINUITY）：照写会在输出里留下一大段空档，报
+/// TimestampJump，报出的空档长度为跳过的时长减去上一片声明的时长。两片之间缺了分片时，跳过的可能就是缺的那几片的时长，
+/// 不核对，照常合并；声明的时长不准而内容连续时不误报。
 #[test]
 fn a_forward_timestamp_jump_within_a_group_is_rejected() {
     let dir = work_dir("timestamp_jump");
