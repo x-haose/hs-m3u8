@@ -229,12 +229,29 @@ pub(crate) fn ffmpeg_path(path: &Path) -> Option<&str> {
 mod tests {
     use super::*;
 
-    /// 把 `parts` 各写成一个文件，返回各文件的路径。
-    fn files(name: &str, parts: &[&[u8]]) -> Vec<PathBuf> {
+    /// 每个测试写的文件，放在独立的目录里；测试通过后删除目录，失败时留着查看。读这些文件的分片链要在它之后声明，
+    /// 先放下：Windows 上开着的文件删不掉。
+    struct Files {
+        dir: PathBuf,
+        paths: Vec<PathBuf>,
+    }
+
+    impl Drop for Files {
+        fn drop(&mut self) {
+            if !std::thread::panicking() {
+                std::fs::remove_dir_all(&self.dir).unwrap();
+            }
+        }
+    }
+
+    /// 把 `parts` 各写成一个文件。
+    fn files(name: &str, parts: &[&[u8]]) -> Files {
         let dir = std::env::temp_dir().join(format!("hs-m3u8-chain-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
         std::fs::create_dir_all(&dir).unwrap();
-        parts
+        let paths = parts
             .iter()
             .enumerate()
             .map(|(i, data)| {
@@ -242,22 +259,26 @@ mod tests {
                 std::fs::write(&path, data).unwrap();
                 path
             })
-            .collect()
+            .collect();
+        Files { dir, paths }
     }
 
-    /// 各文件整个相连的分片链。
-    fn chain_of(name: &str, parts: &[&[u8]]) -> SegmentChain {
-        let pieces = files(name, parts)
-            .into_iter()
+    /// `files`（内容为 `parts`）整个相连的分片链。
+    fn chain_of(files: &Files, parts: &[&[u8]]) -> SegmentChain {
+        let pieces = files
+            .paths
+            .iter()
             .zip(parts)
-            .map(|(path, data)| (path, 0..data.len() as u64))
+            .map(|(path, data)| (path.clone(), 0..data.len() as u64))
             .collect();
         SegmentChain::new(pieces, Cancel::never()).unwrap().0
     }
 
     #[test]
     fn reads_files_back_to_back_skipping_empty_ones() {
-        let mut chain = chain_of("concat", &[b"abc", b"", b"de", b"f"]);
+        let parts: [&[u8]; 4] = [b"abc", b"", b"de", b"f"];
+        let files = files("concat", &parts);
+        let mut chain = chain_of(&files, &parts);
         let mut all = Vec::new();
         chain.read_to_end(&mut all).unwrap();
         assert_eq!(all, b"abcdef");
@@ -265,7 +286,9 @@ mod tests {
 
     #[test]
     fn seeks_across_file_boundaries() {
-        let mut chain = chain_of("seek", &[b"abc", b"", b"de", b"f"]);
+        let parts: [&[u8]; 4] = [b"abc", b"", b"de", b"f"];
+        let files = files("seek", &parts);
+        let mut chain = chain_of(&files, &parts);
         let mut read_from = |to: SeekFrom, n: usize| {
             let at = chain.seek(to).unwrap();
             let mut buf = vec![0; n];
@@ -284,7 +307,8 @@ mod tests {
 
     #[test]
     fn only_the_given_ranges_are_read() {
-        let paths = files("ranges", &[b"abcdef", b"gh"]);
+        let files = files("ranges", &[b"abcdef", b"gh"]);
+        let paths = &files.paths;
         let mut chain = SegmentChain::new(
             vec![
                 (paths[0].clone(), 1..3),
@@ -306,7 +330,9 @@ mod tests {
 
     #[test]
     fn a_file_shrunk_after_opening_is_reported_with_its_path() {
-        let mut chain = chain_of("shrunk", &[b"abc", b"def"]);
+        let parts: [&[u8]; 2] = [b"abc", b"def"];
+        let files = files("shrunk", &parts);
+        let mut chain = chain_of(&files, &parts);
         std::fs::write(&chain.paths[1], b"d").unwrap();
         let failure = chain.failure.clone();
         let mut all = Vec::new();

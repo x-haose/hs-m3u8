@@ -23,7 +23,7 @@ pub(crate) fn reachable(path: &Path) -> Result<(), Error> {
 mod tests {
     use super::*;
 
-    /// 连得上的共享（本机的管理共享）的根读得到，不误报看不到。
+    /// 连得上的共享（本机的管理共享）的根读得到，不误报看不到。要求本机开着管理共享 C$ 且当前用户能访问（管理员）。
     #[test]
     fn a_reachable_share_is_reachable() {
         reachable(Path::new(r"\\localhost\C$\hsdl-absent")).unwrap();
