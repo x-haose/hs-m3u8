@@ -19,6 +19,13 @@ mod entries;
 mod error;
 mod fetch;
 mod hooks;
+/// fork 前后要调用的：fork 出的子进程关掉继承来的任务目录锁，否则父进程的任务结束后锁仍被子进程占着。只给会在
+/// 任务运行期间 fork 的嵌入方用。
+pub mod fork {
+    pub use crate::workdir::{
+        ForkGuard, LockFiles, close_inherited_locks, prepare_fork as prepare,
+    };
+}
 mod http;
 mod ident;
 mod info;
@@ -67,7 +74,6 @@ pub use request::{
 };
 pub use tokio_util::sync::CancellationToken;
 pub use url::Url;
-pub use workdir::{ForkGuard, LockFiles, close_inherited_locks, prepare_fork};
 
 /// 公开接口用到的合并报告与合并错误的类型。
 pub mod remux {

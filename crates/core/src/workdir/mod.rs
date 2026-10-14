@@ -137,7 +137,7 @@ fn held() -> MutexGuard<'static, LockFiles> {
 /// 不受影响。返回的 [`ForkGuard`] 拿着登记表的锁，fork 期间别的线程改不了登记。
 ///
 /// `lock` 为怎么等登记表的锁，通常即 [`Mutex::lock`]。拿着它去等别的锁的，只有另一个正在 fork 的线程（它拿着
-/// [`ForkGuard`] 执行 fork 前后的其他处理）：调用方持有那些处理也要的锁（如 Python 的 GIL）时，等待期间要放开。
+/// [`ForkGuard`] 执行 fork 前后的其他处理）：调用方持有那些处理也要的锁时，等待期间要放开。
 pub fn prepare_fork(
     lock: impl FnOnce(&'static Mutex<LockFiles>) -> LockResult<MutexGuard<'static, LockFiles>>,
 ) -> ForkGuard {

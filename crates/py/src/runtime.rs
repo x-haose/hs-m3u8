@@ -4,7 +4,7 @@
 //! 每个进程一个运行时，第一次用到时建立，解释器退出前关闭（见 [`shutdown`]）。经 `os.fork`（含 multiprocessing 的
 //! fork 方式）fork 出的子进程里没有父进程运行时的工作线程，也没有父进程建立的任务与在途请求：子进程第一次用到时
 //! 另建运行时（macOS 上不建，见 [`after_fork_in_child`]）；父进程建立的引擎、任务与协程在子进程里拒绝使用，回收时
-//! 不销毁（见 [`Owned`]）；继承来的任务目录锁在子进程里关掉（见 `core::prepare_fork`）。
+//! 不销毁（见 [`Owned`]）；继承来的任务目录锁在子进程里关掉（见 `core::fork`）。
 
 use std::cell::RefCell;
 use std::convert::Infallible;
@@ -260,14 +260,14 @@ fn foreign(what: &str) -> PyErr {
 thread_local! {
     /// fork 前拿到、fork 后在同一线程里放开的任务目录锁登记表：fork 时别的线程若正在改登记，子进程里的副本就是改了
     /// 一半的
-    static FORKING: RefCell<Option<core::ForkGuard>> = const { RefCell::new(None) };
+    static FORKING: RefCell<Option<core::fork::ForkGuard>> = const { RefCell::new(None) };
 }
 
 /// 锁住任务目录锁的登记表。等的时候放开 GIL：拿着它的可能是另一个正在 fork 的线程，它要等 GIL 执行 fork 前后的
 /// 其他处理（Python 写的处理让出 GIL 时，别的线程就会进来）。
 #[pyfunction]
 fn before_fork(py: Python<'_>) {
-    let locks = core::prepare_fork(|registry| registry.lock_py_attached(py));
+    let locks = core::fork::prepare(|registry| registry.lock_py_attached(py));
     FORKING.with_borrow_mut(|forking| *forking = Some(locks));
 }
 
@@ -282,7 +282,7 @@ fn after_fork_in_child() {
     match FORKING.with_borrow_mut(Option::take) {
         Some(locks) => locks.child(),
         // 本库在这次 fork 开始之后才登记（另一个线程正在导入它），fork 前的处理没有运行
-        None => core::close_inherited_locks(),
+        None => core::fork::close_inherited_locks(),
     }
     GENERATION.fetch_add(1, Ordering::Relaxed);
     leave_inherited(&mut runtime());
