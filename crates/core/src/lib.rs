@@ -133,7 +133,7 @@ impl Engine {
         let http = Http::new(
             &request.source,
             self.requests.clone(),
-            Some(Arc::new(ProgressObserver(progress_tx.clone()))),
+            Some(Arc::new(ProgressObserver::new(progress_tx.clone()))),
         )?;
         let cancel = CancellationToken::new();
         let stop = CancellationToken::new();
@@ -213,26 +213,45 @@ fn retrying(wait: &RetryWaiting) -> Retrying {
 }
 
 /// 请求的进展计入任务的进度：读到的字节计入 [`Progress::received`]，退避计入 [`Progress::retrying`]。
-struct ProgressObserver(watch::Sender<Progress>);
+struct ProgressObserver {
+    progress: watch::Sender<Progress>,
+    /// [`Progress::retrying`] 各项的 [`RetryWaiting::id`]，一一对应；在改进度时一并改
+    waiting: std::sync::Mutex<Vec<u64>>,
+}
+
+impl ProgressObserver {
+    fn new(progress: watch::Sender<Progress>) -> Self {
+        ProgressObserver {
+            progress,
+            waiting: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn waiting(&self) -> std::sync::MutexGuard<'_, Vec<u64>> {
+        self.waiting.lock().expect("持锁期间只增删 Vec，不会 panic")
+    }
+}
 
 impl Observer for ProgressObserver {
     fn received(&self, len: u64) {
-        self.0.send_modify(|p| p.received += len);
+        self.progress.send_modify(|p| p.received += len);
     }
 
     fn retry_waiting(&self, wait: &RetryWaiting) {
-        self.0.send_modify(|p| p.retrying.push(retrying(wait)));
+        self.progress.send_modify(|p| {
+            self.waiting().push(wait.id);
+            p.retrying.push(retrying(wait));
+        });
     }
 
-    /// 去掉与 `wait` 相同的一项：相同的几项分不出是哪个请求的，去掉哪个结果都一样。
     fn retry_waited(&self, wait: &RetryWaiting) {
-        let ended = retrying(wait);
-        self.0.send_modify(|p| {
-            let at = p
-                .retrying
+        self.progress.send_modify(|p| {
+            let mut waiting = self.waiting();
+            let at = waiting
                 .iter()
-                .position(|r| *r == ended)
+                .position(|&id| id == wait.id)
                 .expect("退避结束之前报过开始");
+            waiting.remove(at);
             p.retrying.remove(at);
         });
     }

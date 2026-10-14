@@ -163,8 +163,15 @@ async fn verify_completed(
             Err(failure) => break Err(failure),
         }
     };
-    // 有一组不通过时其余的中止，等它们退出再返回：它们的请求与退避在任务结束之前收尾
-    running.shutdown().await;
+    // 有一组不通过时其余的中止，等它们退出再返回：它们的请求与退避在任务结束之前收尾；其中 panic 的照样传出
+    running.abort_all();
+    while let Some(joined) = running.join_next().await {
+        if let Err(e) = joined
+            && e.is_panic()
+        {
+            std::panic::resume_unwind(e.into_panic());
+        }
+    }
     verified?;
     if url_changed {
         dir.adopt_url().await?;

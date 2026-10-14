@@ -5,6 +5,7 @@ mod client;
 use std::hash::BuildHasher;
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 use hs_m3u8_hls::ByteRange;
@@ -63,6 +64,8 @@ pub(crate) struct Http {
     requests: Arc<Permits>,
     /// 请求的进展报给它；探测时为 None
     observer: Option<Arc<dyn Observer>>,
+    /// 下一次退避的 [`RetryWaiting::id`]
+    next_wait: AtomicU64,
     jitter: std::hash::RandomState,
 }
 
@@ -79,6 +82,8 @@ pub(crate) trait Observer: Send + Sync {
 /// 一次退避。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RetryWaiting {
+    /// 同一个 [`Http`] 的各次退避里唯一
+    pub id: u64,
     pub purpose: Purpose,
     /// 这次失败
     pub failure: FetchFailure,
@@ -151,6 +156,7 @@ impl Http {
             hooks: source.hooks.clone(),
             requests,
             observer,
+            next_wait: AtomicU64::new(0),
             jitter: std::hash::RandomState::new(),
         })
     }
@@ -201,6 +207,7 @@ impl Http {
                 .missable()
                 .expect("可重试的失败都是取不到或没写完（见 Error::retryable）");
             let wait = RetryWaiting {
+                id: self.next_wait.fetch_add(1, Ordering::Relaxed),
                 purpose,
                 failure,
                 retry: tried,
