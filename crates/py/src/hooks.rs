@@ -1,5 +1,5 @@
 //! 站点适配回调：Python 继承 `Hooks` 并覆盖需要的方法；core 在阻塞线程池里取得 GIL 后调用，没覆盖的方法不调用、
-//! 不取 GIL。
+//! 不取 GIL、不进阻塞线程池。
 
 use std::fmt;
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use hs_m3u8_core::Url;
 use pyo3::exceptions::{PyBaseException, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::{PyBytes, PyDict, PyString, PyTuple};
+use pyo3::types::{PyBytes, PyDict, PyString, PyTuple, PyWeakrefMethods, PyWeakrefReference};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use crate::convert::{Address, Headers};
@@ -71,8 +71,13 @@ impl RequestParts {
 /// （不在事件循环里），同一个对象的回调会在多个线程上同时被调用（同时下载的分片各占一个线程），有状态的回调要自己
 /// 加锁。回调出错使任务失败、不重试（见 `HookError`）。取消不会打断正在执行的回调，任务等它返回后才结束；解释器
 /// 退出时也等它返回，所以回调里的网络请求要设超时。
+///
+/// 每次调用都在新的 Python 线程状态里：`threading.local` 与 `contextvars` 里存的东西不留到下一次调用，要跨调用复用
+/// （如每线程一个 HTTP 会话）就存在对象上并自己加锁。回调持着 GIL 时事件循环与其他回调都要等，耗时的计算放进放开
+/// GIL 的调用里。任务在运行时持有回调对象，回调对象可以引用它的 `Job`（如在回调里调用 `Job.stop`）：不再被其他地方
+/// 引用时两者一起被回收、任务随之取消。
 #[gen_stub_pyclass]
-#[pyclass(module = "hs_m3u8._native", subclass, frozen)]
+#[pyclass(module = "hs_m3u8._native", subclass, frozen, weakref)]
 pub struct Hooks;
 
 #[gen_stub_pymethods]
@@ -142,8 +147,15 @@ impl Hooks {
         None
     }
 
-    /// 在解密之前变换分片（如去掉伪装成图片的前缀字节），返回变换后的内容。`url` 为播放列表中的分片地址；init 段
-    /// 与空的响应不经过此回调。重试时同一个分片会再经过它，`data` 可能没写完。
+    /// 在解密之前变换 init 段（EXT-X-MAP），同 `on_segment`；`url` 为播放列表中的 init 段地址。
+    #[pyo3(signature = (url, data, /))]
+    fn on_init<'py>(&self, url: String, data: Bound<'py, PyBytes>) -> Bound<'py, PyBytes> {
+        let _ = url;
+        data
+    }
+
+    /// 在解密之前变换分片（如去掉伪装成图片的前缀字节），返回变换后的内容。`url` 为播放列表中的分片地址；init 段经
+    /// `on_init`，空的响应不经过此回调。重试时同一个分片会再经过它，`data` 可能没写完。
     #[pyo3(signature = (url, data, /))]
     fn on_segment<'py>(&self, url: String, data: Bound<'py, PyBytes>) -> Bound<'py, PyBytes> {
         let _ = url;
@@ -180,12 +192,14 @@ impl fmt::Display for InvalidReturn {
 
 impl std::error::Error for InvalidReturn {}
 
-/// core 的回调：只调用 Python 子类覆盖了的方法。
+/// core 的回调：只调用 Python 子类覆盖了的方法。对回调对象只持弱引用，由 `Job`（或在探测的协程）持有并报给垃圾
+/// 回收器：回调对象常引用它的 `Job`，core 持强引用时这个环回收不了。
 struct PyHooks {
-    object: Py<Hooks>,
+    object: Py<PyWeakrefReference>,
     playlist: bool,
     request: bool,
     key: bool,
+    init: bool,
     segment: bool,
 }
 
@@ -201,15 +215,36 @@ pub(crate) fn to_core(object: &Bound<'_, Hooks>) -> PyResult<Arc<dyn core::Hooks
         Ok(!found.is(getattr_static.call1((&base, name))?))
     };
     Ok(Arc::new(PyHooks {
-        object: object.clone().unbind(),
+        object: PyWeakrefReference::new(object.as_any())?.unbind(),
         playlist: overridden("on_playlist")?,
         request: overridden("on_request")?,
         key: overridden("on_key")?,
+        init: overridden("on_init")?,
         segment: overridden("on_segment")?,
     }))
 }
 
+/// 回调对象已被回收：只在持有它的 `Job` 被回收（任务随之取消）之后，还在收尾的任务调用回调时发生，结果没人取。
+#[derive(Debug)]
+struct Collected;
+
+impl fmt::Display for Collected {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("回调对象已被回收（任务已随 Job 被回收而取消）")
+    }
+}
+
+impl std::error::Error for Collected {}
+
 impl PyHooks {
+    /// 回调对象；已被回收时为 [`Collected`]。
+    fn object<'py>(&self, py: Python<'py>) -> Result<Bound<'py, PyAny>, core::HookError> {
+        self.object
+            .bind(py)
+            .upgrade()
+            .ok_or_else(|| Box::new(Collected) as core::HookError)
+    }
+
     /// 调用 `method(url, data)`，用 `take` 取回结果；返回值的类型不对时报 `take` 抛的异常（取 `bytes` 时用
     /// `cast`，不接受 bytearray 等可以转换的类型）。
     fn call<T>(
@@ -220,15 +255,25 @@ impl PyHooks {
         take: impl FnOnce(&Bound<'_, PyAny>) -> PyResult<T>,
     ) -> Result<T, core::HookError> {
         Python::attach(|py| {
-            self.object
-                .call_method1(py, method, (url.as_str(), PyBytes::new(py, data)))
-                .and_then(|result| take(result.bind(py)))
+            self.object(py)?
+                .call_method1(method, (url.as_str(), PyBytes::new(py, data)))
+                .and_then(|result| take(&result))
                 .map_err(|failure| hook_error(py, failure))
         })
     }
 }
 
 impl core::Hooks for PyHooks {
+    fn implements(&self, hook: core::HookKind) -> bool {
+        match hook {
+            core::HookKind::Playlist => self.playlist,
+            core::HookKind::Request => self.request,
+            core::HookKind::Key => self.key,
+            core::HookKind::Init => self.init,
+            core::HookKind::Segment => self.segment,
+        }
+    }
+
     fn on_playlist(&self, url: &Url, body: &[u8]) -> Result<Option<String>, core::HookError> {
         if !self.playlist {
             return Ok(None);
@@ -251,9 +296,9 @@ impl core::Hooks for PyHooks {
             headers: Headers(request.headers.clone()),
         };
         let changed = Python::attach(|py| {
-            self.object
-                .call_method1(py, "on_request", (Purpose::from(purpose), parts))
-                .and_then(|result| Ok(result.extract::<RequestParts>(py)?))
+            self.object(py)?
+                .call_method1("on_request", (Purpose::from(purpose), parts))
+                .and_then(|result| Ok(result.extract::<RequestParts>()?))
                 .map_err(|failure| hook_error(py, failure))
         })?;
         *request = core::RequestParts {
@@ -284,6 +329,15 @@ impl core::Hooks for PyHooks {
                     "on_key 返回的 key 应为 16 字节，实际 {length} 字节"
                 )))
             })
+    }
+
+    fn on_init(&self, url: &Url, data: Vec<u8>) -> Result<Vec<u8>, core::HookError> {
+        if !self.init {
+            return Ok(data);
+        }
+        self.call("on_init", url, &data, |result| {
+            Ok(result.cast::<PyBytes>()?.as_bytes().to_vec())
+        })
     }
 
     fn on_segment(&self, url: &Url, data: Vec<u8>) -> Result<Vec<u8>, core::HookError> {

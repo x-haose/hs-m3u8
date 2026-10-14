@@ -15,6 +15,7 @@ use tokio::runtime::Handle;
 use tokio::sync::watch;
 
 use crate::error::to_pyerr;
+use crate::hooks::Hooks;
 use crate::report::{Output, Progress};
 use crate::runtime::{self, Owned};
 
@@ -24,6 +25,8 @@ use crate::runtime::{self, Owned};
 #[pyclass(module = "hs_m3u8._native", frozen)]
 pub struct Job {
     running: Owned<Running>,
+    /// 任务所用的回调对象：core 只持它的弱引用（见 `hooks` 模块），由这里持有到 `Job` 被回收
+    hooks: Option<Py<Hooks>>,
 }
 
 struct Running {
@@ -97,8 +100,8 @@ impl Failure {
 
 impl Job {
     /// 在 `runtime` 上等 `job` 结束，把结果交给各次 `wait`。等待的后台任务随 `job` 结束而结束：`Job` 被回收时取消
-    /// `job`，core 保证取消后任务会结束。
-    pub(crate) fn spawn(runtime: &Handle, job: core::Job) -> Job {
+    /// `job`，core 保证取消后任务会结束。`hooks` 为任务所用的回调对象。
+    pub(crate) fn spawn(runtime: &Handle, job: core::Job, hooks: Option<Py<Hooks>>) -> Job {
         let control = job.control();
         let (sender, finished) = watch::channel(None);
         // 等结果放在单独的任务里：它 panic 时，从它的句柄取得原因
@@ -117,6 +120,7 @@ impl Job {
         });
         Job {
             running: Owned::new(Running { control, finished }),
+            hooks,
         }
     }
 }
@@ -237,10 +241,12 @@ impl Job {
         }
     }
 
-    /// 失败的任务持有异常，异常的回溯里常有引用这个任务的帧（`job = engine.start(...); await job.wait()`），回调
-    /// 抛出的异常还经回调的帧引用回调对象：引用环要靠垃圾回收器经这里找到。
+    /// 回调对象常引用这个任务（如在回调里调用 `stop`）；失败的任务持有异常，异常的回溯里常有引用这个任务的帧
+    /// （`job = engine.start(...); await job.wait()`），回调抛出的异常还经回调的帧引用回调对象：引用环要靠垃圾回收器
+    /// 经这里找到。
     #[gen_stub(skip)]
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.hooks)?;
         let Some(running) = self.running.here() else {
             return Ok(());
         };

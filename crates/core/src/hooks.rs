@@ -45,6 +45,7 @@ pub enum HookKind {
     Playlist,
     Request,
     Key,
+    Init,
     Segment,
 }
 
@@ -54,17 +55,24 @@ impl fmt::Display for HookKind {
             HookKind::Playlist => "播放列表",
             HookKind::Request => "请求",
             HookKind::Key => "key",
+            HookKind::Init => "init 段",
             HookKind::Segment => "分片",
         })
     }
 }
 
-/// 站点适配回调。在阻塞线程池中执行；返回 `Err` 时任务失败，不重试。
+/// 站点适配回调。在阻塞线程池中执行（[`Hooks::implements`] 为 false 的除外）；返回 `Err` 时任务失败，不重试。
 /// 取消不会打断正在执行的回调，任务等它返回后才结束。
 ///
 /// `on_playlist`、`on_key` 返回 `None` 表示不改：拉到的内容不合要求时是来源的问题（如
 /// [`crate::Error::KeyLength`]）；返回的值由类型保证合要求。
 pub trait Hooks: Send + Sync {
+    /// 实现了回调 `hook`。为 false 时本库就地调用它、不进阻塞线程池：那时的调用须立即返回、结果同下面的默认实现。
+    fn implements(&self, hook: HookKind) -> bool {
+        let _ = hook;
+        true
+    }
+
     /// 改写拉到的播放列表（如解密、转码），返回改写后的文本。`url` 为重定向之后的地址。
     fn on_playlist(&self, url: &Url, body: &[u8]) -> Result<Option<String>, HookError> {
         let _ = (url, body);
@@ -85,8 +93,14 @@ pub trait Hooks: Send + Sync {
         Ok(None)
     }
 
-    /// 在解密之前变换分片（如去掉伪装成图片的前缀字节）。`url` 为播放列表中的分片地址；init 段与空的响应不经过此
-    /// 回调。重试时同一个分片会再经过它，`data` 可能没写完。
+    /// 在解密之前变换 init 段（EXT-X-MAP），同 [`Hooks::on_segment`]；`url` 为播放列表中的 init 段地址。
+    fn on_init(&self, url: &Url, data: Vec<u8>) -> Result<Vec<u8>, HookError> {
+        let _ = url;
+        Ok(data)
+    }
+
+    /// 在解密之前变换分片（如去掉伪装成图片的前缀字节）。`url` 为播放列表中的分片地址；init 段经
+    /// [`Hooks::on_init`]，空的响应不经过此回调。重试时同一个分片会再经过它，`data` 可能没写完。
     fn on_segment(&self, url: &Url, data: Vec<u8>) -> Result<Vec<u8>, HookError> {
         let _ = url;
         Ok(data)
@@ -96,16 +110,23 @@ pub trait Hooks: Send + Sync {
 /// 不做任何改动的回调。
 pub struct NoHooks;
 
-impl Hooks for NoHooks {}
+impl Hooks for NoHooks {
+    fn implements(&self, _hook: HookKind) -> bool {
+        false
+    }
+}
 
-/// 在阻塞线程池中执行回调。
+/// 执行调用回调 `hook` 的 `f`：实现了的（见 [`Hooks::implements`]）在阻塞线程池中执行，没实现的就地调用。
 pub(crate) async fn run_hook<T, F>(hooks: &Arc<dyn Hooks>, hook: HookKind, f: F) -> Result<T, Error>
 where
     T: Send + 'static,
     F: FnOnce(&dyn Hooks) -> Result<T, HookError> + Send + 'static,
 {
-    let hooks = hooks.clone();
-    blocking(move || f(hooks.as_ref()))
-        .await?
-        .map_err(|cause| Error::Hook { hook, cause })
+    let result = if hooks.implements(hook) {
+        let hooks = hooks.clone();
+        blocking(move || f(hooks.as_ref())).await?
+    } else {
+        f(hooks.as_ref())
+    };
+    result.map_err(|cause| Error::Hook { hook, cause })
 }

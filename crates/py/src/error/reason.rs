@@ -537,6 +537,8 @@ variants! {
         Request {},
         /// `Hooks.on_key`
         Key {},
+        /// `Hooks.on_init`
+        Init {},
         /// `Hooks.on_segment`
         Segment {},
     }
@@ -782,6 +784,7 @@ impl From<core::HookKind> for HookKind {
             core::HookKind::Playlist => HookKind::Playlist {},
             core::HookKind::Request => HookKind::Request {},
             core::HookKind::Key => HookKind::Key {},
+            core::HookKind::Init => HookKind::Init {},
             core::HookKind::Segment => HookKind::Segment {},
         }
     }

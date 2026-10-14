@@ -474,7 +474,7 @@ class HookError(HsM3u8Error):
     `TypeError`）；返回的地址不是 http/https、请求头不合法、或 key 不是 16 字节时为 None，原因在说明里。
     """
     @property
-    def hook(self) -> HookKind.Playlist | HookKind.Request | HookKind.Key | HookKind.Segment:
+    def hook(self) -> HookKind.Playlist | HookKind.Request | HookKind.Key | HookKind.Init | HookKind.Segment:
         r"""
         哪个回调
         """
@@ -518,6 +518,14 @@ class HookKind:
         def __new__(cls) -> HookKind.Key: ...
     
     @typing.final
+    class Init(HookKind):
+        r"""
+        `Hooks.on_init`
+        """
+        __match_args__ = ()
+        def __new__(cls) -> HookKind.Init: ...
+    
+    @typing.final
     class Segment(HookKind):
         r"""
         `Hooks.on_segment`
@@ -532,6 +540,11 @@ class Hooks:
     （不在事件循环里），同一个对象的回调会在多个线程上同时被调用（同时下载的分片各占一个线程），有状态的回调要自己
     加锁。回调出错使任务失败、不重试（见 `HookError`）。取消不会打断正在执行的回调，任务等它返回后才结束；解释器
     退出时也等它返回，所以回调里的网络请求要设超时。
+    
+    每次调用都在新的 Python 线程状态里：`threading.local` 与 `contextvars` 里存的东西不留到下一次调用，要跨调用复用
+    （如每线程一个 HTTP 会话）就存在对象上并自己加锁。回调持着 GIL 时事件循环与其他回调都要等，耗时的计算放进放开
+    GIL 的调用里。任务在运行时持有回调对象，回调对象可以引用它的 `Job`（如在回调里调用 `Job.stop`）：不再被其他地方
+    引用时两者一起被回收、任务随之取消。
     """
     def __new__(cls, *_args: typing.Any, **_kwargs: typing.Any) -> typing.Self:
         r"""
@@ -558,10 +571,14 @@ class Hooks:
         表示不改，与没覆盖一样用拉到的 key，它不是 16 字节时为 `KeyLengthError`（基类的实现即如此）。`url` 为播放列表
         中的 key 地址。
         """
+    def on_init(self, url: builtins.str, data: bytes, /) -> bytes:
+        r"""
+        在解密之前变换 init 段（EXT-X-MAP），同 `on_segment`；`url` 为播放列表中的 init 段地址。
+        """
     def on_segment(self, url: builtins.str, data: bytes, /) -> bytes:
         r"""
-        在解密之前变换分片（如去掉伪装成图片的前缀字节），返回变换后的内容。`url` 为播放列表中的分片地址；init 段
-        与空的响应不经过此回调。重试时同一个分片会再经过它，`data` 可能没写完。
+        在解密之前变换分片（如去掉伪装成图片的前缀字节），返回变换后的内容。`url` 为播放列表中的分片地址；init 段经
+        `on_init`，空的响应不经过此回调。重试时同一个分片会再经过它，`data` 可能没写完。
         """
 
 class HsM3u8Error(builtins.Exception):

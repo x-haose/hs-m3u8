@@ -31,6 +31,7 @@ from hs_m3u8 import (
     IntegrityError,
     IntegrityFailure,
     InvalidInputError,
+    Job,
     JobCancelledError,
     JobRequest,
     KeyLengthError,
@@ -349,6 +350,30 @@ def test_jobs_no_longer_referenced_are_cancelled(server: Server, tmp_path: Path)
     assert not (tmp_path / "out.mp4").exists()
 
 
+def test_jobs_referenced_only_by_their_hooks_are_cancelled(server: Server, tmp_path: Path) -> None:
+    # 回调对象 → 任务 → core 里的回调 → 回调对象：任务向垃圾回收器报出回调对象，core 只持弱引用，环回收得了
+    put_media(server, VOD)
+    gate = server.gate("seg1.ts")
+
+    class Holder(Hooks):
+        job: Job | None = None
+
+    hooks = Holder()
+    output = OutputOptions(Target.Mp4(tmp_path / "out.mp4"))
+    request = JobRequest(Source(server.url("index.m3u8"), hooks=hooks), output, concurrency=1)
+
+    async def main(hooks: Holder, request: JobRequest) -> None:
+        hooks.job = Engine().start(request)
+        await arrived(gate)
+
+    asyncio.run(main(hooks, request))
+    del hooks, request
+    gc.collect()
+
+    assert gate.abandoned.wait(ARRIVAL)
+    assert not (tmp_path / "out.mp4").exists()
+
+
 def test_failed_jobs_and_their_exceptions_are_collected(server: Server, tmp_path: Path) -> None:
     # 任务 → 异常 → 回溯里等它的帧 → 任务；回调抛出的异常还经回调的帧引用回调对象。任务要向垃圾回收器报出异常
     put_media(server, VOD)
@@ -557,13 +582,23 @@ def test_key_hooks_return_the_key_or_none_and_other_lengths_fail_the_hook(server
     assert short.value.length == 15
 
 
-def test_segment_hooks_transform_segments_before_they_are_checked(server: Server, tmp_path: Path) -> None:
-    put_media(server, VOD)
-    for name in ["seg0.ts", "seg1.ts"]:
-        server.put(name, b"\x89PNG" + fixture(f"ts_a/{name}"))
+def test_content_hooks_transform_init_sections_and_segments_before_they_are_checked(
+    server: Server, tmp_path: Path
+) -> None:
+    server.put(
+        "index.m3u8",
+        '#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:2,\nseg0.m4s\n#EXTINF:2,\nseg1.m4s\n'
+        "#EXT-X-ENDLIST\n",
+    )
+    for name in ["init.mp4", "seg0.m4s", "seg1.m4s"]:
+        server.put(name, b"\x89PNG" + fixture(f"fmp4_a/video/{name}"))
     called: list[str] = []
 
     class StripDisguise(Hooks):
+        def on_init(self, url: str, data: bytes) -> bytes:
+            called.append(url)
+            return data.removeprefix(b"\x89PNG")
+
         def on_segment(self, url: str, data: bytes) -> bytes:
             called.append(url)
             return data.removeprefix(b"\x89PNG")
@@ -575,7 +610,7 @@ def test_segment_hooks_transform_segments_before_they_are_checked(server: Server
     )
 
     assert output.segments == 2
-    assert sorted(called) == [server.url("seg0.ts"), server.url("seg1.ts")]
+    assert sorted(called) == [server.url(name) for name in ["init.mp4", "seg0.m4s", "seg1.m4s"]]
 
 
 def test_live_recordings_end_at_endlist_and_report_missing_segments(server: Server, tmp_path: Path) -> None:

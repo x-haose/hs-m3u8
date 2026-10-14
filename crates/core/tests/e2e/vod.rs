@@ -1250,6 +1250,44 @@ async fn signed_init_urls_resume_with_the_right_init() {
     );
 }
 
+/// 去掉 init 段与分片前伪装成图片的字节。
+struct StripDisguise;
+
+impl Hooks for StripDisguise {
+    fn on_init(&self, _url: &Url, data: Vec<u8>) -> Result<Vec<u8>, HookError> {
+        Ok(data.strip_prefix(DISGUISE).ok_or("缺少伪装前缀")?.to_vec())
+    }
+
+    fn on_segment(&self, _url: &Url, data: Vec<u8>) -> Result<Vec<u8>, HookError> {
+        Ok(data.strip_prefix(DISGUISE).ok_or("缺少伪装前缀")?.to_vec())
+    }
+}
+
+/// init 段与分片都带伪装前缀：init 段经 on_init、分片经 on_segment 还原后照常校验、合并。
+#[tokio::test(flavor = "multi_thread")]
+async fn init_sections_pass_through_on_init() {
+    let dir = test_dir("on_init");
+    let server = Server::start().await;
+    for name in ["init.mp4", "seg0.m4s", "seg1.m4s"] {
+        let data = [DISGUISE, &fixture(&format!("fmp4_a/video/{name}"))].concat();
+        server.put(name, data);
+    }
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"init.mp4\"\n\
+         #EXTINF:1,\nseg0.m4s\n#EXTINF:1,\nseg1.m4s\n#EXT-X-ENDLIST\n",
+    );
+    let mut req = request(server.url("index.m3u8"), &dir);
+    req.source.hooks = Arc::new(StripDisguise);
+
+    let output = run(req).await.unwrap();
+
+    let segments = ["seg0.m4s", "seg1.m4s"];
+    let tracks = vec![track("fmp4_a/video", Some("init.mp4"), &segments)];
+    let want = expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]);
+    assert_output(&output, &want);
+}
+
 /// 把 init 段地址 `init?p=<目录>` 改写为 `<目录>/init.mp4`：模拟按查询串区分内容的站点。
 struct InitByQuery;
 

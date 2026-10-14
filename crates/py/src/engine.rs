@@ -9,6 +9,7 @@ use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
 use crate::convert::{Positive, PyPath, Seq};
 use crate::error::to_pyerr;
+use crate::hooks::Hooks;
 use crate::info::Probe;
 use crate::job::Job;
 use crate::report::Leftover;
@@ -81,8 +82,10 @@ impl Engine {
     async fn probe(&self, source: Py<Source>) -> PyResult<Probe> {
         let engine = self.inner.get("Engine")?.clone();
         runtime::require_event_loop()?;
-        let source = Python::attach(|py| source.get().to_core(py))?;
-        let probed = runtime::spawn(async move { engine.probe(&source).await })?.await?;
+        let core_source = Python::attach(|py| source.get().to_core(py))?;
+        let probed = runtime::spawn(async move { engine.probe(&core_source).await })?.await?;
+        // 持着来源直到探测结束：core 只持回调对象的弱引用
+        drop(source);
         match probed {
             Ok(probe) => Ok(probe.into()),
             Err(error) => Err(Python::attach(|py| to_pyerr(py, error))),
@@ -93,8 +96,15 @@ impl Engine {
     /// 下载之前进行，结果经 `Job.wait` 抛出。
     fn start(&self, py: Python<'_>, request: &Bound<'_, JobRequest>) -> PyResult<Job> {
         let engine = self.inner.get("Engine")?;
+        let hooks = request
+            .get()
+            .source
+            .get()
+            .hooks
+            .as_ref()
+            .map(|h| h.clone_ref(py));
         let request = request.get().to_core(py)?;
-        start_job(py, || engine.start(request))
+        start_job(py, || engine.start(request), hooks)
     }
 
     /// 不联网，只把任务目录中已录到的直播分片写成输出；用于中断后不再续录、或来源已取不到的录制。进度给出已录的
@@ -103,7 +113,7 @@ impl Engine {
     /// 再次运行即可续传）；目录不存在或没有已完成的分片时抛 `NothingRecordedError`。结果的 `LiveReport.end` 为 None。
     fn merge_recorded(&self, py: Python<'_>, output: OutputOptions) -> PyResult<Job> {
         let engine = self.inner.get("Engine")?;
-        start_job(py, || engine.merge_recorded(output.to_core()))
+        start_job(py, || engine.merge_recorded(output.to_core()), None)
     }
 
     /// 放弃任务：删除任务目录 `work_dir`（相对路径按当前目录补全），只删本库写的文件。先按其中的记录收拾写到
@@ -147,10 +157,11 @@ impl Engine {
     }
 }
 
-/// 在本进程的运行时里调用 `start`（core 在当前运行时上启动任务），返回任务句柄。
+/// 在本进程的运行时里调用 `start`（core 在当前运行时上启动任务），返回任务句柄；`hooks` 为任务所用的回调对象。
 fn start_job(
     py: Python<'_>,
     start: impl FnOnce() -> Result<core::Job, core::Error>,
+    hooks: Option<Py<Hooks>>,
 ) -> PyResult<Job> {
     let runtime = runtime::handle()?;
     let job = {
@@ -158,7 +169,7 @@ fn start_job(
         start()
     };
     let job = job.map_err(|error| to_pyerr(py, error))?;
-    Ok(Job::spawn(&runtime, job))
+    Ok(Job::spawn(&runtime, job, hooks))
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {

@@ -82,7 +82,7 @@ uv run --no-sync python examples/download.py
 | `get_m3u8_func`、`m3u8_response_after` | `Hooks.on_playlist`（返回改写后的文本） |
 | `m3u8_request_before`、`key_request_before`、`ts_request_before` | `Hooks.on_request`（`purpose` 区分用途） |
 | `key_response_after` | `Hooks.on_key` |
-| `ts_response_after` | `Hooks.on_segment` |
+| `ts_response_after` | `Hooks.on_segment`，init 段（`EXT-X-MAP`）为 `Hooks.on_init` |
 | `run(merge=False)` | `Target.Hls`：可直接播放的本地 HLS 目录 |
 | `run(del_hls=False)`（默认，保留分片） | 默认成功后删掉任务目录；要保留用 `OutputOptions(keep_work_dir=True)` |
 | Python ≥ 3.10 | Python ≥ 3.12 |

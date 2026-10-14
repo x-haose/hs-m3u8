@@ -229,7 +229,7 @@ impl Direct {
             .map_err(|e| segment_error(track, segment, e))
     }
 
-    /// 拉取 init 段，解密并校验（见 [`check`]，须为 fMP4）；没写完的与请求的临时故障一起重试。`permit` 为 init 段与它的
+    /// 拉取 init 段，经 `on_init` 回调后解密并校验（见 [`check`]，须为 fMP4）；没写完的与请求的临时故障一起重试。`permit` 为 init 段与它的
     /// key 的请求占哪一份引擎名额。IV 依次取自定义的、EXT-X-KEY 写明的，都没有时用 [`INIT_IV`]。
     pub(crate) async fn fetch_init(
         &self,
@@ -255,6 +255,11 @@ impl Direct {
                     .get_once(Purpose::Init, &init.uri, init.byte_range, permit, cancel)
                     .await?;
                 let body = nonempty(response.body, &init.uri)?;
+                let url = init.uri.clone();
+                let body = run_hook(&ctx.hooks, HookKind::Init, move |hooks| {
+                    hooks.on_init(&url, body)
+                })
+                .await?;
                 let content = |e: ContentError| e.into_error(&init.uri);
                 let mut data = match key {
                     Some((key, iv)) => decrypt(body, &key, &iv)
