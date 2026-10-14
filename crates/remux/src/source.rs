@@ -139,31 +139,25 @@ impl Source {
                     .expect("包所属的流存在");
                 let (group, track) = (self.group, self.track);
                 let unsupported = match check.check(packet.data().unwrap_or_default(), &stream) {
-                    Ok(()) => None,
+                    Ok(()) => return Ok(Some((packet, mapping))),
                     Err(Mismatch::Unreadable) => {
                         self.dropped[packet.stream()].corrupt_bytes += packet.size() as u64;
                         continue;
                     }
-                    Err(Mismatch::Changed) => Some(Unsupported::ParamsChangedInGroup {
+                    Err(Mismatch::Changed) => Unsupported::ParamsChangedInGroup {
                         group,
                         track,
                         kind: mapping.kind,
-                    }),
-                    Err(Mismatch::Config) => Some(Unsupported::ConfigChanged {
+                    },
+                    Err(Mismatch::Config) => Unsupported::ConfigChanged {
                         group,
                         track,
                         kind: mapping.kind,
-                    }),
-                    Err(Mismatch::Eac3ShortFrames) => {
-                        Some(Unsupported::Eac3ShortFrames { group, track })
-                    }
-                    Err(Mismatch::Eac3Substreams) => {
-                        Some(Unsupported::Eac3Substreams { group, track })
-                    }
+                    },
+                    Err(Mismatch::Eac3ShortFrames) => Unsupported::Eac3ShortFrames { group, track },
+                    Err(Mismatch::Eac3Substreams) => Unsupported::Eac3Substreams { group, track },
                 };
-                if let Some(unsupported) = unsupported {
-                    return Err(Error::Unsupported(unsupported));
-                }
+                return Err(Error::Unsupported(unsupported));
             }
             return Ok(Some((packet, mapping)));
         }

@@ -447,34 +447,13 @@ mod tests {
 
     use super::*;
     use crate::ident::Fingerprint;
+    use crate::scratch::Scratch;
 
-    /// 每个测试独立的空目录，其中 `work` 为任务目录；测试通过后删除，失败时留着查看。
-    struct Scratch(PathBuf);
-
-    impl std::ops::Deref for Scratch {
-        type Target = Path;
-
-        fn deref(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            if !std::thread::panicking() {
-                fs::remove_dir_all(&self.0).unwrap();
-            }
-        }
-    }
-
+    /// 每个测试独立的空目录，其中 `work` 为任务目录。
     fn scratch(name: &str) -> Scratch {
-        let dir =
-            std::env::temp_dir().join(format!("hs-m3u8-commit-{}-{name}", std::process::id()));
-        if dir.exists() {
-            fs::remove_dir_all(&dir).unwrap();
-        }
+        let dir = Scratch::new(&format!("commit-{name}"));
         fs::create_dir_all(dir.join("work")).unwrap();
-        Scratch(dir)
+        dir
     }
 
     fn pending(kind: OutputKind, target: PathBuf) -> PendingOutput {

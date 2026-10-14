@@ -45,6 +45,8 @@ mod recheck;
 mod report;
 mod request;
 mod resolve;
+#[cfg(test)]
+mod scratch;
 mod selection;
 mod verify;
 mod vod;
