@@ -8,7 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use hs_m3u8_remux::{
-    Cancel, DiscontinuityGroup, ReadProgress, Report, Segment, Streams, TrackSegments,
+    Cancel, Control, DiscontinuityGroup, Report, Segment, Streams, TrackSegments, WriteProgress,
 };
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -22,8 +22,8 @@ use crate::error::io_error;
 use crate::selection::SelectionKey;
 use crate::workdir::{Layout, OutputKind, SegmentName, WorkDir};
 use crate::{
-    Error, Leftover, LeftoverKind, LiveReport, Missed, Mp4Output, Output, Progress, WorkDirProblem,
-    Writing, blocking,
+    Error, FileCount, Leftover, LeftoverKind, LiveReport, Missed, Mp4Output, Output, Progress,
+    WorkDirProblem, Writing, blocking,
 };
 
 /// 交给输出的内容。
@@ -140,8 +140,32 @@ fn check_all(options: &ResolvedOutput) -> Result<Vec<Occupant>, Error> {
         .collect()
 }
 
-/// 写好一个文件（见 [`Writing`]）时调用，参数为写好的个数。
-type Advance = std::sync::Arc<dyn Fn(usize) + Send + Sync>;
+/// 写出的进度计入任务的进度（见 [`Writing`]）。
+#[derive(Clone)]
+struct Advance(watch::Sender<Progress>);
+
+impl Advance {
+    /// MP4 又写完 `files` 个输入文件。
+    fn mp4(&self, files: usize) {
+        self.add(files, |w| w.mp4.as_mut());
+    }
+
+    /// 本地 HLS 又放好 `files` 个文件。
+    fn hls(&self, files: usize) {
+        self.add(files, |w| w.hls.as_mut());
+    }
+
+    fn add(&self, files: usize, count: impl FnOnce(&mut Writing) -> Option<&mut FileCount>) {
+        self.0.send_modify(|p| {
+            let count = p
+                .writing
+                .as_mut()
+                .and_then(count)
+                .expect("写出开始时已给出这种输出的合计");
+            count.done += files;
+        });
+    }
+}
 
 /// 写出输出，按选项删除任务目录。`bytes` 为任务目录中已完成的分片与 init 段的字节数。`cancel` 在换上输出之前都生效
 /// （见 [`write_files`]）。写出的进度计入 `progress`（见 [`Progress::writing`]）。
@@ -166,18 +190,18 @@ pub(crate) async fn write(
         .flatten()
         .map(|t| t.segments.len() + usize::from(t.init.is_some()))
         .sum();
-    let total = per_output * options.outputs.len();
-    progress.send_modify(|p| p.writing = Some(Writing { done: 0, total }));
-    let advance: Advance = {
-        let progress = progress.clone();
-        std::sync::Arc::new(move |files| {
-            progress.send_modify(|p| {
-                if let Some(writing) = &mut p.writing {
-                    writing.done += files;
-                }
-            });
+    let count = |kind| {
+        options.get(kind).map(|_| FileCount {
+            done: 0,
+            total: per_output,
         })
     };
+    let writing = Writing {
+        mp4: count(OutputKind::Mp4),
+        hls: count(OutputKind::Hls),
+    };
+    progress.send_modify(|p| p.writing = Some(writing));
+    let advance = Advance(progress.clone());
     let files = options.clone();
     let cancel = cancel.clone();
     let (mp4, mut leftovers) = blocking(move || {
@@ -274,14 +298,14 @@ fn write_temps(
             groups,
             selection,
             cancel,
-            &**advance,
+            &|files| advance.hls(files),
         )?;
     }
     Ok(report)
 }
 
-/// 合并为 MP4 写到 `temp`，读完一个输入文件报给 `advance`；失败或取消时 `temp` 上可能留有写了一半的文件。
-/// `work_dir` 为分片所在的任务目录。
+/// 合并为 MP4 写到 `temp`，写完输入文件报给 `advance`（见 [`WriteProgress`]）；失败或取消时 `temp` 上可能留有写了一半的
+/// 文件。`work_dir` 为分片所在的任务目录。
 fn write_mp4(
     temp: &Path,
     streams: &[Streams],
@@ -292,11 +316,12 @@ fn write_mp4(
 ) -> Result<Report, Error> {
     let groups: Vec<DiscontinuityGroup> = groups.iter().map(|g| remux_group(g)).collect();
     let token = cancel.clone();
-    let cancel = Cancel::new(move || token.is_cancelled());
     let advance = advance.clone();
-    let progress = ReadProgress::new(move |files| advance(files));
-    hs_m3u8_remux::remux(streams, &groups, temp, &cancel, &progress)
-        .map_err(|e| remux_error(e, work_dir))
+    let control = Control {
+        cancel: Cancel::new(move || token.is_cancelled()),
+        progress: WriteProgress::new(move |files| advance.mp4(files)),
+    };
+    hs_m3u8_remux::remux(streams, &groups, temp, &control).map_err(|e| remux_error(e, work_dir))
 }
 
 /// 下载完之前核对能否合并进 MP4（见 [`hs_m3u8_remux::check`]），各轨只需开头的分片。`groups` 的各项为合并时的组号与

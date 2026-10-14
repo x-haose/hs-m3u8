@@ -13,8 +13,8 @@ use crate::group::{OpenTrack, layout_of, open_group, primed, references_of};
 use crate::source::{Dropped, Mapping, Source};
 use crate::timing::{MICROS, align_wraps, group_offset, retime};
 use crate::{
-    Cancel, Error, FfmpegError, Numbered, ReadProgress, Report, Shape, StreamReport, Streams,
-    Unsupported,
+    Cancel, Control, Error, FfmpegError, Numbered, Report, Shape, StreamReport, Streams,
+    TrackSegments, Unsupported, WriteProgress,
 };
 
 /// 一路输出流：第 0 组决定其编码参数，写出过程中累计统计。`_us` 结尾的时刻为输出时间线上的微秒。
@@ -52,19 +52,20 @@ pub(crate) fn write_verified(
     streams: &[Streams],
     groups: &[Numbered<'_>],
     path: &str,
-    cancel: &Cancel,
-    progress: &ReadProgress,
+    control: &Control,
 ) -> Result<Report, Error> {
-    let first = open_group(streams, groups[0], None, cancel, progress)?;
+    let cancel = &control.cancel;
+    let first = open_group(streams, groups[0], None, cancel)?;
     let layout = layout_of(&first)?;
     let mut muxer = Muxer::open(path, cancel, &first, &layout)?;
     let sources = primed(groups[0].0, first, &layout, &[])?;
     let references = references_of(&sources, muxer.outs.len());
-    muxer.write_group(groups[0].0, sources)?;
+    let (group, tracks) = groups[0];
+    muxer.write_group(group, sources, &tracks.tracks, &control.progress)?;
     for &numbered in &groups[1..] {
-        let opened = open_group(streams, numbered, Some(&layout), cancel, progress)?;
+        let opened = open_group(streams, numbered, Some(&layout), cancel)?;
         let sources = primed(numbered.0, opened, &layout, &references)?;
-        muxer.write_group(numbered.0, sources)?;
+        muxer.write_group(numbered.0, sources, &numbered.1.tracks, &control.progress)?;
     }
     let outs = muxer.finish()?;
     verify(Path::new(path), &outs, cancel)?;
@@ -123,11 +124,19 @@ impl Muxer {
 
     /// 写出一组（各输入已读到每路流的第一个包）：各输入按回绕对齐（见 [`align_wraps`]），再按全组共用的偏移平移时间戳，
     /// 按 DTS 交错写出，写出前核对时间戳没有往前跳（见 [`Source::check_jump`]）。
-    fn write_group(&mut self, group: usize, mut sources: Vec<Source>) -> Result<(), Error> {
+    fn write_group(
+        &mut self,
+        group: usize,
+        mut sources: Vec<Source>,
+        tracks: &[TrackSegments],
+        progress: &WriteProgress,
+    ) -> Result<(), Error> {
         align_wraps(&mut sources);
         let offset_us = self.offset_of(group, &sources)?;
         // 全组已写出的最大 DTS，输入时间线上（对齐回绕后）的微秒
         let mut clock_us: Option<i64> = None;
+        // 各轨已报为写完的文件数（见 [`WriteProgress`]）
+        let mut written = vec![0; tracks.len()];
         loop {
             for source in &mut sources {
                 if source.queue.is_empty()
@@ -147,6 +156,11 @@ impl Muxer {
             let source = &mut sources[i];
             let (packet, mapping) = source.queue.pop_front().expect("next 只指向有待写包的输入");
             source.check_jump(&packet, mapping, dts_us, clock_us)?;
+            if let Some(segment) = source.segment() {
+                let done = usize::from(tracks[source.track].init.is_some()) + segment;
+                progress.add(done.saturating_sub(written[source.track]));
+                written[source.track] = written[source.track].max(done);
+            }
             clock_us = Some(clock_us.map_or(dts_us, |clock| clock.max(dts_us)));
             let at = Placed {
                 group,
@@ -154,6 +168,9 @@ impl Muxer {
                 offset_us: offset_us + source.wrap_us,
             };
             self.write_packet(packet, mapping, at)?;
+        }
+        for (track, done) in tracks.iter().zip(written) {
+            progress.add(track.segments.len() + usize::from(track.init.is_some()) - done);
         }
         for source in &sources {
             for (mapping, dropped) in source.map.iter().zip(&source.dropped) {

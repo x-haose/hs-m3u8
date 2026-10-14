@@ -293,10 +293,20 @@ record! {
 }
 
 record! {
-    /// 写出的进度（`Progress.writing`），以文件计：各组各轨的 init 段与分片各算一个（打包音频按分片）。合并 MP4 时每读
-    /// 完一个计一，备齐本地 HLS 时每放好一个计一，两者都要时各算一遍；合并完回读核对 MP4 时不再增长。
+    /// 写出的进度（`Progress.writing`），以文件计：各组各轨的 init 段与分片各算一个（打包音频按分片）。
     pub struct Writing {
-        /// 已写好的
+        /// 合并 MP4：写完的输入文件，写到下一个分片的包时上一个才算完，合并完回读核对 MP4 时不再增长；不要 MP4 时为 None
+        pub mp4: Option<FileCount>,
+        /// 备齐本地 HLS：放好的文件，已放过的 init 段照样算；与任务目录同盘时用硬链接，几乎不花时间。不要本地 HLS 时为
+        /// None
+        pub hls: Option<FileCount>,
+    }
+}
+
+record! {
+    /// 完成了的文件数与合计。
+    pub struct FileCount {
+        /// 完成了的
         pub done: usize,
         /// 合计
         pub total: usize,
@@ -644,9 +654,15 @@ impl From<core::Progress> for Progress {
                 purpose: r.purpose.into(),
                 failure: r.failure.into(),
             }),
-            writing: p.writing.map(|w| Writing {
-                done: w.done,
-                total: w.total,
+            writing: p.writing.map(|w| {
+                let count = |c: core::FileCount| FileCount {
+                    done: c.done,
+                    total: c.total,
+                };
+                Writing {
+                    mp4: w.mp4.map(count),
+                    hls: w.hls.map(count),
+                }
             }),
             refresh_errors: p
                 .refresh_errors
@@ -784,6 +800,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<FetchFailure>()?;
     module.add_class::<Retrying>()?;
     module.add_class::<Writing>()?;
+    module.add_class::<FileCount>()?;
     module.add_class::<RefreshReason>()?;
     module.add_class::<RefreshCause>()?;
     module.add_class::<StallCause>()?;

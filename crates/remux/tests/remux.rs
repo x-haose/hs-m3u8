@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ffmpeg_next as ffmpeg;
 use hs_m3u8_remux::{
-    Cancel, DiscontinuityGroup, Error, ReadProgress, Segment, Shape, StreamKind, Streams,
-    TrackSegments, Unsupported, remux,
+    Cancel, Control, DiscontinuityGroup, Error, Segment, Shape, StreamKind, Streams, TrackSegments,
+    Unsupported, WriteProgress, remux,
 };
 
 fn fixtures() -> PathBuf {
@@ -332,10 +332,11 @@ fn top_level_boxes(path: &Path) -> Vec<[u8; 4]> {
     boxes
 }
 
-/// 读输入的进度：各组各轨的 init 段与分片（打包音频按分片）各报一次，回读核对输出不计。
+/// 写出的进度：每条轨的 init 段与分片随写出逐个报为写完（写到下一个分片的包时上一个才算完，一组写完时补齐），不在
+/// 打开输入时成批报出；回读核对输出不计。
 #[test]
-fn read_progress_counts_every_input_file_once() {
-    let dir = work_dir("read_progress");
+fn write_progress_reports_each_input_file_as_it_is_written() {
+    let dir = work_dir("write_progress");
     let output = dir.join("out.mp4");
     let cases = [
         (
@@ -345,7 +346,7 @@ fn read_progress_counts_every_input_file_once() {
                 group([track("fmp4_b/video")]),
             ],
         ),
-        (Streams::All, vec![group([track("ts_a")])]),
+        (Streams::All, vec![group([track("ts_long")])]),
         (Streams::Audio, vec![group([track("packed/aac")])]),
     ];
     for (streams, groups) in cases {
@@ -354,15 +355,16 @@ fn read_progress_counts_every_input_file_once() {
             .flat_map(|g| &g.tracks)
             .map(|t| t.segments.len() + usize::from(t.init.is_some()))
             .sum();
-        let read = Arc::new(AtomicUsize::new(0));
-        let counted = read.clone();
-        let progress = ReadProgress::new(move |n| {
-            counted.fetch_add(n, Ordering::Relaxed);
-        });
+        let reported = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = reported.clone();
+        let control = Control {
+            progress: WriteProgress::new(move |n| recorded.lock().unwrap().push(n)),
+            ..Control::default()
+        };
 
-        remux(&[streams], &groups, &output, &Cancel::never(), &progress).unwrap();
+        remux(&[streams], &groups, &output, &control).unwrap();
 
-        assert_eq!(read.load(Ordering::Relaxed), files);
+        assert_eq!(*reported.lock().unwrap(), vec![1; files]);
     }
 }
 
@@ -376,8 +378,7 @@ fn ts_single_group_copies_every_packet_from_zero_with_moov_first() {
         &[Streams::All],
         &[group([a.clone()])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -453,8 +454,7 @@ fn split_fmp4_renditions_merge_into_one_file() {
         &[Streams::Video, Streams::Audio],
         &[group([video.clone(), audio.clone()])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -485,8 +485,7 @@ fn discontinuity_groups_are_laid_end_to_end() {
         &[Streams::All],
         &[group([a.clone()]), group([b]), group([a])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -516,8 +515,7 @@ fn split_renditions_keep_their_relative_timing_across_discontinuities() {
         &[Streams::Video, Streams::Audio],
         &[group([va, aa]), group([vb, ab])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -564,8 +562,7 @@ fn hevc_output_is_tagged_hvc1() {
         &[Streams::All],
         &[group([hevc.clone()])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -590,8 +587,7 @@ fn paths_with_quotes_and_spaces_are_read() {
         &[Streams::All],
         &[group([track_in(&dir)])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -611,8 +607,7 @@ fn timestamps_going_back_within_a_group_fail() {
         &[Streams::All],
         &[group([mixed])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
 
@@ -639,8 +634,7 @@ fn a_frame_repeated_across_segments_fails() {
         &[Streams::Video],
         &[group([track("ts_repeat")])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
 
@@ -666,8 +660,7 @@ fn same_stream_kind_from_two_tracks_is_rejected() {
         &[Streams::All; 2],
         &[group([track("ts_a"), track("fmp4_a/audio")])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
 
@@ -694,8 +687,7 @@ fn unwanted_streams_are_dropped_without_codec_checks() {
         &[Streams::Video, Streams::Audio],
         &[group([muxed.clone(), audio.clone()])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -727,8 +719,7 @@ fn tracks_without_the_wanted_streams_contribute_nothing() {
         &[Streams::Video, Streams::Audio],
         &[group([audio_only.clone(), audio.clone()])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -744,8 +735,7 @@ fn tracks_without_the_wanted_streams_contribute_nothing() {
         &[Streams::Video],
         &[group([audio_only])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
     assert!(
@@ -763,8 +753,7 @@ fn resolution_change_between_groups_is_rejected() {
         &[Streams::All],
         &[group([track("ts_a")]), group([track("ts_small")])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
 
@@ -794,14 +783,7 @@ fn equivalent_aac_configs_from_two_encoders_merge() {
     ] {
         let groups = [group([track(first)]), group([track(second)])];
         check(&[Streams::Audio], &groups).unwrap();
-        remux(
-            &[Streams::Audio],
-            &groups,
-            &output,
-            &Cancel::never(),
-            &ReadProgress::none(),
-        )
-        .unwrap();
+        remux(&[Streams::Audio], &groups, &output, &Control::default()).unwrap();
     }
 }
 
@@ -816,8 +798,7 @@ fn chroma_changes_are_rejected() {
         &[Streams::Video],
         &[group([changing.clone()])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
     assert!(
@@ -846,8 +827,7 @@ fn chroma_changes_are_rejected() {
         &[Streams::Video],
         &[group([first]), group([second])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
     assert!(
@@ -908,8 +888,7 @@ fn decoder_configs_differing_between_groups_are_rejected() {
             &[streams],
             &[group([track(first)]), group([track(second)])],
             &output,
-            &Cancel::never(),
-            &ReadProgress::none(),
+            &Control::default(),
         )
         .unwrap_err();
         assert!(
@@ -938,8 +917,7 @@ fn av1_vp9_opus_flac_and_alac_are_copied() {
             &[Streams::All],
             &[group([muxed.clone()])],
             &output,
-            &Cancel::never(),
-            &ReadProgress::none(),
+            &Control::default(),
         )
         .unwrap();
 
@@ -983,8 +961,7 @@ fn parameter_changes_within_a_group_are_rejected() {
             &[streams],
             &[group([changed.clone()])],
             &output,
-            &Cancel::never(),
-            &ReadProgress::none(),
+            &Control::default(),
         )
         .unwrap_err();
         assert!(
@@ -998,18 +975,19 @@ fn parameter_changes_within_a_group_are_rejected() {
     }
 }
 
-/// 每次检查取消时以检查的序号（从 0 起）调用 `act`、以它的返回值为是否取消的取消信号，另返回已检查的次数。`act` 在
-/// FFmpeg 的回调里调用，不得 panic。
+/// 只带取消信号的控制：每次检查取消时以检查的序号（从 0 起）调用 `act`、以它的返回值为是否取消，另返回已检查的次数。
+/// `act` 在 FFmpeg 的回调里调用，不得 panic。
 fn counting_cancel(
     act: impl Fn(usize) -> bool + Send + Sync + 'static,
-) -> (Cancel, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
+) -> (Control, Arc<AtomicUsize>) {
     let checks = Arc::new(AtomicUsize::new(0));
     let counted = checks.clone();
     let cancel = Cancel::new(move || act(counted.fetch_add(1, Ordering::Relaxed)));
-    (cancel, checks)
+    let control = Control {
+        cancel,
+        ..Control::default()
+    };
+    (control, checks)
 }
 
 /// 取消后合并在下一处检查以 Cancelled 停下：打开输入（含探测时读后面的数据）、写出每个包、FFmpeg 读写输出文件（含
@@ -1017,8 +995,6 @@ fn counting_cancel(
 /// 开始的 TS（探测要读到后面），与音视频分离的 fMP4。
 #[test]
 fn a_merge_cancelled_at_any_check_stops_as_cancelled() {
-    use std::sync::atomic::Ordering;
-
     let dir = work_dir("cancelled");
     let output = dir.join("out.mp4");
     let cases = [
@@ -1030,11 +1006,11 @@ fn a_merge_cancelled_at_any_check_stops_as_cancelled() {
     ];
     for (streams, groups) in &cases {
         let (cancel, checks) = counting_cancel(|_| false);
-        remux(streams, groups, &output, &cancel, &ReadProgress::none()).unwrap();
+        remux(streams, groups, &output, &cancel).unwrap();
         let total = checks.load(Ordering::Relaxed);
         for from in 0..total {
             let (cancel, _) = counting_cancel(move |n| n >= from);
-            let result = remux(streams, groups, &output, &cancel, &ReadProgress::none());
+            let result = remux(streams, groups, &output, &cancel);
             assert!(
                 matches!(result, Err(Error::Cancelled)),
                 "第 {from} 次检查（共 {total} 次）起取消：{result:?}"
@@ -1047,8 +1023,6 @@ fn a_merge_cancelled_at_any_check_stops_as_cancelled() {
 /// 的输出；不会读了一半就当作读完，合并出缺内容的 MP4 而报成功。逐个检查点都试。
 #[test]
 fn a_segment_shrinking_during_the_merge_is_reported() {
-    use std::sync::atomic::Ordering;
-
     let dir = work_dir("shrinking");
     let output = dir.join("out.mp4");
     let source = track("ts_long");
@@ -1057,8 +1031,7 @@ fn a_segment_shrinking_during_the_merge_is_reported() {
             &[Streams::All],
             &[group([source.clone()])],
             &output,
-            &Cancel::never(),
-            &ReadProgress::none(),
+            &Control::default(),
         )
         .unwrap();
         report.streams.iter().map(|s| s.packets).collect::<Vec<_>>()
@@ -1069,7 +1042,6 @@ fn a_segment_shrinking_during_the_merge_is_reported() {
         &[group([source.clone()])],
         &output,
         &cancel,
-        &ReadProgress::none(),
     )
     .unwrap();
     let total = checks.load(Ordering::Relaxed);
@@ -1107,13 +1079,7 @@ fn a_segment_shrinking_during_the_merge_is_reported() {
             segments,
             ..source.clone()
         };
-        let merged = remux(
-            &[Streams::All],
-            &[group([shrinking])],
-            &output,
-            &cancel,
-            &ReadProgress::none(),
-        );
+        let merged = remux(&[Streams::All], &[group([shrinking])], &output, &cancel);
         let cut = truncated.lock().unwrap().take();
         assert!(matches!(cut, Some(Ok(()))), "第 {at} 次检查时截短：{cut:?}");
         match merged {
@@ -1136,8 +1102,7 @@ fn a_full_disk_while_writing_is_reported_as_a_file_error() {
         &[Streams::All],
         &[group([track("ts_long")])],
         Path::new("/dev/full"),
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
     assert!(
@@ -1160,8 +1125,7 @@ fn a_forward_timestamp_jump_within_a_group_is_rejected() {
         &[Streams::All],
         &[group([jump.clone()])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
     assert!(
@@ -1186,8 +1150,7 @@ fn a_forward_timestamp_jump_within_a_group_is_rejected() {
         &[Streams::All],
         &[group([missing])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -1200,8 +1163,7 @@ fn a_forward_timestamp_jump_within_a_group_is_rejected() {
         &[Streams::All],
         &[group([understated])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 }
@@ -1230,8 +1192,7 @@ fn a_timestamp_jump_inside_a_segment_is_rejected() {
         &[Streams::All],
         &[group([one])],
         &dir.join("out.mp4"),
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
 
@@ -1263,8 +1224,7 @@ fn one_stream_pausing_alone_is_not_a_timestamp_jump() {
         &[Streams::Video, Streams::Audio],
         &[group([video, audio])],
         &dir.join("out.mp4"),
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -1293,8 +1253,7 @@ fn sparse_frames_across_segments_are_not_a_timestamp_jump() {
         &[Streams::All],
         &[group([declared])],
         &dir.join("out.mp4"),
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -1315,8 +1274,7 @@ fn video_before_the_first_keyframe_of_a_group_is_dropped_and_counted() {
         &[Streams::All],
         &[group([cut])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -1360,8 +1318,7 @@ fn leading_pictures_of_a_group_starting_with_cra_are_dropped() {
         &[Streams::All],
         &[group([first]), group([second])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -1391,8 +1348,7 @@ fn probing_reads_through_the_declared_duration_of_the_first_segment() {
         &[Streams::All],
         &[group([late.clone()])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -1404,8 +1360,7 @@ fn probing_reads_through_the_declared_duration_of_the_first_segment() {
         &[Streams::All],
         &[group([undeclared])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
     assert!(
@@ -1435,8 +1390,7 @@ fn an_h264_open_gop_without_recovery_points_has_no_keyframe() {
         &[Streams::All],
         &[group([later])],
         &dir.join("out.mp4"),
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
 
@@ -1469,8 +1423,7 @@ fn hevc_radl_pictures_at_the_start_of_a_group_are_kept() {
         &[Streams::All],
         &[group([second])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -1499,8 +1452,7 @@ fn a_group_without_any_decodable_video_frame_is_rejected() {
         &[Streams::All],
         &[group([tail.clone()])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
 
@@ -1528,8 +1480,7 @@ fn audio_damaged_at_a_missing_segment_is_dropped_and_counted() {
         &[Streams::All],
         &[group([holed])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -1610,8 +1561,7 @@ fn audio_in_pes_flagged_corrupt_but_intact_is_kept() {
             &[Streams::All],
             &[group([rewritten])],
             &output,
-            &Cancel::never(),
-            &ReadProgress::none(),
+            &Control::default(),
         )
         .unwrap();
 
@@ -1635,8 +1585,7 @@ fn a_pid_change_within_a_group_is_rejected() {
         &[Streams::All],
         &[group([track("ts_pid_change")])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
 
@@ -1656,8 +1605,7 @@ fn a_pid_change_within_a_group_is_rejected() {
         &[Streams::Video],
         &[group([track("ts_pid_change")])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -1667,8 +1615,7 @@ fn a_pid_change_within_a_group_is_rejected() {
         &[Streams::All],
         &[group([two.clone()])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
     ffmpeg::init().unwrap();
@@ -1702,8 +1649,7 @@ fn a_codec_switch_on_one_pid_is_rejected() {
         &[Streams::Audio],
         &[group([switched])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
 
@@ -1746,8 +1692,7 @@ fn format_changes_within_a_group_are_rejected() {
             &[Streams::Audio],
             &[group([audio])],
             &output,
-            &Cancel::never(),
-            &ReadProgress::none(),
+            &Control::default(),
         )
         .unwrap_err();
         assert!(
@@ -1876,16 +1821,14 @@ fn check_leaves_what_the_first_segment_cannot_tell_to_the_merge() {
         &[Streams::All],
         &[group([late])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
     let err = remux(
         &[Streams::All],
         &[group([head("ts_late_audio")])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
     assert!(
@@ -1921,8 +1864,7 @@ fn check_leaves_what_the_first_segment_cannot_tell_to_the_merge() {
         &[Streams::Audio],
         &[group([whole])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 }
@@ -1970,8 +1912,7 @@ fn check_skips_what_a_head_without_samples_cannot_tell() {
         &[Streams::Audio],
         &groups,
         &dir.join("out.mp4"),
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -2035,8 +1976,7 @@ fn eac3_with_fewer_than_six_blocks_per_frame_is_rejected() {
         &[Streams::Audio],
         &[group([track("ts_eac3_short")])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
     assert!(
@@ -2058,8 +1998,7 @@ fn opus_in_ts_and_low_rate_mp3_audio_are_rejected() {
         &[Streams::All],
         &[group([track("ts_opus")])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
     assert!(
@@ -2077,8 +2016,7 @@ fn opus_in_ts_and_low_rate_mp3_audio_are_rejected() {
         &[Streams::All],
         &[group([track("ts_mp3_8k")])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap_err();
     assert!(
@@ -2104,8 +2042,7 @@ fn mp2_audio_in_ts_is_copied() {
         &[Streams::All],
         &[group([muxed.clone()])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -2152,8 +2089,7 @@ fn ac3_eac3_and_mp3_audio_are_copied() {
             &[Streams::All],
             &[group([muxed.clone()])],
             &output,
-            &Cancel::never(),
-            &ReadProgress::none(),
+            &Control::default(),
         )
         .unwrap();
         let a_in = timelines(&concat_track(&muxed, &dir, "in.ts")).1;
@@ -2177,8 +2113,7 @@ fn ac3_eac3_and_mp3_audio_are_copied() {
             &[Streams::Audio],
             &[group([audio])],
             &output,
-            &Cancel::never(),
-            &ReadProgress::none(),
+            &Control::default(),
         )
         .unwrap();
         let packets: usize = segments
@@ -2218,8 +2153,7 @@ fn packed_audio_follows_its_id3_timestamps() {
         &[Streams::Video, Streams::Audio],
         &[group([video, audio])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -2258,8 +2192,7 @@ fn packed_audio_timestamps_wrap_around() {
         &[Streams::Audio],
         &[group([audio])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -2296,8 +2229,7 @@ fn packed_audio_with_very_short_segments_is_read() {
                 &[Streams::Audio],
                 &[group([audio])],
                 &output,
-                &Cancel::never(),
-                &ReadProgress::none(),
+                &Control::default(),
             )
             .unwrap();
 
@@ -2367,8 +2299,7 @@ fn packed_audio_with_id3_tags_between_frames_keeps_its_timing() {
                 &[Streams::Audio],
                 &[group([audio])],
                 &output,
-                &Cancel::never(),
-                &ReadProgress::none(),
+                &Control::default(),
             )
             .unwrap();
 
@@ -2423,8 +2354,7 @@ fn packed_mp3_info_frames_and_id3v1_tags_are_skipped() {
         &[Streams::Audio],
         &[group([audio])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -2479,8 +2409,7 @@ fn damage_in_packed_audio_keeps_the_timing_of_later_frames() {
         &[Streams::Audio],
         &[group([audio])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -2549,8 +2478,7 @@ fn damage_before_a_gap_or_a_frameless_segment_in_packed_audio() {
         &[Streams::Audio],
         &[group([gap])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
     assert_eq!(report.streams[0].packets, (10 + n2) as u64);
@@ -2573,8 +2501,7 @@ fn damage_before_a_gap_or_a_frameless_segment_in_packed_audio() {
         &[Streams::Audio],
         &[group([empty_next])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
     assert_eq!(report.streams[0].packets, (n0 - 1 + n2) as u64);
@@ -2659,8 +2586,7 @@ fn fmp4_structure_is_checked() {
             &[Streams::Video],
             &[group([segments])],
             &dir.join("out.mp4"),
-            &Cancel::never(),
-            &ReadProgress::none(),
+            &Control::default(),
         )
         .unwrap_err();
         let expected = match name {
@@ -2718,8 +2644,7 @@ fn consecutive_damaged_segments_in_packed_audio_are_timed_separately() {
         &[Streams::Audio],
         &[group([three])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
     let n2 = sizes[2].len();
@@ -2744,8 +2669,7 @@ fn consecutive_damaged_segments_in_packed_audio_are_timed_separately() {
         &[Streams::Audio],
         &[group([two])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
     assert_eq!(report.streams[0].packets, (n0 - 1) as u64);
@@ -2767,8 +2691,7 @@ fn invalid_gaps_are_rejected() {
             &[Streams::All],
             &[group([ts])],
             &output,
-            &Cancel::never(),
-            &ReadProgress::none(),
+            &Control::default(),
         )
         .unwrap_err();
         assert!(
@@ -2795,8 +2718,7 @@ fn ts_inputs_across_the_wrap_edge_stay_aligned() {
         &[Streams::Video, Streams::Audio],
         &[group([video, audio])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -2830,8 +2752,7 @@ fn packed_audio_aligns_with_ts_across_the_wrap_edge() {
         &[Streams::Video, Streams::Audio],
         &[group([video, audio])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
 
@@ -2869,8 +2790,7 @@ fn untimed_packed_audio_is_used_only_alone() {
             &[Streams::Video, Streams::Audio],
             &[group([track("ts_a"), audio.clone()])],
             &output,
-            &Cancel::never(),
-            &ReadProgress::none(),
+            &Control::default(),
         )
         .unwrap_err();
         assert!(
@@ -2886,8 +2806,7 @@ fn untimed_packed_audio_is_used_only_alone() {
         &[Streams::Audio],
         &[group([untimed])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
     let packets: usize = segments
@@ -2900,8 +2819,7 @@ fn untimed_packed_audio_is_used_only_alone() {
         &[Streams::Audio],
         &[group([partly])],
         &output,
-        &Cancel::never(),
-        &ReadProgress::none(),
+        &Control::default(),
     )
     .unwrap();
     let expected = (segments[0].1 + segments[2].1) as f64 / 90_000.0;

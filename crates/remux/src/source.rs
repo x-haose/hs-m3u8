@@ -101,6 +101,11 @@ impl Source {
         }
     }
 
+    /// 上一个写出的包所在的分片；还没写出过、或写出的都在第一个分片之前（fMP4 的 init 段里）时为 None。
+    pub(crate) fn segment(&self) -> Option<usize> {
+        self.last_segment
+    }
+
     /// 读下一个要写出的包。跳过未映射流的包；没有 DTS 的包、组开头解不出的视频包（见 [`Source::decodable`]）与损坏（读
     /// 不出帧头或帧长与包长对不上）的音频包记入 `dropped`；参数随帧携带的包核对参数。读到末尾返回 `None` 并记下
     /// `finished`，打包音频丢弃的损坏字节这时才是全部（见 [`Input::discarded`]），一并记入 `dropped`；之后不再调用。

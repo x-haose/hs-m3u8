@@ -15,6 +15,7 @@ __all__ = [
     "Engine",
     "FetchErrorKind",
     "FetchFailure",
+    "FileCount",
     "FileError",
     "HlsUnsupported",
     "HlsUnsupportedError",
@@ -391,6 +392,29 @@ class FetchFailure:
         __match_args__ = ()
         def __new__(cls) -> FetchFailure.Incomplete: ...
     
+
+@typing.final
+class FileCount:
+    r"""
+    完成了的文件数与合计。
+    """
+    @property
+    def done(self) -> builtins.int:
+        r"""
+        完成了的
+        """
+    @property
+    def total(self) -> builtins.int:
+        r"""
+        合计
+        """
+    def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
+    def __hash__(self) -> builtins.int: ...
+    def __new__(cls, *, done: builtins.int, total: builtins.int) -> FileCount:
+        r"""
+        各参数即同名属性。
+        """
+    def __repr__(self) -> builtins.str: ...
 
 @typing.final
 class FileError(HsM3u8Error):
@@ -4019,22 +4043,22 @@ class WorkDirProblem:
 @typing.final
 class Writing:
     r"""
-    写出的进度（`Progress.writing`），以文件计：各组各轨的 init 段与分片各算一个（打包音频按分片）。合并 MP4 时每读
-    完一个计一，备齐本地 HLS 时每放好一个计一，两者都要时各算一遍；合并完回读核对 MP4 时不再增长。
+    写出的进度（`Progress.writing`），以文件计：各组各轨的 init 段与分片各算一个（打包音频按分片）。
     """
     @property
-    def done(self) -> builtins.int:
+    def mp4(self) -> typing.Optional[FileCount]:
         r"""
-        已写好的
+        合并 MP4：写完的输入文件，写到下一个分片的包时上一个才算完，合并完回读核对 MP4 时不再增长；不要 MP4 时为 None
         """
     @property
-    def total(self) -> builtins.int:
+    def hls(self) -> typing.Optional[FileCount]:
         r"""
-        合计
+        备齐本地 HLS：放好的文件，已放过的 init 段照样算；与任务目录同盘时用硬链接，几乎不花时间。不要本地 HLS 时为
+        None
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, done: builtins.int, total: builtins.int) -> Writing:
+    def __new__(cls, *, mp4: typing.Optional[FileCount], hls: typing.Optional[FileCount]) -> Writing:
         r"""
         各参数即同名属性。
         """

@@ -9,10 +9,7 @@ use crate::inband::Inband;
 use crate::input::Input;
 use crate::nal::Framing;
 use crate::source::Source;
-use crate::{
-    Cancel, Error, Numbered, ReadProgress, StreamKind, Streams, TrackSegments, Unsupported, ffi,
-    frame,
-};
+use crate::{Cancel, Error, Numbered, StreamKind, Streams, TrackSegments, Unsupported, ffi, frame};
 
 /// 一条轨在某组中被选中的一路流。
 pub(crate) struct Selected {
@@ -32,9 +29,8 @@ fn open_selected(
     group: usize,
     track: usize,
     cancel: &Cancel,
-    progress: &ReadProgress,
 ) -> Result<(Input, Vec<Selected>), Error> {
-    let input = Input::open(segments, group, track, cancel, progress)?;
+    let input = Input::open(segments, group, track, cancel)?;
     let mut selected = Vec::new();
     for kind in [StreamKind::Video, StreamKind::Audio] {
         if !wanted.wants(kind) {
@@ -95,13 +91,11 @@ pub(crate) fn open_group(
     (group, tracks): Numbered<'_>,
     layout: Option<&[Vec<Desc>]>,
     cancel: &Cancel,
-    progress: &ReadProgress,
 ) -> Result<Vec<OpenTrack>, Error> {
     let mut opened = Vec::new();
     let mut unknown = None;
     for (track, segments) in tracks.tracks.iter().enumerate() {
-        let (input, selected) =
-            open_selected(segments, streams[track], group, track, cancel, progress)?;
+        let (input, selected) = open_selected(segments, streams[track], group, track, cancel)?;
         let found: Vec<&Desc> = selected.iter().map(|s| &s.desc).collect();
         if let Some(layout) = layout
             && let Some(kind) = same_streams(&found, &layout[track], group, track)?

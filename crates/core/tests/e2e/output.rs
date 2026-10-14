@@ -7,13 +7,11 @@ use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
 use hs_m3u8_core::{
-    Error, HlsUnsupported, JobRequest, LiveOptions, Mp4Unsupported, Target, Unsupported, Url,
-    WorkDirProblem, Writing,
+    Error, FileCount, HlsUnsupported, JobRequest, LiveOptions, Mp4Unsupported, Target, Unsupported,
+    Url, WorkDirProblem, Writing,
 };
 use hs_m3u8_hls::{MediaPlaylist, Playlist, parse};
-use hs_m3u8_remux::{
-    Cancel, DiscontinuityGroup, ReadProgress, Segment, Streams, TrackSegments, remux,
-};
+use hs_m3u8_remux::{Control, DiscontinuityGroup, Segment, Streams, TrackSegments, remux};
 
 use crate::server::Server;
 #[cfg(unix)]
@@ -119,14 +117,7 @@ fn read_hls(dir: &Path) -> (Vec<Streams>, Vec<DiscontinuityGroup>) {
 fn assert_hls_matches(hls: &Path, mp4: &Path) {
     let (streams, groups) = read_hls(hls);
     let merged = hls.with_extension("check.mp4");
-    remux(
-        &streams,
-        &groups,
-        &merged,
-        &Cancel::never(),
-        &ReadProgress::none(),
-    )
-    .unwrap();
+    remux(&streams, &groups, &merged, &Control::default()).unwrap();
     assert_eq!(std::fs::read(merged).unwrap(), std::fs::read(mp4).unwrap());
 }
 
@@ -145,7 +136,7 @@ fn request_to(url: Url, dir: &Path, target: Target) -> JobRequest {
 }
 
 /// 两者都要：音视频分离、两个不连续段组。HLS 的主播放列表码率按文件算、编码照抄来源，各轨分片按顺序编号、
-/// 组间加不连续标记；按它列出的文件合并与 MP4 相同。任务目录与临时名都已删除。写出进度按两种输出各算一遍文件。
+/// 组间加不连续标记；按它列出的文件合并与 MP4 相同。任务目录与临时名都已删除。写出进度两种输出各给一份。
 #[tokio::test(flavor = "multi_thread")]
 async fn split_source_writes_both_outputs() {
     let dir = test_dir("output_both");
@@ -196,9 +187,13 @@ async fn split_source_writes_both_outputs() {
         .flat_map(|g| &g.tracks)
         .map(|t| t.segments.len() + usize::from(t.init.is_some()))
         .sum();
+    let count = Some(FileCount {
+        done: files,
+        total: files,
+    });
     let writing = Writing {
-        done: 2 * files,
-        total: 2 * files,
+        mp4: count,
+        hls: count,
     };
     assert_eq!(progress.borrow().writing, Some(writing));
 }

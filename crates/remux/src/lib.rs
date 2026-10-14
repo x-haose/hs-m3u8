@@ -217,32 +217,42 @@ impl fmt::Debug for Cancel {
     }
 }
 
-/// 合并时读输入的进度：每读完输入的若干个文件（init 段或分片；打包音频按分片算）以读完的个数调用一次，各组各轨读完
-/// 时合计为它们的 init 段与分片数；回读核对输出不计。在 FFmpeg 的读回调里调用，要求同 [`Cancel::new`]。
-#[derive(Clone)]
-pub struct ReadProgress(Option<Arc<dyn Fn(usize) + Send + Sync>>);
-
-impl ReadProgress {
-    pub fn new(read: impl Fn(usize) + Send + Sync + 'static) -> ReadProgress {
-        ReadProgress(Some(Arc::new(read)))
+impl Default for Cancel {
+    /// 不会取消。
+    fn default() -> Cancel {
+        Cancel::never()
     }
+}
 
-    /// 不报。
-    pub fn none() -> ReadProgress {
-        ReadProgress(None)
+/// 合并的进度：一组里一条轨的输入文件（init 段或分片；打包音频按分片算）写完若干个时，以写完的个数调用；各组各轨写完
+/// 时合计为它们的 init 段与分片数，回读核对输出不计。按写出的包所在的分片推进：写到第 n 个分片的包时，它之前的分片与
+/// init 段即算写完；一组写完时补齐（含不取流的轨）。在写包的线程上调用，要快、不阻塞。默认不报。
+#[derive(Clone, Default)]
+pub struct WriteProgress(Option<Arc<dyn Fn(usize) + Send + Sync>>);
+
+impl WriteProgress {
+    pub fn new(written: impl Fn(usize) + Send + Sync + 'static) -> WriteProgress {
+        WriteProgress(Some(Arc::new(written)))
     }
 
     pub(crate) fn add(&self, files: usize) {
-        if let Some(read) = &self.0 {
-            read(files);
+        if let (Some(written), 1..) = (&self.0, files) {
+            written(files);
         }
     }
 }
 
-impl fmt::Debug for ReadProgress {
+impl fmt::Debug for WriteProgress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("ReadProgress")
+        f.write_str("WriteProgress")
     }
+}
+
+/// 调用方对合并的控制：取消与进度。默认不取消、不报进度。
+#[derive(Clone, Debug, Default)]
+pub struct Control {
+    pub cancel: Cancel,
+    pub progress: WriteProgress,
 }
 
 /// 把各不连续段组的分片复制进 `output`（MP4，moov 前置），写完回读核对每路流的包数并落盘。失败或取消时 `output` 上
@@ -251,8 +261,7 @@ pub fn remux(
     streams: &[Streams],
     groups: &[DiscontinuityGroup],
     output: &Path,
-    cancel: &Cancel,
-    progress: &ReadProgress,
+    control: &Control,
 ) -> Result<Report, Error> {
     init()?;
     let groups: Vec<Numbered<'_>> = groups.iter().enumerate().collect();
@@ -260,7 +269,7 @@ pub fn remux(
     let Some(path) = ffmpeg_path(output) else {
         return Err(Error::NonUtf8Path(output.to_path_buf()));
     };
-    let report = write_verified(streams, &groups, path, cancel, progress)?;
+    let report = write_verified(streams, &groups, path, control)?;
     sync(output)?;
     Ok(report)
 }
@@ -281,8 +290,7 @@ pub fn check(streams: &[Streams], groups: &[(usize, &DiscontinuityGroup)]) -> Re
     validate(streams, groups)?;
     let cancel = Cancel::never();
     // 第 0 组的流布局；它开头的分片预读判断不了（如没有关键帧）时逐包参照留空，流布局与参数照样拿来比较
-    let none = ReadProgress::none();
-    let first = match judgeable(open_group(streams, groups[0], None, &cancel, &none))? {
+    let first = match judgeable(open_group(streams, groups[0], None, &cancel))? {
         Some(first) => {
             let layout = layout_of(&first)?;
             let outputs = layout.iter().map(Vec::len).sum();
@@ -296,15 +304,15 @@ pub fn check(streams: &[Streams], groups: &[(usize, &DiscontinuityGroup)]) -> Re
     };
     for &numbered in &groups[1..] {
         let layout = first.as_ref().map(|(layout, _)| layout.as_slice());
-        judgeable(
-            open_group(streams, numbered, layout, &cancel, &none).and_then(|opened| match &first {
+        judgeable(open_group(streams, numbered, layout, &cancel).and_then(
+            |opened| match &first {
                 Some((layout, references)) => primed(numbered.0, opened, layout, references),
                 None => {
                     let own = layout_of(&opened)?;
                     primed(numbered.0, opened, &own, &[])
                 }
-            }),
-        )?;
+            },
+        ))?;
     }
     Ok(())
 }
