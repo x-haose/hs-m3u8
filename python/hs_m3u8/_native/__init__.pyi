@@ -282,7 +282,7 @@ class FetchErrorKind:
         """
         __match_args__ = ("kind",)
         @property
-        def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.Proxy | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
+        def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.RangeMismatch | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.Proxy | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
             r"""
             请求失败的原因
             """
@@ -554,7 +554,7 @@ class HttpError(HsM3u8Error):
         请求的地址（可能带令牌；异常的说明里只显示到路径）
         """
     @property
-    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.Proxy | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
+    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.RangeMismatch | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.Proxy | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
         r"""
         失败的原因
         """
@@ -598,6 +598,19 @@ class HttpErrorKind:
             HTTP 状态码
             """
         def __new__(cls, code: builtins.int) -> HttpErrorKind.RangeIgnored: ...
+    
+    @typing.final
+    class RangeMismatch(HttpErrorKind):
+        r"""
+        字节范围请求返回了 206，Content-Range 却不是请求的那一段（多为 CDN 缓存 206 响应时没按 Range 区分）
+        """
+        __match_args__ = ("content_range",)
+        @property
+        def content_range(self) -> typing.Optional[builtins.str]:
+            r"""
+            收到的 Content-Range；没有时为 None
+            """
+        def __new__(cls, content_range: typing.Optional[builtins.str]) -> HttpErrorKind.RangeMismatch: ...
     
     @typing.final
     class Timeout(HttpErrorKind):
@@ -693,7 +706,7 @@ class HttpFailure:
     取不到的请求：失败的原因，与服务器要求的最短等待。
     """
     @property
-    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.Proxy | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
+    def kind(self) -> HttpErrorKind.Status | HttpErrorKind.RangeIgnored | HttpErrorKind.RangeMismatch | HttpErrorKind.Timeout | HttpErrorKind.Certificate | HttpErrorKind.Redirect | HttpErrorKind.Connect | HttpErrorKind.Proxy | HttpErrorKind.InvalidRequest | HttpErrorKind.Transport:
         r"""
         失败的原因
         """

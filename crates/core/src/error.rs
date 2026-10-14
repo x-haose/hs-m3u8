@@ -387,6 +387,10 @@ pub enum HttpError {
     Status(u16),
     #[error("字节范围请求应返回 206，实际 {0}")]
     RangeIgnored(u16),
+    /// 字节范围请求返回了 206，Content-Range 却不是请求的那一段（多为 CDN 缓存 206 响应时没按 Range 区分）；值为
+    /// 收到的 Content-Range，没有时为 None
+    #[error("字节范围请求返回的是另一段（Content-Range：{}）", .0.as_deref().unwrap_or("无"))]
+    RangeMismatch(Option<String>),
     #[error("超时")]
     Timeout,
     /// TLS 证书校验失败（自签名、过期、与域名不符等）；确认来源可信时可设 [`crate::HttpOptions::insecure`]
@@ -417,6 +421,7 @@ impl HttpError {
             HttpError::Status(code) => matches!(code, 408 | 429 | 500..=599),
             HttpError::Timeout | HttpError::Connect(_) | HttpError::Transport(_) => true,
             HttpError::RangeIgnored(_)
+            | HttpError::RangeMismatch(_)
             | HttpError::Certificate(_)
             | HttpError::Redirect(_)
             | HttpError::Proxy(_)

@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use hs_m3u8_hls::ByteRange;
 use reqwest::StatusCode;
-use reqwest::header::{RANGE, RETRY_AFTER};
+use reqwest::header::{CONTENT_RANGE, RANGE, RETRY_AFTER};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -270,11 +270,26 @@ impl Http {
                 retry_after,
             });
         }
-        if range.is_some() && status != StatusCode::PARTIAL_CONTENT {
-            return Err(http_error(
-                &parts.url,
-                HttpError::RangeIgnored(status.as_u16()),
-            ));
+        if let Some(r) = range {
+            if status != StatusCode::PARTIAL_CONTENT {
+                return Err(http_error(
+                    &parts.url,
+                    HttpError::RangeIgnored(status.as_u16()),
+                ));
+            }
+            let content_range = response
+                .headers()
+                .get(CONTENT_RANGE)
+                .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
+            if !content_range
+                .as_deref()
+                .is_some_and(|v| range_matches(v, r))
+            {
+                return Err(http_error(
+                    &parts.url,
+                    HttpError::RangeMismatch(content_range),
+                ));
+            }
         }
         Ok(response)
     }
@@ -353,6 +368,19 @@ fn body_limit(purpose: Purpose) -> Option<u64> {
         Purpose::Key => Some(1 << 20),
         Purpose::Segment => None,
     }
+}
+
+/// 206 响应的 Content-Range `value` 是不是请求的那一段 `r`（RFC 9110 14.4：`bytes 首-尾/总长`，总长可为 `*`）。
+fn range_matches(value: &str, r: ByteRange) -> bool {
+    let span = value
+        .trim()
+        .strip_prefix("bytes ")
+        .and_then(|rest| rest.split_once('/'))
+        .and_then(|(span, _total)| span.split_once('-'));
+    // hls 保证 offset + length 不溢出且 length ≥ 1
+    span.is_some_and(|(first, last)| {
+        first.trim().parse() == Ok(r.offset) && last.trim().parse() == Ok(r.offset + r.length - 1)
+    })
 }
 
 /// Retry-After 要求的等待：秒数，或 HTTP 日期离 `now` 还有多久（已经过去的为 0）；无法解析的值视为没有要求。
@@ -477,6 +505,30 @@ mod tests {
     use std::num::NonZeroU32;
 
     use super::*;
+
+    #[test]
+    fn content_range_must_be_the_requested_span() {
+        let r = ByteRange {
+            offset: 100,
+            length: 50,
+        };
+        for value in [
+            "bytes 100-149/1000",
+            "bytes 100-149/*",
+            " bytes 100-149/1000 ",
+        ] {
+            assert!(range_matches(value, r), "{value}");
+        }
+        for value in [
+            "bytes 0-49/1000",
+            "bytes 100-150/1000",
+            "bytes 100-149",
+            "100-149/1000",
+            "items 100-149/1000",
+        ] {
+            assert!(!range_matches(value, r), "{value}");
+        }
+    }
 
     #[test]
     fn retry_after_takes_seconds_or_an_http_date() {

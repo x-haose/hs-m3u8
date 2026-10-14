@@ -229,7 +229,13 @@ async fn serve(State(state): State<Arc<ServerState>>, uri: Uri, headers: HeaderM
                 .and_then(|r| r.split_once('-'))
                 .unwrap();
             let (start, end): (usize, usize) = (start.parse().unwrap(), end.parse().unwrap());
-            (StatusCode::PARTIAL_CONTENT, body[start..=end].to_vec()).into_response()
+            let content_range = format!("bytes {start}-{end}/{}", body.len());
+            (
+                StatusCode::PARTIAL_CONTENT,
+                [(header::CONTENT_RANGE, content_range)],
+                body[start..=end].to_vec(),
+            )
+                .into_response()
         }
     }
 }

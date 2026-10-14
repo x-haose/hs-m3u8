@@ -23,6 +23,11 @@ variants! {
             /// HTTP 状态码
             code: u16,
         },
+        /// 字节范围请求返回了 206，Content-Range 却不是请求的那一段（多为 CDN 缓存 206 响应时没按 Range 区分）
+        RangeMismatch {
+            /// 收到的 Content-Range；没有时为 None
+            content_range: Option<String>,
+        },
         /// 连接、读空闲或单次请求超时
         Timeout {},
         /// TLS 证书校验失败（自签名、过期、与域名不符等）；确认来源可信时可设 `HttpOptions.insecure`
@@ -440,6 +445,9 @@ impl From<core::HttpError> for HttpErrorKind {
         match kind {
             core::HttpError::Status(code) => HttpErrorKind::Status { code },
             core::HttpError::RangeIgnored(code) => HttpErrorKind::RangeIgnored { code },
+            core::HttpError::RangeMismatch(content_range) => {
+                HttpErrorKind::RangeMismatch { content_range }
+            }
             core::HttpError::Timeout => HttpErrorKind::Timeout {},
             core::HttpError::Certificate(detail) => HttpErrorKind::Certificate { detail },
             core::HttpError::Redirect(detail) => HttpErrorKind::Redirect { detail },
