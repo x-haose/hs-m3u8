@@ -99,4 +99,7 @@ typeCheckingMode = "strict"
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
 addopts = ["--strict-markers", "--strict-config"]
+# 警告即失败：协程没被 await、资源没关、回收时抛出的异常（PytestUnraisableExceptionWarning）都不放过；预期的警告用
+# pytest.warns 断言
+filterwarnings = ["error"]
 xfail_strict = true

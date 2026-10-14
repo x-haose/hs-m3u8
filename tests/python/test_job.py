@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import weakref
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 
@@ -151,6 +152,18 @@ def forked_child_exit_code(unraisable: list[object], url: str, parent_done: int)
         sys.stderr.write(f"子进程另建的 Engine 被拒绝：{refused!r}\n")
         return 4
     return 0
+
+
+def fork_child(child: Callable[[], int]) -> int:
+    """fork：子进程里执行 `child`，以它的返回值为退出码结束（它出错时为 1），不回到调用方；父进程里返回子进程号。"""
+    pid = os.fork()
+    if pid == 0:
+        code = 1
+        try:
+            code = child()
+        finally:
+            os._exit(code)
+    return pid
 
 
 def probe_refused(url: str) -> bool:
@@ -717,8 +730,6 @@ def test_interpreter_exit_waits_for_running_hooks(server: Server, tmp_path: Path
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows 没有 fork")
-# 测的就是在多线程进程里 fork；子进程只回收对象、等管道、退出，不做会死锁的事
-@pytest.mark.filterwarnings("ignore:This process .* is multi-threaded:DeprecationWarning")
 def test_forked_children_hold_no_work_dir_locks_and_leave_parent_jobs_alone(server: Server, tmp_path: Path) -> None:
     put_media(server, VOD)
     gate = server.gate("seg1.ts")
@@ -731,28 +742,27 @@ def test_forked_children_hold_no_work_dir_locks_and_leave_parent_jobs_alone(serv
 
     async def main() -> Output:
         engine = Engine()
-        job = engine.start(request)
+        jobs = [engine.start(request)]
         await arrived(gate)
-        pid = os.fork()
-        if pid == 0:
-            # 子进程：回收继承来的任务不碰父进程的运行时，没有无法抛出的异常；另建的 Engine 能用，macOS 上则明确拒绝
-            # （系统框架在 fork 之后不可用）。都对时退出码为 0，否则把原因写到 stderr
-            code = 1
-            try:
-                os.write(signal_ready, b"\0")
-                unraisable: list[object] = []
-                sys.unraisablehook = unraisable.append
-                del job
-                gc.collect()
-                code = forked_child_exit_code(unraisable, server.url("index.m3u8"), parent_done)
-            finally:
-                os._exit(code)
-        children.append(pid)
+
+        def child() -> int:
+            # 回收继承来的任务不碰父进程的运行时，没有无法抛出的异常；另建的 Engine 能用，macOS 上则明确拒绝（系统框架
+            # 在 fork 之后不可用）
+            os.write(signal_ready, b"\0")
+            unraisable: list[object] = []
+            sys.unraisablehook = unraisable.append
+            jobs.clear()
+            gc.collect()
+            return forked_child_exit_code(unraisable, server.url("index.m3u8"), parent_done)
+
+        # 测的就是在多线程进程里 fork（Python 为此警告）；子进程只回收对象、等管道、退出，不做会死锁的事
+        with pytest.warns(DeprecationWarning, match="multi-threaded"):
+            children.append(fork_child(child))
         os.close(signal_ready)
         assert await asyncio.to_thread(readable, child_ready)
-        job.cancel()
+        jobs[0].cancel()
         with pytest.raises(JobCancelledError):
-            await job.wait()
+            await jobs[0].wait()
         gate.release()
         return await engine.start(request).wait()
 
