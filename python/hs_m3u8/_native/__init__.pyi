@@ -707,8 +707,10 @@ class HttpOptions:
     @property
     def headers(self) -> builtins.tuple[tuple[builtins.str, builtins.str], ...]:
         r"""
-        附加到所有请求的请求头，按顺序，同名的可以有多个；跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉
-        Cookie、Authorization 与 Proxy-Authorization
+        附加到请求的请求头，按顺序，同名的可以有多个。其中的 Cookie（`名=值; 名=值`）记进本任务的 Cookie 存储，作为只
+        属于来源地址的主机的 Cookie：只发往这个主机，服务器下发同名的即被替换；Authorization 只发往与来源地址协议、
+        主机、端口都相同的地址；其余的发往所有地址。跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉
+        Authorization 与 Proxy-Authorization
         """
     @property
     def proxy(self) -> Proxy.System | Proxy.Direct | Proxy.Url:
@@ -735,7 +737,8 @@ class HttpOptions:
     def __new__(cls, *, headers: typing.Optional[collections.abc.Mapping[builtins.str, builtins.str] | collections.abc.Iterable[tuple[builtins.str, builtins.str]]] = None, proxy: Proxy = ..., insecure: builtins.bool = False, timeouts: Timeouts = ..., retry: RetryPolicy = ...) -> HttpOptions:
         r"""
         `headers` 为 None 时没有附加的请求头；`proxy`、`timeouts`、`retry` 默认取 `Proxy.System()`、`Timeouts()`、
-        `RetryPolicy()`。请求头的名或值放不进 HTTP 请求、代理的协议不支持或主机名不合法时抛 `InvalidInputError`。
+        `RetryPolicy()`。请求头的名或值放不进 HTTP 请求、Cookie 不是 `名=值; 名=值` 的写法、代理的协议不支持或主机名
+        不合法时抛 `InvalidInputError`。
         """
     def __repr__(self) -> builtins.str: ...
 

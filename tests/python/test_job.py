@@ -676,7 +676,7 @@ def test_requests_survive_pickle_by_value(tmp_path: Path) -> None:
         "https://example.com/a.m3u8?token=t",
         preference=Preference(variant=VariantChoice.Index(1), audio=AudioChoice.Language("en")),
         http=HttpOptions(
-            headers=[("Cookie", "a"), ("Cookie", "b")],
+            headers=[("Cookie", "a=1"), ("Cookie", "b=2")],
             proxy=Proxy.Url("socks5h://127.0.0.1:1080"),
             insecure=True,
             timeouts=Timeouts(connect=timedelta(seconds=3)),

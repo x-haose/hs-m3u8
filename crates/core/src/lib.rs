@@ -13,6 +13,7 @@
 
 mod blocking;
 mod busy;
+mod cookies;
 mod crypto;
 mod entries;
 mod error;
@@ -43,6 +44,7 @@ use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinHandle;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
+pub use cookies::{CookieHeader, CookieStore};
 pub use error::{
     Error, FetchError, FetchFailure, HlsUnsupported, HttpError, HttpFailure, Integrity, JobType,
     StallError, Unsupported, WorkDirProblem,
@@ -109,12 +111,7 @@ impl Engine {
     /// 音轨、查看时长与是否直播。参数错误时立即返回错误；不在 tokio 运行时内调用会 panic。
     pub async fn probe(&self, source: &Source) -> Result<Probe, Error> {
         source.validate()?;
-        let http = Http::new(
-            &source.http,
-            source.hooks.clone(),
-            self.requests.clone(),
-            None,
-        )?;
+        let http = Http::new(source, self.requests.clone(), None)?;
         probe::probe(&http, source).await
     }
 
@@ -125,8 +122,7 @@ impl Engine {
         let output = request.validate()?;
         let (progress_tx, progress) = watch::channel(Progress::default());
         let http = Http::new(
-            &request.source.http,
-            request.source.hooks.clone(),
+            &request.source,
             self.requests.clone(),
             Some(count_received(progress_tx.clone())),
         )?;

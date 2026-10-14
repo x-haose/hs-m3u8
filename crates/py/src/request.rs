@@ -213,8 +213,10 @@ variants! {
 #[pyclass(module = "hs_m3u8._native", frozen, eq, hash, get_all, from_py_object)]
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct HttpOptions {
-    /// 附加到所有请求的请求头，按顺序，同名的可以有多个；跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉
-    /// Cookie、Authorization 与 Proxy-Authorization
+    /// 附加到请求的请求头，按顺序，同名的可以有多个。其中的 Cookie（`名=值; 名=值`）记进本任务的 Cookie 存储，作为只
+    /// 属于来源地址的主机的 Cookie：只发往这个主机，服务器下发同名的即被替换；Authorization 只发往与来源地址协议、
+    /// 主机、端口都相同的地址；其余的发往所有地址。跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉
+    /// Authorization 与 Proxy-Authorization
     pub headers: Headers,
     /// 经不经代理、经哪个
     pub proxy: Proxy,
@@ -230,7 +232,8 @@ pub struct HttpOptions {
 #[pymethods]
 impl HttpOptions {
     /// `headers` 为 None 时没有附加的请求头；`proxy`、`timeouts`、`retry` 默认取 `Proxy.System()`、`Timeouts()`、
-    /// `RetryPolicy()`。请求头的名或值放不进 HTTP 请求、代理的协议不支持或主机名不合法时抛 `InvalidInputError`。
+    /// `RetryPolicy()`。请求头的名或值放不进 HTTP 请求、Cookie 不是 `名=值; 名=值` 的写法、代理的协议不支持或主机名
+    /// 不合法时抛 `InvalidInputError`。
     #[new]
     #[pyo3(signature = (
         *,
@@ -750,6 +753,9 @@ impl HttpOptions {
     fn to_core(&self) -> core::HttpOptions {
         core::HttpOptions {
             headers: self.headers.0.clone(),
+            // 简化：Python 不提供跨任务的 Cookie 存储，每个任务各用一个；Python 用户要跨任务保存服务器下发的 Cookie
+            // 时，提供一个在 Rust 里实现、Python 能读写的存储（存储在请求路径上同步调用，不回调 Python）
+            cookies: None,
             proxy: match &self.proxy {
                 Proxy::System {} => core::Proxy::System,
                 Proxy::Direct {} => core::Proxy::Direct,

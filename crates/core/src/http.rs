@@ -12,10 +12,11 @@ use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use crate::cookies::Provider;
 use crate::hooks::{HookKind, Hooks, Purpose, RequestParts, run_hook};
 use crate::ident::bare_url;
 use crate::proxy;
-use crate::request::{HttpOptions, Proxy, RetryPolicy, check_header};
+use crate::request::{Proxy, RetryPolicy, Source, check_header, cookie_pairs};
 use crate::{Error, HttpError, Integrity};
 
 /// 请求是否计入引擎的在途上限。
@@ -30,7 +31,12 @@ pub(crate) enum Permit {
 
 pub(crate) struct Http {
     client: reqwest::Client,
+    /// 附加到所有请求的请求头（调用方给的，Cookie 与 Authorization 除外）
     headers: Vec<(String, String)>,
+    /// 调用方给的 Authorization，只附加到与来源地址同源（协议、主机、端口都相同）的请求
+    credentials: Vec<(String, String)>,
+    /// 来源地址的源
+    source: url::Origin,
     retry: RetryPolicy,
     hooks: Arc<dyn Hooks>,
     /// 引擎内所有任务共享；[`Permit::Required`] 的每次尝试从发出请求到读完响应体占用一个名额
@@ -51,22 +57,35 @@ pub(crate) struct Response {
 }
 
 impl Http {
+    /// 访问 `source` 的客户端（`source.http` 已校验过，见 [`crate::HttpOptions::validate`]）。
     pub(crate) fn new(
-        options: &HttpOptions,
-        hooks: Arc<dyn Hooks>,
+        source: &Source,
         requests: Arc<Semaphore>,
         on_received: Option<OnReceived>,
     ) -> Result<Self, Error> {
+        let options = &source.http;
         let t = options.timeouts;
+        let is = |name: &str, wanted: &str| name.eq_ignore_ascii_case(wanted);
         // 不自动写 Referer：开着时 reqwest 跟随重定向会把它换成上一跳的地址，盖掉调用方给的
         let mut builder = reqwest::Client::builder()
             .user_agent(concat!("hs-m3u8/", env!("CARGO_PKG_VERSION")))
             .referer(false)
-            .cookie_store(true)
             .connect_timeout(t.connect)
             .read_timeout(t.read_idle)
             .timeout(t.request)
             .tls_danger_accept_invalid_certs(options.insecure);
+        builder = match &options.cookies {
+            Some(store) => builder.cookie_provider(Arc::new(Provider(store.clone()))),
+            None => {
+                let jar = reqwest::cookie::Jar::default();
+                for (_, value) in options.headers.iter().filter(|(n, _)| is(n, "cookie")) {
+                    for pair in cookie_pairs(value).flatten() {
+                        jar.add_cookie_str(&format!("{pair}; Path=/"), &source.url);
+                    }
+                }
+                builder.cookie_provider(Arc::new(jar))
+            }
+        };
         match &options.proxy {
             Proxy::System => {
                 builder = match proxy::system_proxy()? {
@@ -91,11 +110,19 @@ impl Http {
         let client = builder
             .build()
             .map_err(|e| Error::InvalidInput(format!("无法创建 HTTP 客户端：{e}")))?;
+        let (credentials, headers) = options
+            .headers
+            .iter()
+            .filter(|(name, _)| !is(name, "cookie"))
+            .cloned()
+            .partition(|(name, _)| is(name, "authorization"));
         Ok(Http {
             client,
-            headers: options.headers.clone(),
+            headers,
+            credentials,
+            source: source.url.origin(),
             retry: options.retry,
-            hooks,
+            hooks: source.hooks.clone(),
             requests,
             on_received,
             jitter: std::hash::RandomState::new(),
@@ -173,9 +200,13 @@ impl Http {
 
     /// 本次尝试的地址与请求头：经 `on_request` 回调修改，改后不合法时报回调错误（不重试）。
     async fn prepare(&self, purpose: Purpose, url: &Url) -> Result<RequestParts, Error> {
+        let mut headers = self.headers.clone();
+        if url.origin() == self.source {
+            headers.extend(self.credentials.iter().cloned());
+        }
         let parts = RequestParts {
             url: url.clone(),
-            headers: self.headers.clone(),
+            headers,
         };
         let parts = run_hook(&self.hooks, HookKind::Request, move |hooks| {
             let mut parts = parts;

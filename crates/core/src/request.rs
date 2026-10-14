@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use url::Url;
 
+use crate::cookies::CookieStore;
 use crate::hooks::{Hooks, NoHooks};
 use crate::ident::bare_url;
 use crate::output::{OutputOptions, ResolvedOutput};
@@ -67,9 +68,13 @@ impl Source {
 /// 发请求的方式。不实现 `Debug`：请求头常带 Cookie 与令牌，代理地址可能带口令（[`Proxy`] 同理）。
 #[derive(Clone, Default)]
 pub struct HttpOptions {
-    /// 附加到所有请求的请求头；跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉 Cookie、Authorization
-    /// 与 Proxy-Authorization
+    /// 附加到请求的请求头。其中的 Cookie（`名=值; 名=值`）记进本任务的 Cookie 存储，作为只属于来源地址的主机的
+    /// Cookie：只发往这个主机，服务器下发同名的即被替换；Authorization 只发往与来源地址协议、主机、端口都相同的地址；
+    /// 其余的发往所有地址。跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉 Authorization 与
+    /// Proxy-Authorization
     pub headers: Vec<(String, String)>,
+    /// 调用方持有的 Cookie 存储，跨任务保存；None 时每个任务各用一个，任务结束即丢。给了它时 `headers` 里不能有 Cookie
+    pub cookies: Option<Arc<dyn CookieStore>>,
     pub proxy: Proxy,
     /// 不校验 TLS 证书
     pub insecure: bool,
@@ -78,10 +83,23 @@ pub struct HttpOptions {
 }
 
 impl HttpOptions {
-    /// 校验请求头、超时（[`Timeouts::validate`]）与代理，不合要求时报 [`Error::InvalidInput`]。
+    /// 校验请求头、超时（[`Timeouts::validate`]）与代理，不合要求时报 [`Error::InvalidInput`]：请求头的名或值放不进
+    /// HTTP 请求，Cookie 不是 `名=值; 名=值` 的写法，或给了 Cookie 存储又在请求头里带 Cookie。
     pub fn validate(&self) -> Result<(), Error> {
         for (name, value) in &self.headers {
             check_header(name, value).map_err(Error::InvalidInput)?;
+            if name.eq_ignore_ascii_case("cookie") {
+                if self.cookies.is_some() {
+                    return Err(Error::InvalidInput(
+                        "给了 Cookie 存储时 Cookie 经存储传，请求头里不能再带 Cookie".to_owned(),
+                    ));
+                }
+                if cookie_pairs(value).any(|pair| pair.is_none()) {
+                    return Err(Error::InvalidInput(
+                        "请求头 Cookie 应为 `名=值; 名=值` 的写法".to_owned(),
+                    ));
+                }
+            }
         }
         self.timeouts.validate()?;
         if let Proxy::Url(proxy) = &self.proxy {
@@ -162,6 +180,19 @@ impl JobRequest {
         }
         self.output.resolve()
     }
+}
+
+/// Cookie 请求头 `value` 里的各项（`名=值`），按分号分开、去掉两边的空白；名为空或没有等号的项为 None。
+pub(crate) fn cookie_pairs(value: &str) -> impl Iterator<Item = Option<&str>> {
+    value
+        .split(';')
+        .map(str::trim)
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| {
+            pair.split_once('=')
+                .is_some_and(|(name, _)| !name.trim().is_empty())
+                .then_some(pair)
+        })
 }
 
 /// 请求头名与值能否放进 HTTP 请求；不能时返回原因。

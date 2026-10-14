@@ -1,4 +1,5 @@
-//! 测试用 HTTP 服务：按路径返回内容，可注入 500、指定状态码、404、重定向、按请求次数变化的内容与阻塞点。
+//! 测试用 HTTP 服务：按路径返回内容，可注入 500、指定状态码、404、重定向、按请求次数变化的内容、阻塞点与下发的
+//! Cookie，记下各路径最近一次请求带的请求头。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -35,6 +36,10 @@ struct ServerState {
     gates: Mutex<HashMap<String, Arc<Gate>>>,
     /// 所有请求都必须带的请求头
     required_header: Mutex<Option<(String, String)>>,
+    /// 路径 → 响应下发的 Set-Cookie
+    set_cookies: Mutex<HashMap<String, String>>,
+    /// 路径 → 最近一次请求带的请求头
+    received: Mutex<HashMap<String, HeaderMap>>,
 }
 
 pub(crate) struct Server {
@@ -137,6 +142,22 @@ impl Server {
         gate.release.notify_one();
     }
 
+    /// `path` 的响应下发 `set_cookie`。
+    pub(crate) fn set_cookie(&self, path: &str, set_cookie: &str) {
+        self.state
+            .set_cookies
+            .lock()
+            .unwrap()
+            .insert(path.into(), set_cookie.into());
+    }
+
+    /// `path` 最近一次请求带的请求头 `name`；没有请求过或没带时为 None。
+    pub(crate) fn received(&self, path: &str, name: &str) -> Option<String> {
+        let received = self.state.received.lock().unwrap();
+        let value = received.get(path)?.get(name)?;
+        Some(value.to_str().unwrap().to_owned())
+    }
+
     pub(crate) fn require_header(&self, name: &str, value: &str) {
         *self.state.required_header.lock().unwrap() = Some((name.into(), value.into()));
     }
@@ -160,6 +181,11 @@ async fn serve(State(state): State<Arc<ServerState>>, uri: Uri, headers: HeaderM
         *hits += 1;
         *hits
     };
+    state
+        .received
+        .lock()
+        .unwrap()
+        .insert(path.clone(), headers.clone());
 
     if let Some((name, value)) = state.required_header.lock().unwrap().clone()
         && headers.get(&name).and_then(|v| v.to_str().ok()) != Some(&value)
@@ -192,6 +218,9 @@ async fn serve(State(state): State<Arc<ServerState>>, uri: Uri, headers: HeaderM
         Some(Entry::Body(body)) => body.clone(),
         Some(Entry::Sequence(bodies)) => bodies[nth(bodies.len())].clone(),
     };
+    if let Some(set_cookie) = state.set_cookies.lock().unwrap().get(&path) {
+        return ([(header::SET_COOKIE, set_cookie.clone())], body).into_response();
+    }
     match headers.get(header::RANGE).and_then(|r| r.to_str().ok()) {
         None => body.into_response(),
         Some(range) => {
