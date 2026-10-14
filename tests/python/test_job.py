@@ -337,20 +337,25 @@ def test_a_cancelled_wait_raises_once_the_job_has_ended(server: Server, tmp_path
 def test_waits_and_discards_cancelled_before_they_start_do_nothing(server: Server, tmp_path: Path) -> None:
     put_media(server, VOD)
     gate = server.gate("seg1.ts")
-    request = one_at_a_time(server, Target.Mp4(tmp_path / "out.mp4"))
+    output = OutputOptions(Target.Mp4(tmp_path / "out.mp4"), keep_work_dir=True)
+    request = JobRequest(Source(server.url("index.m3u8")), output, concurrency=1)
+    work_dir = output.resolved_work_dir()
 
-    async def main() -> Output:
+    async def main() -> None:
         job = Engine().start(request)
         await arrived(gate)
-        # 超时为 0：协程第一步就被取消。等待不取消任务；放弃不去碰正被使用的任务目录（碰了会报 WorkDirError）
+        # 超时为 0：协程第一步就被取消。等待不取消任务，任务照常完成
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(job.wait(), 0)
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(Engine().discard(request.output.resolved_work_dir()), 0)
         gate.release()
-        return await job.wait()
+        assert (await job.wait()).segments == 2
+        # 放弃不动留下的任务目录
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(Engine().discard(work_dir), 0)
 
-    assert asyncio.run(main()).segments == 2
+    asyncio.run(main())
+
+    assert (work_dir / "job.json").exists()
 
 
 def test_jobs_no_longer_referenced_are_cancelled(server: Server, tmp_path: Path) -> None:

@@ -79,9 +79,9 @@ async fn discarding_restores_outputs_and_removes_only_library_files() {
     assert_eq!(left, ["job.json", "notes.txt"]);
 }
 
-/// 放弃时已取消：加了锁就停下，什么也不动、放开锁；再放弃照常收拾并报出留下的东西。
+/// 放弃之前就已取消：加了锁就停下，什么也不动、放开锁；再放弃照常收拾并报出留下的东西。
 #[tokio::test(flavor = "multi_thread")]
-async fn a_cancelled_discard_stops_between_steps_and_can_be_repeated() {
+async fn a_discard_cancelled_beforehand_changes_nothing_and_can_be_repeated() {
     let dir = test_dir("discard_cancelled");
     let work = failed_job(&dir).await;
     let target = dir.join("out.mp4");
