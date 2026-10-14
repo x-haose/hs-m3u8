@@ -9,8 +9,8 @@ use hs_m3u8_core::{
 };
 
 use super::{
-    STALL, expected_split, live_request, missed, playlist, playlist_with_target, put_long,
-    put_split_master, report, split_source,
+    STALL, expected_split, live_request, missed, playlist, playlist_in, playlist_with_target,
+    put_long, put_split_master, report, split_source,
 };
 use crate::server::Server;
 use crate::{assert_output, engine, expected_long, fixture, run, test_dir};
@@ -506,4 +506,120 @@ async fn forbidden_refresh_fails_the_task() {
         ),
         "{err}"
     );
+}
+
+/// 音频轨不再出新分片、先到停滞，这时视频轨的刷新一直 500：视频轨的情况不明（故障），不当作直播结束；以视频轨的
+/// 刷新失败使任务失败，目录保留，可以续录。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_other_track_is_not_taken_as_the_end() {
+    let dir = test_dir("live_other_fails");
+    let server = Server::start().await;
+    put_long(&server, "v/", &[0, 1, 2]);
+    put_long(&server, "a/", &[0]);
+    server.put_sequence(
+        "video.m3u8",
+        vec![
+            playlist_in("v/", &[0], false),
+            playlist_in("v/", &[0, 1], false),
+            playlist_in("v/", &[0, 1, 2], false),
+        ],
+    );
+    server.put("audio.m3u8", playlist_in("a/", &[0], false));
+    put_split_master(&server);
+    let job = engine()
+        .start(live_request(server.url("master.m3u8"), &dir, STALL))
+        .unwrap();
+    let mut progress = job.control().progress();
+    progress.wait_for(|p| p.segments_done == 4).await.unwrap();
+    server.status("video.m3u8", StatusCode::INTERNAL_SERVER_ERROR);
+
+    let err = job.wait().await.unwrap_err();
+
+    assert!(
+        matches!(
+            &err,
+            Error::LiveStalled {
+                track: 0,
+                cause: StallError::RefreshFailed(RefreshCause::Http(HttpFailure {
+                    kind: HttpError::Status(500),
+                    ..
+                })),
+            }
+        ),
+        "{err}"
+    );
+    assert!(dir.join("out.hsdl/job.json").exists());
+}
+
+/// 停滞开始之前发起的刷新挂住不返回：察觉停滞后再过一个目标时长即以刷新没有返回使任务失败，不等请求本身超时。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refresh_hanging_since_before_the_stall_is_concluded_promptly() {
+    let dir = test_dir("live_hung_refresh");
+    let server = Server::start().await;
+    put_long(&server, "", &[0]);
+    server.put("live.m3u8", playlist(&[0], false));
+    let job = engine()
+        .start(live_request(
+            server.url("live.m3u8"),
+            &dir,
+            Duration::from_millis(300),
+        ))
+        .unwrap();
+    let mut progress = job.control().progress();
+    progress.wait_for(|p| p.segments_done == 1).await.unwrap();
+    let _hung = server.gate("live.m3u8");
+
+    let err = tokio::time::timeout(Duration::from_secs(5), job.wait())
+        .await
+        .expect("应在察觉停滞后一个目标时长内下结论，不等请求超时")
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::LiveStalled {
+                track: 0,
+                cause: StallError::RefreshPending
+            }
+        ),
+        "{err}"
+    );
+}
+
+/// 刷新返回 503、要求 5 秒后再来：停滞时不提前再刷新，照服务器的意思等；这次失败本身即是结论，带上要求的等待。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stall_respects_the_servers_retry_after() {
+    let dir = test_dir("live_stall_retry_after");
+    let server = Server::start().await;
+    put_long(&server, "", &[0]);
+    server.put("live.m3u8", playlist(&[0], false));
+    let job = engine()
+        .start(live_request(
+            server.url("live.m3u8"),
+            &dir,
+            Duration::from_millis(300),
+        ))
+        .unwrap();
+    let mut progress = job.control().progress();
+    progress.wait_for(|p| p.segments_done == 1).await.unwrap();
+    server.status_retry_after("live.m3u8", StatusCode::SERVICE_UNAVAILABLE, "5");
+    let before = server.hits("live.m3u8");
+
+    let err = job.wait().await.unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::LiveStalled {
+                track: 0,
+                cause: StallError::RefreshFailed(RefreshCause::Http(HttpFailure {
+                    kind: HttpError::Status(503),
+                    ..
+                })),
+            }
+        ),
+        "{err}"
+    );
+    assert_eq!(err.retry_after(), Some(Duration::from_secs(5)));
+    assert_eq!(server.hits("live.m3u8") - before, 1);
 }

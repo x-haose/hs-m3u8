@@ -20,12 +20,8 @@ use crate::{
 /// 两次刷新之间的最短间隔，防止 TARGETDURATION 为 0 或极小时空转。
 const MIN_REFRESH: Duration = Duration::from_millis(100);
 
-/// 这么多个目标时长内列出过新分片，即认为播放列表仍在更新：分片时长不超过目标时长（RFC 8216 4.3.3.1），
-/// 正常的直播每个目标时长至少出一个新分片，再留一个目标时长给刷新的间隔。
-const LISTING_TARGETS: u32 = 2;
-
-/// 停滞判定至少等这么多个目标时长：比「仍在更新」的判定多一个，正常出分片的直播不会因为 stall_timeout
-/// 设得比目标时长还短而被判为停滞。
+/// 停滞判定至少等这么多个目标时长：分片时长不超过目标时长（RFC 8216 4.3.3.1），正常的直播每个目标时长至少出一个
+/// 新分片，再留出刷新的间隔与下载的时间，正常出分片的直播不会因为 stall_timeout 设得比目标时长还短而被判为停滞。
 const STALL_TARGETS: u32 = 3;
 
 /// 网络刷新的状态。准备暂存的播放列表另记（[`LiveTrack`] 的 `preparing`），两者互不等待。
@@ -97,6 +93,8 @@ pub(super) struct LiveTrack {
     last_download_failure: Option<FetchFailure>,
     /// 最近一次刷新失败的原因；刷新成功即清空
     last_refresh_error: Option<RefreshCause>,
+    /// 服务器在最近一次失败的刷新里要求等到的时刻（Retry-After）；刷新成功即清空
+    server_wait: Option<Instant>,
 }
 
 impl LiveTrack {
@@ -128,6 +126,7 @@ impl LiveTrack {
             outstanding: 0,
             last_download_failure: None,
             last_refresh_error: None,
+            server_wait: None,
         })
     }
 
@@ -204,20 +203,21 @@ impl LiveTrack {
         !self.is_ended() && !self.is_full(max_us)
     }
 
-    /// 下次刷新的时刻。会话定下后，暂存的处理完才再刷新：刷新时按已处理到的位置决定拉哪些新 init 段。
-    /// `probe` 为停滞判定要的刷新（见 [`super::Recorder`] 的 `judgeable_stall`）：那之后还没发起过刷新时，最迟在它发起。
-    /// 在途、等处理、暂停或已结束时为 None。
-    pub(super) fn due_at(&self, probe: Option<Instant>) -> Option<Instant> {
+    /// 下次刷新的时刻。会话定下后，暂存的处理完才再刷新：刷新时按已处理到的位置决定拉哪些新 init 段。停滞开始于
+    /// `stall_since`（见 [`super::Recorder`] 的停滞判定）而那之后还没发起过刷新时，最迟在那时发起；服务器要求的等待
+    /// 照样遵守。在途、等处理、暂停或已结束时为 None。
+    pub(super) fn due_at(&self, stall_since: Option<Instant>) -> Option<Instant> {
         let Refresh::Due(at) = self.refresh else {
             return None;
         };
         if self.window().is_some() && self.has_held() {
             return None;
         }
-        Some(match probe {
-            Some(probe) if !self.last_started.is_some_and(|s| s >= probe) => at.min(probe),
+        let at = match stall_since {
+            Some(since) if !self.last_started.is_some_and(|s| s >= since) => at.min(since),
             _ => at,
-        })
+        };
+        Some(self.server_wait.map_or(at, |until| at.max(until)))
     }
 
     /// 发起刷新。
@@ -238,46 +238,59 @@ impl LiveTrack {
         }
     }
 
-    /// `since` 之后发起的刷新已经返回，或刷新已暂停（不会再有刷新，只能按最近一次的结果判断）：这条轨在 `since`
-    /// 之后的状况有据可依。
-    pub(super) fn observed_since(&self, since: Instant) -> bool {
-        matches!(self.refresh, Refresh::Suspended) || self.last_returned.is_some_and(|r| r >= since)
-    }
-
-    /// 刷新在途已满一个目标时长（不论何时发起）。
-    pub(super) fn refresh_overdue(&self, now: Instant) -> bool {
-        self.overdue_at().is_some_and(|at| at <= now)
-    }
-
-    /// 在途的刷新满一个目标时长的时刻；没有在途的刷新时为 None。
-    pub(super) fn overdue_at(&self) -> Option<Instant> {
+    /// 在途的网络请求（刷新，或准备暂存的播放列表时拉 init 段）发起的时刻；没有在途的时为 None。
+    fn in_flight_since(&self) -> Option<Instant> {
         match self.refresh {
-            Refresh::InFlight { started } => started.checked_add(self.target),
-            _ => None,
+            Refresh::InFlight { started } => Some(started),
+            _ => self.preparing,
         }
     }
 
-    /// `since` 之后发起、还在途的刷新再过一个目标时长的时刻：到时还没返回即刷新没有返回；没有这样的刷新时为 None。
-    pub(super) fn pending_deadline(&self, since: Instant) -> Option<Instant> {
-        match self.refresh {
-            Refresh::InFlight { started } if started >= since => started.checked_add(self.target),
-            _ => None,
+    /// 在途的请求算作没有返回的时刻：从发起与 `noticed`（察觉停滞的时刻）中晚的那个起，再过一个目标时长。进程被
+    /// 挂起醒来时，按醒来之后实际运行的时间算。没有在途的请求时为 None。
+    pub(super) fn deadline(&self, noticed: Instant) -> Option<Instant> {
+        let from = self.in_flight_since()?.max(noticed);
+        from.checked_add(self.target)
+    }
+
+    /// 停滞开始于 `since`、在 `noticed` 被察觉时，这条轨在 `now` 的状况有据可依：有在途的请求时它满了期限（见
+    /// [`LiveTrack::deadline`]）；没有时 `since` 之后发起的刷新已经返回，或服务器要求等待（照它的意思等，失败本身即是
+    /// 结论），或刷新已暂停。
+    pub(super) fn settled(&self, since: Instant, noticed: Instant, now: Instant) -> bool {
+        match self.deadline(noticed) {
+            Some(deadline) => deadline <= now,
+            None => {
+                matches!(self.refresh, Refresh::Suspended)
+                    || self.last_returned.is_some_and(|r| r >= since)
+                    || self.server_waiting(now)
+            }
         }
+    }
+
+    /// 服务器在最近一次失败的刷新里要求的等待还没到。
+    fn server_waiting(&self, now: Instant) -> bool {
+        self.server_wait.is_some_and(|until| until > now)
+    }
+
+    /// 在 `since` 之后列出过新分片。
+    pub(super) fn listed_since(&self, since: Instant) -> bool {
+        self.last_listed >= since
     }
 
     /// 刷新拿到了播放列表。
     pub(super) fn refreshed(&mut self) {
         self.last_refresh_error = None;
+        self.server_wait = None;
     }
 
     /// 刷新失败、可以再试：半个目标时长后再刷新，服务器要求等更久时按它的。
     pub(super) fn refresh_failed(&mut self, cause: RefreshCause, now: Instant) {
-        let wait = self
-            .half_target()
-            .max(cause.retry_after().unwrap_or_default());
+        let asked = cause.retry_after();
+        let wait = self.half_target().max(asked.unwrap_or_default());
         self.refresh = now
             .checked_add(wait)
             .map_or(Refresh::Suspended, Refresh::Due);
+        self.server_wait = asked.and_then(|asked| now.checked_add(asked));
         self.last_refresh_error = Some(cause);
     }
 
@@ -440,19 +453,14 @@ impl LiveTrack {
         (self.target / 2).max(MIN_REFRESH)
     }
 
-    /// 播放列表仍在出新分片：最近 [`LISTING_TARGETS`] 个目标时长内列出过。
-    pub(super) fn is_live(&self, now: Instant) -> bool {
-        now.duration_since(self.last_listed) < self.target.saturating_mul(LISTING_TARGETS)
-    }
-
     /// 停滞开始的时刻：最近一次录到分片（或录制开始、会话定下）之后，持续 `stall_timeout`（至少 [`STALL_TARGETS`]
-    /// 个目标时长）。在等本任务的时为 None：会话定下之前已有候选（在等核对或其他轨），或有分片排着队、在下载，或有
-    /// 拉到的播放列表还没处理完；时长大到无法表示时也为 None。停滞的结论另要这之后的刷新结果（见 [`super::Recorder`]
-    /// 的 `judgeable_stall`）。
+    /// 个目标时长）。在等本任务的时为 None：会话定下之前已有候选（在等核对或其他轨），或有分片排着队、在下载；时长大到
+    /// 无法表示时也为 None。拉到的播放列表还在准备（拉 init 段）时照样算，那次准备当作在途的请求（见
+    /// [`LiveTrack::deadline`]）。停滞的结论另要这之后的刷新结果（见 [`LiveTrack::settled`]）。
     pub(super) fn stall_since(&self, stall_timeout: Duration) -> Option<Instant> {
         let waiting = match self.role {
             Role::Undecided { candidate, .. } => candidate,
-            Role::Decided(_) => self.outstanding > 0 || self.has_held(),
+            Role::Decided(_) => self.outstanding > 0,
             Role::Idle => true,
         };
         if waiting {
@@ -462,38 +470,56 @@ impl LiveTrack {
             .checked_add(stall_timeout.max(self.target.saturating_mul(STALL_TARGETS)))
     }
 
-    /// 停滞的结论，取走最近一次刷新失败的原因；只在据此结束录制时调用，此时停滞开始之后的刷新结果都已拿到（或本轨
-    /// 那次刷新在途超过了一个目标时长）。`Ok` 为看起来直播已结束，`Err` 为故障。`others_live` 为其他轨的播放列表还在
-    /// 出：这时本轨不再出新分片是本轨的故障。
+    /// 作为其他轨（不是停滞的那条）看，在 `now` 有故障：在途的请求满了期限（见 [`LiveTrack::deadline`]），或停滞开始
+    /// 于 `since` 之后最近一次刷新失败（404/410 除外：播放列表已删除，是直播结束的迹象）。没有故障时为 None：在出新
+    /// 分片，或有结束的迹象。
+    pub(super) fn fault(
+        &self,
+        since: Instant,
+        noticed: Instant,
+        now: Instant,
+    ) -> Option<StallError> {
+        if self
+            .deadline(noticed)
+            .is_some_and(|deadline| deadline <= now)
+        {
+            return Some(StallError::RefreshPending);
+        }
+        let observed = self.last_returned.is_some_and(|r| r >= since) || self.server_waiting(now);
+        match &self.last_refresh_error {
+            Some(cause) if observed && gone(cause).is_none() => {
+                Some(StallError::RefreshFailed(cause.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// 停滞的结论，取走最近一次刷新失败的原因；只在据此结束录制时调用，此时这条轨的状况有据可依（见
+    /// [`LiveTrack::settled`]）。停滞开始于 `since`、在 `noticed` 被察觉。`Ok` 为看起来直播已结束，`Err` 为故障。
+    /// `others_live` 为其他轨在 `since` 之后列出过新分片：这时本轨不再出新分片是本轨的故障。
     ///
-    /// 播放列表没被删除（最近一次刷新不是 404/410）而仍在列出新分片时，刷新是通的，停滞的原因是新分片都取不到；
-    /// 否则依次看刷新在途超过一个目标时长、播放列表已删除、刷新失败，都没有时为不再出新分片。
+    /// 依次看：在途的请求满了期限；播放列表没被删除（最近一次刷新不是 404/410）而 `since` 之后列出过新分片（刷新是
+    /// 通的，新分片都取不到）；播放列表已删除；刷新失败；都没有时为不再出新分片。
     pub(super) fn stall(
         &mut self,
         now: Instant,
+        since: Instant,
+        noticed: Instant,
         others_live: bool,
     ) -> Result<StallCause, StallError> {
-        let refresh_error = self.last_refresh_error.take();
-        let gone = match &refresh_error {
-            Some(RefreshCause::Http(HttpFailure {
-                kind: HttpError::Status(status @ (404 | 410)),
-                ..
-            })) => Some(*status),
-            _ => None,
-        };
-        if gone.is_none() && self.is_live(now) {
-            let failure = self
-                .last_download_failure
-                .clone()
-                .expect("仍在列出新分片、没有在途的下载又没有录到：新分片都记了缺失，有失败原因");
-            return Err(StallError::Unrecordable(failure));
-        }
-        let pending_since = match self.refresh {
-            Refresh::InFlight { started } => Some(started),
-            _ => self.preparing,
-        };
-        if pending_since.is_some_and(|started| now.duration_since(started) >= self.target) {
+        if self
+            .deadline(noticed)
+            .is_some_and(|deadline| deadline <= now)
+        {
             return Err(StallError::RefreshPending);
+        }
+        let refresh_error = self.last_refresh_error.take();
+        let gone = refresh_error.as_ref().and_then(gone);
+        if gone.is_none() && self.listed_since(since) {
+            let failure = self.last_download_failure.clone().expect(
+                "停滞开始后列出过新分片、没有在途的下载又没有录到：新分片都记了缺失，有失败原因",
+            );
+            return Err(StallError::Unrecordable(failure));
         }
         let ended = match (gone, refresh_error) {
             (Some(status), _) => StallCause::PlaylistGone(status),
@@ -504,6 +530,17 @@ impl LiveTrack {
             return Err(StallError::TrackStopped(ended));
         }
         Ok(ended)
+    }
+}
+
+/// 刷新失败说明播放列表已被删除（404/410）时为那个状态码。
+fn gone(cause: &RefreshCause) -> Option<u16> {
+    match cause {
+        RefreshCause::Http(HttpFailure {
+            kind: HttpError::Status(status @ (404 | 410)),
+            ..
+        }) => Some(*status),
+        _ => None,
     }
 }
 

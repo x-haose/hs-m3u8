@@ -404,9 +404,9 @@ variants! {
             /// 最近一次刷新失败
             cause: RefreshCause,
         },
-        /// 刷新请求超过一个目标时长仍未返回
+        /// 刷新播放列表（或为新分片拉 init 段）的请求，在察觉停滞之后又过了一个目标时长仍未返回
         RefreshPending {},
-        /// 播放列表仍在列出新分片，但一个都没有下载成功
+        /// 停滞开始之后播放列表仍列出了新分片，但一个都没有下载成功
         Unrecordable {
             /// 最近一次取不到的分片或 init 段
             cause: FetchFailure,

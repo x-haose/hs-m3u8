@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use hs_m3u8_core::{JobRequest, LiveEnd, StallCause};
+use hs_m3u8_core::{Error, JobRequest, LiveEnd, StallError};
 
 use super::{expected_split, interrupt, live_request, report, split_source};
 use crate::server::Server;
@@ -174,8 +174,8 @@ async fn a_failed_late_refresh_does_not_skip_held_playlists() {
     assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
 }
 
-/// 判定期间音频一直没有分片而停滞，这时视频的刷新挂着：按直播已结束收尾，视频暂存的候选照常录到，
-/// 不等那次刷新。
+/// 判定期间音频一直没有分片而停滞，这时视频的刷新挂着：视频轨的情况不明，不当作直播结束；察觉停滞后再过一个目标
+/// 时长，以视频轨的刷新没有返回使任务失败（可重试，目录保留），不一直等那次刷新。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stall_while_deciding_does_not_wait_for_a_late_refresh() {
     let server = Server::start().await;
@@ -190,17 +190,27 @@ async fn a_stall_while_deciding_does_not_wait_for_a_late_refresh() {
     )
     .await;
     let _later = server.gate("video/later.m3u8");
-    let output = tokio::time::timeout(Duration::from_secs(10), run(req.clone()))
+    let err = tokio::time::timeout(Duration::from_secs(10), run(req.clone()))
         .await
-        .expect("停滞收尾不应等挂着的刷新")
-        .unwrap();
+        .expect("停滞的结论不应一直等挂着的刷新")
+        .unwrap_err();
 
-    let dir = req.output.target.mp4().unwrap().parent().unwrap();
-    let want = expected_split(dir, &["seg0.m4s", "seg1.m4s"], &["seg0.m4s"]);
-    assert_output(&output, &want);
-    let end = LiveEnd::Stalled {
-        track: 1,
-        cause: StallCause::NoNewSegments,
-    };
-    assert_eq!(output.live, report(end, 1, vec![]));
+    assert!(
+        matches!(
+            err,
+            Error::LiveStalled {
+                track: 0,
+                cause: StallError::RefreshPending
+            }
+        ),
+        "{err}"
+    );
+    assert!(err.retryable());
+    assert!(
+        req.output
+            .resolved_work_dir()
+            .unwrap()
+            .join("job.json")
+            .exists()
+    );
 }
