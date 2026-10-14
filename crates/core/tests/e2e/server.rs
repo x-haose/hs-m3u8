@@ -45,6 +45,8 @@ struct ServerState {
 pub(crate) struct Server {
     base: Url,
     state: Arc<ServerState>,
+    /// 接受连接的任务
+    serving: tokio::task::JoinHandle<()>,
 }
 
 impl Server {
@@ -55,8 +57,18 @@ impl Server {
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        Server { base, state }
+        let serving = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        Server {
+            base,
+            state,
+            serving,
+        }
+    }
+
+    /// 停止服务：返回时监听已关闭，之后的连接被拒绝。
+    pub(crate) async fn stop(self) {
+        self.serving.abort();
+        assert!(self.serving.await.unwrap_err().is_cancelled());
     }
 
     pub(crate) fn url(&self, path: &str) -> Url {

@@ -385,7 +385,7 @@ async fn a_live_directory_without_live_options_is_a_kind_mismatch() {
     assert!(dir.join("out.hsdl/job.json").exists());
 }
 
-/// 只合并：不联网，把中断前录到的合并成输出，没有录制结束原因；进度给出已录的分片数与时长。
+/// 只合并：不联网（服务已停），把中断前录到的合并成输出，没有录制结束原因；进度给出已录的分片数与时长。
 #[tokio::test(flavor = "multi_thread")]
 async fn merge_recorded_merges_without_the_network() {
     let dir = test_dir("resume_merge");
@@ -394,7 +394,7 @@ async fn merge_recorded_merges_without_the_network() {
     server.put("live.m3u8", playlist(&[0, 1, 2], false));
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
     interrupt(&req, |p| p.segments_done == 3).await;
-    let hits = server.hits("live.m3u8");
+    server.stop().await;
 
     let job = engine().merge_recorded(req.output.clone()).unwrap();
     let progress = job.control().progress();
@@ -412,7 +412,6 @@ async fn merge_recorded_merges_without_the_network() {
         new_sessions: vec![],
     };
     assert_eq!(outcome(&output), (Some(want), vec![]));
-    assert_eq!(server.hits("live.m3u8"), hits);
 }
 
 /// 任务目录里的分片被改成认不出的内容（下载时都核对过）：合并 MP4 与写本地 HLS 都报任务目录损坏。
