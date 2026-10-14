@@ -147,14 +147,14 @@ fn glob(pattern: &str, text: &str) -> bool {
     pattern[p..].iter().all(|&c| c == '*')
 }
 
-/// 本机的系统代理设置，即 [`crate::Proxy::System`] 用的；没设代理时为 None。读到用不了的值时报
-/// [`Error::InvalidInput`]，说明是哪一项；操作系统的接口失败时报 [`Error::SystemProxy`]。每次调用重新读取。
+/// 本机的系统代理设置，即 [`crate::Proxy::System`] 用的；没设代理时为 None。读到用不了的值（说明是哪一项）、或
+/// 操作系统的接口失败时报 [`Error::SystemProxy`]。每次调用重新读取。
 pub fn system_proxy() -> Result<Option<SystemProxy>, Error> {
-    read(&env_var, system::read).map_err(|trouble| match trouble {
-        Trouble::Unusable(reason) => Error::InvalidInput(format!(
-            "系统代理设置用不了，可改为直连或指定代理地址：{reason}"
-        )),
-        Trouble::Unreadable(reason) => Error::SystemProxy(reason),
+    read(&env_var, system::read).map_err(|trouble| {
+        Error::SystemProxy(match trouble {
+            Trouble::Unusable(reason) => format!("系统代理设置用不了：{reason}"),
+            Trouble::Unreadable(reason) => format!("读不出操作系统的代理设置：{reason}"),
+        })
     })
 }
 

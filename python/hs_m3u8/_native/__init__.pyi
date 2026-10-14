@@ -2334,8 +2334,7 @@ class Proxy:
         r"""
         按系统代理设置：先看环境变量（规则同 curl，另认大写的 `HTTP_PROXY`；`no_proxy` 对系统设置的代理同样起作
         用），没设代理时看 macOS 的系统设置或 Windows 的 Internet 选项，其他平台即直连。探测与开始任务时读取；值用不
-        了（写错、用了 PAC 等）时抛 `InvalidInputError`，读不出时抛 `SystemProxyError`，可改用 `Proxy.Direct()` 或
-        `Proxy.Url(...)`
+        了（写错、用了 PAC 等）或读不出时抛 `SystemProxyError`，可改用 `Proxy.Direct()` 或 `Proxy.Url(...)`
         """
         __match_args__ = ()
         def __new__(cls) -> Proxy.System: ...
@@ -3247,8 +3246,8 @@ class StreamReport:
 @typing.final
 class SystemProxyError(HsM3u8Error):
     r"""
-    读不出操作系统的代理设置（`Proxy.System()` 时）：系统的接口失败。设置的值用不了（写错、用了 PAC 等）是
-    `InvalidInputError`。可改用 `Proxy.Direct()` 或 `Proxy.Url(...)`。
+    系统代理（`Proxy.System()`）用不了：设置的值用不了（写错、用了 PAC 或自动发现），或读不出（系统的接口失败）。
+    可改用 `Proxy.Direct()` 或 `Proxy.Url(...)`。
     """
     def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> SystemProxyError:
         r"""

@@ -421,8 +421,8 @@ exception! {
 }
 
 exception! {
-    /// 读不出操作系统的代理设置（`Proxy.System()` 时）：系统的接口失败。设置的值用不了（写错、用了 PAC 等）是
-    /// `InvalidInputError`。可改用 `Proxy.Direct()` 或 `Proxy.Url(...)`。
+    /// 系统代理（`Proxy.System()`）用不了：设置的值用不了（写错、用了 PAC 或自动发现），或读不出（系统的接口失败）。
+    /// 可改用 `Proxy.Direct()` 或 `Proxy.Url(...)`。
     pub struct SystemProxyError extends HsM3u8Error {}
 }
 

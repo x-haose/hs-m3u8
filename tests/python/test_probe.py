@@ -318,7 +318,7 @@ def test_invalid_arguments_are_rejected_when_constructed() -> None:
 # 用不了时为 4
 SYSTEM_PROXY_SCRIPT = """
 import asyncio, sys
-from hs_m3u8 import Engine, HttpError, HttpOptions, InvalidInputError, Proxy, RetryPolicy, Source
+from hs_m3u8 import Engine, HttpError, HttpOptions, Proxy, RetryPolicy, Source, SystemProxyError
 
 async def main(url: str, proxy: Proxy) -> None:
     await Engine().probe(Source(url, http=HttpOptions(proxy=proxy, retry=RetryPolicy(attempts=1))))
@@ -328,7 +328,7 @@ try:
     asyncio.run(main(sys.argv[1], Proxy.System()))
 except HttpError:
     sys.exit(3)
-except InvalidInputError:
+except SystemProxyError:
     sys.exit(4)
 """
 

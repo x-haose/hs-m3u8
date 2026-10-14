@@ -11,8 +11,8 @@
 //! - 说明出在哪里、看包着的原因：[`Error::Segment`]、[`Error::Key`]（哪个分片或 key）、[`Error::LiveStalled`]（直播
 //!   哪条轨停滞）、[`Error::Cleanup`]（失败后收拾也没做完，带残留列表）；
 //! - 读写文件：[`Error::Io`]（Windows 上别的进程一直开着文件时可重试，其余不可）、[`Error::VolumeUnavailable`]（盘
-//!   不在、共享连不上，接上后再试）；合并 MP4：[`Error::Remux`]；读操作系统的代理设置：[`Error::SystemProxy`]。除
-//!   注明的外都不可重试；
+//!   不在、共享连不上，接上后再试）；合并 MP4：[`Error::Remux`]；系统代理用不了：[`Error::SystemProxy`]（改用直连或
+//!   指定代理地址）。除注明的外都不可重试；
 //! - 任务目录：[`Error::WorkDir`]（按 [`WorkDirProblem`] 处理）、[`Error::NothingRecorded`]；
 //! - 调用方的回调出错：[`Error::Hook`]；[`Error::Cancelled`]。
 //!
@@ -123,9 +123,9 @@ pub enum Error {
     /// 不据此删东西、丢记录
     #[error("读不到 {}：{cause}", .root.display())]
     VolumeUnavailable { root: PathBuf, cause: io::Error },
-    /// 读不出操作系统的代理设置（[`crate::Proxy::System`] 时）：系统的接口失败，值为原因。设置的值用不了（写错、
-    /// 用了 PAC 等）是 [`Error::InvalidInput`]。可改用 [`crate::Proxy::Direct`] 或 [`crate::Proxy::Url`]
-    #[error("读不出操作系统的代理设置：{0}")]
+    /// 系统代理（[`crate::Proxy::System`]）用不了，值为说明：设置的值用不了（写错、用了 PAC 或自动发现），或读不出
+    /// （系统的接口失败）。可改用 [`crate::Proxy::Direct`] 或 [`crate::Proxy::Url`]
+    #[error("{0}")]
     SystemProxy(String),
     /// 合并 MP4 或下载中核对能否合并时失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是
     /// [`Unsupported::Mp4`]
