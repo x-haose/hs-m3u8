@@ -2,16 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
-use ffmpeg::format::context::StreamIo;
 use ffmpeg::{Dictionary, Packet, Rational, Rescale, Rounding, codec, encoder, format};
 use ffmpeg_next as ffmpeg;
 
-use crate::chain::SegmentChain;
+use crate::chain::{self, Halt, SegmentChain};
 use crate::compare::Desc;
 use crate::error::file_error;
 use crate::ffi::{self, OpenFailure, OutputFile};
 use crate::group::{OpenTrack, layout_of, open_group, primed, references_of};
-use crate::input::stopped;
 use crate::source::{Dropped, Mapping, Source};
 use crate::timing::{MICROS, align_wraps, group_offset, retime};
 use crate::{
@@ -380,30 +378,23 @@ fn count_packets(path: &Path, cancel: &Cancel) -> Result<Vec<u64>, Error> {
     let len = std::fs::metadata(path).map_err(file_failed)?.len();
     let (chain, failure) = SegmentChain::new(vec![(path.to_path_buf(), 0..len)], cancel.clone())
         .map_err(|(_, cause)| file_failed(cause))?;
-    let reread = |cause: ffmpeg::Error| Error::Reread {
-        path: path.to_path_buf(),
-        cause: cause.into(),
+    let halted = |halt| match halt {
+        Halt::Stopped(stopped) => stopped.into_error("回读"),
+        Halt::Ffmpeg(cause) => Error::Reread {
+            path: path.to_path_buf(),
+            cause: cause.into(),
+        },
     };
-    let opened =
-        StreamIo::from_read_seek(chain).and_then(|io| format::input_from_stream(io, None, None));
-    if let Some(stopped) = stopped(&failure, "回读") {
-        return Err(stopped);
-    }
-    let mut ictx = opened.map_err(reread)?;
+    let mut ictx = chain::open(chain, &failure, None).map_err(halted)?;
     let mut counts = vec![0u64; ictx.nb_streams() as usize];
     loop {
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
         let mut packet = Packet::empty();
-        let read = packet.read(&mut ictx);
-        if let Some(stopped) = stopped(&failure, "回读") {
-            return Err(stopped);
+        if !chain::read(&mut ictx, &failure, &mut packet).map_err(halted)? {
+            return Ok(counts);
         }
-        match read {
-            Ok(()) => counts[packet.stream()] += 1,
-            Err(ffmpeg::Error::Eof) => return Ok(counts),
-            Err(cause) => return Err(reread(cause)),
-        }
+        counts[packet.stream()] += 1;
     }
 }

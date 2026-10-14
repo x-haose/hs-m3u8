@@ -1,4 +1,5 @@
-//! 分片链：把一条轨在一组里的多个文件（或其中的几段）当作一个连续的字节流读取，同一时刻只打开一个文件。
+//! 分片链：把一个或几个文件（或其中的几段）当作一个连续的字节流交给 FFmpeg 读，同一时刻只打开一个文件：一条轨在一组
+//! 里的分片，或回读的输出。
 //!
 //! FFmpeg 的 concat 协议在打开时就打开全部文件并持有到关闭，一组几百个分片就会超过进程的文件描述符
 //! 上限（macOS 图形程序默认 256）；这里按偏移定位，读到哪个文件才打开哪个。
@@ -9,7 +10,11 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::Cancel;
+use ffmpeg::format::context::StreamIo;
+use ffmpeg::{Dictionary, Packet, format};
+use ffmpeg_next as ffmpeg;
+
+use crate::{Cancel, Error};
 
 /// 读取中止的原因：FFmpeg 只拿到错误码，这里留下供调用方报告。
 pub(crate) enum Stopped {
@@ -19,8 +24,67 @@ pub(crate) enum Stopped {
     Cancelled,
 }
 
+impl Stopped {
+    /// 换成带路径的原始错误（`action` 为报错时说的动作）或取消。
+    pub(crate) fn into_error(self, action: &'static str) -> Error {
+        match self {
+            Stopped::File(path, cause) => Error::Io {
+                action,
+                path,
+                cause,
+            },
+            Stopped::Cancelled => Error::Cancelled,
+        }
+    }
+}
+
 /// 第一次读取中止的原因（见 [`Stopped`]）。
 pub(crate) type Failure = Arc<Mutex<Option<Stopped>>>;
+
+/// 经分片链读的 FFmpeg 输入出错：分片链记下的中止原因，或 FFmpeg 自己的错误。
+pub(crate) enum Halt {
+    Stopped(Stopped),
+    Ffmpeg(ffmpeg::Error),
+}
+
+/// 取走分片链记下的中止原因。
+fn taken(failure: &Failure) -> Option<Stopped> {
+    failure.lock().expect("持锁时只赋值，不会 panic").take()
+}
+
+/// 把分片链 `chain`（`failure` 为它记中止原因的位置）交给 FFmpeg 打开，格式由开头的内容识别，`options` 为打开选项。
+/// 分片链记下的中止原因优先：FFmpeg 探测时把读错误当作读到末尾，有流的参数齐了就照样打开成功。
+pub(crate) fn open(
+    chain: SegmentChain,
+    failure: &Failure,
+    options: Option<Dictionary<'static>>,
+) -> Result<format::context::Input, Halt> {
+    let opened =
+        StreamIo::from_read_seek(chain).and_then(|io| format::input_from_stream(io, None, options));
+    if let Some(stopped) = taken(failure) {
+        return Err(Halt::Stopped(stopped));
+    }
+    opened.map_err(Halt::Ffmpeg)
+}
+
+/// 读下一个包；读到末尾为 false。分片链记下的中止原因优先：FFmpeg 把一部分读错误报成读到末尾（如 TS 读到不足一个包的
+/// 数据时），只看它的结果会把读了一半的输入当作读完。用 `Packet::read` 而不是 ffmpeg-next 的 `packets()` 迭代器：后者
+/// 把读错误当作读到末尾，并静默跳过 `InvalidData` 的包。
+pub(crate) fn read(
+    ictx: &mut format::context::Input,
+    failure: &Failure,
+    packet: &mut Packet,
+) -> Result<bool, Halt> {
+    let read = packet.read(ictx);
+    if let Some(stopped) = taken(failure) {
+        return Err(Halt::Stopped(stopped));
+    }
+    match read {
+        Ok(()) => Ok(true),
+        Err(ffmpeg::Error::Eof) => Ok(false),
+        Err(cause) => Err(Halt::Ffmpeg(cause)),
+    }
+}
 
 pub(crate) struct SegmentChain {
     /// 各段所在的文件
@@ -132,7 +196,7 @@ impl Read for SegmentChain {
         if read == 0 && limit > 0 {
             let truncated = io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                "文件比开始合并时短（合并期间被改动）",
+                "文件比开始读时短（读的期间被改动）",
             );
             return Err(self.fail(index, truncated));
         }

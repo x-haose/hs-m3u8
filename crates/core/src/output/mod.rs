@@ -269,8 +269,8 @@ pub(super) fn unrecognized_segment(work_dir: &Path, path: &Path) -> Error {
 
 /// 合并或核对任务目录里的分片时 remux 的错误：放不进 MP4 的为 [`crate::Unsupported::Mp4`]；认不出的分片与结构不对的
 /// fMP4 为任务目录损坏（下载时都核对过，即目录里的文件被改动过），认不出的与写本地 HLS 时相同（见
-/// [`unrecognized_segment`]）；读分片、写输出时文件出错为 [`Error::Io`]（如盘满），取消为 [`Error::Cancelled`]；其余为
-/// [`Error::Remux`]。
+/// [`unrecognized_segment`]）；读分片、写出、关闭或回读输出时文件出错为 [`Error::Io`]（如盘满），取消为
+/// [`Error::Cancelled`]；其余为 [`Error::Remux`]。
 fn remux_error(error: hs_m3u8_remux::Error, work_dir: &Path) -> Error {
     match error {
         hs_m3u8_remux::Error::Io {

@@ -6,11 +6,10 @@ use std::fs::File;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use ffmpeg::format::context::StreamIo;
 use ffmpeg::{Dictionary, Packet, format};
 use ffmpeg_next as ffmpeg;
 
-use crate::chain::{self, SegmentChain, Stopped};
+use crate::chain::{self, Halt, SegmentChain};
 use crate::packed::Packed;
 use crate::{Cancel, Error, Segment, TrackSegments, Unsupported, fmp4, standalone};
 
@@ -293,8 +292,7 @@ impl Probe {
     }
 }
 
-/// 把分片链当作一个输入交给 FFmpeg 打开，格式由开头的内容识别，探测读到 `probe` 为止。分片链记下的中止原因（读文件
-/// 出错、取消）优先：FFmpeg 探测时把读错误当作读到末尾，有流的参数齐了就照样打开成功。
+/// 把分片链当作一个输入交给 FFmpeg 打开，探测读到 `probe` 为止（见 [`chain::open`]）。
 pub(crate) fn open_chain(
     chain: SegmentChain,
     failure: &chain::Failure,
@@ -302,21 +300,17 @@ pub(crate) fn open_chain(
     group: usize,
     track: usize,
 ) -> Result<format::context::Input, Error> {
-    let opened = StreamIo::from_read_seek(chain)
-        .and_then(|io| format::input_from_stream(io, None, Some(probe.options())));
-    if let Some(stopped) = stopped(failure, "读取") {
-        return Err(stopped);
-    }
-    opened.map_err(|cause| Error::OpenInput {
-        group,
-        track,
-        cause: cause.into(),
+    chain::open(chain, failure, Some(probe.options())).map_err(|halt| match halt {
+        Halt::Stopped(stopped) => stopped.into_error("读取"),
+        Halt::Ffmpeg(cause) => Error::OpenInput {
+            group,
+            track,
+            cause: cause.into(),
+        },
     })
 }
 
-/// 读下一个包；读到末尾返回 false。用 `Packet::read` 而不是 ffmpeg-next 的 `packets()` 迭代器：后者把读错误当作读到
-/// 末尾，并静默跳过 `InvalidData` 的包。分片链记下的中止原因优先：FFmpeg 把一部分读错误报成读到末尾（如 TS 读到不足
-/// 一个包的数据时），只看它的结果会把读了一半的输入当作读完。
+/// 读下一个包；读到末尾返回 false（见 [`chain::read`]）。
 pub(crate) fn read_packet(
     ictx: &mut format::context::Input,
     failure: &chain::Failure,
@@ -324,29 +318,12 @@ pub(crate) fn read_packet(
     group: usize,
     track: usize,
 ) -> Result<bool, Error> {
-    let read = packet.read(ictx);
-    if let Some(stopped) = stopped(failure, "读取") {
-        return Err(stopped);
-    }
-    match read {
-        Ok(()) => Ok(true),
-        Err(ffmpeg::Error::Eof) => Ok(false),
-        Err(cause) => Err(Error::Read {
+    chain::read(ictx, failure, packet).map_err(|halt| match halt {
+        Halt::Stopped(stopped) => stopped.into_error("读取"),
+        Halt::Ffmpeg(cause) => Error::Read {
             group,
             track,
             cause: cause.into(),
-        }),
-    }
-}
-
-/// 分片链记下的读取中止原因；FFmpeg 只拿到错误码，这里换回带路径的原始错误（`action` 为报错时说的动作），或取消。
-pub(crate) fn stopped(failure: &chain::Failure, action: &'static str) -> Option<Error> {
-    match failure.lock().expect("持锁时只赋值，不会 panic").take()? {
-        Stopped::File(path, cause) => Some(Error::Io {
-            action,
-            path,
-            cause,
-        }),
-        Stopped::Cancelled => Some(Error::Cancelled),
-    }
+        },
+    })
 }
