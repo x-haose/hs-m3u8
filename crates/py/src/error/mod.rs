@@ -427,6 +427,12 @@ exception! {
 }
 
 exception! {
+    /// 本机建不出 HTTP 客户端：参数都已校验过，多为系统的证书校验用不了（如读不到系统的证书库）；与请求和来源无关，
+    /// 修好系统环境后再试。
+    pub struct HttpClientError extends HsM3u8Error {}
+}
+
+exception! {
     /// 合并 MP4 或下载中核对能否合并时失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是
     /// `Mp4UnsupportedError`。
     pub struct RemuxError extends HsM3u8Error {}
@@ -755,6 +761,7 @@ fn exception(
             return Ok(error);
         }
         E::SystemProxy(_) => instance(py, HsM3u8Error::chain(base, SystemProxyError {}))?,
+        E::HttpClient(_) => instance(py, HsM3u8Error::chain(base, HttpClientError {}))?,
         E::Remux(_) => instance(py, HsM3u8Error::chain(base, RemuxError {}))?,
         E::WorkDir { path, problem } => instance(
             py,
@@ -847,6 +854,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<FileError>()?;
     module.add_class::<VolumeUnavailableError>()?;
     module.add_class::<SystemProxyError>()?;
+    module.add_class::<HttpClientError>()?;
     module.add_class::<RemuxError>()?;
     module.add_class::<WorkDirError>()?;
     module.add_class::<NothingRecordedError>()?;

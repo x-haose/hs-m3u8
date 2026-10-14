@@ -22,6 +22,7 @@ __all__ = [
     "HookKind",
     "Hooks",
     "HsM3u8Error",
+    "HttpClientError",
     "HttpError",
     "HttpErrorKind",
     "HttpFailure",
@@ -621,6 +622,22 @@ class HsM3u8Error(builtins.Exception):
     def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> HsM3u8Error:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，`leftovers` 为 None 时为空。
+        """
+    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+        r"""
+        同构造函数：把说明放进 `args`。
+        """
+
+@typing.final
+class HttpClientError(HsM3u8Error):
+    r"""
+    本机建不出 HTTP 客户端：参数都已校验过，多为系统的证书校验用不了（如读不到系统的证书库）；与请求和来源无关，
+    修好系统环境后再试。
+    """
+    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> HttpClientError:
+        r"""
+        `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
+        None 时为空。
         """
     def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""

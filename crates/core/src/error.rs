@@ -12,7 +12,7 @@
 //!   哪条轨停滞）、[`Error::Cleanup`]（失败后收拾也没做完，带残留列表）；
 //! - 读写文件：[`Error::Io`]（Windows 上别的进程一直开着文件时可重试，其余不可）、[`Error::VolumeUnavailable`]（盘
 //!   不在、共享连不上，接上后再试）；合并 MP4：[`Error::Remux`]；系统代理用不了：[`Error::SystemProxy`]（改用直连或
-//!   指定代理地址）。除注明的外都不可重试；
+//!   指定代理地址）；本机建不出 HTTP 客户端：[`Error::HttpClient`]（修好系统环境）。除注明的外都不可重试；
 //! - 任务目录：[`Error::WorkDir`]（按 [`WorkDirProblem`] 处理）、[`Error::NothingRecorded`]；
 //! - 调用方的回调出错：[`Error::Hook`]；[`Error::Cancelled`]。
 //!
@@ -127,6 +127,10 @@ pub enum Error {
     /// （系统的接口失败）。可改用 [`crate::Proxy::Direct`] 或 [`crate::Proxy::Url`]
     #[error("{0}")]
     SystemProxy(String),
+    /// 本机建不出 HTTP 客户端，值为说明：参数都已校验过，多为系统的证书校验用不了（如读不到系统的证书库）；与请求和
+    /// 来源无关，修好系统环境后再试
+    #[error("无法创建 HTTP 客户端：{0}")]
+    HttpClient(String),
     /// 合并 MP4 或下载中核对能否合并时失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是
     /// [`Unsupported::Mp4`]
     #[error("合并失败：{0}")]

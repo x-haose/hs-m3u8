@@ -16,7 +16,7 @@ pub(crate) fn read() -> Result<MacOs, Error> {
     let store = SCDynamicStoreBuilder::new("hs-m3u8")
         .build()
         .ok_or_else(|| Error("建不出读取系统设置的 SCDynamicStore 会话".to_owned()))?;
-    // 只在传入的选项不是字典时为 NULL，这里不传选项
+    // 头文件写明出错时为 NULL
     let proxies = store
         .get_proxies()
         .ok_or_else(|| Error("读取系统代理设置失败".to_owned()))?;

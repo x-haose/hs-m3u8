@@ -7,6 +7,7 @@ use reqwest::header::HeaderValue;
 use tokio::time::Instant;
 use url::Url;
 
+use super::chain_text;
 use crate::Error;
 use crate::ident::bare_url;
 use crate::proxy::{self, SystemProxy};
@@ -153,5 +154,5 @@ fn build(config: &Config, route: Route<'_>) -> Result<reqwest::Client, Error> {
     };
     builder
         .build()
-        .map_err(|e| Error::InvalidInput(format!("无法创建 HTTP 客户端：{e}")))
+        .map_err(|e| Error::HttpClient(chain_text(&e)))
 }
