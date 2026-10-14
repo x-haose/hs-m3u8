@@ -327,11 +327,6 @@ impl<T: PyStubType> PyStubType for Count<T> {
     }
 }
 
-/// 服务器要求的等待（Retry-After）换成整秒，向上取整：按它等不会比要求的短。
-pub(crate) fn wait_seconds(wait: Duration) -> u64 {
-    wait.as_secs() + u64::from(wait.subsec_nanos() > 0)
-}
-
 /// 传入的时长（`datetime.timedelta`）：为负时抛 `InvalidInputError`，不是 PyO3 默认的 `ValueError`。
 #[derive(Clone, Copy)]
 pub(crate) struct Span(pub(crate) Duration);

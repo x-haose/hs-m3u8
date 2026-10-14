@@ -279,7 +279,7 @@ def test_waits_the_server_asks_for_are_reported(server: Server) -> None:
 
     assert limited.value.kind == HttpErrorKind.Status(429)
     assert limited.value.retryable
-    assert limited.value.retry_after == 100
+    assert limited.value.retry_after == timedelta(seconds=100)
     assert server.hits("limited.m3u8") == 1
 
 

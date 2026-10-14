@@ -5,6 +5,7 @@
 
 use std::io;
 use std::path::Path;
+use std::time::Duration;
 
 use hs_m3u8_core as core;
 use pyo3::exceptions::{PyException, PyOSError};
@@ -20,7 +21,7 @@ use self::reason::{
     HlsUnsupported, HookKind, IntegrityFailure, Malformed, SegmentRef, SelectFailure,
     SourceUnsupported, StallReason, WorkDirProblem,
 };
-use crate::convert::{Address, PyPath, Seq, wait_seconds};
+use crate::convert::{Address, PyPath, Seq};
 use crate::hooks::{Purpose, PyHookError};
 use crate::record::{field_names, partial};
 use crate::report::{HttpErrorKind, Leftover};
@@ -34,8 +35,8 @@ use crate::report::{HttpErrorKind, Leftover};
 pub struct HsM3u8Error {
     /// 外部的临时故障，稍后重试可能成功
     pub retryable: bool,
-    /// 服务器在 429/503 中要求（Retry-After）的最短等待，秒，向上取整；没有要求时为 None
-    pub retry_after: Option<u64>,
+    /// 服务器在 429/503 中要求（Retry-After）的最短等待；没有要求时为 None
+    pub retry_after: Option<Duration>,
     /// 出错的分片；不是分片的失败时为 None
     pub segment: Option<SegmentRef>,
     /// 取 key 的请求或回调出错时，key 的地址（播放列表里写的）；其余为 None（key 长度不对时地址在
@@ -62,7 +63,7 @@ impl HsM3u8Error {
     fn new(
         message: String,
         retryable: bool,
-        retry_after: Option<u64>,
+        retry_after: Option<Duration>,
         segment: Option<SegmentRef>,
         key_url: Option<Address>,
         leftovers: Option<Seq<Leftover>>,
@@ -92,7 +93,7 @@ impl HsM3u8Error {
         slf: &Bound<'_, Self>,
         message: String,
         retryable: bool,
-        retry_after: Option<u64>,
+        retry_after: Option<Duration>,
         segment: Option<SegmentRef>,
         key_url: Option<Address>,
         leftovers: Option<Seq<Leftover>>,
@@ -110,7 +111,7 @@ impl HsM3u8Error {
 
 impl HsM3u8Error {
     /// 不在分片与 key 里、没有残留的失败。
-    fn plain(retryable: bool, retry_after: Option<u64>) -> Self {
+    fn plain(retryable: bool, retry_after: Option<Duration>) -> Self {
         HsM3u8Error {
             retryable,
             retry_after,
@@ -199,7 +200,7 @@ macro_rules! exception {
                 message: String,
                 $($field: $ty,)*
                 retryable: bool,
-                retry_after: Option<u64>,
+                retry_after: Option<Duration>,
                 segment: Option<SegmentRef>,
                 key_url: Option<Address>,
                 leftovers: Option<Seq<Leftover>>,
@@ -224,7 +225,7 @@ macro_rules! exception {
                 message: String,
                 $($field: $ty,)*
                 retryable: bool,
-                retry_after: Option<u64>,
+                retry_after: Option<Duration>,
                 segment: Option<SegmentRef>,
                 key_url: Option<Address>,
                 leftovers: Option<Seq<Leftover>>,
@@ -484,7 +485,7 @@ pub(crate) fn traverse(error: &core::Error, visit: &PyVisit<'_>) -> Result<(), P
 
 /// 把 core 的错误翻译为 Python 异常；翻译本身出错时（如内存不足）抛那个错误。
 pub(crate) fn to_pyerr(py: Python<'_>, error: core::Error) -> PyErr {
-    let base = HsM3u8Error::plain(error.retryable(), error.retry_after().map(wait_seconds));
+    let base = HsM3u8Error::plain(error.retryable(), error.retry_after());
     let message = error.to_string();
     exception(py, error, base, message).unwrap_or_else(|failure| failure)
 }

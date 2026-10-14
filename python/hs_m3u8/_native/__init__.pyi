@@ -439,12 +439,12 @@ class FileError(HsM3u8Error):
         系统的错误码，同 `__cause__.errno`（磁盘满等按它区分，见 `errno` 模块）；不是系统报的错误时为 None。
         pickle 后仍在，`__cause__` 则不随 pickle 保存
         """
-    def __new__(cls, message: builtins.str, *, action: builtins.str, path: builtins.str | os.PathLike[str], errno: typing.Optional[builtins.int], retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> FileError:
+    def __new__(cls, message: builtins.str, *, action: builtins.str, path: builtins.str | os.PathLike[str], errno: typing.Optional[builtins.int], retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> FileError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, action: builtins.str, path: builtins.str | os.PathLike[str], errno: typing.Optional[builtins.int], retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, action: builtins.str, path: builtins.str | os.PathLike[str], errno: typing.Optional[builtins.int], retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -487,12 +487,12 @@ class HlsUnsupportedError(RequestError):
         r"""
         表示不了的原因
         """
-    def __new__(cls, message: builtins.str, *, reason: HlsUnsupported, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> HlsUnsupportedError:
+    def __new__(cls, message: builtins.str, *, reason: HlsUnsupported, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> HlsUnsupportedError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, reason: HlsUnsupported, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, reason: HlsUnsupported, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -508,12 +508,12 @@ class HookError(HsM3u8Error):
         r"""
         哪个回调
         """
-    def __new__(cls, message: builtins.str, *, hook: HookKind, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> HookError:
+    def __new__(cls, message: builtins.str, *, hook: HookKind, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> HookError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, hook: HookKind, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, hook: HookKind, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -625,9 +625,9 @@ class HsM3u8Error(builtins.Exception):
         外部的临时故障，稍后重试可能成功
         """
     @property
-    def retry_after(self) -> typing.Optional[builtins.int]:
+    def retry_after(self) -> typing.Optional[datetime.timedelta]:
         r"""
-        服务器在 429/503 中要求（Retry-After）的最短等待，秒，向上取整；没有要求时为 None
+        服务器在 429/503 中要求（Retry-After）的最短等待；没有要求时为 None
         """
     @property
     def segment(self) -> typing.Optional[SegmentRef]:
@@ -645,11 +645,11 @@ class HsM3u8Error(builtins.Exception):
         r"""
         失败后收拾也没做完而留下的东西；都做完时为空
         """
-    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> HsM3u8Error:
+    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> HsM3u8Error:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，`leftovers` 为 None 时为空。
         """
-    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -660,12 +660,12 @@ class HttpClientInitError(HsM3u8Error):
     本机建不出 HTTP 客户端：参数都已校验过，多为系统的证书校验用不了（如读不到系统的证书库）；与请求和来源无关，
     修好系统环境后再试。
     """
-    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> HttpClientInitError:
+    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> HttpClientInitError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -685,12 +685,12 @@ class HttpError(HsM3u8Error):
         r"""
         失败的原因
         """
-    def __new__(cls, message: builtins.str, *, url: builtins.str, kind: HttpErrorKind, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> HttpError:
+    def __new__(cls, message: builtins.str, *, url: builtins.str, kind: HttpErrorKind, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> HttpError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, url: builtins.str, kind: HttpErrorKind, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, url: builtins.str, kind: HttpErrorKind, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -843,13 +843,13 @@ class HttpFailure:
         临时故障，重试可能成功：超时、连接与传输错误，408、429 与 5xx
         """
     @property
-    def retry_after(self) -> typing.Optional[builtins.int]:
+    def retry_after(self) -> typing.Optional[datetime.timedelta]:
         r"""
-        服务器在 429/503 中要求（Retry-After）的最短等待，秒，向上取整；没有要求时为 None
+        服务器在 429/503 中要求（Retry-After）的最短等待；没有要求时为 None
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, kind: HttpErrorKind, retryable: builtins.bool, retry_after: typing.Optional[builtins.int]) -> HttpFailure:
+    def __new__(cls, *, kind: HttpErrorKind, retryable: builtins.bool, retry_after: typing.Optional[datetime.timedelta]) -> HttpFailure:
         r"""
         各参数即同名属性。
         """
@@ -911,12 +911,12 @@ class IncompleteError(HsM3u8Error):
         r"""
         播放列表、分片或 init 段的地址（可能带令牌；异常的说明里只显示到路径）
         """
-    def __new__(cls, message: builtins.str, *, url: builtins.str, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> IncompleteError:
+    def __new__(cls, message: builtins.str, *, url: builtins.str, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> IncompleteError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, url: builtins.str, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, url: builtins.str, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -936,12 +936,12 @@ class IntegrityError(SourceError):
         r"""
         失败的原因
         """
-    def __new__(cls, message: builtins.str, *, url: builtins.str, reason: IntegrityFailure, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> IntegrityError:
+    def __new__(cls, message: builtins.str, *, url: builtins.str, reason: IntegrityFailure, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> IntegrityError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, url: builtins.str, reason: IntegrityFailure, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, url: builtins.str, reason: IntegrityFailure, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -1091,12 +1091,12 @@ class InvalidInputError(RequestError):
     r"""
     参数不对。
     """
-    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> InvalidInputError:
+    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> InvalidInputError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -1136,12 +1136,12 @@ class JobCancelledError(HsM3u8Error):
     r"""
     任务已取消。
     """
-    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> JobCancelledError:
+    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> JobCancelledError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -1221,12 +1221,12 @@ class KeyLengthError(SourceError):
         r"""
         实际的字节数
         """
-    def __new__(cls, message: builtins.str, *, url: builtins.str, length: builtins.int, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> KeyLengthError:
+    def __new__(cls, message: builtins.str, *, url: builtins.str, length: builtins.int, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> KeyLengthError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, url: builtins.str, length: builtins.int, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, url: builtins.str, length: builtins.int, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -1404,12 +1404,12 @@ class LiveNotEnabledError(RequestError):
     r"""
     来源是直播，而请求没开启直播录制（`JobRequest.live` 为 None）。
     """
-    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> LiveNotEnabledError:
+    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> LiveNotEnabledError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -1504,12 +1504,12 @@ class LiveStalledError(HsM3u8Error):
         r"""
         停滞的原因
         """
-    def __new__(cls, message: builtins.str, *, track: builtins.int, reason: StallReason, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> LiveStalledError:
+    def __new__(cls, message: builtins.str, *, track: builtins.int, reason: StallReason, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> LiveStalledError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, track: builtins.int, reason: StallReason, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, track: builtins.int, reason: StallReason, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -2120,12 +2120,12 @@ class Mp4UnsupportedError(RequestError):
         r"""
         放不进的原因
         """
-    def __new__(cls, message: builtins.str, *, reason: Mp4Unsupported, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> Mp4UnsupportedError:
+    def __new__(cls, message: builtins.str, *, reason: Mp4Unsupported, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> Mp4UnsupportedError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, reason: Mp4Unsupported, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, reason: Mp4Unsupported, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -2164,12 +2164,12 @@ class NotMediaPlaylistError(SourceError):
         r"""
         这个地址
         """
-    def __new__(cls, message: builtins.str, *, url: builtins.str, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> NotMediaPlaylistError:
+    def __new__(cls, message: builtins.str, *, url: builtins.str, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> NotMediaPlaylistError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, url: builtins.str, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, url: builtins.str, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -2179,12 +2179,12 @@ class NothingRecordedError(HsM3u8Error):
     r"""
     直播没有录到可合并的分片。
     """
-    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> NothingRecordedError:
+    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> NothingRecordedError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -2252,12 +2252,12 @@ class OutputExistsError(RequestError):
         r"""
         输出路径
         """
-    def __new__(cls, message: builtins.str, *, path: builtins.str | os.PathLike[str], retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> OutputExistsError:
+    def __new__(cls, message: builtins.str, *, path: builtins.str | os.PathLike[str], retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> OutputExistsError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, path: builtins.str | os.PathLike[str], retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, path: builtins.str | os.PathLike[str], retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -2278,12 +2278,12 @@ class OutputOccupiedError(RequestError):
         r"""
         建不出来时，挡住它的上级（文件，或悬空的符号链接）；路径本身被占用时为 None
         """
-    def __new__(cls, message: builtins.str, *, path: builtins.str | os.PathLike[str], ancestor: typing.Optional[builtins.str | os.PathLike[str]], retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> OutputOccupiedError:
+    def __new__(cls, message: builtins.str, *, path: builtins.str | os.PathLike[str], ancestor: typing.Optional[builtins.str | os.PathLike[str]], retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> OutputOccupiedError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, path: builtins.str | os.PathLike[str], ancestor: typing.Optional[builtins.str | os.PathLike[str]], retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, path: builtins.str | os.PathLike[str], ancestor: typing.Optional[builtins.str | os.PathLike[str]], retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -2345,12 +2345,12 @@ class PlaylistError(SourceError):
         r"""
         不合法的原因
         """
-    def __new__(cls, message: builtins.str, *, url: builtins.str, reason: Malformed, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> PlaylistError:
+    def __new__(cls, message: builtins.str, *, url: builtins.str, reason: Malformed, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> PlaylistError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, url: builtins.str, reason: Malformed, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, url: builtins.str, reason: Malformed, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -2575,13 +2575,13 @@ class RefreshCause:
         一直这样失败到停滞时，稍后续录可能成功：取不到的看原因；内容不完整的当作暂时故障，同样可以
         """
     @property
-    def retry_after(self) -> typing.Optional[builtins.int]:
+    def retry_after(self) -> typing.Optional[datetime.timedelta]:
         r"""
-        服务器要求的最短等待，秒，向上取整，下次刷新不早于它；没有要求时为 None
+        服务器要求的最短等待，下次刷新不早于它；没有要求时为 None
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, reason: RefreshReason, retryable: builtins.bool, retry_after: typing.Optional[builtins.int]) -> RefreshCause:
+    def __new__(cls, *, reason: RefreshReason, retryable: builtins.bool, retry_after: typing.Optional[datetime.timedelta]) -> RefreshCause:
         r"""
         各参数即同名属性。
         """
@@ -2646,12 +2646,12 @@ class RemuxError(HsM3u8Error):
     合并 MP4 或下载中核对能否合并时失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是
     `Mp4UnsupportedError`。
     """
-    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> RemuxError:
+    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> RemuxError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -2660,12 +2660,12 @@ class RequestError(HsM3u8Error):
     r"""
     改请求再试：参数不对、输出路径不能用、选轨偏好与来源不符、没开启直播录制、内容放不进所选的输出。
     """
-    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> RequestError:
+    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> RequestError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -2737,12 +2737,12 @@ class ResponseTooLargeError(SourceError):
         r"""
         这类请求的响应体上限，字节
         """
-    def __new__(cls, message: builtins.str, *, url: builtins.str, purpose: Purpose, limit: builtins.int, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> ResponseTooLargeError:
+    def __new__(cls, message: builtins.str, *, url: builtins.str, purpose: Purpose, limit: builtins.int, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> ResponseTooLargeError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, url: builtins.str, purpose: Purpose, limit: builtins.int, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, url: builtins.str, purpose: Purpose, limit: builtins.int, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -2887,12 +2887,12 @@ class SelectError(RequestError):
         r"""
         选不出的原因
         """
-    def __new__(cls, message: builtins.str, *, reason: SelectFailure, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> SelectError:
+    def __new__(cls, message: builtins.str, *, reason: SelectFailure, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> SelectError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, reason: SelectFailure, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, reason: SelectFailure, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -3153,12 +3153,12 @@ class SourceError(HsM3u8Error):
     r"""
     来源本身不行，同样的请求再试也不会成功。
     """
-    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> SourceError:
+    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> SourceError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -3366,12 +3366,12 @@ class SourceUnsupportedError(SourceError):
         r"""
         哪个特性
         """
-    def __new__(cls, message: builtins.str, *, reason: SourceUnsupported, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> SourceUnsupportedError:
+    def __new__(cls, message: builtins.str, *, reason: SourceUnsupported, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> SourceUnsupportedError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, reason: SourceUnsupported, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, reason: SourceUnsupported, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -3576,12 +3576,12 @@ class SystemProxyError(HsM3u8Error):
     系统代理（`Proxy.System()`）用不了：设置的值用不了（写错、用了 PAC 或自动发现），或读不出（系统的接口失败）。
     可改用 `Proxy.Direct()` 或 `Proxy.Url(...)`。
     """
-    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> SystemProxyError:
+    def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> SystemProxyError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -3881,12 +3881,12 @@ class VolumeUnavailableError(HsM3u8Error):
         r"""
         系统的错误码，同 `FileError.errno`
         """
-    def __new__(cls, message: builtins.str, *, root: builtins.str | os.PathLike[str], errno: typing.Optional[builtins.int], retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> VolumeUnavailableError:
+    def __new__(cls, message: builtins.str, *, root: builtins.str | os.PathLike[str], errno: typing.Optional[builtins.int], retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> VolumeUnavailableError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, root: builtins.str | os.PathLike[str], errno: typing.Optional[builtins.int], retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, root: builtins.str | os.PathLike[str], errno: typing.Optional[builtins.int], retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
@@ -3906,12 +3906,12 @@ class WorkDirError(HsM3u8Error):
         r"""
         不能使用的原因
         """
-    def __new__(cls, message: builtins.str, *, path: builtins.str | os.PathLike[str], problem: WorkDirProblem, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> WorkDirError:
+    def __new__(cls, message: builtins.str, *, path: builtins.str | os.PathLike[str], problem: WorkDirProblem, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> WorkDirError:
         r"""
         `message` 为说明（`str(异常)`）；其余各参数即同名属性，基类 `HsM3u8Error` 的可省略，`leftovers` 为
         None 时为空。
         """
-    def __init__(self, message: builtins.str, *, path: builtins.str | os.PathLike[str], problem: WorkDirProblem, retryable: builtins.bool = False, retry_after: typing.Optional[builtins.int] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
+    def __init__(self, message: builtins.str, *, path: builtins.str | os.PathLike[str], problem: WorkDirProblem, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> None:
         r"""
         同构造函数：把说明放进 `args`。
         """
