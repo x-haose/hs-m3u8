@@ -46,7 +46,7 @@ async fn records_until_endlist() {
     assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
     let last = progress.borrow().clone();
     assert_eq!(
-        (last.stage, last.segments_done, last.segments_total),
+        (last.stage, last.segments.done, last.segments.total),
         (Stage::Done, 4, 4)
     );
 }
@@ -129,7 +129,7 @@ async fn refresh_errors_show_in_progress_until_recovered() {
         .start(live_request(server.url("live.m3u8"), &dir, STALL))
         .unwrap();
     let mut progress = job.control().progress();
-    progress.wait_for(|p| p.segments_done == 1).await.unwrap();
+    progress.wait_for(|p| p.segments.done == 1).await.unwrap();
 
     server.status("live.m3u8", StatusCode::SERVICE_UNAVAILABLE);
     let failed = tokio::time::timeout(
@@ -166,7 +166,7 @@ async fn half_written_playlists_are_waited_out() {
         .start(live_request(server.url("live.m3u8"), &dir, STALL))
         .unwrap();
     let mut progress = job.control().progress();
-    progress.wait_for(|p| p.segments_done == 1).await.unwrap();
+    progress.wait_for(|p| p.segments.done == 1).await.unwrap();
 
     let dangling = RefreshCause::Syntax {
         line: 6,
@@ -219,10 +219,10 @@ async fn window_slide_is_reported_as_missed() {
     let last = progress.borrow().clone();
     assert_eq!(
         (
-            last.segments_done,
-            last.segments_total,
-            last.segments_failed,
-            last.segments_expired
+            last.segments.done,
+            last.segments.total,
+            last.segments.failed,
+            last.segments.expired
         ),
         (2, 2, 0, 2)
     );
@@ -278,7 +278,7 @@ async fn gap_segments_are_reported_as_missed_without_fetching() {
     assert_eq!(server.hits("seg1.ts"), 0);
     let last = progress.borrow().clone();
     assert_eq!(
-        (last.segments_done, last.segments_total, last.segments_gap),
+        (last.segments.done, last.segments.total, last.segments.gap),
         (2, 2, 1)
     );
 }
@@ -456,10 +456,10 @@ async fn unavailable_new_init_is_missed() {
     let last = progress.borrow().clone();
     assert_eq!(
         (
-            last.segments_done,
-            last.segments_total,
-            last.segments_failed,
-            last.segments_expired
+            last.segments.done,
+            last.segments.total,
+            last.segments.failed,
+            last.segments.expired
         ),
         (1, 2, 1, 0)
     );
@@ -507,7 +507,7 @@ async fn refresh_does_not_wait_for_engine_permits() {
     gate.arrived.notified().await;
     server.put("v.m3u8", playlist(2, 1, true));
     // 刷新等名额时，要到 seg0 的请求读超时（30 秒）放开名额才出新分片：上限远小于它
-    let refreshed = progress.wait_for(|p| p.segments_total == 2);
+    let refreshed = progress.wait_for(|p| p.segments.total == 2);
     tokio::time::timeout(Duration::from_secs(10), refreshed)
         .await
         .expect("刷新不应等 seg0 放开名额")
@@ -665,7 +665,7 @@ async fn live_segments_do_not_wait_for_permits_held_by_vod_downloads() {
     let mut progress = live.control().progress();
     tokio::time::timeout(
         Duration::from_secs(10),
-        progress.wait_for(|p| p.segments_done == 2),
+        progress.wait_for(|p| p.segments.done == 2),
     )
     .await
     .expect("直播的分片不应等点播占着的名额")

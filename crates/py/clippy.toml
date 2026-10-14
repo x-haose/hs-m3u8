@@ -1,3 +1,3 @@
-# 14 为 Progress 构造函数的参数个数（record! 生成，参数与字段一一对应）：构造函数的参数即 Python 侧的关键字参数，
-# 个数由类的字段决定
-too-many-arguments-threshold = 14
+# 10 为最多字段的类（Progress 与几个带属性的异常）的构造函数参数个数：record! 与 exception! 生成，参数与字段一一对应，
+# 即 Python 侧的关键字参数，个数由类的字段决定
+too-many-arguments-threshold = 10

@@ -24,7 +24,7 @@ async fn stop_merges_what_was_recorded() {
         .start(live_request(server.url("live.m3u8"), &dir, STALL))
         .unwrap();
     let mut progress = job.control().progress();
-    progress.wait_for(|p| p.segments_done == 2).await.unwrap();
+    progress.wait_for(|p| p.segments.done == 2).await.unwrap();
     job.control().stop();
     let output = job.wait().await.unwrap();
 
@@ -40,7 +40,7 @@ async fn stop_is_observed_while_checking() {
     put_long(&server, "", &[0, 1, 2, 3]);
     server.put("live.m3u8", playlist(&[0, 1], false));
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
 
     server.put("live.m3u8", playlist(&[1, 2, 3], false));
     let gate = server.gate("seg1.ts");

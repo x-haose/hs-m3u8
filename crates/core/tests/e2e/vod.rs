@@ -72,7 +72,7 @@ async fn aes128_explicit_and_sequence_iv() {
     assert_eq!(output.segments, 4);
     let last = progress.borrow().clone();
     assert_eq!(
-        (last.stage, last.segments_done, last.segments_total),
+        (last.stage, last.segments.done, last.segments.total),
         (Stage::Done, 4, 4)
     );
     // 读到的字节：播放列表、两个 key 与四个分片（密文），各一次
@@ -333,7 +333,7 @@ async fn gap_segments_are_skipped_and_reported() {
     assert_eq!(server.hits("seg1.ts"), 0);
     let last = progress.borrow().clone();
     assert_eq!(
-        (last.segments_done, last.segments_total, last.segments_gap),
+        (last.segments.done, last.segments.total, last.segments.gap),
         (2, 2, 1)
     );
 }

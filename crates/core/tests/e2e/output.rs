@@ -588,7 +588,7 @@ async fn hls_cannot_mix_fmp4_and_ts_in_one_track() {
     req.live = Some(LiveOptions::default());
     let job = engine().start(req.clone()).unwrap();
     let mut progress = job.control().progress();
-    progress.wait_for(|p| p.segments_done == 1).await.unwrap();
+    progress.wait_for(|p| p.segments.done == 1).await.unwrap();
     job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
     server.put(

@@ -269,7 +269,7 @@ async fn a_held_playlist_that_contradicts_starts_a_new_session() {
     put_long(&server, "", &[0, 1, 2, 3]);
     server.put("live.m3u8", playlist(&[0, 1], false));
     let mut req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
 
     // 核对 seg1 先失败两次（退避 300 毫秒），其间刷新拿到序号 2 换了分片的一份
     req.source.http.retry = slow_retry(Duration::from_millis(300));

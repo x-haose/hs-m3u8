@@ -210,7 +210,7 @@ def test_downloads_write_the_mp4_and_report_its_streams(server: Server, tmp_path
     assert (output.segments, output.hls, output.live, output.leftovers) == (2, None, None, ())
     assert not (tmp_path / "out.hsdl").exists()
     assert progress.stage == Stage.Done()
-    assert (progress.segments_done, progress.segments_total) == (2, 2)
+    assert (progress.segments.done, progress.segments.total) == (2, 2)
 
 
 def test_download_sends_the_headers_and_refuses_live_sources(server: Server, tmp_path: Path) -> None:
@@ -264,7 +264,7 @@ def test_cancelled_jobs_keep_their_segments_and_resume(server: Server, tmp_path:
     progress = asyncio.run(cancel())
 
     assert progress.stage == Stage.Downloading()
-    assert (progress.segments_done, progress.segments_total) == (1, 2)
+    assert (progress.segments.done, progress.segments.total) == (1, 2)
     assert_survives_pickle(progress)
     assert request.output.resolved_work_dir().is_dir()
     assert run(request).segments == 2
@@ -671,7 +671,7 @@ def test_live_recordings_end_at_endlist_and_report_missing_segments(server: Serv
     assert [(m.first, m.last, m.reason) for m in output.missed] == [
         (1, 1, MissReason.Failed(FetchErrorKind.Http(HttpErrorKind.Status(404))))
     ]
-    assert (progress.segments_done, progress.segments_failed, progress.segments_expired) == (1, 1, 0)
+    assert (progress.segments.done, progress.segments.failed, progress.segments.expired) == (1, 1, 0)
     # 读到的字节含播放列表与取不到的请求，多于写进任务目录的分片
     assert progress.received > progress.bytes > 0
 

@@ -237,8 +237,8 @@ pub(crate) fn count_stored(stored: &Stored, progress: &watch::Sender<Progress>) 
     let bytes = stored.bytes();
     let duration_us = stored.duration_us(0);
     progress.send_modify(|p| {
-        p.segments_done = done;
-        p.segments_total = done;
+        p.segments.done = done;
+        p.segments.total = done;
         p.bytes = bytes;
         p.duration_us = duration_us;
     });
@@ -606,10 +606,10 @@ impl Recorder<'_> {
         let expired = update.expired.as_ref().map_or(0, Missed::count);
         let listed = update.items.len() + failed;
         self.progress.send_modify(|p| {
-            p.segments_total += listed;
-            p.segments_failed += failed;
-            p.segments_gap += gaps;
-            p.segments_expired = p.segments_expired.saturating_add(expired);
+            p.segments.total += listed;
+            p.segments.failed += failed;
+            p.segments.gap += gaps;
+            p.segments.expired = p.segments.expired.saturating_add(expired);
         });
         self.missed.extend(update.expired);
         self.missed.extend(update.init_failed);
@@ -681,7 +681,7 @@ impl Recorder<'_> {
             last: id.name.sequence,
             reason,
         });
-        self.progress.send_modify(|p| p.segments_failed += 1);
+        self.progress.send_modify(|p| p.segments.failed += 1);
         Ok(())
     }
 

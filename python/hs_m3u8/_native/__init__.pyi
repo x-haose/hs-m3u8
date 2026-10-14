@@ -75,6 +75,7 @@ __all__ = [
     "ResponseTooLargeError",
     "RetryPolicy",
     "Retrying",
+    "SegmentCounts",
     "SegmentRef",
     "SelectError",
     "SelectFailure",
@@ -2428,30 +2429,9 @@ class Progress:
         轨，不一定是偏好会选的那条
         """
     @property
-    def segments_done(self) -> builtins.int:
+    def segments(self) -> SegmentCounts:
         r"""
-        已完成的分片，各轨合计；含续传前已完成的
-        """
-    @property
-    def segments_total(self) -> builtins.int:
-        r"""
-        要下载的分片，各轨合计：已完成的（含续传前的）加上排入下载的；直播另含列出了但 init 段取不到的，随录制增长；
-        点播不含所在组合并不了的分片（见 `Output.missed`）。全部处理完时等于 `segments_done` 加 `segments_failed`
-        """
-    @property
-    def segments_failed(self) -> builtins.int:
-        r"""
-        直播本次运行中列出了、但分片或其 init 段取不到的分片，计入 `segments_total`；点播恒为 0
-        """
-    @property
-    def segments_expired(self) -> builtins.int:
-        r"""
-        直播本次运行中两次刷新之间已滑出窗口、没有列出过的分片，不在 `segments_total` 里；点播恒为 0
-        """
-    @property
-    def segments_gap(self) -> builtins.int:
-        r"""
-        来源标了 EXT-X-GAP（没有内容）、不取的分片，不在 `segments_total` 里；直播为本次运行中列出的
+        分片数，各轨合计
         """
     @property
     def duration(self) -> datetime.timedelta:
@@ -2497,7 +2477,7 @@ class Progress:
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, stage: Stage, selected: typing.Optional[Selected], segments_done: builtins.int, segments_total: builtins.int, segments_failed: builtins.int, segments_expired: builtins.int, segments_gap: builtins.int, duration: datetime.timedelta, bytes: builtins.int, received: builtins.int, retrying: collections.abc.Sequence[Retrying], writing: typing.Optional[Writing], refresh_errors: collections.abc.Sequence[typing.Optional[RefreshCause]], mp4_unsupported: typing.Optional[Mp4Unsupported]) -> Progress:
+    def __new__(cls, *, stage: Stage, selected: typing.Optional[Selected], segments: SegmentCounts, duration: datetime.timedelta, bytes: builtins.int, received: builtins.int, retrying: collections.abc.Sequence[Retrying], writing: typing.Optional[Writing], refresh_errors: collections.abc.Sequence[typing.Optional[RefreshCause]], mp4_unsupported: typing.Optional[Mp4Unsupported]) -> Progress:
         r"""
         各参数即同名属性。
         """
@@ -2826,6 +2806,45 @@ class Retrying:
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
     def __new__(cls, *, purpose: Purpose, failure: FetchFailure, retry: builtins.int, delay: datetime.timedelta) -> Retrying:
+        r"""
+        各参数即同名属性。
+        """
+    def __repr__(self) -> builtins.str: ...
+
+@typing.final
+class SegmentCounts:
+    r"""
+    分片数，各轨合计（`Progress.segments`）。
+    """
+    @property
+    def done(self) -> builtins.int:
+        r"""
+        已完成的；含续传前已完成的
+        """
+    @property
+    def total(self) -> builtins.int:
+        r"""
+        要下载的：已完成的（含续传前的）加上排入下载的；直播另含列出了但 init 段取不到的，随录制增长；点播不含所在组
+        合并不了的（见 `Output.missed`）。全部处理完时等于 `done` 加 `failed`
+        """
+    @property
+    def failed(self) -> builtins.int:
+        r"""
+        直播本次运行中列出了、但分片或其 init 段取不到的，计入 `total`；点播恒为 0
+        """
+    @property
+    def expired(self) -> builtins.int:
+        r"""
+        直播本次运行中两次刷新之间已滑出窗口、没有列出过的，不在 `total` 里；点播恒为 0
+        """
+    @property
+    def gap(self) -> builtins.int:
+        r"""
+        来源标了 EXT-X-GAP（没有内容）、不取的，不在 `total` 里；直播为本次运行中列出的
+        """
+    def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
+    def __hash__(self) -> builtins.int: ...
+    def __new__(cls, *, done: builtins.int, total: builtins.int, failed: builtins.int, expired: builtins.int, gap: builtins.int) -> SegmentCounts:
         r"""
         各参数即同名属性。
         """

@@ -28,7 +28,7 @@ async fn removed_playlist_ends_recording() {
         .start(live_request(server.url("live.m3u8"), &dir, STALL))
         .unwrap();
     let mut progress = job.control().progress();
-    progress.wait_for(|p| p.segments_total == 2).await.unwrap();
+    progress.wait_for(|p| p.segments.total == 2).await.unwrap();
     server.remove("live.m3u8");
     let gone = Some(RefreshCause::Http(HttpFailure {
         kind: HttpError::Status(404),
@@ -90,7 +90,7 @@ async fn a_stall_after_the_process_was_suspended_is_judged_on_a_fresh_refresh() 
         ))
         .unwrap();
     let mut progress = job.control().progress();
-    progress.wait_for(|p| p.segments_done == 2).await.unwrap();
+    progress.wait_for(|p| p.segments.done == 2).await.unwrap();
     server.put("live.m3u8", playlist(&[0, 1, 2, 3], false));
     // 停住唯一的运行时线程，模拟进程被挂起：其间录制与测试服务都不运行，时钟照走，超过停滞时长
     std::thread::sleep(Duration::from_millis(600));
@@ -192,7 +192,7 @@ async fn one_track_whose_playlist_is_removed_ends_the_recording() {
         .start(live_request(server.url("master.m3u8"), &dir, STALL))
         .unwrap();
     let mut progress = job.control().progress();
-    progress.wait_for(|p| p.segments_total >= 2).await.unwrap();
+    progress.wait_for(|p| p.segments.total >= 2).await.unwrap();
     server.remove("audio.m3u8");
 
     let output = job.wait().await.unwrap();
@@ -246,7 +246,7 @@ async fn one_failing_track_fails_the_recording() {
         .start(live_request(server.url("master.m3u8"), &dir, STALL))
         .unwrap();
     let mut progress = job.control().progress();
-    progress.wait_for(|p| p.segments_done >= 3).await.unwrap();
+    progress.wait_for(|p| p.segments.done >= 3).await.unwrap();
     server.status("audio.m3u8", StatusCode::INTERNAL_SERVER_ERROR);
 
     let err = job.wait().await.unwrap_err();
@@ -373,7 +373,7 @@ async fn playlists_that_stay_empty_stall_retryably() {
         ))
         .unwrap();
     let mut progress = job.control().progress();
-    progress.wait_for(|p| p.segments_done == 1).await.unwrap();
+    progress.wait_for(|p| p.segments.done == 1).await.unwrap();
     server.put("live.m3u8", "");
 
     let err = job.wait().await.unwrap_err();
@@ -442,7 +442,7 @@ async fn queued_segments_do_not_stall_a_track() {
         ))
         .unwrap();
     let mut progress = job.control().progress();
-    progress.wait_for(|p| p.segments_total == 5).await.unwrap();
+    progress.wait_for(|p| p.segments.total == 5).await.unwrap();
     server.ungate("video/seg0.m4s");
     drop(gate);
 
@@ -508,7 +508,7 @@ async fn endless_retry_after_ends_as_a_refresh_failure() {
         ))
         .unwrap();
     let mut progress = job.control().progress();
-    progress.wait_for(|p| p.segments_done == 1).await.unwrap();
+    progress.wait_for(|p| p.segments.done == 1).await.unwrap();
     server.status_retry_after(
         "live.m3u8",
         StatusCode::SERVICE_UNAVAILABLE,
@@ -568,7 +568,7 @@ async fn forbidden_refresh_fails_the_task() {
         .start(live_request(server.url("live.m3u8"), &dir, STALL))
         .unwrap();
     let mut progress = job.control().progress();
-    progress.wait_for(|p| p.segments_total == 2).await.unwrap();
+    progress.wait_for(|p| p.segments.total == 2).await.unwrap();
     server.status("live.m3u8", StatusCode::FORBIDDEN);
 
     let err = job.wait().await.unwrap_err();
@@ -607,7 +607,7 @@ async fn a_failing_other_track_is_not_taken_as_the_end() {
         .start(live_request(server.url("master.m3u8"), &dir, STALL))
         .unwrap();
     let mut progress = job.control().progress();
-    progress.wait_for(|p| p.segments_done == 4).await.unwrap();
+    progress.wait_for(|p| p.segments.done == 4).await.unwrap();
     server.status("video.m3u8", StatusCode::INTERNAL_SERVER_ERROR);
 
     let err = job.wait().await.unwrap_err();
@@ -643,7 +643,7 @@ async fn a_refresh_hanging_since_before_the_stall_is_concluded_promptly() {
         ))
         .unwrap();
     let mut progress = job.control().progress();
-    progress.wait_for(|p| p.segments_done == 1).await.unwrap();
+    progress.wait_for(|p| p.segments.done == 1).await.unwrap();
     let _hung = server.gate("live.m3u8");
 
     let err = tokio::time::timeout(Duration::from_secs(5), job.wait())
@@ -678,7 +678,7 @@ async fn a_stall_respects_the_servers_retry_after() {
         ))
         .unwrap();
     let mut progress = job.control().progress();
-    progress.wait_for(|p| p.segments_done == 1).await.unwrap();
+    progress.wait_for(|p| p.segments.done == 1).await.unwrap();
     server.status_retry_after("live.m3u8", StatusCode::SERVICE_UNAVAILABLE, "5");
     let before = server.hits("live.m3u8");
 

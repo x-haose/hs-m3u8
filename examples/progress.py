@@ -17,7 +17,7 @@ async def watch(job: Job) -> Output:
         done, _ = await asyncio.wait({waiting}, timeout=1)
         progress = job.progress()
         megabytes = progress.received / 1_000_000
-        print(f"{progress.segments_done}/{progress.segments_total} 个分片，已读 {megabytes:.1f} MB")
+        print(f"{progress.segments.done}/{progress.segments.total} 个分片，已读 {megabytes:.1f} MB")
         if done:
             return await waiting
 

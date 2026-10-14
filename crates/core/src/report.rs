@@ -15,17 +15,8 @@ pub struct Progress {
     /// 所选的变体与音频 rendition；解析完成前、或来源本身是媒体播放列表时为 None。有已完成分片的任务目录按
     /// 记录找回原来的轨，不一定是偏好会选的那条
     pub selected: Option<Selected>,
-    /// 已完成的分片，各轨合计；含续传前已完成的
-    pub segments_done: usize,
-    /// 要下载的分片，各轨合计：已完成的（含续传前的）加上排入下载的；直播另含列出了但 init 段取不到的，随录制增长；点播
-    /// 不含所在组合并不了的分片（见 [`Output::missed`]）。全部处理完时等于 `segments_done` 加 `segments_failed`
-    pub segments_total: usize,
-    /// 直播本次运行中列出了、但分片或其 init 段取不到的分片，计入 `segments_total`；点播恒为 0
-    pub segments_failed: usize,
-    /// 直播本次运行中两次刷新之间已滑出窗口、没有列出过的分片，不在 `segments_total` 里；点播恒为 0
-    pub segments_expired: usize,
-    /// 来源标了 EXT-X-GAP（没有内容）、不取的分片，不在 `segments_total` 里；直播为本次运行中列出的
-    pub segments_gap: usize,
+    /// 分片数，各轨合计
+    pub segments: SegmentCounts,
     /// 第 0 条轨已完成分片的声明时长之和，微秒；含续传前已完成的。直播即已录时长
     pub duration_us: u64,
     /// 任务目录中已完成的分片与 init 段的字节数（解密后）；含续传前已完成的
@@ -49,10 +40,26 @@ pub struct Progress {
     pub mp4_unsupported: Option<Mp4Unsupported>,
 }
 
+/// 分片数，各轨合计（[`Progress::segments`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SegmentCounts {
+    /// 已完成的；含续传前已完成的
+    pub done: usize,
+    /// 要下载的：已完成的（含续传前的）加上排入下载的；直播另含列出了但 init 段取不到的，随录制增长；点播不含所在组合并
+    /// 不了的（见 [`Output::missed`]）。全部处理完时等于 `done` 加 `failed`
+    pub total: usize,
+    /// 直播本次运行中列出了、但分片或其 init 段取不到的，计入 `total`；点播恒为 0
+    pub failed: usize,
+    /// 直播本次运行中两次刷新之间已滑出窗口、没有列出过的，不在 `total` 里；点播恒为 0
+    pub expired: usize,
+    /// 来源标了 EXT-X-GAP（没有内容）、不取的，不在 `total` 里；直播为本次运行中列出的
+    pub gap: usize,
+}
+
 impl Progress {
     /// 计入一个已完成的分片：第 `track` 条轨、声明时长 `duration_us`、`len` 字节。
     pub(crate) fn count_segment(&mut self, track: usize, duration_us: u64, len: u64) {
-        self.segments_done += 1;
+        self.segments.done += 1;
         self.bytes += len;
         if track == 0 {
             self.duration_us = self.duration_us.saturating_add(duration_us);

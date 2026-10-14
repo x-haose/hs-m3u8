@@ -28,10 +28,10 @@ async fn tracks_whose_latest_sessions_differ_continue_the_latest_one() {
         let url = Url::parse(&format!("{}?token={token}", server.url("master.m3u8"))).unwrap();
         live_request(url, &dir, STALL)
     };
-    interrupt(&with_token(1), |p| p.segments_done == 4).await;
+    interrupt(&with_token(1), |p| p.segments.done == 4).await;
 
     server.put("audio.m3u8", playlist_in("a/", &[2, 3], false));
-    interrupt(&with_token(1), |p| p.segments_done == 6).await;
+    interrupt(&with_token(1), |p| p.segments.done == 6).await;
     let video_hits = server.hits("v/seg0.ts");
 
     server.put("video.m3u8", playlist_in("v/", &[0, 1, 2, 3], true));
@@ -59,15 +59,15 @@ async fn skipped_sequences_stay_skipped_after_an_encoder_restart() {
     server.put("video.m3u8", playlist_in("v/", &[100, 101], false));
     server.put("audio.m3u8", playlist_in("a/", &[100, 101], false));
     let req = live_request(server.url("master.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 4).await;
+    interrupt(&req, |p| p.segments.done == 4).await;
 
     server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
     server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
-    interrupt(&req, |p| p.segments_done == 8).await;
+    interrupt(&req, |p| p.segments.done == 8).await;
 
     server.put("video.m3u8", playlist_in("v/", &[0, 1, 2], false));
     server.put("audio.m3u8", playlist_in("a/", &[2, 3], false));
-    interrupt(&req, |p| p.segments_done == 11).await;
+    interrupt(&req, |p| p.segments.done == 11).await;
     let video_hits = server.hits("v/seg0.ts");
 
     server.put("video.m3u8", playlist_in("v/", &[0, 1, 2, 3], true));
@@ -92,7 +92,7 @@ async fn a_fresh_sessions_head_is_refilled_below_an_earlier_maximum() {
     server.put("live.m3u8", playlist_in("old-", &[10], false));
     let mut req = live_request(server.url("live.m3u8"), &dir, STALL);
     req.concurrency = NonZeroUsize::new(2).unwrap();
-    interrupt(&req, |p| p.segments_done == 1).await;
+    interrupt(&req, |p| p.segments.done == 1).await;
 
     for i in 0..4 {
         server.put(
@@ -105,7 +105,7 @@ async fn a_fresh_sessions_head_is_refilled_below_an_earlier_maximum() {
     let job = engine().start(req.clone()).unwrap();
     let mut progress = job.control().progress();
     gate.arrived.notified().await;
-    progress.wait_for(|p| p.segments_done == 3).await.unwrap();
+    progress.wait_for(|p| p.segments.done == 3).await.unwrap();
     job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
     server.ungate("seg10.ts");
@@ -132,7 +132,7 @@ async fn a_track_never_recorded_joins_the_session() {
         live_request(url, &dir, STALL)
     };
     interrupt(&with_token(1), |p| {
-        p.segments_done == 2 && p.segments_failed == 2
+        p.segments.done == 2 && p.segments.failed == 2
     })
     .await;
 
@@ -176,7 +176,7 @@ async fn a_full_track_that_matches_verifies_a_new_token() {
     let server = Server::start().await;
     let with_token = video_only_first_run(&server, &dir);
     interrupt(&with_token(1, None), |p| {
-        p.segments_done == 2 && p.segments_failed == 2
+        p.segments.done == 2 && p.segments.failed == 2
     })
     .await;
 
@@ -199,7 +199,7 @@ async fn a_new_token_needs_a_verified_track() {
     let server = Server::start().await;
     let with_token = video_only_first_run(&server, &dir);
     interrupt(&with_token(1, None), |p| {
-        p.segments_done == 2 && p.segments_failed == 2
+        p.segments.done == 2 && p.segments.failed == 2
     })
     .await;
 
@@ -227,7 +227,7 @@ async fn an_unverifiable_full_track_fails_before_recording() {
     let server = Server::start().await;
     let with_token = video_only_first_run(&server, &dir);
     interrupt(&with_token(1, None), |p| {
-        p.segments_done == 2 && p.segments_failed == 2
+        p.segments.done == 2 && p.segments.failed == 2
     })
     .await;
 

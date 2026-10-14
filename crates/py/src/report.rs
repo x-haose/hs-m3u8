@@ -245,17 +245,8 @@ record! {
         /// 所选的变体与音频；解析完成前、或来源本身是媒体播放列表时为 None。有已完成分片的任务目录按记录找回原来的
         /// 轨，不一定是偏好会选的那条
         pub selected: Option<Selected>,
-        /// 已完成的分片，各轨合计；含续传前已完成的
-        pub segments_done: usize,
-        /// 要下载的分片，各轨合计：已完成的（含续传前的）加上排入下载的；直播另含列出了但 init 段取不到的，随录制增长；
-        /// 点播不含所在组合并不了的分片（见 `Output.missed`）。全部处理完时等于 `segments_done` 加 `segments_failed`
-        pub segments_total: usize,
-        /// 直播本次运行中列出了、但分片或其 init 段取不到的分片，计入 `segments_total`；点播恒为 0
-        pub segments_failed: usize,
-        /// 直播本次运行中两次刷新之间已滑出窗口、没有列出过的分片，不在 `segments_total` 里；点播恒为 0
-        pub segments_expired: usize,
-        /// 来源标了 EXT-X-GAP（没有内容）、不取的分片，不在 `segments_total` 里；直播为本次运行中列出的
-        pub segments_gap: usize,
+        /// 分片数，各轨合计
+        pub segments: SegmentCounts,
         /// 第 0 条轨已完成分片的声明时长之和；含续传前已完成的。直播即已录时长
         pub duration: Duration,
         /// 任务目录中已完成的分片与 init 段的字节数（解密后）；含续传前已完成的
@@ -277,6 +268,23 @@ record! {
         /// 由调用方定（直播错过的内容录不回来）；合并 MP4 时照样以 `Mp4UnsupportedError` 失败，可改为只输出本地 HLS
         /// 再合并。点播（下载各组的第一个分片后核对，放不进时任务直接失败）与不输出 MP4 时为 None
         pub mp4_unsupported: Option<Mp4Unsupported>,
+    }
+}
+
+record! {
+    /// 分片数，各轨合计（`Progress.segments`）。
+    pub struct SegmentCounts {
+        /// 已完成的；含续传前已完成的
+        pub done: usize,
+        /// 要下载的：已完成的（含续传前的）加上排入下载的；直播另含列出了但 init 段取不到的，随录制增长；点播不含所在组
+        /// 合并不了的（见 `Output.missed`）。全部处理完时等于 `done` 加 `failed`
+        pub total: usize,
+        /// 直播本次运行中列出了、但分片或其 init 段取不到的，计入 `total`；点播恒为 0
+        pub failed: usize,
+        /// 直播本次运行中两次刷新之间已滑出窗口、没有列出过的，不在 `total` 里；点播恒为 0
+        pub expired: usize,
+        /// 来源标了 EXT-X-GAP（没有内容）、不取的，不在 `total` 里；直播为本次运行中列出的
+        pub gap: usize,
     }
 }
 
@@ -643,11 +651,13 @@ impl From<core::Progress> for Progress {
         Progress {
             stage: p.stage.into(),
             selected: p.selected.map(Selected::from),
-            segments_done: p.segments_done,
-            segments_total: p.segments_total,
-            segments_failed: p.segments_failed,
-            segments_expired: p.segments_expired,
-            segments_gap: p.segments_gap,
+            segments: SegmentCounts {
+                done: p.segments.done,
+                total: p.segments.total,
+                failed: p.segments.failed,
+                expired: p.segments.expired,
+                gap: p.segments.gap,
+            },
             duration: Duration::from_micros(p.duration_us),
             bytes: p.bytes,
             received: p.received,
@@ -805,6 +815,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<HttpFailure>()?;
     module.add_class::<FetchErrorKind>()?;
     module.add_class::<FetchFailure>()?;
+    module.add_class::<SegmentCounts>()?;
     module.add_class::<Retrying>()?;
     module.add_class::<Writing>()?;
     module.add_class::<FileCount>()?;

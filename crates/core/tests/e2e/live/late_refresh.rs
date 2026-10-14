@@ -39,7 +39,7 @@ async fn resume_with_late_refresh(
 ) -> JobRequest {
     split_source(server, &[(1, 1, false)], &[(1, 1, false)]);
     let req = live_request(server.url("master.m3u8"), &test_dir(name), stall);
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
 
     server.put("video/first.m3u8", first);
     match later {
@@ -85,7 +85,7 @@ async fn a_late_refresh_with_a_new_init_is_prepared_and_recorded() {
     later.arrived.notified().await;
     server.ungate("video/seg0.m4s");
     // 音频的 seg1 排入下载，说明会话已定下
-    progress.wait_for(|p| p.segments_total >= 3).await.unwrap();
+    progress.wait_for(|p| p.segments.total >= 3).await.unwrap();
     server.ungate("video/later.m3u8");
     let output = tokio::time::timeout(Duration::from_secs(10), job.wait())
         .await
@@ -122,7 +122,7 @@ async fn stop_after_the_decision_does_not_wait_for_a_late_refresh() {
     // 两轨的 seg1 都排入下载：视频暂存的候选没有被挂着的刷新挡住
     tokio::time::timeout(
         Duration::from_secs(10),
-        progress.wait_for(|p| p.segments_total == 4),
+        progress.wait_for(|p| p.segments.total == 4),
     )
     .await
     .expect("暂存的候选应在会话定下时处理")
@@ -161,7 +161,7 @@ async fn a_failed_late_refresh_does_not_skip_held_playlists() {
     check.arrived.notified().await;
     later.arrived.notified().await;
     server.ungate("video/seg0.m4s");
-    progress.wait_for(|p| p.segments_total >= 3).await.unwrap();
+    progress.wait_for(|p| p.segments.total >= 3).await.unwrap();
     server.ungate("video/later.m3u8");
     let output = tokio::time::timeout(Duration::from_secs(10), job.wait())
         .await

@@ -25,7 +25,7 @@ async fn disjoint_window_starts_a_new_session() {
     put_long(&server, "", &[0, 1, 2, 3]);
     server.put("live.m3u8", playlist(&[0, 1], false));
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
 
     server.put("live.m3u8", playlist(&[2, 3], true));
     let output = run(req).await.unwrap();
@@ -45,7 +45,7 @@ async fn a_new_session_is_checked_against_the_group_recorded_before() {
     server.put("seg3.ts", fixture("ts_a/seg1.ts"));
     server.put("live.m3u8", playlist(&[0, 1], false));
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
 
     server.put("live.m3u8", playlist(&[2, 3], false));
     let job = engine().start(req).unwrap();
@@ -150,7 +150,7 @@ async fn overlapping_window_continues_the_session() {
     put_long(&server, "", &[0, 1, 2, 3]);
     server.put("live.m3u8", playlist(&[0, 1], false));
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
 
     server.put("live.m3u8", playlist(&[1, 2, 3], true));
     let output = run(req).await.unwrap();
@@ -169,7 +169,7 @@ async fn event_playlist_records_each_segment_once() {
     put_long(&server, "", &[0, 1, 2, 3]);
     server.put("live.m3u8", playlist(&[0, 1], false));
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
 
     server.put("live.m3u8", playlist(&[0, 1, 2, 3], true));
     let output = run(req).await.unwrap();
@@ -186,7 +186,7 @@ async fn segments_missing_from_the_session_are_refilled() {
     put_long(&server, "", &[0, 1, 3]);
     server.put("live.m3u8", playlist(&[0, 1, 2, 3], false));
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 3 && p.segments_failed == 1).await;
+    interrupt(&req, |p| p.segments.done == 3 && p.segments.failed == 1).await;
 
     put_long(&server, "", &[2]);
     server.put("live.m3u8", playlist(&[0, 1, 2, 3], true));
@@ -205,7 +205,7 @@ async fn holes_from_an_earlier_run_are_unknown() {
     put_long(&server, "", &[0, 2, 3]);
     server.put("live.m3u8", playlist(&[0, 1, 2, 3], false));
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 3 && p.segments_failed == 1).await;
+    interrupt(&req, |p| p.segments.done == 3 && p.segments.failed == 1).await;
 
     server.put("live.m3u8", playlist(&[3], true));
     let output = run(req).await.unwrap();
@@ -227,7 +227,7 @@ async fn max_duration_counts_earlier_sessions() {
         max_duration: Some(Duration::from_secs(2)),
         stall_timeout: STALL,
     });
-    interrupt(&req, |p| p.segments_done == 1).await;
+    interrupt(&req, |p| p.segments.done == 1).await;
 
     server.put("live.m3u8", playlist(&[1, 2, 3], false));
     let job = engine().start(req).unwrap();
@@ -265,7 +265,7 @@ async fn continue_finds_the_recorded_variant() {
     let lo = "#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=160x90\nlo.m3u8\n";
     server.put("master.m3u8", format!("#EXTM3U\n{lo}"));
     let req = live_request(server.url("master.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
 
     server.put(
         "master.m3u8",
@@ -281,7 +281,7 @@ async fn continue_finds_the_recorded_variant() {
     std::fs::remove_file(req.output.target.mp4().unwrap()).unwrap();
     server.put("master.m3u8", format!("#EXTM3U\n{lo}"));
     server.put("lo.m3u8", media("lo", false));
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
     server.put(
         "master.m3u8",
         "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2,RESOLUTION=320x180\nhi.m3u8\n",
@@ -313,7 +313,7 @@ async fn new_token_continues_only_when_the_window_overlaps() {
             STALL,
         )
     };
-    interrupt(&with_token(1), |p| p.segments_done == 2).await;
+    interrupt(&with_token(1), |p| p.segments.done == 2).await;
 
     server.put("live.m3u8", playlist(&[3], false));
     let err = run(with_token(2)).await.unwrap_err();
@@ -344,7 +344,7 @@ async fn a_new_path_continues_when_the_window_overlaps() {
     server.put("tok1/live.m3u8", playlist(&[0, 1], false));
     interrupt(
         &live_request(server.url("tok1/live.m3u8"), &dir, STALL),
-        |p| p.segments_done == 2,
+        |p| p.segments.done == 2,
     )
     .await;
 
@@ -362,7 +362,7 @@ async fn a_live_directory_without_live_options_is_a_kind_mismatch() {
     put_long(&server, "", &[0, 1]);
     server.put("live.m3u8", playlist(&[0, 1], false));
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
 
     server.put("live.m3u8", playlist(&[0, 1], true));
     let mut vod = req;
@@ -393,7 +393,7 @@ async fn merge_recorded_merges_without_the_network() {
     put_long(&server, "", &[0, 1, 2, 3]);
     server.put("live.m3u8", playlist(&[0, 1, 2], false));
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 3).await;
+    interrupt(&req, |p| p.segments.done == 3).await;
     server.stop().await;
 
     let job = engine().merge_recorded(req.output.clone()).unwrap();
@@ -403,7 +403,7 @@ async fn merge_recorded_merges_without_the_network() {
     assert_output(&output, &expected_long(&dir, &[0, 1, 2], &[3]));
     let last = progress.borrow().clone();
     assert_eq!(
-        (last.stage, last.segments_done, last.duration_us),
+        (last.stage, last.segments.done, last.duration_us),
         (Stage::Done, 3, 3_000_000)
     );
     let want = LiveReport {
@@ -422,7 +422,7 @@ async fn a_tampered_segment_is_a_corrupt_work_dir_for_every_target() {
     put_long(&server, "", &[0, 1]);
     server.put("live.m3u8", playlist(&[0, 1], false));
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
     let work_dir = req.output.resolved_work_dir().unwrap();
     let segment = std::fs::read_dir(work_dir.join("tracks/0"))
         .unwrap()
@@ -495,7 +495,7 @@ async fn changed_preference_is_rejected_for_master_playlists_only() {
     server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
     server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
     let req = live_request(server.url("master.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 4).await;
+    interrupt(&req, |p| p.segments.done == 4).await;
 
     let mut other = req;
     other.source.preference.audio = AudioChoice::Language("en".into());
@@ -515,7 +515,7 @@ async fn changed_preference_is_rejected_for_master_playlists_only() {
     put_long(&server, "", &[0, 1]);
     server.put("live.m3u8", playlist(&[0, 1], false));
     let req = live_request(server.url("live.m3u8"), &media_dir, STALL);
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
     server.put("live.m3u8", playlist(&[0, 1], true));
     let mut other = req;
     other.source.preference.audio = AudioChoice::Language("en".into());
@@ -532,7 +532,7 @@ async fn encoder_restart_with_reused_names_starts_a_new_session() {
     put_long(&server, "", &[0, 1, 2, 3]);
     server.put("live.m3u8", playlist(&[0, 1, 2, 3], false));
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 4).await;
+    interrupt(&req, |p| p.segments.done == 4).await;
 
     // 重启后的新节目：seg0、seg1 是另两段内容
     server.put("seg0.ts", fixture("ts_long/seg2.ts"));
@@ -557,13 +557,13 @@ async fn skipped_segments_are_not_refilled_later() {
     server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
     server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
     let req = live_request(server.url("master.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 3 && p.segments_failed == 1).await;
+    interrupt(&req, |p| p.segments.done == 3 && p.segments.failed == 1).await;
 
     // 运行 2：窗口 [1,2]；视频与会话 0 重叠，音频没有 → 会话 1，视频只录 2，音频录 1、2
     put_long(&server, "a/", &[1, 2, 3]);
     server.put("video.m3u8", playlist_in("v/", &[1, 2], false));
     server.put("audio.m3u8", playlist_in("a/", &[1, 2], false));
-    interrupt(&req, |p| p.segments_done == 6).await;
+    interrupt(&req, |p| p.segments.done == 6).await;
 
     // 运行 3：窗口 [1,2,3] 并结束；两轨都接得上会话 1
     server.put("video.m3u8", playlist_in("v/", &[1, 2, 3], true));
@@ -583,7 +583,7 @@ async fn empty_first_playlist_does_not_decide_the_session() {
     put_long(&server, "", &[0, 1, 2, 3]);
     server.put("live.m3u8", playlist(&[0, 1], false));
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
 
     server.put_sequence(
         "live.m3u8",

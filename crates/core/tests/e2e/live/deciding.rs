@@ -29,7 +29,7 @@ async fn in_flight_first_segment_is_refilled() {
     let job = engine().start(req.clone()).unwrap();
     let mut progress = job.control().progress();
     gate.arrived.notified().await;
-    progress.wait_for(|p| p.segments_done == 3).await.unwrap();
+    progress.wait_for(|p| p.segments.done == 3).await.unwrap();
     job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
     server.ungate("seg0.ts");
@@ -53,7 +53,7 @@ async fn a_waiting_track_stops_while_another_keeps_going() {
     server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
     server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
     let req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(500));
-    interrupt(&req, |p| p.segments_done == 4).await;
+    interrupt(&req, |p| p.segments.done == 4).await;
 
     // 视频每次刷新多一个分片（会话定下之前不下载，不必有内容），远长于音频停滞所需的时间
     let growing = (2..100)
@@ -88,7 +88,7 @@ async fn an_ended_live_with_an_emptied_track_ends_normally() {
     server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
     server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
     let req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(500));
-    interrupt(&req, |p| p.segments_done == 4).await;
+    interrupt(&req, |p| p.segments.done == 4).await;
 
     server.put("audio.m3u8", playlist_in("a/", &[], false));
     let output = run(req).await.unwrap();
@@ -113,7 +113,7 @@ async fn a_slow_check_does_not_stall_a_waiting_track() {
     server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
     server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
     let mut req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(300));
-    interrupt(&req, |p| p.segments_done == 4).await;
+    interrupt(&req, |p| p.segments.done == 4).await;
 
     req.source.http.retry = slow_retry(Duration::from_millis(300));
     server.fail("v/seg1.ts", 2);
@@ -144,7 +144,7 @@ async fn a_stall_while_deciding_still_records_listed_segments() {
     server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
     server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
     let req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(500));
-    interrupt(&req, |p| p.segments_done == 4).await;
+    interrupt(&req, |p| p.segments.done == 4).await;
 
     server.put("video.m3u8", playlist_in("v/", &[0, 1, 2, 3], true));
     server.put("audio.m3u8", playlist_in("a/", &[], false));
@@ -172,7 +172,7 @@ async fn a_stall_while_another_track_is_checking() {
     server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
     server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
     let mut req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(300));
-    interrupt(&req, |p| p.segments_done == 4).await;
+    interrupt(&req, |p| p.segments.done == 4).await;
 
     req.source.http.retry = slow_retry(Duration::from_millis(800));
     server.fail("v/seg1.ts", 2);
@@ -203,7 +203,7 @@ async fn a_slow_init_fetch_does_not_stall_another_track() {
         signed_fmp4_playlist("video", "2", 1, 1, false),
     );
     let mut req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(300));
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
 
     req.source.http.retry = slow_retry(Duration::from_millis(300));
     server.put("video.m3u8", signed_fmp4_playlist("video", "2", 2, 2, true));
@@ -236,7 +236,7 @@ async fn an_ended_track_without_segments_does_not_affect_the_decision() {
         let url = Url::parse(&format!("{}?token={token}", server.url("master.m3u8"))).unwrap();
         live_request(url, &dir, STALL)
     };
-    interrupt(&with_token(1), |p| p.segments_done == 4).await;
+    interrupt(&with_token(1), |p| p.segments.done == 4).await;
 
     server.put("video.m3u8", playlist_in("v/", &[0, 1, 2, 3], true));
     server.put("audio.m3u8", playlist_in("a/", &[], true));
@@ -258,7 +258,7 @@ async fn tracks_without_candidates_all_end_together() {
     server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
     server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
     let req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(300));
-    interrupt(&req, |p| p.segments_done == 4).await;
+    interrupt(&req, |p| p.segments.done == 4).await;
 
     server.put("video.m3u8", playlist_in("v/", &[], false));
     server.put("audio.m3u8", playlist_in("a/", &[], false));
@@ -322,7 +322,7 @@ async fn transient_failure_while_checking_is_reported() {
     put_long(&server, "", &[0, 1, 2, 3]);
     server.put("live.m3u8", playlist(&[0, 1], false));
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
 
     server.put("live.m3u8", playlist(&[1, 2, 3], true));
     server.fail("seg1.ts", 3);
@@ -346,7 +346,7 @@ async fn an_older_overlap_is_checked_when_the_newest_keeps_failing() {
     put_long(&server, "", &[0, 1, 2, 3]);
     server.put("live.m3u8", playlist(&[0, 1], false));
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
 
     server.put("live.m3u8", playlist(&[0, 1, 2, 3], true));
     server.status("seg1.ts", StatusCode::SERVICE_UNAVAILABLE);
@@ -367,7 +367,7 @@ async fn transient_failure_with_a_new_token_is_not_unverified() {
         let url = Url::parse(&format!("{}?token={token}", server.url("live.m3u8"))).unwrap();
         live_request(url, &dir, STALL)
     };
-    interrupt(&with_token(1), |p| p.segments_done == 2).await;
+    interrupt(&with_token(1), |p| p.segments.done == 2).await;
 
     server.put("live.m3u8", playlist(&[1, 2], true));
     server.fail("seg1.ts", 3);
@@ -414,7 +414,7 @@ async fn inits_of_recorded_segments_are_not_fetched_again() {
         ),
     );
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
 
     server.status("a/init.mp4", StatusCode::FORBIDDEN);
     server.put(
@@ -450,7 +450,7 @@ async fn slow_check_does_not_count_as_a_stall() {
     put_long(&server, "", &[0, 1, 2, 3]);
     server.put("live.m3u8", playlist(&[0, 1], false));
     let mut req = live_request(server.url("live.m3u8"), &dir, Duration::from_millis(300));
-    interrupt(&req, |p| p.segments_done == 2).await;
+    interrupt(&req, |p| p.segments.done == 2).await;
 
     // 核对 seg1 先失败两次，退避合计至少 600 毫秒；其间播放列表一直没有新分片、也没结束（约 100 毫秒刷新一次，
     // 前六次都是 [0,1]），之后才出现 2、3
