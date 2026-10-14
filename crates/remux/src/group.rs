@@ -7,6 +7,7 @@ use crate::codecs::check_codec;
 use crate::compare::{Config, Desc, same_streams};
 use crate::inband::Inband;
 use crate::input::Input;
+use crate::nal::Framing;
 use crate::source::Source;
 use crate::{Cancel, Error, Numbered, StreamKind, Streams, TrackSegments, Unsupported, ffi, frame};
 
@@ -16,6 +17,9 @@ pub(crate) struct Selected {
     pub(crate) time_base: Rational,
     pub(crate) id: codec::Id,
     pub(crate) desc: Desc,
+    /// HEVC 视频：包里 NAL 单元的排法，用于认出参考上一个 GOP 的前导帧（见 [`crate::nal::hevc_rasl`]）；其余流，及 MP4
+    /// 的解码配置太短读不出排法时为 None
+    pub(crate) hevc: Option<Framing>,
 }
 
 /// 打开一条轨在一组里的分片，按 `wanted` 选出第一路视频与（或）第一路音频，并检查编码是否受支持。
@@ -56,11 +60,17 @@ fn open_selected(
                 Config::Init(extradata)
             }
         };
+        let hevc = match (&config, id) {
+            (Config::Inband, codec::Id::HEVC) => Some(Framing::AnnexB),
+            (Config::Init(hvcc), codec::Id::HEVC) => Framing::of_hvcc(hvcc),
+            _ => None,
+        };
         selected.push(Selected {
             index: stream.index(),
             time_base: stream.time_base(),
             id,
             desc: Desc { shape, config },
+            hevc,
         });
     }
     Ok((input, selected))

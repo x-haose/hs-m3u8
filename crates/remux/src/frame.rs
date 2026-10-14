@@ -2,8 +2,6 @@
 //! 字节数（打包音频按它切帧，见 [`crate::packed`]）。合法性的判定与 FFmpeg 9.0.2 的帧头解析一致，帧头不合法时为 None；
 //! 从字节里认 ADTS 另有要求（见 [`is_adts`]）。另读 MP4 里 AAC 解码配置的编码类型。
 
-use crate::bits::Bits;
-
 /// ADTS 帧头里 MP4 的 AudioSpecificConfig 由之写成的三项（ISO/IEC 14496-3 1.A.2.2）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Adts {
@@ -262,6 +260,35 @@ pub(crate) fn audio_object_type(config: &[u8]) -> Option<u32> {
     match b.read(5)? {
         31 => Some(32 + b.read(6)?),
         aot => Some(aot),
+    }
+}
+
+/// 按位从高到低读字节。
+struct Bits<'a> {
+    data: &'a [u8],
+    /// 已读的位数
+    at: usize,
+}
+
+impl Bits<'_> {
+    fn new(data: &[u8]) -> Bits<'_> {
+        Bits { data, at: 0 }
+    }
+
+    /// 读 `n`（不超过 32）位；数据不够时为 None。
+    fn read(&mut self, n: usize) -> Option<u32> {
+        let mut value = 0;
+        for _ in 0..n {
+            let byte = self.data.get(self.at / 8)?;
+            value = value << 1 | u32::from(byte >> (7 - self.at % 8) & 1);
+            self.at += 1;
+        }
+        Some(value)
+    }
+
+    /// 读 `n` 位，须等于 `expected`。
+    fn expect(&mut self, n: usize, expected: u32) -> Option<()> {
+        (self.read(n)? == expected).then_some(())
     }
 }
 

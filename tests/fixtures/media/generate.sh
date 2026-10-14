@@ -170,7 +170,7 @@ change_enc=(-c:v libx264 -preset veryfast -bf 0 -g 10 -b:v 150k "${aac[@]}" -f m
   -output_ts_offset 1.1 "${change_enc[@]}" "$DIR/ts_param_change/seg1.ts"
 
 # H.264 开放 GOP、去掉 SEI（没有 recovery point）：4 秒按 1 秒切成 4 片，第二片起以非 IDR 的 I 帧开头，FFmpeg 不给它打
-# 关键帧标志；每帧都带参数集
+# 关键帧标志、之后的帧参考它之前的帧；每帧都带参数集
 read -r -a four_src <<< "$(source_args testsrc2 320x180 440 4)"
 ts_segments ts_h264_open_gop "${four_src[@]}" -c:v libx264 -preset veryfast -x264-params open-gop=1:ref=3:keyint=25:scenecut=0 \
   -pix_fmt yuv420p -b:v 150k -bsf:v filter_units=remove_types=6,dump_extra=freq=all "${aac[@]}"

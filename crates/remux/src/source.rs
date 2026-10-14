@@ -2,10 +2,9 @@
 
 use std::collections::VecDeque;
 
-use ffmpeg::{Packet, Rational, Rescale, codec};
+use ffmpeg::{Packet, Rational, Rescale};
 use ffmpeg_next as ffmpeg;
 
-use crate::compare::Config;
 use crate::group::Selected;
 use crate::inband::{Inband, Mismatch};
 use crate::input::Input;
@@ -43,8 +42,8 @@ pub(crate) struct Source {
     pub(crate) inband: Vec<Option<Inband>>,
     /// 按输入流下标
     pub(crate) dropped: Vec<Dropped>,
-    /// 按输入流下标：进输出的视频流的编码与包里 NAL 单元的排法（H.264、HEVC 才有，见 [`Source::decodable`]）
-    video: Vec<Option<(codec::Id, Option<Framing>)>>,
+    /// 按输入流下标：HEVC 视频流包里 NAL 单元的排法（见 [`Selected::hevc`]）
+    hevc: Vec<Option<Framing>>,
     /// 按输入流下标：视频流在这一组里读到的第一个能开始解码的帧的 PTS（没有 PTS 时为 DTS），还没读到时为 None
     keyframe_pts: Vec<Option<i64>>,
     /// 按输入流下标：上一个要写出的包所在的分片与它的 DTS（微秒），见 [`Source::check_advance`]
@@ -70,7 +69,7 @@ impl Source {
         let streams = input.context().nb_streams() as usize;
         let mut map = vec![None; streams];
         let mut inband = vec![None; streams];
-        let mut video = vec![None; streams];
+        let mut hevc = vec![None; streams];
         for (s, &output) in selected.iter().zip(outputs) {
             let kind = s.desc.shape.kind();
             map[s.index] = Some(Mapping {
@@ -78,16 +77,7 @@ impl Source {
                 kind,
                 time_base: s.time_base,
             });
-            if kind == StreamKind::Video {
-                let framing = match (&s.desc.config, s.id) {
-                    (Config::Inband, _) => Some(Framing::AnnexB),
-                    (Config::Init(config), codec::Id::H264 | codec::Id::HEVC) => {
-                        Framing::of_config(config, s.id == codec::Id::HEVC)
-                    }
-                    _ => None,
-                };
-                video[s.index] = Some((s.id, framing));
-            }
+            hevc[s.index] = s.hevc;
             if input.standalone() {
                 inband[s.index] = Some(match references.get(output).cloned().flatten() {
                     Some(reference) => reference.for_next_group(),
@@ -102,7 +92,7 @@ impl Source {
             map,
             inband,
             dropped: vec![Dropped::default(); streams],
-            video,
+            hevc,
             keyframe_pts: vec![None; streams],
             last_written: vec![None; streams],
             queue: VecDeque::new(),
@@ -133,7 +123,7 @@ impl Source {
                 self.dropped[packet.stream()].without_dts += 1;
                 continue;
             }
-            if mapping.kind == StreamKind::Video && !self.decodable(&mut packet) {
+            if mapping.kind == StreamKind::Video && !self.decodable(&packet) {
                 self.dropped[packet.stream()].before_keyframe += 1;
                 continue;
             }
@@ -218,32 +208,22 @@ impl Source {
         }
     }
 
-    /// 带 DTS 的视频包在这一组里解得出：从这一组第一个能开始解码的帧起（FFmpeg 标的关键帧；H.264 另认整帧都是 I slice
-    /// 的帧，FFmpeg 不给不带 recovery point SEI 的非 IDR I 帧打标志，见 [`crate::nal`]），除去参考上一个 GOP 的前导帧
-    /// （HEVC 按 NAL 类型只去掉 RASL；H.264 没有这样的标记，解码在起点之后、呈现在它之前的帧一律去掉）。之前的帧参考的
-    /// 帧不在这一组里：第 0 组之前什么也没有，其余组之前是不连续处另一段内容的帧。认作起点而 FFmpeg 没标关键帧的包补上
-    /// 标志：写进 MP4 的同步样本表，播放器从它开始解码。
-    fn decodable(&mut self, packet: &mut Packet) -> bool {
+    /// 带 DTS 的视频包在这一组里解得出：从这一组第一个 FFmpeg 标的关键帧（随机访问点：IDR、带 recovery point SEI 的
+    /// 帧、参考帧数不超过 1 的 I 帧等）起，除去参考上一个 GOP 的前导帧（HEVC 按 NAL 类型只去掉 RASL；其余编码没有这样
+    /// 的标记，解码在起点之后、呈现在它之前的帧一律去掉）。之前的帧参考的帧不在这一组里：第 0 组之前什么也没有，其余组
+    /// 之前是不连续处另一段内容的帧。FFmpeg 没标的 I 帧不当起点：它之后的帧可能参考它之前的帧，光看码流确认不了。
+    fn decodable(&mut self, packet: &Packet) -> bool {
         let stream = packet.stream();
-        let (id, framing) = self.video[stream].expect("只对进输出的视频流调用");
         let pts = packet.pts().or(packet.dts()).expect("调用方已确认带 DTS");
-        let data = packet.data().unwrap_or_default();
         match self.keyframe_pts[stream] {
             Some(key) if pts >= key => true,
-            Some(_) => match (id, framing) {
-                (codec::Id::HEVC, Some(framing)) => !nal::hevc_rasl(data, framing),
-                _ => false,
-            },
-            None => {
-                let intra = id == codec::Id::H264
-                    && framing.is_some_and(|framing| nal::h264_intra(data, framing));
-                if !packet.is_key() && !intra {
-                    return false;
-                }
+            Some(_) => self.hevc[stream]
+                .is_some_and(|framing| !nal::hevc_rasl(packet.data().unwrap_or_default(), framing)),
+            None if packet.is_key() => {
                 self.keyframe_pts[stream] = Some(pts);
-                packet.set_flags(packet.flags() | ffmpeg::packet::Flags::KEY);
                 true
             }
+            None => false,
         }
     }
 

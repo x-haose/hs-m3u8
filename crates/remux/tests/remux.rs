@@ -1233,48 +1233,31 @@ fn probing_reads_through_the_declared_duration_of_the_first_segment() {
     );
 }
 
-/// H.264 开放 GOP、不带 recovery point SEI：从第二片起每片以非 IDR 的 I 帧开头，FFmpeg 不给它打关键帧标志。以它开头
-/// 的组从这个 I 帧开始写，只去掉呈现在它之前、参考上一个 GOP 的帧，视频与音频一样长；这个 I 帧补上关键帧标志，MP4 的
-/// 同步样本表（stss，只有视频轨有）恰好列出它。
+/// H.264 开放 GOP、不带 recovery point SEI：从第二片起每片以非 IDR 的 I 帧开头，FFmpeg 不给它打关键帧标志，之后的帧
+/// 参考它之前的帧。从第二片起的组没有关键帧，明确报错，不写出解不出的画面。
 #[test]
-fn an_h264_open_gop_without_recovery_points_starts_at_its_intra_frame() {
+fn an_h264_open_gop_without_recovery_points_has_no_keyframe() {
     let dir = work_dir("h264_open_gop");
-    let output = dir.join("out.mp4");
     let gop = track("ts_h264_open_gop");
     let later = TrackSegments {
         segments: gop.segments[1..].to_vec(),
         ..gop.clone()
     };
-    let (v_in, a_in) = timelines(&concat_track(&later, &dir, "later.ts"));
-    let leading = v_in.iter().skip(1).filter(|p| p.0 < v_in[0].0).count();
 
-    let report = remux(
+    let err = remux(
         &[Streams::All],
         &[group([later])],
-        &output,
+        &dir.join("out.mp4"),
         &Cancel::never(),
     )
-    .unwrap();
+    .unwrap_err();
 
-    let video = &report.streams[0];
-    assert_eq!(video.skipped_before_keyframe, leading as u64, "{video:?}");
-    assert_eq!(video.packets, (v_in.len() - leading) as u64);
-    let v_out = timelines(&output).0;
     assert!(
-        (span(&v_out) - span(&a_in)).abs() < 0.2,
-        "视频 {} 秒，音频 {} 秒",
-        span(&v_out),
-        span(&a_in)
-    );
-    // stss：版本与标志 4 字节、条目数 1、第 1 个样本
-    let data = std::fs::read(&output).unwrap();
-    let at = data
-        .windows(4)
-        .position(|w| w == b"stss")
-        .expect("视频轨应有同步样本表");
-    assert_eq!(
-        &data[at + 4..at + 16],
-        &[0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1]
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::NoKeyframe { group: 0, track: 0 })
+        ),
+        "{err:?}"
     );
 }
 

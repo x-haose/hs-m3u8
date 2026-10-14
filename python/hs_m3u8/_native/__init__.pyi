@@ -1925,8 +1925,8 @@ class Mp4Unsupported:
     @typing.final
     class NoKeyframe(Mp4Unsupported):
         r"""
-        这一组里这条轨的视频没有一个能开始解码的帧（关键帧；H.264 另认整帧都是 I slice 的帧）：各帧参考的帧都不在这
-        一组里，写进去解不出画面
+        这一组里这条轨的视频没有关键帧（随机访问点；不带 recovery point SEI 的 H.264 开放 GOP 里非 IDR 的 I 帧不算：
+        之后的帧可能参考它之前的帧）：写进去解不出画面
         """
         __match_args__ = ("group", "track",)
         @property
@@ -3234,8 +3234,8 @@ class StreamReport:
     @property
     def skipped_before_keyframe(self) -> builtins.int:
         r"""
-        各组开头解不出、因而未写入的视频包数：第一个能开始解码的帧（关键帧；H.264 另认整帧都是 I slice 的帧）之前的
-        包，与参考上一个 GOP 的前导帧（HEVC 为 RASL；H.264 为解码在起点之后、呈现在它之前的帧）。音频为 0
+        各组开头解不出、因而未写入的视频包数：第一个关键帧（随机访问点）之前的包，与参考上一个 GOP 的前导帧（HEVC 为
+        RASL；其余编码为解码在关键帧之后、呈现在它之前的帧）。音频为 0
         """
     @property
     def discarded_corrupt_bytes(self) -> builtins.int:
