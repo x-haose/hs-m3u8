@@ -229,6 +229,24 @@ fn get_ffmpeg_target_os() -> String {
     }
 }
 
+/// 本机 macOS SDK 的路径（`xcrun --show-sdk-path`）；取不到时失败并说明要装 Xcode 命令行工具。
+fn macos_sdk_path() -> String {
+    let output = Command::new("xcrun")
+        .arg("--show-sdk-path")
+        .output()
+        .unwrap_or_else(|e| panic!("运行 xcrun 失败（要装 Xcode 命令行工具）：{e}"));
+    if !output.status.success() {
+        panic!(
+            "xcrun --show-sdk-path 失败（要装 Xcode 命令行工具）：{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    String::from_utf8(output.stdout)
+        .expect("xcrun 给出的 SDK 路径是 UTF-8")
+        .trim()
+        .to_owned()
+}
+
 /// Find the sysroot required for a cross compilation by ffmpeg **and** bindgen
 /// @see https://github.com/rust-lang/rust-bindgen/issues/1229
 fn find_sysroot() -> Option<String> {
@@ -1756,6 +1774,9 @@ fn main() {
 
     if let Some(sysroot) = sysroot.as_deref() {
         builder = builder.clang_arg(format!("--sysroot={sysroot}"));
+    } else if target_os == "macos" && env::var_os("BINDGEN_EXTRA_CLANG_ARGS").is_none() {
+        // bindgen 加载的 libclang 不一定带默认的 SDK 路径（如 Homebrew 的 LLVM），那样找不到 errno.h 等系统头文件
+        builder = builder.clang_arg(format!("-isysroot{}", macos_sdk_path()));
     }
 
     // The input headers we would like to generate

@@ -64,6 +64,8 @@ if [[ "$actual" != "$SHA256" ]]; then
   echo "ffmpeg-$VERSION.tar.xz 的 SHA-256 不符：期望 $SHA256，实际 $actual" >&2
   exit 1
 fi
+# build/ 下只留当前版本的源码包：sdist 收录这里的 ffmpeg-*.tar.xz
+find "$WORK" -maxdepth 1 -name 'ffmpeg-*.tar.xz' ! -name "ffmpeg-$VERSION.tar.xz" -delete
 if $FETCH_ONLY; then
   echo "已取得 $TARBALL"
   exit 0

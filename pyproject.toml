@@ -3,9 +3,8 @@ name = "hs-m3u8"
 dynamic = ["version"]
 description = "HLS（m3u8）下载：并发拉取、AES-128 解密与校验、断点续传、直播录制，输出 MP4 或可直接播放的本地 HLS"
 authors = [{ name = "昊色居士", email = "xhrtxh@gmail.com" }]
-# 本项目，与 wheel 里静态链接的 FFmpeg：LGPL 给用户换用修改过的库的权利，要让用户看得到；其余捆绑的 crate 都是宽松
-# 许可证，原文见 LICENSES/THIRD-PARTY-RUST.txt
-license = "MIT AND LGPL-2.1-or-later"
+# 本项目、wheel 里静态链接的 FFmpeg 与各 Rust crate 的许可证，由 scripts/licenses.py 求出（make licenses）
+license = "MIT AND LGPL-2.1-or-later AND Apache-2.0 AND BSD-3-Clause AND ISC AND Unicode-3.0 AND Unicode-DFS-2016 AND WTFPL"
 license-files = ["LICENSE", "LICENSES/*"]
 readme = "README.md"
 requires-python = ">=3.12"

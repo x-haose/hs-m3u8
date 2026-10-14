@@ -4,11 +4,6 @@
 
 FFMPEG_DIST := third_party/ffmpeg/dist
 
-# macOS：bindgen 若加载的是不带默认 sysroot 的 libclang（如 Homebrew LLVM）会找不到系统头文件，显式指定 SDK
-ifeq ($(shell uname -s),Darwin)
-export BINDGEN_EXTRA_CLANG_ARGS := --sysroot=$(shell xcrun --show-sdk-path)
-endif
-
 # Python 开发环境：uv 把开发工具装进 $(VENV)，Python 默认用支持的最低版本，换版本另给目录（如 make py_test
 # VENV=.venv-3.15 UV_PYTHON=3.15）；PyO3 的构建脚本按它确定 Python 版本与链接参数
 VENV ?= .venv

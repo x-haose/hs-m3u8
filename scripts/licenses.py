@@ -1,9 +1,12 @@
-"""生成 LICENSES 下随发布包分发的声明：NOTICE.txt 与 THIRD-PARTY-RUST.txt。`--check` 时只核对已有的是否最新。
+"""生成随发布包分发的声明与 pyproject.toml 的许可证表达式；`--check` 时只核对是否最新。
+
+声明为 LICENSES 下的 NOTICE.txt 与 THIRD-PARTY-RUST.txt，许可证表达式为 pyproject.toml 的 `license`。
 
 THIRD-PARTY-RUST.txt 收录 Python 扩展模块在各发布平台（deny.toml 的 `[graph] targets`）上依赖的 Rust crate：按
 `cargo tree` 解析特性后 `hs-m3u8-py` 的正常依赖，过程宏与工作区成员不算。各 crate 根目录里的许可证文件原样收录，内容
 相同的只收一份；包里没有许可证文件的，取 third_party/crate-licenses/<名字>-<版本>/ 下的，那里也没有即失败。NOTICE.txt
-里 FFmpeg 的版本与源码包的 SHA-256 取自 third_party/ffmpeg/build.sh。
+里 FFmpeg 的版本与源码包的 SHA-256 取自 third_party/ffmpeg/build.sh。许可证表达式为本项目（MIT）、FFmpeg（LGPL）与各
+crate 的许可证表达式之积，化成合取范式后按吸收律化简（`A AND (A OR B)` 即 `A`）。
 """
 
 import argparse
@@ -15,6 +18,7 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NoReturn
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "LICENSES"
@@ -25,6 +29,9 @@ LICENSE_FILE = re.compile(r"^(licen[cs]e|copying|copyright|notice|unlicense)", r
 # `cargo tree --format {p}` 的一行：名字、版本，路径依赖另带路径，已列过的带 (*)
 TREE_LINE = re.compile(r"^(\S+) v(\S+)(?: \(/[^)]*\))?(?: \(\*\))?$")
 RULE = "-" * 80
+# 本项目与静态链接的 FFmpeg 的许可证
+OWN_LICENSES = ["MIT", "LGPL-2.1-or-later"]
+PYPROJECT_LICENSE = re.compile(r'^license = "[^"]*"$', re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -142,6 +149,88 @@ def third_party(crates: list[Crate]) -> str:
     return "\n".join(lines) + "\n"
 
 
+class Clauses:
+    """许可证表达式化成合取范式的各子句，每个子句为可任选其一的许可证；旧写法里的 `/` 即 OR。
+
+    只认 OR 都在 AND 之内的写法（如 `(A OR B) AND C`），按 SPDX 的优先级 AND 先于 OR；别的写法失败。
+    """
+
+    def __init__(self, expression: str) -> None:
+        """解析 `expression`；认不出时失败。"""
+        self.expression = expression
+        self.words: list[str] = re.findall(r"\(|\)|[^\s()]+", expression.replace("/", " OR "))
+        self.position = 0
+        self.result = self.either()
+        if self.position != len(self.words):
+            self.fail()
+
+    def fail(self) -> NoReturn:
+        """认不出这个表达式。"""
+        message = f"认不出的许可证表达式：{self.expression}"
+        raise SystemExit(message)
+
+    def peek(self) -> str | None:
+        """下一个词；读完了为 None。"""
+        return self.words[self.position] if self.position < len(self.words) else None
+
+    def take(self) -> str:
+        """取下一个词；读完了即失败。"""
+        if self.position >= len(self.words):
+            self.fail()
+        self.position += 1
+        return self.words[self.position - 1]
+
+    def either(self) -> set[frozenset[str]]:
+        """以 OR 连接的部分；两边都须是单个子句。"""
+        left = self.both()
+        while self.peek() == "OR":
+            self.take()
+            right = self.both()
+            if len(left) != 1 or len(right) != 1:
+                self.fail()
+            left = {next(iter(left)) | next(iter(right))}
+        return left
+
+    def both(self) -> set[frozenset[str]]:
+        """以 AND 连接的部分。"""
+        left = self.single()
+        while self.peek() == "AND":
+            self.take()
+            left |= self.single()
+        return left
+
+    def single(self) -> set[frozenset[str]]:
+        """一个许可证（可带 WITH 例外），或括号里的表达式。"""
+        word = self.take()
+        if word == "(":
+            inner = self.either()
+            if self.take() != ")":
+                self.fail()
+            return inner
+        if word in {")", "AND", "OR", "WITH"}:
+            self.fail()
+        if self.peek() == "WITH":
+            self.take()
+            word = f"{word} WITH {self.take()}"
+        return {frozenset([word])}
+
+
+def license_expression(crates: list[Crate]) -> str:
+    """pyproject.toml 的许可证表达式：本项目、FFmpeg 与各 crate 的许可证之积，按吸收律化简。"""
+    found = {frozenset([own]) for own in OWN_LICENSES}
+    for crate in crates:
+        found |= Clauses(crate.license).result
+    kept = [clause for clause in found if not any(other < clause for other in found)]
+    order = {own: index for index, own in enumerate(OWN_LICENSES)}
+
+    def text(clause: frozenset[str]) -> str:
+        names = sorted(clause)
+        return names[0] if len(names) == 1 else "(" + " OR ".join(names) + ")"
+
+    kept.sort(key=lambda clause: (len(clause), order.get(text(clause), len(order)), text(clause)))
+    return " AND ".join(text(clause) for clause in kept)
+
+
 def notice() -> str:
     """NOTICE.txt 的内容。"""
     script = (ROOT / "third_party/ffmpeg/build.sh").read_text(encoding="utf-8")
@@ -177,19 +266,28 @@ def main() -> int:
     names: set[tuple[str, str]] = set()
     for target in release_targets():
         names |= dependencies(target)
-    expected = {"NOTICE.txt": notice(), "THIRD-PARTY-RUST.txt": third_party(crates(names))}
-    stale: list[str] = []
-    for name, content in expected.items():
-        path = OUT / name
+    found = crates(names)
+    pyproject = ROOT / "pyproject.toml"
+    project = pyproject.read_text(encoding="utf-8")
+    if len(PYPROJECT_LICENSE.findall(project)) != 1:
+        message = 'pyproject.toml 里要有恰好一行 license = "..."'
+        raise SystemExit(message)
+    expected = {
+        OUT / "NOTICE.txt": notice(),
+        OUT / "THIRD-PARTY-RUST.txt": third_party(found),
+        pyproject: PYPROJECT_LICENSE.sub(f'license = "{license_expression(found)}"', project),
+    }
+    stale: list[Path] = []
+    for path, content in expected.items():
         current = path.read_text(encoding="utf-8") if path.exists() else None
         if current == content:
             continue
         if args.check:
-            stale.append(name)
+            stale.append(path)
         else:
             path.write_text(content, encoding="utf-8")
-    for name in stale:
-        sys.stderr.write(f"LICENSES/{name} 不是最新的，运行 make licenses 重新生成\n")
+    for path in stale:
+        sys.stderr.write(f"{path.relative_to(ROOT)} 不是最新的，运行 make licenses 重新生成\n")
     return 1 if stale else 0
 
 
