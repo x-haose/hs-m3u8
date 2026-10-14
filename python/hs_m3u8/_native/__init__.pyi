@@ -72,6 +72,7 @@ __all__ = [
     "Resolution",
     "ResponseTooLargeError",
     "RetryPolicy",
+    "Retrying",
     "SegmentRef",
     "SelectError",
     "SelectFailure",
@@ -2427,6 +2428,12 @@ class Progress:
         变化算下载速度
         """
     @property
+    def retrying(self) -> typing.Optional[Retrying]:
+        r"""
+        正在退避、等着重试的请求（分片、key、init 段，与开始任务时拉的播放列表；直播的刷新不重试，见
+        `refresh_errors`）；没有在等的为 None
+        """
+    @property
     def refresh_errors(self) -> builtins.tuple[typing.Optional[RefreshCause], ...]:
         r"""
         直播：各轨（下标为轨道编号）最近一次刷新失败的原因。这条轨之后刷新成功、不再刷新或录制结束即为 None；
@@ -2443,7 +2450,7 @@ class Progress:
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, stage: Stage, selected: typing.Optional[Selected], segments_done: builtins.int, segments_total: builtins.int, segments_failed: builtins.int, segments_expired: builtins.int, segments_gap: builtins.int, duration: datetime.timedelta, bytes: builtins.int, received: builtins.int, refresh_errors: collections.abc.Sequence[typing.Optional[RefreshCause]], mp4_unsupported: typing.Optional[Mp4Unsupported]) -> Progress:
+    def __new__(cls, *, stage: Stage, selected: typing.Optional[Selected], segments_done: builtins.int, segments_total: builtins.int, segments_failed: builtins.int, segments_expired: builtins.int, segments_gap: builtins.int, duration: datetime.timedelta, bytes: builtins.int, received: builtins.int, retrying: typing.Optional[Retrying], refresh_errors: collections.abc.Sequence[typing.Optional[RefreshCause]], mp4_unsupported: typing.Optional[Mp4Unsupported]) -> Progress:
         r"""
         各参数即同名属性。
         """
@@ -2743,6 +2750,34 @@ class RetryPolicy:
         r"""
         各项的默认值见类的说明；`attempts` 小于 1、时长为负时抛 `InvalidInputError`。
         """
+
+@typing.final
+class Retrying:
+    r"""
+    正在退避、等着重试的请求（`Progress.retrying`）。
+    """
+    @property
+    def waiting(self) -> builtins.int:
+        r"""
+        在等的请求数，至少 1
+        """
+    @property
+    def purpose(self) -> Purpose.Playlist | Purpose.Key | Purpose.Init | Purpose.Segment:
+        r"""
+        最近一次要重试的请求的用途
+        """
+    @property
+    def failure(self) -> FetchFailure.Http | FetchFailure.Incomplete:
+        r"""
+        最近一次要重试的失败
+        """
+    def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
+    def __hash__(self) -> builtins.int: ...
+    def __new__(cls, *, waiting: builtins.int, purpose: Purpose, failure: FetchFailure) -> Retrying:
+        r"""
+        各参数即同名属性。
+        """
+    def __repr__(self) -> builtins.str: ...
 
 @typing.final
 class SegmentRef:

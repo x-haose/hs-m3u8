@@ -60,7 +60,7 @@ pub use probe::Probe;
 pub use proxy::{Bypass, ProxySource, SystemProxy, system_proxy};
 pub use report::{
     Leftover, LeftoverKind, LiveEnd, LiveReport, MissReason, Missed, Mp4Output, NewSession, Output,
-    Progress, RefreshCause, SourceBreak, Stage, StallCause,
+    Progress, RefreshCause, Retrying, SourceBreak, Stage, StallCause,
 };
 pub use request::{
     HttpOptions, JobRequest, KeyOverride, LiveOptions, Proxy, RetryPolicy, Source, Timeouts,
@@ -84,7 +84,7 @@ pub mod hls {
 
 pub(crate) use blocking::blocking;
 
-use crate::http::{Http, OnReceived, Permits};
+use crate::http::{Http, Observer, Permits};
 
 /// 下载引擎；持有跨任务共享的在途请求上限。
 #[derive(Clone)]
@@ -125,7 +125,7 @@ impl Engine {
         let http = Http::new(
             &request.source,
             self.requests.clone(),
-            Some(count_received(progress_tx.clone())),
+            Some(Arc::new(ProgressObserver(progress_tx.clone()))),
         )?;
         let cancel = CancellationToken::new();
         let stop = CancellationToken::new();
@@ -194,9 +194,36 @@ pub enum Unsettled {
     Report,
 }
 
-/// 读到的响应体字节计入 [`Progress::received`]。
-fn count_received(progress: watch::Sender<Progress>) -> OnReceived {
-    Box::new(move |len| progress.send_modify(|p| p.received += len))
+/// 请求的进展计入任务的进度：读到的字节计入 [`Progress::received`]，退避计入 [`Progress::retrying`]。
+struct ProgressObserver(watch::Sender<Progress>);
+
+impl Observer for ProgressObserver {
+    fn received(&self, len: u64) {
+        self.0.send_modify(|p| p.received += len);
+    }
+
+    fn retry_waiting(&self, purpose: Purpose, failure: FetchFailure) {
+        self.0.send_modify(|p| {
+            let waiting = p.retrying.as_ref().map_or(0, |r| r.waiting) + 1;
+            p.retrying = Some(Retrying {
+                waiting,
+                purpose,
+                failure,
+            });
+        });
+    }
+
+    fn retry_waited(&self) {
+        self.0.send_modify(|p| {
+            let retrying = p.retrying.take().expect("退避结束之前报过开始");
+            if retrying.waiting > 1 {
+                p.retrying = Some(Retrying {
+                    waiting: retrying.waiting - 1,
+                    ..retrying
+                });
+            }
+        });
+    }
 }
 
 /// 运行中的任务：等结果用 [`Job::wait`]，取消、停止与读进度用 [`Job::control`]。丢弃句柄即取消任务。

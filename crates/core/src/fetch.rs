@@ -246,7 +246,7 @@ impl Direct {
             None => None,
         };
         ctx.http
-            .retrying(&init.uri, cancel, || async move {
+            .retrying(Purpose::Init, &init.uri, cancel, || async move {
                 let response = ctx
                     .http
                     .get_once(Purpose::Init, &init.uri, init.byte_range, permit, cancel)
@@ -334,7 +334,7 @@ async fn fetch_segment(
         None => Container::Standalone,
     };
     ctx.http
-        .retrying(&segment.uri, cancel, || async move {
+        .retrying(Purpose::Segment, &segment.uri, cancel, || async move {
             let response = ctx
                 .http
                 .get_once(

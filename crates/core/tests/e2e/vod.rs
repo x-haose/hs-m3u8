@@ -8,8 +8,8 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use hs_m3u8_core::hls::{AudioChoice, Encryption};
 use hs_m3u8_core::{
-    Error, HookError, Hooks, HttpError, Integrity, KeyOverride, MissReason, Missed, Purpose,
-    RequestParts, Stage, Unsupported, Url, WorkDirProblem,
+    Error, FetchFailure, HookError, Hooks, HttpError, HttpFailure, Integrity, KeyOverride,
+    MissReason, Missed, Purpose, RequestParts, Retrying, Stage, Unsupported, Url, WorkDirProblem,
 };
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
@@ -431,6 +431,43 @@ async fn retries_server_errors() {
     let want = expected_ts_a(&dir);
     assert_output(&output, &want);
     assert_eq!(server.hits("seg0.ts"), 3);
+}
+
+/// 退避等着重试时进度里给出在等的请求数、用途与失败原因；退避结束（这里是取消）即清空。
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_waits_show_in_progress() {
+    let dir = test_dir("retry_progress");
+    let server = Server::start().await;
+    put_ts_a(&server, "index.m3u8", 1.0);
+    server.fail("seg1.ts", 1);
+    let mut req = request(server.url("index.m3u8"), &dir);
+    req.source.http.retry.base_delay = Duration::from_secs(3600);
+    req.source.http.retry.max_delay = Duration::from_secs(3600);
+    let job = engine().start(req).unwrap();
+    let mut progress = job.control().progress();
+
+    let retrying = progress
+        .wait_for(|p| p.retrying.is_some())
+        .await
+        .unwrap()
+        .retrying
+        .clone();
+
+    let failure = FetchFailure::Http(HttpFailure {
+        kind: HttpError::Status(500),
+        retry_after: None,
+    });
+    assert_eq!(
+        retrying,
+        Some(Retrying {
+            waiting: 1,
+            purpose: Purpose::Segment,
+            failure
+        })
+    );
+    job.control().cancel();
+    assert!(matches!(job.wait().await, Err(Error::Cancelled)));
+    assert_eq!(progress.borrow().retrying, None);
 }
 
 /// 服务器要求的等待超过重试的等待上限：不再重试，任务失败；错误可重试，服务器要求的等待包在分片的失败里（key

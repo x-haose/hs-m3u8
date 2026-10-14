@@ -19,7 +19,7 @@ use crate::cookies::Provider;
 use crate::hooks::{HookKind, Hooks, Purpose, RequestParts, run_hook};
 use crate::ident::bare_url;
 use crate::request::{RetryPolicy, Source, check_header, cookie_pairs};
-use crate::{Error, HttpError, Integrity};
+use crate::{Error, FetchFailure, HttpError, Integrity};
 
 /// 请求占哪一份引擎名额（见 [`Permits`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,13 +61,36 @@ pub(crate) struct Http {
     hooks: Arc<dyn Hooks>,
     /// 引擎内所有任务共享；占名额的每次尝试从调用 `on_request` 回调到读完响应体占用一个
     requests: Arc<Permits>,
-    /// 每读到一块响应体，以它的字节数调用；不需要计数（探测）时为 None
-    on_received: Option<OnReceived>,
+    /// 请求的进展报给它；探测时为 None
+    observer: Option<Arc<dyn Observer>>,
     jitter: std::hash::RandomState,
 }
 
-/// 读到响应体时的回调，参数为这一块的字节数。
-pub(crate) type OnReceived = Box<dyn Fn(u64) + Send + Sync>;
+/// 请求的进展，报给任务的进度。在请求所在的任务里调用，要快、不阻塞。
+pub(crate) trait Observer: Send + Sync {
+    /// 读到一块响应体，`len` 为它的字节数
+    fn received(&self, len: u64);
+    /// 用途为 `purpose` 的一次请求取不到或没写完（`failure`），开始退避、等着重试
+    fn retry_waiting(&self, purpose: Purpose, failure: FetchFailure);
+    /// 一次退避结束：接着重试，或被取消
+    fn retry_waited(&self);
+}
+
+/// 一次退避：建立时报 [`Observer::retry_waiting`]，结束（含被取消时丢弃）时报 [`Observer::retry_waited`]。
+struct RetryWait<'a>(&'a dyn Observer);
+
+impl<'a> RetryWait<'a> {
+    fn new(observer: &'a dyn Observer, purpose: Purpose, failure: FetchFailure) -> Self {
+        observer.retry_waiting(purpose, failure);
+        RetryWait(observer)
+    }
+}
+
+impl Drop for RetryWait<'_> {
+    fn drop(&mut self) {
+        self.0.retry_waited();
+    }
+}
 
 /// 一次成功的请求。
 pub(crate) struct Response {
@@ -81,7 +104,7 @@ impl Http {
     pub(crate) fn new(
         source: &Source,
         requests: Arc<Permits>,
-        on_received: Option<OnReceived>,
+        observer: Option<Arc<dyn Observer>>,
     ) -> Result<Self, Error> {
         let options = &source.http;
         let is = |name: &str, wanted: &str| name.eq_ignore_ascii_case(wanted);
@@ -112,7 +135,7 @@ impl Http {
             retry: options.retry,
             hooks: source.hooks.clone(),
             requests,
-            on_received,
+            observer,
             jitter: std::hash::RandomState::new(),
         })
     }
@@ -126,16 +149,18 @@ impl Http {
         permit: Permit,
         cancel: &CancellationToken,
     ) -> Result<Response, Error> {
-        self.retrying(url, cancel, || {
+        self.retrying(purpose, url, cancel, || {
             self.get_once(purpose, url, range, permit, cancel)
         })
         .await
     }
 
-    /// 反复做 `attempt` 直到成功：可重试的失败（[`Error::retryable`]）按 [`RetryPolicy`] 退避后再做，`url` 决定退避
-    /// 的抖动；服务器要求的等待超过 `max_delay` 时不再重试，错误里带上它要求的等待。
+    /// 反复做 `attempt`（用途为 `purpose` 的请求）直到成功：可重试的失败（[`Error::retryable`]）按 [`RetryPolicy`] 退避
+    /// 后再做，`url` 决定退避的抖动，退避期间报给观察者（见 [`Observer::retry_waiting`]）；服务器要求的等待超过
+    /// `max_delay` 时不再重试，错误里带上它要求的等待。
     pub(crate) async fn retrying<T, F>(
         &self,
+        purpose: Purpose,
         url: &Url,
         cancel: &CancellationToken,
         mut attempt: impl FnMut() -> F,
@@ -157,6 +182,11 @@ impl Http {
                 return Err(error);
             }
             let delay = self.backoff(url, tried).max(asked);
+            let _waiting = self
+                .observer
+                .as_deref()
+                .zip(error.missable())
+                .map(|(observer, failure)| RetryWait::new(observer, purpose, failure));
             tokio::select! {
                 _ = cancel.cancelled() => return Err(Error::Cancelled),
                 _ = tokio::time::sleep(delay) => {}
@@ -317,8 +347,8 @@ impl Http {
                 chunk = response.chunk() => chunk.map_err(|e| http_error(url, classify(e)))?,
             };
             let Some(chunk) = chunk else { break };
-            if let Some(on_received) = &self.on_received {
-                on_received(chunk.len() as u64);
+            if let Some(observer) = &self.observer {
+                observer.received(chunk.len() as u64);
             }
             body.extend_from_slice(&chunk);
             let len = body.len() as u64;

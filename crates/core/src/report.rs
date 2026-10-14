@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use crate::info::Selected;
 use crate::remux::Report;
-use crate::{FetchError, HttpFailure, Mp4Unsupported, hls};
+use crate::{FetchError, FetchFailure, HttpFailure, Mp4Unsupported, Purpose, hls};
 
 /// 任务进度快照。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -33,6 +33,9 @@ pub struct Progress {
     /// 本次运行从网络读到的响应体字节数，读到即计：含播放列表与 key，含没读完、校验失败与重试前的请求。
     /// 按它的变化算下载速度
     pub received: u64,
+    /// 正在退避、等着重试的请求（分片、key、init 段，与开始任务时拉的播放列表；直播的刷新不重试，见
+    /// `refresh_errors`）；没有在等的为 None
+    pub retrying: Option<Retrying>,
     /// 直播：各轨（下标为轨道编号）最近一次刷新失败的原因。这条轨之后刷新成功、不再刷新或录制结束即清空；
     /// 一直失败到停滞时任务以 [`crate::Error::LiveStalled`] 结束。点播与录制开始前为空
     pub refresh_errors: Vec<Option<RefreshCause>>,
@@ -53,6 +56,17 @@ impl Progress {
             self.duration_us = self.duration_us.saturating_add(duration_us);
         }
     }
+}
+
+/// 正在退避、等着重试的请求（[`Progress::retrying`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Retrying {
+    /// 在等的请求数，至少 1
+    pub waiting: usize,
+    /// 最近一次要重试的请求的用途
+    pub purpose: Purpose,
+    /// 最近一次要重试的失败
+    pub failure: FetchFailure,
 }
 
 /// 直播一次刷新失败的原因；这类失败等下次刷新，不使任务立即失败。

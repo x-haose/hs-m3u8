@@ -7,6 +7,7 @@ use pyo3::prelude::*;
 
 use crate::convert::{PyPath, Seq, wait_seconds};
 use crate::error::Mp4Unsupported;
+use crate::hooks::Purpose;
 use crate::info::Selected;
 use crate::record::{record, variants};
 
@@ -262,6 +263,9 @@ record! {
         /// 本次运行从网络读到的响应体字节数，读到即计：含播放列表与 key，含没读完、校验失败与重试前的请求。按它的
         /// 变化算下载速度
         pub received: u64,
+        /// 正在退避、等着重试的请求（分片、key、init 段，与开始任务时拉的播放列表；直播的刷新不重试，见
+        /// `refresh_errors`）；没有在等的为 None
+        pub retrying: Option<Retrying>,
         /// 直播：各轨（下标为轨道编号）最近一次刷新失败的原因。这条轨之后刷新成功、不再刷新或录制结束即为 None；
         /// 一直失败到停滞时任务以 `LiveStalledError` 结束。点播与录制开始前为空
         pub refresh_errors: Seq<Option<RefreshCause>>,
@@ -271,6 +275,18 @@ record! {
         /// 由调用方定（直播错过的内容录不回来）；合并 MP4 时照样以 `Mp4UnsupportedError` 失败，可改为只输出本地 HLS
         /// 再合并。点播（下载各组的第一个分片后核对，放不进时任务直接失败）与不输出 MP4 时为 None
         pub mp4_unsupported: Option<Mp4Unsupported>,
+    }
+}
+
+record! {
+    /// 正在退避、等着重试的请求（`Progress.retrying`）。
+    pub struct Retrying {
+        /// 在等的请求数，至少 1
+        pub waiting: usize,
+        /// 最近一次要重试的请求的用途
+        pub purpose: Purpose,
+        /// 最近一次要重试的失败
+        pub failure: FetchFailure,
     }
 }
 
@@ -610,6 +626,11 @@ impl From<core::Progress> for Progress {
             duration: Duration::from_micros(p.duration_us),
             bytes: p.bytes,
             received: p.received,
+            retrying: p.retrying.map(|r| Retrying {
+                waiting: r.waiting,
+                purpose: r.purpose.into(),
+                failure: r.failure.into(),
+            }),
             refresh_errors: p
                 .refresh_errors
                 .into_iter()
@@ -744,6 +765,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<HttpFailure>()?;
     module.add_class::<FetchErrorKind>()?;
     module.add_class::<FetchFailure>()?;
+    module.add_class::<Retrying>()?;
     module.add_class::<RefreshReason>()?;
     module.add_class::<RefreshCause>()?;
     module.add_class::<StallCause>()?;
