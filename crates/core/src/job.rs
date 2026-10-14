@@ -8,7 +8,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::fetch::Fetcher;
-use crate::http::Http;
+use crate::http::{Http, Permit};
 use crate::ident::{source_digest, url_digest};
 use crate::info::Selected;
 use crate::live::{self, Context, Outcome};
@@ -109,7 +109,7 @@ async fn run_live(
         },
     };
     let dir = WorkDir::open(task.output.work_dir.clone(), record, lock).await?;
-    let mut fetcher = task.fetcher(&dir);
+    let mut fetcher = task.fetcher(&dir, Permit::Exempt);
     let ctx = Context {
         http: task.http.clone(),
         hooks: task.request.source.hooks.clone(),
@@ -148,7 +148,7 @@ async fn run_vod(
         },
     };
     let dir = WorkDir::open(task.output.work_dir.clone(), record, lock).await?;
-    let mut fetcher = task.fetcher(&dir);
+    let mut fetcher = task.fetcher(&dir, Permit::Required);
     let mp4 = task.output.get(OutputKind::Mp4).map(|_| streams.as_slice());
     let groups = vod::download(
         &task.http,
@@ -249,13 +249,15 @@ fn merge_live(
 }
 
 impl Task {
-    fn fetcher(&self, dir: &WorkDir) -> Fetcher {
+    /// 下载任务目录 `dir` 的分片的下载器；`permit` 见 [`Fetcher::new`]。
+    fn fetcher(&self, dir: &WorkDir, permit: Permit) -> Fetcher {
         Fetcher::new(
             self.http.clone(),
             self.request.source.hooks.clone(),
             self.request.key,
             self.request.concurrency,
             dir.layout().root(),
+            permit,
             &self.cancel,
         )
     }

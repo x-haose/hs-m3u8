@@ -60,6 +60,8 @@ struct Ctx {
     work_dir: PathBuf,
     /// 有值时加密的分片都用它，不取 key
     key_override: Option<KeyOverride>,
+    /// 分片与 key 的请求占不占引擎的名额
+    permit: Permit,
     /// key 地址 → 处理后的 16 字节 key；每个地址只拉取一次
     keys: Mutex<HashMap<Url, Arc<OnceCell<[u8; 16]>>>>,
 }
@@ -74,13 +76,15 @@ pub(crate) struct Fetcher {
 }
 
 impl Fetcher {
-    /// `work_dir` 为任务目录，各项的 init 段在其中。
+    /// `work_dir` 为任务目录，各项的 init 段在其中；`permit` 为分片与 key 的请求占不占引擎的名额：点播的占，直播的不占
+    /// （直播的量受实时码率约束，排在其他任务的大批下载之后时分片会滑出窗口、永久缺失）。
     pub(crate) fn new(
         http: Arc<Http>,
         hooks: Arc<dyn Hooks>,
         key_override: Option<KeyOverride>,
         limit: NonZeroUsize,
         work_dir: &Path,
+        permit: Permit,
         cancel: &CancellationToken,
     ) -> Self {
         Fetcher {
@@ -89,6 +93,7 @@ impl Fetcher {
                 hooks,
                 work_dir: work_dir.to_path_buf(),
                 key_override,
+                permit,
                 keys: Mutex::new(HashMap::new()),
             }),
             limit: limit.get(),
@@ -263,7 +268,7 @@ async fn fetch_segment(
                     Purpose::Segment,
                     &segment.uri,
                     segment.byte_range,
-                    Permit::Required,
+                    ctx.permit,
                     cancel,
                 )
                 .await?;
@@ -329,7 +334,7 @@ async fn key_for(ctx: &Ctx, url: &Url, cancel: &CancellationToken) -> Result<[u8
             };
             let body = ctx
                 .http
-                .get(Purpose::Key, url, None, Permit::Required, cancel)
+                .get(Purpose::Key, url, None, ctx.permit, cancel)
                 .await
                 .map_err(wrap)?
                 .body;

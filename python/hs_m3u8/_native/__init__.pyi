@@ -228,8 +228,8 @@ class Engine:
     之后不可用），开始操作时抛 `RuntimeError`，要用 multiprocessing 的 spawn 方式。在 atexit 处理里第一次导入本库时，
     退出前不会关闭运行时，那样开始的任务要在处理返回前等它结束。
     
-    `max_requests`：所有任务合计同时在途的 key、分片与点播 init 段请求数，至少 1，默认为每个任务默认并发的四倍。
-    播放列表与直播刷新时新出现的 init 段不占名额，以免直播刷新排在其他任务的大批下载之后。
+    `max_requests`：所有点播任务合计同时在途的 key、分片与 init 段请求数，至少 1，默认为每个任务默认并发的四倍；播放列表
+    与直播的请求不占名额，只受各自任务的并发数限制（直播排在大批下载之后时分片会滑出窗口）。
     """
     def __new__(cls, *, max_requests: builtins.int = ...) -> Engine:
         r"""

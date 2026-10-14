@@ -12,11 +12,13 @@ use hs_m3u8_core::{
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
 use super::{
-    STALL, expected_split, live_request, missed, playlist, put_long, report, signed_fmp4_playlist,
-    split_source,
+    STALL, expected_split, live_request, missed, playlist, playlist_in, put_long, report,
+    signed_fmp4_playlist, split_source,
 };
 use crate::server::Server;
-use crate::{assert_output, engine, expected, expected_long, fixture, run, test_dir, track};
+use crate::{
+    assert_output, engine, expected, expected_long, fixture, request, run, test_dir, track,
+};
 
 /// 刷新一次多一个分片、窗口前移，直到出现 EXT-X-ENDLIST。stall_timeout 大到无法表示时视为不限。
 #[tokio::test(flavor = "multi_thread")]
@@ -499,4 +501,40 @@ async fn key_failure_fails_the_task() {
         }
         other => panic!("{other}"),
     }
+}
+
+/// 引擎的名额被点播任务占满（这里唯一的名额被一个挂着的分片请求占着）时，直播的分片照常下载：直播的请求不占名额，
+/// 不会排在点播的大批下载之后、等到分片滑出窗口。
+#[tokio::test(flavor = "multi_thread")]
+async fn live_segments_do_not_wait_for_permits_held_by_vod_downloads() {
+    let server = Server::start().await;
+    put_long(&server, "vod/", &[0, 1]);
+    server.put("vod.m3u8", playlist_in("vod/", &[0, 1], true));
+    put_long(&server, "", &[0, 1]);
+    server.put("live.m3u8", playlist(&[0, 1], false));
+    let engine = Engine::new(NonZeroUsize::new(1).unwrap());
+    let gate = server.gate("vod/seg0.ts");
+    let vod = engine
+        .start(request(server.url("vod.m3u8"), &test_dir("permits_vod")))
+        .unwrap();
+    gate.arrived.notified().await;
+
+    let live_dir = test_dir("permits_live");
+    let live = engine
+        .start(live_request(server.url("live.m3u8"), &live_dir, STALL))
+        .unwrap();
+    let mut progress = live.control().progress();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        progress.wait_for(|p| p.segments_done == 2),
+    )
+    .await
+    .expect("直播的分片不应等点播占着的名额")
+    .unwrap();
+    server.put("live.m3u8", playlist(&[0, 1], true));
+    let output = live.wait().await.unwrap();
+    assert_output(&output, &expected_long(&live_dir, &[0, 1], &[2]));
+
+    server.ungate("vod/seg0.ts");
+    vod.wait().await.unwrap();
 }

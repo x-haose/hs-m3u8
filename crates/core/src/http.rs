@@ -21,9 +21,10 @@ use crate::{Error, HttpError, Integrity};
 /// 请求是否计入引擎的在途上限。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Permit {
-    /// 计入：key、分片与点播的 init 段，量大
+    /// 计入：点播的 key、分片与 init 段，量大
     Required,
-    /// 不计入：播放列表与直播刷新时新出现的 init 段，量小；排在其他任务的大批下载之后会让直播停滞
+    /// 不计入：播放列表与直播的请求。前者量小；后者的量受实时码率约束，排在其他任务的大批下载之后会让直播停滞、分片
+    /// 滑出窗口
     Exempt,
 }
 
