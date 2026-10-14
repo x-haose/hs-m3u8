@@ -10,17 +10,11 @@ wheels/
 .venv
 .venv-*
 
-# rye
+# uv python pin 写的本地 Python 版本；开发用的版本由 Makefile 的 UV_PYTHON 定
 .python-version
-
-# downloiad
-downloads
 
 # pycharm
 .idea
-
-# res
-res/ffmpeg_win.exe
 
 # Mac
 .DS_Store

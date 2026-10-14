@@ -13,5 +13,3 @@
 3. `FFMPEG_DIR` 模式下对 `$FFMPEG_DIR/lib` 与 `$FFMPEG_DIR/include` 声明 `rerun-if-changed`。上游只声明了
    `rerun-if-env-changed=FFMPEG_DIR`，而静态库会被打包进本 crate 的 rlib：FFmpeg 重新编译后（如增减组件）
    构建脚本不重跑，链接进去的仍是旧库，表现为运行时找不到新启用的协议或组件。
-
-上游发布包含以上修正的版本后，删除本目录与 `[patch.crates-io]` 条目。

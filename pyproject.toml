@@ -29,7 +29,7 @@ requires = ["maturin>=1.15,<2"]
 build-backend = "maturin"
 
 [dependency-groups]
-# 开发工具钉死版本：类型检查与格式的结果随版本变化
+# 开发工具固定版本：类型检查与格式的结果随版本变化
 dev = [
     "basedpyright==1.40.2",
     "maturin==1.15.0",

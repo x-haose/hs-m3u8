@@ -247,7 +247,7 @@ fn sniff(path: &Path, work_dir: &Path) -> Result<Format, Error> {
 }
 
 /// 把 `src` 放到新文件 `dst`，返回字节数：能硬链接就硬链接，不占额外空间；做不了时（跨文件系统、文件系统不支持）
-/// 复制并落盘。`dst` 已存在时报错，不写穿已有的文件：它可能是别处文件的硬链接。
+/// 复制并落盘。`dst` 已存在时报错，不改写已有的文件：它可能是别处文件的硬链接。
 fn place(src: &Path, dst: &Path) -> Result<u64, Error> {
     match fs::hard_link(src, dst) {
         Ok(()) => return Ok(fs::metadata(dst).map_err(io_error("读取", dst))?.len()),
