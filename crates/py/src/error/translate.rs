@@ -48,7 +48,6 @@ fn exception(
     message: String,
 ) -> PyResult<PyErr> {
     use core::Error as E;
-    use core::Unsupported as U;
     let object = match error {
         E::Segment {
             track,
@@ -110,104 +109,7 @@ fn exception(
             ),
         )?,
         E::LiveNotEnabled => instance(py, RequestError::chain(base, LiveNotEnabledError {}))?,
-        E::Unsupported(U::Mp4(reason)) => instance(
-            py,
-            RequestError::chain(
-                base,
-                Mp4UnsupportedError {
-                    reason: reason.into(),
-                },
-            ),
-        )?,
-        E::Unsupported(U::Hls(reason)) => instance(
-            py,
-            RequestError::chain(
-                base,
-                HlsUnsupportedError {
-                    reason: reason.into(),
-                },
-            ),
-        )?,
-        E::Unsupported(U::EmptyPlaylist(url)) => unsupported_source(
-            py,
-            base,
-            SourceUnsupported::EmptyPlaylist { url: Address(*url) },
-        )?,
-        E::Unsupported(U::NoTargetDuration(url)) => unsupported_source(
-            py,
-            base,
-            SourceUnsupported::NoTargetDuration { url: Address(*url) },
-        )?,
-        E::Unsupported(U::Encryption { url, line, what }) => unsupported_source(
-            py,
-            base,
-            SourceUnsupported::Encrypted {
-                url: Address(*url),
-                line,
-                encryption: what.into(),
-            },
-        )?,
-        E::Unsupported(U::IFramesOnly { url, line }) => unsupported_source(
-            py,
-            base,
-            SourceUnsupported::IFramesOnly {
-                url: Address(*url),
-                line,
-            },
-        )?,
-        E::Unsupported(U::DeltaUpdate { url, line }) => unsupported_source(
-            py,
-            base,
-            SourceUnsupported::DeltaUpdate {
-                url: Address(*url),
-                line,
-            },
-        )?,
-        E::Unsupported(U::InitChangesWithinGroup {
-            track,
-            discontinuity,
-        }) => unsupported_source(
-            py,
-            base,
-            SourceUnsupported::InitChangesWithinGroup {
-                track,
-                discontinuity,
-            },
-        )?,
-        E::Unsupported(U::DiscontinuityMismatch {
-            track,
-            first,
-            found,
-        }) => unsupported_source(
-            py,
-            base,
-            SourceUnsupported::DiscontinuityMismatch {
-                track,
-                first: Seq(first),
-                found: Seq(found),
-            },
-        )?,
-        E::Unsupported(U::NoMergeableGroup(url)) => unsupported_source(
-            py,
-            base,
-            SourceUnsupported::NoMergeableGroup { url: Address(*url) },
-        )?,
-        E::Unsupported(U::Fmp4BaseDataOffset { url, at }) => unsupported_source(
-            py,
-            base,
-            SourceUnsupported::Fmp4BaseDataOffset {
-                url: Address(*url),
-                at,
-            },
-        )?,
-        E::Unsupported(U::KeyWithoutUri(url)) => unsupported_source(
-            py,
-            base,
-            SourceUnsupported::KeyWithoutUri { url: Address(*url) },
-        )?,
-        E::Unsupported(U::TsInit(url)) => {
-            unsupported_source(py, base, SourceUnsupported::TsInit { url: Address(*url) })?
-        }
+        E::Unsupported(unsupported) => unsupported_error(py, base, unsupported)?,
         E::Playlist { url, cause } => instance(
             py,
             SourceError::chain(
@@ -351,12 +253,76 @@ fn errno_of(py: Python<'_>, os_error: &PyErr) -> PyResult<Option<i32>> {
     os_error.value(py).getattr("errno")?.extract()
 }
 
-/// 来源用到了不支持的特性：`SourceUnsupportedError`。
-fn unsupported_source(
+/// 不支持的特性对应的异常：放不进 MP4、本地 HLS 表示不了的各是一类，其余是来源用到了不支持的特性
+/// （`SourceUnsupportedError`）。
+fn unsupported_error(
     py: Python<'_>,
     base: HsM3u8Error,
-    reason: SourceUnsupported,
+    unsupported: core::Unsupported,
 ) -> PyResult<Bound<'_, PyAny>> {
+    use core::Unsupported as U;
+    let reason = match unsupported {
+        U::Mp4(reason) => {
+            return instance(
+                py,
+                RequestError::chain(
+                    base,
+                    Mp4UnsupportedError {
+                        reason: reason.into(),
+                    },
+                ),
+            );
+        }
+        U::Hls(reason) => {
+            return instance(
+                py,
+                RequestError::chain(
+                    base,
+                    HlsUnsupportedError {
+                        reason: reason.into(),
+                    },
+                ),
+            );
+        }
+        U::EmptyPlaylist(url) => SourceUnsupported::EmptyPlaylist { url: Address(*url) },
+        U::NoTargetDuration(url) => SourceUnsupported::NoTargetDuration { url: Address(*url) },
+        U::Encryption { url, line, what } => SourceUnsupported::Encrypted {
+            url: Address(*url),
+            line,
+            encryption: what.into(),
+        },
+        U::IFramesOnly { url, line } => SourceUnsupported::IFramesOnly {
+            url: Address(*url),
+            line,
+        },
+        U::DeltaUpdate { url, line } => SourceUnsupported::DeltaUpdate {
+            url: Address(*url),
+            line,
+        },
+        U::InitChangesWithinGroup {
+            track,
+            discontinuity,
+        } => SourceUnsupported::InitChangesWithinGroup {
+            track,
+            discontinuity,
+        },
+        U::DiscontinuityMismatch {
+            track,
+            first,
+            found,
+        } => SourceUnsupported::DiscontinuityMismatch {
+            track,
+            first: Seq(first),
+            found: Seq(found),
+        },
+        U::NoMergeableGroup(url) => SourceUnsupported::NoMergeableGroup { url: Address(*url) },
+        U::Fmp4BaseDataOffset { url, at } => SourceUnsupported::Fmp4BaseDataOffset {
+            url: Address(*url),
+            at,
+        },
+        U::KeyWithoutUri(url) => SourceUnsupported::KeyWithoutUri { url: Address(*url) },
+        U::TsInit(url) => SourceUnsupported::TsInit { url: Address(*url) },
+    };
     instance(
         py,
         SourceError::chain(base, SourceUnsupportedError { reason }),
