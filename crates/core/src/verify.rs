@@ -1,20 +1,22 @@
-//! 分片内容校验：拦下解密错误、伪装页面、错误响应等不是媒体数据的内容与没写完的内容，不写盘。
+//! 分片与 init 段的内容校验：拦下解密错误、伪装页面、错误响应等不是媒体数据的内容与没写完的内容，不写盘。
 
 use std::collections::HashMap;
 use std::io::Cursor;
 
 use hs_m3u8_remux::fmp4::{self, Problem};
-use hs_m3u8_remux::standalone;
+use hs_m3u8_remux::standalone::{self, Format};
 use url::Url;
 
 use crate::crypto::DecryptError;
 use crate::{Error, Integrity, Unsupported};
 
-/// 分片的格式。
+/// 取到的内容的格式。
 pub(crate) enum Container {
-    /// fMP4：`trex` 为所用 init 段里各轨的默认样本长度（见 [`fmp4::trex_sample_sizes`]）
+    /// init 段，须为 fMP4（按它自己的 trex 核对）
+    Init,
+    /// fMP4 的分片：`trex` 为所用 init 段里各轨的默认样本长度（见 [`fmp4::trex_sample_sizes`]）
     Fmp4 { trex: HashMap<u32, u32> },
-    /// 没有 init 段：TS 或打包音频
+    /// 没有 init 段的分片：TS 或打包音频
     Standalone,
 }
 
@@ -28,6 +30,8 @@ pub(crate) enum ContentError {
     BaseDataOffset {
         at: u64,
     },
+    /// init 段是 TS（见 [`Unsupported::TsInit`]）
+    TsInit,
 }
 
 impl ContentError {
@@ -40,6 +44,7 @@ impl ContentError {
             ContentError::BaseDataOffset { at } => {
                 Error::Unsupported(Unsupported::Fmp4BaseDataOffset { url, at })
             }
+            ContentError::TsInit => Error::Unsupported(Unsupported::TsInit(url)),
         }
     }
 
@@ -60,18 +65,15 @@ impl ContentError {
     }
 }
 
-/// 校验 init 段 `data`（按它自己的 trex，见 [`fmp4::check`]），并把长度写 0 的最后一个 box 改写成实际长度（见
-/// [`fmp4::seal`]）。
-pub(crate) fn check_init(data: &mut [u8]) -> Result<(), ContentError> {
-    let trex = fmp4::trex_sample_sizes(data).map_err(|p| ContentError::of_fmp4(p, data))?;
-    fmp4::seal(data, &trex).map_err(|p| ContentError::of_fmp4(p, data))
-}
-
-/// 校验分片 `data`：fMP4 见 [`fmp4::check`]，并把长度写 0 的最后一个 box 改写成实际长度（见 [`fmp4::seal`]）；没有
-/// init 段的须认得出格式（见 [`standalone::read_head`]），截在 TS 包、帧或标签中间的为没写完（见
-/// [`standalone::truncated`]）。
-pub(crate) fn check_segment(data: &mut [u8], container: &Container) -> Result<(), ContentError> {
+/// 校验取到的 `data`：fMP4 的 init 段与分片见 [`fmp4::check`]（init 段按它自己的 trex；不是 fMP4 而是 TS 的 init 段
+/// 报不支持），并把长度写 0 的最后一个 box 改写成实际长度（见 [`fmp4::seal`]）；没有 init 段的分片须认得出格式（见
+/// [`standalone::read_head`]），截在 TS 包、帧或标签中间的为没写完（见 [`standalone::truncated`]）。
+pub(crate) fn check(data: &mut [u8], container: &Container) -> Result<(), ContentError> {
     match container {
+        Container::Init => {
+            let trex = fmp4::trex_sample_sizes(data).map_err(|p| init_problem(p, data))?;
+            fmp4::seal(data, &trex).map_err(|p| init_problem(p, data))
+        }
         Container::Fmp4 { trex } => {
             fmp4::seal(data, trex).map_err(|p| ContentError::of_fmp4(p, data))
         }
@@ -85,26 +87,30 @@ pub(crate) fn check_segment(data: &mut [u8], container: &Container) -> Result<()
     }
 }
 
-/// 没有 init 段的分片 `data` 开头的信息；认不出格式时为 None（见 [`standalone::read_head`]）。
+/// init 段 `data` 的结构问题：不是 fMP4 而是 TS 的为 [`ContentError::TsInit`]。
+fn init_problem(problem: Problem, data: &[u8]) -> ContentError {
+    match problem {
+        Problem::NotFmp4 if standalone_head(data).is_some_and(|h| h.format == Format::Ts) => {
+            ContentError::TsInit
+        }
+        problem => ContentError::of_fmp4(problem, data),
+    }
+}
+
+/// 没有 fMP4 结构的 `data` 开头的信息；认不出格式时为 None（见 [`standalone::read_head`]）。
 fn standalone_head(data: &[u8]) -> Option<standalone::Head> {
     standalone::read_head(&mut Cursor::new(data)).expect("读内存不会出错")
 }
 
-/// 解密失败的分片：解出的明文（密文不足整块时为整块部分，都不去填充）是截断的媒体数据时为没写完，判断同解密成功时
-/// （见 [`check_segment`]）；不是的报原来的错：密文不足整块为长度不对（如源站返回的是错误页面、完整的内容后面多了
+/// 解密失败的分片或 init 段：解出的明文（密文不足整块时为整块部分，都不去填充）是截断的媒体数据时为没写完，判断同
+/// 解密成功时（见 [`check`]）；不是的报原来的错：密文不足整块为长度不对（如源站返回的是错误页面、完整的内容后面多了
 /// 字节），填充不合法多为 key 不对。完整的内容之后的填充字节不像 box、TS 包或帧的开头，不会被当成截断。
 pub(crate) fn decrypt_failure(error: DecryptError, container: &Container) -> ContentError {
-    let (plain, otherwise) = match error {
+    let (mut plain, otherwise) = match error {
         DecryptError::Padding { plain } => (plain, Integrity::Padding),
         DecryptError::Unaligned { len, whole } => (whole, Integrity::CipherLength(len)),
     };
-    let truncated = match container {
-        Container::Fmp4 { trex } => fmp4::check(&plain, trex) == Err(Problem::Incomplete),
-        Container::Standalone => {
-            standalone_head(&plain).is_some_and(|found| standalone::truncated(&plain, &found))
-        }
-    };
-    if truncated {
+    if check(&mut plain, container) == Err(ContentError::Incomplete) {
         ContentError::Incomplete
     } else {
         ContentError::Invalid(otherwise)
@@ -134,7 +140,7 @@ mod tests {
 
     #[test]
     fn standalone_segments_must_be_recognized_and_whole() {
-        let check = |mut data: Vec<u8>| check_segment(&mut data, &Container::Standalone);
+        let check = |mut data: Vec<u8>| check(&mut data, &Container::Standalone);
         // 帧头声明帧长 16 字节的 ADTS 帧
         let adts = [&[0xFF, 0xF1, 0x50, 0x80, 0x02, 0x1F, 0xFC][..], &[0; 9]].concat();
         assert_eq!(check(ts_packets(3)), Ok(()));

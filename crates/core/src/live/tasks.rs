@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use super::mp4_check::Batch;
 use super::track::{Fetched, RefreshRequest};
 use super::window::{InitsToFetch, NewInits};
-use crate::fetch::{self, Direct};
+use crate::fetch::Direct;
 use crate::hooks::Hooks;
 use crate::http::{Http, Permit};
 use crate::output;
@@ -60,11 +60,12 @@ impl Tasks {
         }
     }
 
-    /// 刷新第 `track` 条轨。
+    /// 刷新第 `track` 条轨；新 init 段经 `direct` 拉取。
     pub(super) fn refresh(
         &mut self,
         http: Arc<Http>,
         hooks: Arc<dyn Hooks>,
+        direct: Direct,
         track: usize,
         request: RefreshRequest,
     ) {
@@ -76,7 +77,7 @@ impl Tasks {
                     resolve::fetch_media(&http, &hooks, &request.url, Attempts::Once, &cancel)
                         .await?;
                 let inits = match &request.inits {
-                    Some(inits) => Some(new_inits(&http, &playlist, inits, &cancel).await?),
+                    Some(inits) => Some(new_inits(&direct, &playlist, inits, &cancel).await?),
                     None => None,
                 };
                 Ok((playlist, inits))
@@ -90,17 +91,17 @@ impl Tasks {
         });
     }
 
-    /// 准备第 `track` 条轨暂存的一份播放列表：拉它要用的 init 段。
+    /// 准备第 `track` 条轨暂存的一份播放列表：经 `direct` 拉它要用的 init 段。
     pub(super) fn prepare(
         &mut self,
-        http: Arc<Http>,
+        direct: Direct,
         track: usize,
         fetched: Fetched,
         inits: InitsToFetch,
     ) {
         let cancel = self.cancel.clone();
         self.set.spawn(async move {
-            let result = new_inits(&http, &fetched.playlist, &inits, &cancel).await;
+            let result = new_inits(&direct, &fetched.playlist, &inits, &cancel).await;
             Done::Prepared {
                 track,
                 fetched,
@@ -172,7 +173,7 @@ async fn check_mp4(
 /// 拉取 `inits` 所说的新 init 段；各自的失败随结果返回，只有取消中止。它们是刷新的一部分，不占名额（见
 /// [`crate::Engine::new`]）。
 async fn new_inits(
-    http: &Http,
+    direct: &Direct,
     playlist: &MediaPlaylist,
     inits: &InitsToFetch,
     cancel: &CancellationToken,
@@ -186,7 +187,7 @@ async fn new_inits(
             && !inits.known.contains(init)
             && !fetched.iter().any(|(i, _)| i == init)
         {
-            match fetch::fetch_init(http, init, Permit::Exempt, cancel).await {
+            match direct.fetch_init(init, Permit::Exempt, cancel).await {
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
                 result => fetched.push((init.clone(), result)),
             }

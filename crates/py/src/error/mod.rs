@@ -646,6 +646,9 @@ fn exception(
         E::Unsupported(U::KeyWithoutUri) => {
             unsupported_source(py, base, SourceUnsupported::KeyWithoutUri {})?
         }
+        E::Unsupported(U::TsInit(url)) => {
+            unsupported_source(py, base, SourceUnsupported::TsInit { url: Address(*url) })?
+        }
         E::Playlist { url, cause } => instance(
             py,
             SourceError::chain(

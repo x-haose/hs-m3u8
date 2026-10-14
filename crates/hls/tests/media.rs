@@ -248,6 +248,7 @@ fn init_section_follows_map_tags() {
     let first = InitSection {
         uri: url("https://cdn.example.com/video/720p/init.mp4"),
         byte_range: None,
+        key: None,
     };
     let second = InitSection {
         uri: url("https://cdn.example.com/other/init.mp4"),
@@ -255,9 +256,42 @@ fn init_section_follows_map_tags() {
             offset: 0,
             length: 720,
         }),
+        key: None,
     };
     let inits: Vec<Option<InitSection>> = m.segments.iter().map(|s| s.init.clone()).collect();
     assert_eq!(inits, [Some(first.clone()), Some(first), Some(second)]);
+}
+
+/// 加密的 init 段：EXT-X-MAP 处生效的 key 连同它写明的 IV 记在 init 段上（之后换了 key 的分片不影响它）；那个
+/// EXT-X-KEY 没写 IV 时报错（分片缺省的 IV 由媒体序号推出，init 段没有序号）。
+#[test]
+fn an_encrypted_init_section_takes_the_key_in_effect_at_its_map() {
+    let m = media(
+        "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k1\",IV=0x000102030405060708090A0B0C0D0E0F\n\
+         #EXT-X-MAP:URI=\"init.mp4\"\n#EXT-X-KEY:METHOD=AES-128,URI=\"k2\"\n#EXTINF:4,\na.m4s\n",
+    );
+    let init = m.segments[0].init.clone().unwrap();
+    assert_eq!(
+        init.key,
+        Some(SegmentKey {
+            uri: Some(url("https://cdn.example.com/video/720p/k1")),
+            iv: core::array::from_fn(|i| i as u8),
+        })
+    );
+    assert_eq!(
+        m.segments[0].key.as_ref().unwrap().uri,
+        Some(url("https://cdn.example.com/video/720p/k2"))
+    );
+
+    assert_eq!(
+        malformed(
+            "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\"\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4,\na.m4s\n"
+        ),
+        Malformed::Syntax {
+            line: 3,
+            kind: SyntaxError::InitWithoutIv
+        }
+    );
 }
 
 #[test]

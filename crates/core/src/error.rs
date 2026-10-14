@@ -316,6 +316,9 @@ pub enum Unsupported {
     /// 按 moof 相对寻址，分片单独存放、接起来合并时绝对位置都对不上
     #[error("{} {}", bare_url(.url), base_data_offset_text(*.at))]
     Fmp4BaseDataOffset { url: Box<Url>, at: u64 },
+    /// init 段 `0`（EXT-X-MAP）是 TS 的节目表（PAT/PMT），本库只支持 fMP4 的 init 段
+    #[error("init 段 {} 是 TS 的节目表，只支持 fMP4 的 init 段", bare_url(.0))]
+    TsInit(Box<Url>),
 }
 
 fn base_data_offset_text(at: u64) -> String {

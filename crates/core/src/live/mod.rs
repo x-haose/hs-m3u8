@@ -397,8 +397,13 @@ impl Recorder<'_> {
                 continue;
             }
             let request = t.start_refresh(now);
-            self.tasks
-                .refresh(self.http.clone(), self.hooks.clone(), index, request);
+            self.tasks.refresh(
+                self.http.clone(),
+                self.hooks.clone(),
+                self.direct.clone(),
+                index,
+                request,
+            );
         }
     }
 
@@ -559,7 +564,8 @@ impl Recorder<'_> {
     /// 第 `track` 条轨没有在途的刷新或准备时，开始准备最早暂存的播放列表。
     fn prepare_next(&mut self, track: usize) {
         if let Some((fetched, inits)) = self.tracks[track].start_preparing(Instant::now()) {
-            self.tasks.prepare(self.http.clone(), track, fetched, inits);
+            self.tasks
+                .prepare(self.direct.clone(), track, fetched, inits);
         }
     }
 

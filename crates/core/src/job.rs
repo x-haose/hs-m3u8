@@ -158,16 +158,8 @@ async fn run_vod(
     let dir = WorkDir::open(task.output.work_dir.clone(), record, lock).await?;
     let mut fetcher = task.fetcher(&dir, Permit::Vod);
     let mp4 = task.output.get(OutputKind::Mp4).map(|_| streams.as_slice());
-    let groups = vod::download(
-        &task.http,
-        &mut fetcher,
-        &plan,
-        &dir,
-        mp4,
-        &task.progress,
-        &task.cancel,
-    )
-    .await?;
+    let groups =
+        vod::download(&mut fetcher, &plan, &dir, mp4, &task.progress, &task.cancel).await?;
     let input = Content {
         streams,
         groups,

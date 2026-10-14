@@ -176,6 +176,11 @@ variants! {
         },
         /// 加密的分片所用的 EXT-X-KEY 没写 URI（违反 RFC 8216），取不到 key；已知 key 时用 `JobRequest.key`
         KeyWithoutUri {},
+        /// init 段（EXT-X-MAP）是 TS 的节目表（PAT/PMT），本库只支持 fMP4 的 init 段
+        TsInit {
+            /// init 段的地址
+            url: Address,
+        },
     }
 }
 

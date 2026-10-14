@@ -520,7 +520,7 @@ impl OutputOptions {
     }
 }
 
-/// 自定义 key：加密的分片一律用它解密，不请求播放列表里的 key 地址，也不经过 `Hooks.on_key`。用于 key 地址取不到、
+/// 自定义 key：加密的分片与 init 段一律用它解密，不请求播放列表里的 key 地址，也不经过 `Hooks.on_key`。用于 key 地址取不到、
 /// 没写（EXT-X-KEY 没有 URI）或返回的不是真正的 key，而调用方已知 key 的站点；不加密的分片不受影响。`repr` 不显示 key
 /// 与 IV。
 #[gen_stub_pyclass]

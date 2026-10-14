@@ -1163,7 +1163,7 @@ class KeyLengthError(SourceError):
 @typing.final
 class KeyOverride:
     r"""
-    自定义 key：加密的分片一律用它解密，不请求播放列表里的 key 地址，也不经过 `Hooks.on_key`。用于 key 地址取不到、
+    自定义 key：加密的分片与 init 段一律用它解密，不请求播放列表里的 key 地址，也不经过 `Hooks.on_key`。用于 key 地址取不到、
     没写（EXT-X-KEY 没有 URI）或返回的不是真正的 key，而调用方已知 key 的站点；不加密的分片不受影响。`repr` 不显示 key
     与 IV。
     """
@@ -3173,6 +3173,19 @@ class SourceUnsupported:
         __match_args__ = ()
         def __new__(cls) -> SourceUnsupported.KeyWithoutUri: ...
     
+    @typing.final
+    class TsInit(SourceUnsupported):
+        r"""
+        init 段（EXT-X-MAP）是 TS 的节目表（PAT/PMT），本库只支持 fMP4 的 init 段
+        """
+        __match_args__ = ("url",)
+        @property
+        def url(self) -> builtins.str:
+            r"""
+            init 段的地址
+            """
+        def __new__(cls, url: builtins.str) -> SourceUnsupported.TsInit: ...
+    
 
 @typing.final
 class SourceUnsupportedError(SourceError):
@@ -3180,7 +3193,7 @@ class SourceUnsupportedError(SourceError):
     来源用到了不支持的特性。
     """
     @property
-    def reason(self) -> SourceUnsupported.EmptyPlaylist | SourceUnsupported.NoTargetDuration | SourceUnsupported.Encrypted | SourceUnsupported.IFramesOnly | SourceUnsupported.DeltaUpdate | SourceUnsupported.InitChangesWithinGroup | SourceUnsupported.DiscontinuityMismatch | SourceUnsupported.Fmp4BaseDataOffset | SourceUnsupported.KeyWithoutUri:
+    def reason(self) -> SourceUnsupported.EmptyPlaylist | SourceUnsupported.NoTargetDuration | SourceUnsupported.Encrypted | SourceUnsupported.IFramesOnly | SourceUnsupported.DeltaUpdate | SourceUnsupported.InitChangesWithinGroup | SourceUnsupported.DiscontinuityMismatch | SourceUnsupported.Fmp4BaseDataOffset | SourceUnsupported.KeyWithoutUri | SourceUnsupported.TsInit:
         r"""
         哪个特性
         """

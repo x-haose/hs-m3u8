@@ -11,8 +11,8 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use self::plan::Plan;
-use crate::fetch::{Fetcher, Item, ItemInfo, count_done, fetch_init};
-use crate::http::{Http, Permit};
+use crate::fetch::{Direct, Fetcher, Item, ItemInfo, count_done};
+use crate::http::Permit;
 use crate::ident::Fingerprint;
 use crate::output::{self, GroupTrack};
 use crate::recheck::{Candidate, Recheck, recheck};
@@ -32,7 +32,6 @@ use crate::{Error, Progress, Stage, WorkDirProblem, blocking};
 /// init 段每次都重新拉取（地址常带每次会话不同的签名，内容决定文件名）；任一项失败时取消其余项并返回该错误，
 /// 任务被取消时返回 [`Error::Cancelled`]。
 pub(crate) async fn download(
-    http: &Http,
     fetcher: &mut Fetcher,
     plan: &Plan,
     dir: &WorkDir,
@@ -45,7 +44,7 @@ pub(crate) async fn download(
         p.segments_total = plan.segment_count();
     });
     let layout = dir.layout();
-    let inits = store_inits(http, plan, layout, progress, cancel).await?;
+    let inits = store_inits(&fetcher.direct(), plan, layout, progress, cancel).await?;
     plan.check_inits(&inits)?;
     let names = names(plan, &inits);
     verify_completed(fetcher, plan, &names, layout, cancel).await?;
@@ -188,7 +187,7 @@ async fn fetch(
 
 /// 拉取并存入各轨的 init 段，返回 `inits[t][i]`：第 t 条轨 `inits[i]` 的内容指纹。
 async fn store_inits(
-    http: &Http,
+    direct: &Direct,
     plan: &Plan,
     layout: &Layout,
     progress: &watch::Sender<Progress>,
@@ -198,7 +197,7 @@ async fn store_inits(
     for (track, t) in plan.tracks.iter().enumerate() {
         let mut fingerprints: Vec<Fingerprint> = Vec::with_capacity(t.inits.len());
         for init in &t.inits {
-            let data = fetch_init(http, init, Permit::Vod, cancel).await?;
+            let data = direct.fetch_init(init, Permit::Vod, cancel).await?;
             let len = data.len() as u64;
             let fingerprint = Fingerprint::of_content(&data);
             workdir::store_init(layout, track, fingerprint, data).await?;

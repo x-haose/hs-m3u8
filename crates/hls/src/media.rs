@@ -58,6 +58,9 @@ pub struct SegmentKey {
 pub struct InitSection {
     pub uri: Url,
     pub byte_range: Option<ByteRange>,
+    /// EXT-X-MAP 处生效的 AES-128 解密参数，IV 取自那个 EXT-X-KEY（加密的 init 段须写明，RFC 8216 4.3.2.5）；None 表示
+    /// 不加密
+    pub key: Option<SegmentKey>,
 }
 
 /// 资源中的一段字节：[offset, offset + length)。解析结果保证 length ≥ 1 且 offset + length 不溢出。
@@ -141,7 +144,7 @@ impl Parser<'_> {
             }
             "EXT-X-DISCONTINUITY" => self.pending.discontinuity = true,
             "EXT-X-KEY" => self.key(line, required("EXT-X-KEY")?).map_err(at)?,
-            "EXT-X-MAP" => self.map(required("EXT-X-MAP")?).map_err(at)?,
+            "EXT-X-MAP" => self.map(line, required("EXT-X-MAP")?)?,
             "EXT-X-MEDIA-SEQUENCE" => {
                 let tag = "EXT-X-MEDIA-SEQUENCE";
                 self.playlist.media_sequence = self.sequence_tag(tag, value).map_err(at)?;
@@ -209,20 +212,33 @@ impl Parser<'_> {
         Ok(())
     }
 
-    /// EXT-X-MAP；其 BYTERANGE 必须带偏移（RFC 8216 4.3.2.5）。
-    fn map(&mut self, value: &str) -> Result<(), SyntaxError> {
-        let attrs = Attributes::parse(value)?;
-        let uri = resolve(self.url, attrs.require("EXT-X-MAP", "URI")?)?;
+    /// 第 `line` 行的 EXT-X-MAP；其 BYTERANGE 必须带偏移，加密时所用的 EXT-X-KEY 必须写 IV（RFC 8216 4.3.2.5）。
+    fn map(&mut self, line: usize, value: &str) -> Result<(), Error> {
+        let at = |kind| Error::from(Malformed::Syntax { line, kind });
+        let attrs = Attributes::parse(value).map_err(at)?;
+        let uri = attrs.require("EXT-X-MAP", "URI").map_err(at)?;
+        let uri = resolve(self.url, uri).map_err(at)?;
         let byte_range = match attrs.get("BYTERANGE") {
-            Some(range) => match parse_byte_range(range)? {
+            Some(range) => match parse_byte_range(range).map_err(at)? {
                 (length, Some(offset)) if offset.checked_add(length).is_some() => {
                     Some(ByteRange { offset, length })
                 }
-                _ => return Err(SyntaxError::ByteRange(range.to_owned())),
+                _ => return Err(at(SyntaxError::ByteRange(range.to_owned()))),
             },
             None => None,
         };
-        self.init = Some(InitSection { uri, byte_range });
+        let key = match key_in_effect(&self.keys)? {
+            Some(tag) => Some(SegmentKey {
+                uri: tag.uri.clone(),
+                iv: tag.iv.ok_or(at(SyntaxError::InitWithoutIv))?,
+            }),
+            None => None,
+        };
+        self.init = Some(InitSection {
+            uri,
+            byte_range,
+            key,
+        });
         Ok(())
     }
 
@@ -256,7 +272,10 @@ impl Parser<'_> {
                 .ok_or(at(SyntaxError::SequenceOverflow))?;
         }
         let byte_range = self.byte_range(&uri)?;
-        let key = segment_key(&self.keys, sequence)?;
+        let key = key_in_effect(&self.keys)?.map(|tag| SegmentKey {
+            uri: tag.uri.clone(),
+            iv: tag.iv.unwrap_or(u128::from(sequence).to_be_bytes()),
+        });
         self.playlist.segments.push(Segment {
             sequence,
             duration_us,
@@ -308,11 +327,9 @@ impl Parser<'_> {
     }
 }
 
-/// 分片使用的 key：有 identity 格式的 key 就用它；只有其他 KEYFORMAT（DRM）时不支持。
-fn segment_key(
-    keys: &BTreeMap<String, KeyTag>,
-    sequence: u64,
-) -> Result<Option<SegmentKey>, Error> {
+/// 生效的 key：有 identity 格式的 key 就用它（只支持 AES-128）；只有其他 KEYFORMAT（DRM）时不支持。分片缺省的 IV 为
+/// 它的媒体序号的 16 字节大端编码（RFC 8216 5.2）。
+fn key_in_effect(keys: &BTreeMap<String, KeyTag>) -> Result<Option<&KeyTag>, Error> {
     let Some(identity) = keys.get("identity") else {
         return match keys.iter().next() {
             Some((format, tag)) => Err(Error::Unsupported {
@@ -329,10 +346,7 @@ fn segment_key(
         what: Feature::Encryption(what),
     };
     match identity.method.as_str() {
-        "AES-128" => Ok(Some(SegmentKey {
-            uri: identity.uri.clone(),
-            iv: identity.iv.unwrap_or(u128::from(sequence).to_be_bytes()),
-        })),
+        "AES-128" => Ok(Some(identity)),
         "SAMPLE-AES" | "SAMPLE-AES-CTR" => Err(unsupported(Encryption::SampleAes)),
         other => Err(unsupported(Encryption::Method(other.to_owned()))),
     }

@@ -1,4 +1,4 @@
-//! 下载器：拉取分片，解密、校验后写入任务目录；另提供拉取 init 段的函数。
+//! 下载器：拉取分片，解密、校验后写入任务目录；另提供不排队、不写盘的拉取（init 段、核对用的分片）。
 //!
 //! 分片可以随时加入（点播一次加入全部，直播随刷新加入）；同时在途的不超过任务的并发数，其余排队。
 //! 每项完成后由驱动方取走结果（[`Fetcher::next`] / [`Fetcher::drain`]），据此更新进度、决定失败如何处理。
@@ -8,7 +8,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use hs_m3u8_hls::{InitSection, Segment};
+use hs_m3u8_hls::{InitSection, Segment, SegmentKey};
 use hs_m3u8_remux::fmp4;
 use tokio::sync::{OnceCell, watch};
 use tokio::task::JoinSet;
@@ -20,7 +20,7 @@ use crate::error::io_error;
 use crate::hooks::{HookKind, Hooks, Purpose, run_hook};
 use crate::http::{Http, Permit};
 use crate::request::KeyOverride;
-use crate::verify::{Container, ContentError, check_init, check_segment, decrypt_failure};
+use crate::verify::{Container, ContentError, check, decrypt_failure};
 use crate::workdir::{self, SegmentName};
 use crate::{Error, Progress, Unsupported, WorkDirProblem};
 
@@ -193,7 +193,8 @@ impl Fetcher {
     }
 }
 
-/// 立即拉取分片（经回调、解密、校验）的句柄，可交给后台任务；用于续录时核对内容。
+/// 立即拉取分片（经回调、解密、校验）与 init 段（解密、校验）的句柄，可交给后台任务；用于拉 init 段与续传、续录时
+/// 核对内容。
 #[derive(Clone)]
 pub(crate) struct Direct {
     ctx: Arc<Ctx>,
@@ -212,6 +213,35 @@ impl Direct {
         fetch_segment(&self.ctx, segment, init, cancel)
             .await
             .map_err(|e| segment_error(track, segment, e))
+    }
+
+    /// 拉取 init 段，解密（见 [`decryption`]）并校验（见 [`check`]，须为 fMP4）；没写完的与请求的临时故障一起重试。
+    /// `permit` 为 init 段的请求占哪一份引擎名额（key 的请求同分片）。
+    pub(crate) async fn fetch_init(
+        &self,
+        init: &InitSection,
+        permit: Permit,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<u8>, Error> {
+        let ctx = &self.ctx;
+        let key = decryption(ctx, init.key.as_ref(), cancel).await?;
+        ctx.http
+            .retrying(&init.uri, cancel, || async move {
+                let response = ctx
+                    .http
+                    .get_once(Purpose::Init, &init.uri, init.byte_range, permit, cancel)
+                    .await?;
+                let body = nonempty(response.body, &init.uri)?;
+                let content = |e: ContentError| e.into_error(&init.uri);
+                let mut data = match key {
+                    Some((key, iv)) => decrypt(body, &key, &iv)
+                        .map_err(|e| content(decrypt_failure(e, &Container::Init)))?,
+                    None => body,
+                };
+                check(&mut data, &Container::Init).map_err(content)?;
+                Ok(data)
+            })
+            .await
     }
 }
 
@@ -255,44 +285,15 @@ async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
     (id, result)
 }
 
-/// 拉取 init 段并校验（见 [`check_init`]）；没写完的与请求的临时故障一起重试。
-pub(crate) async fn fetch_init(
-    http: &Http,
-    init: &InitSection,
-    permit: Permit,
-    cancel: &CancellationToken,
-) -> Result<Vec<u8>, Error> {
-    http.retrying(&init.uri, cancel, || async move {
-        let response = http
-            .get_once(Purpose::Init, &init.uri, init.byte_range, permit, cancel)
-            .await?;
-        let mut data = nonempty(response.body, &init.uri)?;
-        check_init(&mut data).map_err(|e| e.into_error(&init.uri))?;
-        Ok(data)
-    })
-    .await
-}
-
-/// 拉取分片，经 `on_segment` 回调后解密并校验内容（见 [`check_segment`]，`init` 见 [`Item`]；解密失败见
-/// [`decrypt_failure`]）；有自定义 key 时用它解密。请求、回调、解密与校验作为一次尝试，没写完的与请求的临时故障一起
-/// 重试。
+/// 拉取分片，经 `on_segment` 回调后解密（见 [`decryption`]）并校验内容（见 [`check`]，`init` 见 [`Item`]；解密失败见
+/// [`decrypt_failure`]）。请求、回调、解密与校验作为一次尝试，没写完的与请求的临时故障一起重试。
 async fn fetch_segment(
     ctx: &Ctx,
     segment: &Segment,
     init: Option<&Path>,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>, Error> {
-    let key = match (&segment.key, ctx.key_override) {
-        (None, _) => None,
-        (Some(key), Some(given)) => Some((given.key, given.iv.unwrap_or(key.iv))),
-        (Some(key), None) => {
-            let url = key
-                .uri
-                .as_ref()
-                .ok_or(Error::Unsupported(Unsupported::KeyWithoutUri))?;
-            Some((key_for(ctx, url, cancel).await?, key.iv))
-        }
-    };
+    let key = decryption(ctx, segment.key.as_ref(), cancel).await?;
     let container = &match init {
         Some(path) => Container::Fmp4 {
             trex: stored_trex(&ctx.work_dir, path).await?,
@@ -324,10 +325,30 @@ async fn fetch_segment(
                 }
                 None => data,
             };
-            check_segment(&mut data, container).map_err(content)?;
+            check(&mut data, container).map_err(content)?;
             Ok(data)
         })
         .await
+}
+
+/// 按 `key` 解密用的 key 与 IV；不加密时为 None。有自定义 key 时用它（IV 没给的用 `key` 的），否则按 `key` 的地址取
+/// （见 [`key_for`]），没有地址报 [`Unsupported::KeyWithoutUri`]。
+async fn decryption(
+    ctx: &Ctx,
+    key: Option<&SegmentKey>,
+    cancel: &CancellationToken,
+) -> Result<Option<([u8; 16], [u8; 16])>, Error> {
+    let Some(key) = key else {
+        return Ok(None);
+    };
+    if let Some(given) = ctx.key_override {
+        return Ok(Some((given.key, given.iv.unwrap_or(key.iv))));
+    }
+    let url = key
+        .uri
+        .as_ref()
+        .ok_or(Error::Unsupported(Unsupported::KeyWithoutUri))?;
+    Ok(Some((key_for(ctx, url, cancel).await?, key.iv)))
 }
 
 /// 源站返回空的内容（多为文件刚建出、还没写进内容）时为取自 `url` 的内容没写完。

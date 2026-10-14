@@ -254,6 +254,54 @@ async fn byte_ranges() {
     assert_eq!(server.hits("video.mp4"), 3);
 }
 
+/// 加密的 init 段（RFC 8216 4.3.2.5）：EXT-X-MAP 之前的 EXT-X-KEY 写明 IV，init 段与分片都用它解密。init 段是 TS
+/// 的节目表时明确报不支持，不当作数据损坏。
+#[tokio::test(flavor = "multi_thread")]
+async fn encrypted_init_sections_are_decrypted_and_ts_ones_are_unsupported() {
+    let dir = test_dir("encrypted_init");
+    let server = Server::start().await;
+    let (key, iv) = ([0x5A; 16], [0x11; 16]);
+    for name in ["init.mp4", "seg0.m4s", "seg1.m4s"] {
+        let plain = fixture(&format!("fmp4_a/video/{name}"));
+        server.put(name, encrypt(&plain, &key, &iv));
+    }
+    server.put("key", key.to_vec());
+    let playlist = |init: &str| {
+        format!(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:1\n\
+             #EXT-X-KEY:METHOD=AES-128,URI=\"key\",IV=0x11111111111111111111111111111111\n\
+             #EXT-X-MAP:URI=\"{init}\"\n#EXTINF:1,\nseg0.m4s\n#EXTINF:1,\nseg1.m4s\n#EXT-X-ENDLIST\n"
+        )
+    };
+    server.put("index.m3u8", playlist("init.mp4"));
+
+    let output = run(request(server.url("index.m3u8"), &dir)).await.unwrap();
+
+    let want = expected(
+        &dir,
+        &[Streams::All],
+        &[DiscontinuityGroup {
+            tracks: vec![track(
+                "fmp4_a/video",
+                Some("init.mp4"),
+                &["seg0.m4s", "seg1.m4s"],
+            )],
+        }],
+    );
+    assert_output(&output, &want);
+
+    let ts = test_dir("ts_init");
+    server.put("pat.ts", encrypt(&fixture("ts_a/seg0.ts"), &key, &iv));
+    server.put("index.m3u8", playlist("pat.ts"));
+    let err = run(request(server.url("index.m3u8"), &ts))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, Error::Unsupported(Unsupported::TsInit(url)) if **url == server.url("pat.ts")),
+        "{err}"
+    );
+}
+
 /// 500 按重试策略重试后成功。
 #[tokio::test(flavor = "multi_thread")]
 async fn retries_server_errors() {
