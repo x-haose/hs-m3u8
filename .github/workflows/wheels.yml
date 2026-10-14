@@ -1,0 +1,219 @@
+name: wheels
+
+# 构建发布用的 sdist 与各平台的 wheel：每个 wheel 装进干净的环境跑 Python 端到端测试，sdist 按 LICENSES/NOTICE.txt
+# 写的步骤（先 build.sh、再 maturin）从源码构建一次。只构建与测试，不发布；产物作为工作流的附件保留。
+on:
+  push:
+    branches: [rewrite/rust]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # macOS 的最低系统版本：build.sh 编译 FFmpeg 与 maturin 定 wheel 的平台标签都读它
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+  UV_PYTHON: "3.12"
+
+jobs:
+  sdist:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.0"
+
+      - name: Python 开发环境
+        run: uv sync --locked
+
+      # sdist 带上 FFmpeg 的源码包（LGPL 要求源码与二进制在同一处提供）
+      - name: 取 FFmpeg 源码包
+        run: bash third_party/ffmpeg/build.sh --fetch
+
+      - name: 打 sdist
+        run: |
+          uv run --no-sync maturin sdist --out dist
+          tar -tzf dist/*.tar.gz | grep -q '/third_party/ffmpeg/build/ffmpeg-[0-9.]*\.tar\.xz$'
+
+      # 照用户的做法从 sdist 构建：PATH 最前面放一个总是失败的 curl，build.sh 若不用随附的源码包而去下载即失败
+      - name: 从 sdist 构建
+        run: |
+          mkdir -p "$RUNNER_TEMP/sdist" "$RUNNER_TEMP/no-curl"
+          printf '#!/bin/sh\necho "不应下载：$*" >&2\nexit 1\n' > "$RUNNER_TEMP/no-curl/curl"
+          chmod +x "$RUNNER_TEMP/no-curl/curl"
+          tar -xzf dist/*.tar.gz -C "$RUNNER_TEMP/sdist"
+          cd "$RUNNER_TEMP"/sdist/*/
+          PATH="$RUNNER_TEMP/no-curl:$PATH" bash third_party/ffmpeg/build.sh
+          "$GITHUB_WORKSPACE/.venv/bin/maturin" build --release --locked --out "$RUNNER_TEMP/from-sdist"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+            # 2026-10-10 的镜像，升级时显式修改
+            image: quay.io/pypa/manylinux_2_28_x86_64@sha256:4131ddd7acb9c6c966af02fe7e71edc51e078c2d41f475966697676430bfa2ae
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            image: quay.io/pypa/manylinux_2_28_aarch64@sha256:abd1230aa9e4058a74b89d27cd14ba18c0db036d7bfe6e6f219a29ea63c24eb6
+    runs-on: ${{ matrix.runner }}
+    # FFmpeg、扩展模块与测试都在 manylinux_2_28 里：链接的 glibc 符号不新于 2.28，wheel 才能标 manylinux_2_28
+    container: ${{ matrix.image }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 构建依赖
+        run: |
+          # bindgen 要 libclang
+          dnf install -y clang-devel
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: 缓存 FFmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: third_party/ffmpeg/dist
+          key: ffmpeg-${{ matrix.image }}-${{ hashFiles('third_party/ffmpeg/build.sh') }}
+
+      - name: 编译 FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: bash third_party/ffmpeg/build.sh
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.0"
+
+      - name: Python 开发环境
+        run: uv sync --locked
+
+      - name: 构建 wheel
+        run: uv run --no-sync maturin build --release --locked --compatibility manylinux_2_28 --out dist
+
+      # 开发环境里只有开发工具、没有从源码装的 hs_m3u8，测试用的即这个 wheel
+      - name: 装上 wheel 测试
+        run: |
+          uv pip install dist/*.whl
+          uv run --no-sync pytest
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheel-linux-${{ matrix.arch }}
+          path: dist/*.whl
+
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # 同 Makefile：bindgen 加载的 libclang 不带默认 sysroot 时找不到系统头文件
+      - name: bindgen 的 SDK 路径
+        run: echo "BINDGEN_EXTRA_CLANG_ARGS=--sysroot=$(xcrun --show-sdk-path)" >> "$GITHUB_ENV"
+
+      - name: 缓存 FFmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: third_party/ffmpeg/dist
+          key: ffmpeg-macos-15-${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('third_party/ffmpeg/build.sh') }}
+
+      - name: 编译 FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: bash third_party/ffmpeg/build.sh
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.0"
+
+      - name: Python 开发环境
+        run: uv sync --locked
+
+      # 链接警告当错误：目标文件的最低系统版本比 wheel 声称的新时，链接器只警告
+      - name: 构建 wheel
+        run: uv run --no-sync maturin build --release --locked --out dist
+        env:
+          RUSTFLAGS: "-C link-arg=-Wl,-fatal_warnings"
+
+      # 开发环境里只有开发工具、没有从源码装的 hs_m3u8，测试用的即这个 wheel
+      - name: 装上 wheel 测试
+        run: |
+          uv pip install dist/*.whl
+          uv run --no-sync pytest
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheel-macos-arm64
+          path: dist/*.whl
+
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: MSVC 环境
+        shell: pwsh
+        run: |
+          # 找到带 VC 工具的 VS，执行 vcvarsall 后把环境变量传给后续步骤
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw "找不到带 VC 工具的 Visual Studio" }
+          $vars = cmd /c "`"$vs\VC\Auxiliary\Build\vcvarsall.bat`" x64 >nul && set"
+          if ($LASTEXITCODE -ne 0) { throw "vcvarsall.bat 执行失败（退出码 $LASTEXITCODE）" }
+          $vars | Where-Object { $_ -match '^[^=]+=' } | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: MSYS
+          path-type: inherit
+          update: false
+          install: make diffutils xz
+
+      - name: 缓存 FFmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: third_party/ffmpeg/dist
+          key: ffmpeg-windows-2025-${{ hashFiles('third_party/ffmpeg/build.sh') }}
+
+      - name: 编译 FFmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: |
+          # MSYS2 coreutils 的 link.exe 会遮住 MSVC 的链接器
+          if [ -f /usr/bin/link.exe ]; then mv /usr/bin/link.exe /usr/bin/link.exe.msys; fi
+          bash third_party/ffmpeg/build.sh
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.0"
+
+      - name: Python 开发环境
+        run: uv sync --locked
+
+      - name: 构建 wheel
+        run: uv run --no-sync maturin build --release --locked --out dist
+
+      # 开发环境里只有开发工具、没有从源码装的 hs_m3u8，测试用的即这个 wheel
+      - name: 装上 wheel
+        shell: bash
+        run: uv pip install dist/*.whl
+
+      - name: 测试
+        run: uv run --no-sync pytest
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheel-windows-x86_64
+          path: dist/*.whl

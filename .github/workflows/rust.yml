@@ -16,7 +16,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: MSVC 环境（Windows）
         if: runner.os == 'Windows'
@@ -32,7 +32,7 @@ jobs:
 
       - name: MSYS2（Windows）
         if: runner.os == 'Windows'
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
         with:
           msystem: MSYS
           path-type: inherit
@@ -41,7 +41,7 @@ jobs:
 
       - name: 缓存 FFmpeg
         id: ffmpeg-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: third_party/ffmpeg/dist
           key: ffmpeg-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('third_party/ffmpeg/build.sh') }}
@@ -58,10 +58,10 @@ jobs:
         if: runner.os != 'Windows' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
         run: third_party/ffmpeg/build.sh
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       # Python 开发环境（.venv，Python 3.12 即支持的最低版本）：绑定 crate 的构建脚本要用，Python 的检查与测试也用
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: "0.13.0"
 
@@ -74,7 +74,7 @@ jobs:
       # 格式、clippy、文档与测试涉及各平台专属的代码（cfg 下的、sysproxy 的 macOS 与 Windows 实现），三个平台都查
       - name: 安装 cargo-deny 与 cargo-llvm-cov（Linux）
         if: runner.os == 'Linux'
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-deny@0.20.2,cargo-llvm-cov@0.9.1
 
