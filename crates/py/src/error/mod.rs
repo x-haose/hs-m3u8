@@ -643,6 +643,9 @@ fn exception(
                 at,
             },
         )?,
+        E::Unsupported(U::KeyWithoutUri) => {
+            unsupported_source(py, base, SourceUnsupported::KeyWithoutUri {})?
+        }
         E::Playlist { url, cause } => instance(
             py,
             SourceError::chain(

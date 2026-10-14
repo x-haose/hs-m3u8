@@ -174,6 +174,8 @@ variants! {
             /// 这个 moof 的起点，字节
             at: u64,
         },
+        /// 加密的分片所用的 EXT-X-KEY 没写 URI（违反 RFC 8216），取不到 key；已知 key 时用 `JobRequest.key`
+        KeyWithoutUri {},
     }
 }
 

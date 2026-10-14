@@ -881,6 +881,35 @@ async fn key_override_replaces_the_playlist_key_and_iv() {
     assert_eq!(server.hits("key"), 0);
 }
 
+/// EXT-X-KEY 没写 URI：没有自定义 key 时取分片即明确报不支持（不是校验失败），有了照常解密。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_without_uri_needs_a_key_override() {
+    let dir = test_dir("key_without_uri");
+    let server = Server::start().await;
+    let (key, iv) = ([0x3C; 16], [0x7E; 16]);
+    for name in TS_A {
+        server.put(name, encrypt(&fixture(&format!("ts_a/{name}")), &key, &iv));
+    }
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-KEY:METHOD=AES-128,IV=0x7E7E7E7E7E7E7E7E7E7E7E7E7E7E7E7E\n\
+         #EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n#EXT-X-ENDLIST\n",
+    );
+    let mut req = request(server.url("index.m3u8"), &dir);
+
+    let err = run(req.clone()).await.unwrap_err();
+    assert!(
+        matches!(&err, Error::Segment { cause, .. }
+            if matches!(**cause, Error::Unsupported(Unsupported::KeyWithoutUri))),
+        "{err}"
+    );
+    assert!(!err.retryable());
+
+    req.key = Some(KeyOverride { key, iv: None });
+    let output = run(req).await.unwrap();
+    assert_output(&output, &expected_ts_a(&dir));
+}
+
 /// 站点适配：改写播放列表、给每个请求签名、解开变换过的 key、去掉分片前的伪装字节。
 struct SiteHooks;
 

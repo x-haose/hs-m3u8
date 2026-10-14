@@ -22,7 +22,7 @@ use crate::http::{Http, Permit};
 use crate::request::KeyOverride;
 use crate::verify::{Container, ContentError, check_init, check_segment, decrypt_failure};
 use crate::workdir::{self, SegmentName};
-use crate::{Error, Progress, WorkDirProblem};
+use crate::{Error, Progress, Unsupported, WorkDirProblem};
 
 /// 一项下载：第 `track` 条轨的分片，`name` 为它在任务目录中的名字，`path` 为由名字得出的写入位置，`init` 为它所用的
 /// init 段在任务目录里的文件（排入下载之前已落盘；分片没有 init 段、不是 fMP4 时为 None）。
@@ -285,7 +285,13 @@ async fn fetch_segment(
     let key = match (&segment.key, ctx.key_override) {
         (None, _) => None,
         (Some(key), Some(given)) => Some((given.key, given.iv.unwrap_or(key.iv))),
-        (Some(key), None) => Some((key_for(ctx, &key.uri, cancel).await?, key.iv)),
+        (Some(key), None) => {
+            let url = key
+                .uri
+                .as_ref()
+                .ok_or(Error::Unsupported(Unsupported::KeyWithoutUri))?;
+            Some((key_for(ctx, url, cancel).await?, key.iv))
+        }
     };
     let container = &match init {
         Some(path) => Container::Fmp4 {

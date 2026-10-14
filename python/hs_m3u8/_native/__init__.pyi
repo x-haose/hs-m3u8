@@ -1164,7 +1164,8 @@ class KeyLengthError(SourceError):
 class KeyOverride:
     r"""
     自定义 key：加密的分片一律用它解密，不请求播放列表里的 key 地址，也不经过 `Hooks.on_key`。用于 key 地址取不到、
-    或返回的不是真正的 key，而调用方已知 key 的站点；不加密的分片不受影响。`repr` 不显示 key 与 IV。
+    没写（EXT-X-KEY 没有 URI）或返回的不是真正的 key，而调用方已知 key 的站点；不加密的分片不受影响。`repr` 不显示 key
+    与 IV。
     """
     @property
     def key(self) -> bytes:
@@ -3163,6 +3164,14 @@ class SourceUnsupported:
             """
         def __new__(cls, *, url: builtins.str, at: builtins.int) -> SourceUnsupported.Fmp4BaseDataOffset: ...
     
+    @typing.final
+    class KeyWithoutUri(SourceUnsupported):
+        r"""
+        加密的分片所用的 EXT-X-KEY 没写 URI（违反 RFC 8216），取不到 key；已知 key 时用 `JobRequest.key`
+        """
+        __match_args__ = ()
+        def __new__(cls) -> SourceUnsupported.KeyWithoutUri: ...
+    
 
 @typing.final
 class SourceUnsupportedError(SourceError):
@@ -3170,7 +3179,7 @@ class SourceUnsupportedError(SourceError):
     来源用到了不支持的特性。
     """
     @property
-    def reason(self) -> SourceUnsupported.EmptyPlaylist | SourceUnsupported.NoTargetDuration | SourceUnsupported.Encrypted | SourceUnsupported.IFramesOnly | SourceUnsupported.DeltaUpdate | SourceUnsupported.InitChangesWithinGroup | SourceUnsupported.DiscontinuityMismatch | SourceUnsupported.Fmp4BaseDataOffset:
+    def reason(self) -> SourceUnsupported.EmptyPlaylist | SourceUnsupported.NoTargetDuration | SourceUnsupported.Encrypted | SourceUnsupported.IFramesOnly | SourceUnsupported.DeltaUpdate | SourceUnsupported.InitChangesWithinGroup | SourceUnsupported.DiscontinuityMismatch | SourceUnsupported.Fmp4BaseDataOffset | SourceUnsupported.KeyWithoutUri:
         r"""
         哪个特性
         """

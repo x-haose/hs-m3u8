@@ -97,19 +97,33 @@ fn key_applies_until_the_next_key_and_iv_defaults_to_the_sequence_number() {
         keys,
         [
             Some(SegmentKey {
-                uri: k1.clone(),
+                uri: Some(k1.clone()),
                 iv: sequence_iv(5)
             }),
             Some(SegmentKey {
-                uri: k1,
+                uri: Some(k1),
                 iv: sequence_iv(6)
             }),
             Some(SegmentKey {
-                uri: k2,
+                uri: Some(k2),
                 iv: core::array::from_fn(|i| i as u8)
             }),
             None,
         ]
+    );
+}
+
+/// EXT-X-KEY 没写 URI（站点另给 key）：照常解析，key 地址为空，IV 照常定值。
+#[test]
+fn a_key_without_uri_is_kept_without_an_address() {
+    let m =
+        media("#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:3\n#EXT-X-KEY:METHOD=AES-128\n#EXTINF:4,\na.ts\n");
+    assert_eq!(
+        m.segments[0].key,
+        Some(SegmentKey {
+            uri: None,
+            iv: sequence_iv(3)
+        })
     );
 }
 
@@ -139,7 +153,10 @@ fn identity_key_is_used_alongside_drm_keys() {
          #EXTINF:4,\na.ts\n",
     );
     let key = m.segments[0].key.as_ref().unwrap();
-    assert_eq!(key.uri.as_str(), "https://cdn.example.com/video/720p/k.key");
+    assert_eq!(
+        key.uri.as_ref().unwrap().as_str(),
+        "https://cdn.example.com/video/720p/k.key"
+    );
 }
 
 #[test]
@@ -214,7 +231,10 @@ fn lenient_formatting_is_accepted() {
         "https://cdn.example.com/video/720p/seg0.ts"
     );
     let key = m.segments[1].key.as_ref().unwrap();
-    assert_eq!(key.uri.as_str(), "https://cdn.example.com/video/720p/k.key");
+    assert_eq!(
+        key.uri.as_ref().unwrap().as_str(),
+        "https://cdn.example.com/video/720p/k.key"
+    );
     assert_eq!(key.iv, core::array::from_fn::<u8, 16, _>(|i| i as u8));
     assert!(m.ended);
 }
@@ -395,12 +415,12 @@ fn malformed_input_is_reported_with_its_line() {
         }
     ));
     assert_eq!(
-        malformed("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128\n#EXTINF:4,\na.ts\n"),
+        malformed("#EXTM3U\n#EXT-X-KEY:URI=\"k\"\n#EXTINF:4,\na.ts\n"),
         Malformed::Syntax {
             line: 2,
             kind: SyntaxError::MissingAttribute {
                 tag: "EXT-X-KEY",
-                name: "URI"
+                name: "METHOD"
             }
         }
     );

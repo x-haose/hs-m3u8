@@ -48,7 +48,8 @@ pub struct Segment {
 /// 分片的 AES-128 解密参数。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentKey {
-    pub uri: Url,
+    /// key 的地址；None 为 EXT-X-KEY 没写 URI（违反 RFC 8216 4.3.2.4，确有站点这样给），只能用另外得到的 key 解密
+    pub uri: Option<Url>,
     /// 显式 IV，或缺省时该分片媒体序号的 16 字节大端编码（RFC 8216 5.2）
     pub iv: [u8; 16],
 }
@@ -70,7 +71,7 @@ pub struct ByteRange {
 struct KeyTag {
     line: usize,
     method: String,
-    uri: Url,
+    uri: Option<Url>,
     iv: Option<[u8; 16]>,
 }
 
@@ -187,7 +188,10 @@ impl Parser<'_> {
             self.keys.clear();
             return Ok(());
         }
-        let uri = resolve(self.url, attrs.require("EXT-X-KEY", "URI")?)?;
+        let uri = attrs
+            .get("URI")
+            .map(|uri| resolve(self.url, uri))
+            .transpose()?;
         let iv = attrs.get("IV").map(parse_iv).transpose()?;
         let format = attrs
             .get("KEYFORMAT")
