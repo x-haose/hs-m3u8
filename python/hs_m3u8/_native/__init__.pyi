@@ -1616,7 +1616,8 @@ class Mp4Unsupported:
     @typing.final
     class Codec(Mp4Unsupported):
         r"""
-        编码放不进 MP4。支持的编码见 README 的「能力」一节；作为异常抛出时，异常的说明（`str(异常)`）里也列出
+        编码放不进 MP4。支持的：fMP4 里 H.264、HEVC、AV1、VP9 视频与 AAC、AC-3、E-AC-3、MP3、MP2、FLAC、Opus、ALAC
+        音频；TS 与打包音频里 H.264、HEVC 视频与 AAC、AC-3、E-AC-3、MP3、MP2 音频
         """
         __match_args__ = ("group", "track", "kind", "codec",)
         @property

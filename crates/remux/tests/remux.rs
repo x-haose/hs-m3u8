@@ -937,7 +937,8 @@ fn parameter_changes_within_a_group_are_rejected() {
     }
 }
 
-/// 在第 `at` 次检查取消时（返回真之前）做 `act`、并返回它的结果的取消信号，另返回已检查的次数。
+/// 每次检查取消时以检查的序号（从 0 起）调用 `act`、以它的返回值为是否取消的取消信号，另返回已检查的次数。`act` 在
+/// FFmpeg 的回调里调用，不得 panic。
 fn counting_cancel(
     act: impl Fn(usize) -> bool + Send + Sync + 'static,
 ) -> (Cancel, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
@@ -1026,11 +1027,16 @@ fn a_segment_shrinking_during_the_merge_is_reported() {
             })
             .collect();
         let victim = segments[2].path.clone();
+        // 截短在取消回调里做，不能 panic：结果记下来，合并结束后再断言
+        let truncated = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let result = truncated.clone();
         let (cancel, _) = counting_cancel(move |n| {
             if n == at {
-                let file = std::fs::File::options().write(true).open(&victim).unwrap();
-                let len = file.metadata().unwrap().len();
-                file.set_len(len / 2).unwrap();
+                let cut = std::fs::File::options()
+                    .write(true)
+                    .open(&victim)
+                    .and_then(|file| file.set_len(file.metadata()?.len() / 2));
+                *result.lock().unwrap_or_else(|e| e.into_inner()) = Some(cut);
             }
             false
         });
@@ -1038,7 +1044,10 @@ fn a_segment_shrinking_during_the_merge_is_reported() {
             segments,
             ..source.clone()
         };
-        match remux(&[Streams::All], &[group([shrinking])], &output, &cancel) {
+        let merged = remux(&[Streams::All], &[group([shrinking])], &output, &cancel);
+        let cut = truncated.lock().unwrap().take();
+        assert!(matches!(cut, Some(Ok(()))), "第 {at} 次检查时截短：{cut:?}");
+        match merged {
             Ok(report) => assert_eq!(
                 report.streams.iter().map(|s| s.packets).collect::<Vec<_>>(),
                 complete,

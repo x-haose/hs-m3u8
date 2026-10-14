@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn a_track_recorded_before_continues_only_when_some_track_matches() {
+    fn an_unrecorded_track_joins_the_old_session_only_when_some_track_matches() {
         // 视频已录满：没有一条轨核对一致，音频不知道与旧会话哪段时间对得上，另起会话
         let full = decide(Verdict::Full, Verdict::Unrecorded);
         assert_eq!(full.session, 4);
