@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use hs_m3u8_core::hls::{AudioChoice, Encryption};
 use hs_m3u8_core::{
     Error, FetchFailure, HookError, Hooks, HttpError, HttpFailure, Integrity, KeyOverride,
-    MissReason, Missed, Purpose, RequestParts, Retrying, Stage, Unsupported, Url, WorkDirProblem,
+    MissReason, Missed, Purpose, RequestParts, Stage, Unsupported, Url, WorkDirProblem,
 };
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
@@ -433,7 +433,7 @@ async fn retries_server_errors() {
     assert_eq!(server.hits("seg0.ts"), 3);
 }
 
-/// 退避等着重试时进度里给出在等的请求数、用途与失败原因；退避结束（这里是取消）即清空。
+/// 退避等着重试时进度里列出这个请求：用途、失败原因、第几次重试、退避多久；退避结束（这里是取消）即去掉。
 #[tokio::test(flavor = "multi_thread")]
 async fn retry_waits_show_in_progress() {
     let dir = test_dir("retry_progress");
@@ -447,27 +447,29 @@ async fn retry_waits_show_in_progress() {
     let mut progress = job.control().progress();
 
     let retrying = progress
-        .wait_for(|p| p.retrying.is_some())
+        .wait_for(|p| !p.retrying.is_empty())
         .await
         .unwrap()
         .retrying
         .clone();
 
+    let [waiting] = &retrying[..] else {
+        panic!("应只有一个在等：{retrying:?}");
+    };
     let failure = FetchFailure::Http(HttpFailure {
         kind: HttpError::Status(500),
         retry_after: None,
     });
     assert_eq!(
-        retrying,
-        Some(Retrying {
-            waiting: 1,
-            purpose: Purpose::Segment,
-            failure
-        })
+        (waiting.purpose, &waiting.failure, waiting.retry),
+        (Purpose::Segment, &failure, 1)
     );
+    // 一小时乘以 [0.75, 1.25) 的抖动
+    let jittered = Duration::from_secs(2700)..Duration::from_secs(4500);
+    assert!(jittered.contains(&waiting.delay), "{:?}", waiting.delay);
     job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
-    assert_eq!(progress.borrow().retrying, None);
+    assert!(progress.borrow().retrying.is_empty());
 }
 
 /// 服务器要求的等待超过重试的等待上限：不再重试，任务失败；错误可重试，服务器要求的等待包在分片的失败里（key

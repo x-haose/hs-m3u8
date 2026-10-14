@@ -135,7 +135,7 @@ async fn verify_completed(
     let direct = fetcher.direct();
     let mut pending = picked.into_iter();
     let mut running = JoinSet::new();
-    loop {
+    let verified = loop {
         while running.len() < fetcher.limit()
             && let Some(Group { track, candidates }) = pending.next()
         {
@@ -145,23 +145,27 @@ async fn verify_completed(
             });
         }
         let Some(joined) = running.join_next().await else {
-            break;
+            break Ok(());
         };
         let checked = match joined {
             Ok(checked) => checked,
             Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
             Err(_) => unreachable!("核对的任务不会被单独中止，运行时关闭时这里也不再被轮询"),
         };
-        match checked? {
-            Recheck::Same => {}
-            Recheck::Different | Recheck::Gone => {
-                return Err(Error::WorkDir {
+        match checked {
+            Ok(Recheck::Same) => {}
+            Ok(Recheck::Different | Recheck::Gone) => {
+                break Err(Error::WorkDir {
                     path: layout.root().to_path_buf(),
                     problem: WorkDirProblem::SourceUnverified,
                 });
             }
+            Err(failure) => break Err(failure),
         }
-    }
+    };
+    // 有一组不通过时其余的中止，等它们退出再返回：它们的请求与退避在任务结束之前收尾
+    running.shutdown().await;
+    verified?;
     if url_changed {
         dir.adopt_url().await?;
     }

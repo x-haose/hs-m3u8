@@ -2470,10 +2470,10 @@ class Progress:
         变化算下载速度
         """
     @property
-    def retrying(self) -> typing.Optional[Retrying]:
+    def retrying(self) -> builtins.tuple[Retrying, ...]:
         r"""
         正在退避、等着重试的请求（分片、key、init 段，与开始任务时拉的播放列表；直播的刷新不重试，见
-        `refresh_errors`）；没有在等的为 None
+        `refresh_errors`），按开始退避的先后；退避结束（接着重试或被取消）即去掉
         """
     @property
     def writing(self) -> typing.Optional[Writing]:
@@ -2497,7 +2497,7 @@ class Progress:
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, stage: Stage, selected: typing.Optional[Selected], segments_done: builtins.int, segments_total: builtins.int, segments_failed: builtins.int, segments_expired: builtins.int, segments_gap: builtins.int, duration: datetime.timedelta, bytes: builtins.int, received: builtins.int, retrying: typing.Optional[Retrying], writing: typing.Optional[Writing], refresh_errors: collections.abc.Sequence[typing.Optional[RefreshCause]], mp4_unsupported: typing.Optional[Mp4Unsupported]) -> Progress:
+    def __new__(cls, *, stage: Stage, selected: typing.Optional[Selected], segments_done: builtins.int, segments_total: builtins.int, segments_failed: builtins.int, segments_expired: builtins.int, segments_gap: builtins.int, duration: datetime.timedelta, bytes: builtins.int, received: builtins.int, retrying: collections.abc.Sequence[Retrying], writing: typing.Optional[Writing], refresh_errors: collections.abc.Sequence[typing.Optional[RefreshCause]], mp4_unsupported: typing.Optional[Mp4Unsupported]) -> Progress:
         r"""
         各参数即同名属性。
         """
@@ -2801,26 +2801,31 @@ class RetryPolicy:
 @typing.final
 class Retrying:
     r"""
-    正在退避、等着重试的请求（`Progress.retrying`）。
+    一个正在退避、等着重试的请求（`Progress.retrying`）。
     """
-    @property
-    def waiting(self) -> builtins.int:
-        r"""
-        在等的请求数，至少 1
-        """
     @property
     def purpose(self) -> Purpose.Playlist | Purpose.Key | Purpose.Init | Purpose.Segment:
         r"""
-        最近一次要重试的请求的用途
+        请求的用途
         """
     @property
     def failure(self) -> FetchFailure.Http | FetchFailure.Incomplete:
         r"""
-        最近一次要重试的失败
+        上一次尝试的失败
+        """
+    @property
+    def retry(self) -> builtins.int:
+        r"""
+        接着是第几次重试，从 1 起（总尝试次数见 `RetryPolicy.attempts`）
+        """
+    @property
+    def delay(self) -> datetime.timedelta:
+        r"""
+        这次退避多久（随机抖动之后的，服务器要求等待更久时按它的）
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, waiting: builtins.int, purpose: Purpose, failure: FetchFailure) -> Retrying:
+    def __new__(cls, *, purpose: Purpose, failure: FetchFailure, retry: builtins.int, delay: datetime.timedelta) -> Retrying:
         r"""
         各参数即同名属性。
         """

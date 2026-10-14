@@ -264,8 +264,8 @@ record! {
         /// 变化算下载速度
         pub received: u64,
         /// 正在退避、等着重试的请求（分片、key、init 段，与开始任务时拉的播放列表；直播的刷新不重试，见
-        /// `refresh_errors`）；没有在等的为 None
-        pub retrying: Option<Retrying>,
+        /// `refresh_errors`），按开始退避的先后；退避结束（接着重试或被取消）即去掉
+        pub retrying: Seq<Retrying>,
         /// 写出的进度；`Stage.Writing` 之前为 None
         pub writing: Option<Writing>,
         /// 直播：各轨（下标为轨道编号）最近一次刷新失败的原因。这条轨之后刷新成功、不再刷新或录制结束即为 None；
@@ -281,14 +281,16 @@ record! {
 }
 
 record! {
-    /// 正在退避、等着重试的请求（`Progress.retrying`）。
+    /// 一个正在退避、等着重试的请求（`Progress.retrying`）。
     pub struct Retrying {
-        /// 在等的请求数，至少 1
-        pub waiting: usize,
-        /// 最近一次要重试的请求的用途
+        /// 请求的用途
         pub purpose: Purpose,
-        /// 最近一次要重试的失败
+        /// 上一次尝试的失败
         pub failure: FetchFailure,
+        /// 接着是第几次重试，从 1 起（总尝试次数见 `RetryPolicy.attempts`）
+        pub retry: u32,
+        /// 这次退避多久（随机抖动之后的，服务器要求等待更久时按它的）
+        pub delay: Duration,
     }
 }
 
@@ -649,11 +651,16 @@ impl From<core::Progress> for Progress {
             duration: Duration::from_micros(p.duration_us),
             bytes: p.bytes,
             received: p.received,
-            retrying: p.retrying.map(|r| Retrying {
-                waiting: r.waiting,
-                purpose: r.purpose.into(),
-                failure: r.failure.into(),
-            }),
+            retrying: p
+                .retrying
+                .into_iter()
+                .map(|r| Retrying {
+                    purpose: r.purpose.into(),
+                    failure: r.failure.into(),
+                    retry: r.retry,
+                    delay: r.delay,
+                })
+                .collect(),
             writing: p.writing.map(|w| {
                 let count = |c: core::FileCount| FileCount {
                     done: c.done,

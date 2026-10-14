@@ -90,7 +90,7 @@ pub mod hls {
 
 pub(crate) use blocking::blocking;
 
-use crate::http::{Http, Observer, Permits};
+use crate::http::{Http, Observer, Permits, RetryWaiting};
 
 /// 下载引擎；持有跨任务共享的在途请求上限。
 #[derive(Clone)]
@@ -200,6 +200,16 @@ pub enum Unsettled {
     Report,
 }
 
+/// 进度里的一个等着重试的请求。
+fn retrying(wait: &RetryWaiting) -> Retrying {
+    Retrying {
+        purpose: wait.purpose,
+        failure: wait.failure.clone(),
+        retry: wait.retry,
+        delay: wait.delay,
+    }
+}
+
 /// 请求的进展计入任务的进度：读到的字节计入 [`Progress::received`]，退避计入 [`Progress::retrying`]。
 struct ProgressObserver(watch::Sender<Progress>);
 
@@ -208,26 +218,20 @@ impl Observer for ProgressObserver {
         self.0.send_modify(|p| p.received += len);
     }
 
-    fn retry_waiting(&self, purpose: Purpose, failure: FetchFailure) {
-        self.0.send_modify(|p| {
-            let waiting = p.retrying.as_ref().map_or(0, |r| r.waiting) + 1;
-            p.retrying = Some(Retrying {
-                waiting,
-                purpose,
-                failure,
-            });
-        });
+    fn retry_waiting(&self, wait: &RetryWaiting) {
+        self.0.send_modify(|p| p.retrying.push(retrying(wait)));
     }
 
-    fn retry_waited(&self) {
+    /// 去掉与 `wait` 相同的一项：相同的几项分不出是哪个请求的，去掉哪个结果都一样。
+    fn retry_waited(&self, wait: &RetryWaiting) {
+        let ended = retrying(wait);
         self.0.send_modify(|p| {
-            let retrying = p.retrying.take().expect("退避结束之前报过开始");
-            if retrying.waiting > 1 {
-                p.retrying = Some(Retrying {
-                    waiting: retrying.waiting - 1,
-                    ..retrying
-                });
-            }
+            let at = p
+                .retrying
+                .iter()
+                .position(|r| *r == ended)
+                .expect("退避结束之前报过开始");
+            p.retrying.remove(at);
         });
     }
 }

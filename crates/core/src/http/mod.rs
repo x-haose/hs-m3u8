@@ -70,25 +70,40 @@ pub(crate) struct Http {
 pub(crate) trait Observer: Send + Sync {
     /// 读到一块响应体，`len` 为它的字节数
     fn received(&self, len: u64);
-    /// 用途为 `purpose` 的一次请求取不到或没写完（`failure`），开始退避、等着重试
-    fn retry_waiting(&self, purpose: Purpose, failure: FetchFailure);
-    /// 一次退避结束：接着重试，或被取消
-    fn retry_waited(&self);
+    /// 一次请求失败后开始退避、等着重试
+    fn retry_waiting(&self, wait: &RetryWaiting);
+    /// `retry_waiting` 报过的 `wait` 结束：接着重试，或被取消
+    fn retry_waited(&self, wait: &RetryWaiting);
+}
+
+/// 一次退避。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RetryWaiting {
+    pub purpose: Purpose,
+    /// 这次失败
+    pub failure: FetchFailure,
+    /// 接着是第几次重试，从 1 起
+    pub retry: u32,
+    /// 退避多久
+    pub delay: Duration,
 }
 
 /// 一次退避：建立时报 [`Observer::retry_waiting`]，结束（含被取消时丢弃）时报 [`Observer::retry_waited`]。
-struct RetryWait<'a>(&'a dyn Observer);
+struct RetryWait<'a> {
+    observer: &'a dyn Observer,
+    wait: RetryWaiting,
+}
 
 impl<'a> RetryWait<'a> {
-    fn new(observer: &'a dyn Observer, purpose: Purpose, failure: FetchFailure) -> Self {
-        observer.retry_waiting(purpose, failure);
-        RetryWait(observer)
+    fn new(observer: &'a dyn Observer, wait: RetryWaiting) -> Self {
+        observer.retry_waiting(&wait);
+        RetryWait { observer, wait }
     }
 }
 
 impl Drop for RetryWait<'_> {
     fn drop(&mut self) {
-        self.0.retry_waited();
+        self.observer.retry_waited(&self.wait);
     }
 }
 
@@ -182,11 +197,19 @@ impl Http {
                 return Err(error);
             }
             let delay = self.backoff(url, tried).max(asked);
+            let failure = error
+                .missable()
+                .expect("可重试的失败都是取不到或没写完（见 Error::retryable）");
+            let wait = RetryWaiting {
+                purpose,
+                failure,
+                retry: tried,
+                delay,
+            };
             let _waiting = self
                 .observer
                 .as_deref()
-                .zip(error.missable())
-                .map(|(observer, failure)| RetryWait::new(observer, purpose, failure));
+                .map(|observer| RetryWait::new(observer, wait));
             tokio::select! {
                 _ = cancel.cancelled() => return Err(Error::Cancelled),
                 _ = tokio::time::sleep(delay) => {}
