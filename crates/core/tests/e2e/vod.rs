@@ -528,6 +528,28 @@ async fn a_shared_ending_does_not_vouch_for_the_rest() {
     assert_eq!(server.hits("v2/seg1.ts"), 0);
 }
 
+/// 每个分片自成一组（每片前都有 EXT-X-DISCONTINUITY）：续传前只核对已完成字节数最多的三组，不把已完成的都重下一遍。
+#[tokio::test(flavor = "multi_thread")]
+async fn verification_checks_at_most_three_groups_per_track() {
+    let dir = test_dir("resume_many_groups");
+    let server = Server::start().await;
+    let mut playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n".to_owned();
+    for i in 0..4 {
+        playlist += &format!("#EXT-X-DISCONTINUITY\n#EXTINF:1,\n{i}/seg.ts\n");
+        server.put(&format!("{i}/seg.ts"), fixture("ts_long/seg0.ts"));
+    }
+    playlist += "#EXT-X-DISCONTINUITY\n#EXTINF:1,\nlast/seg.ts\n#EXT-X-ENDLIST\n";
+    server.put("index.m3u8", playlist);
+    assert!(run(request(server.url("index.m3u8"), &dir)).await.is_err());
+
+    server.put("last/seg.ts", fixture("ts_long/seg0.ts"));
+    run(request(server.url("index.m3u8"), &dir)).await.unwrap();
+    let rechecked: usize = (0..4)
+        .map(|i| server.hits(&format!("{i}/seg.ts")) - 1)
+        .sum();
+    assert_eq!(rechecked, 3);
+}
+
 /// 主播放列表里有两个属性完全相同的变体（冗余流）：续传按排位选回上次那个。两者分片文件名相同、计划摘要
 /// 也相同，选错了不会报错，只能看续传时的请求落在哪个变体上。
 #[tokio::test(flavor = "multi_thread")]

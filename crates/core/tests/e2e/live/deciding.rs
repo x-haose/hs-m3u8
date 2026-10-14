@@ -334,10 +334,10 @@ async fn transient_failure_while_checking_is_reported() {
     assert_eq!(output.live, report(LiveEnd::EndList, 1, vec![]));
 }
 
-/// 重叠中最新的分片重试后仍是临时故障（503）时不换更早的，如实报可重试的失败：同一时刻别的多半也取不到，逐个重试只会
-/// 拖长。它已取不到（404）时用更早的核对，接得上就接着原会话录。
+/// 重叠中最新的分片一直取不到（重试后仍 503），更早的取得到：用更早的核对，接得上就接着原会话录（窗口滑过就录不到
+/// 了，与录制中临时故障记为缺失、照常录一致）。
 #[tokio::test(flavor = "multi_thread")]
-async fn an_older_overlap_is_checked_only_when_the_newest_is_gone() {
+async fn an_older_overlap_is_checked_when_the_newest_keeps_failing() {
     let dir = test_dir("deciding_older_overlap");
     let server = Server::start().await;
     put_long(&server, "", &[0, 1, 2, 3]);
@@ -347,15 +347,6 @@ async fn an_older_overlap_is_checked_only_when_the_newest_is_gone() {
 
     server.put("live.m3u8", playlist(&[0, 1, 2, 3], true));
     server.status("seg1.ts", StatusCode::SERVICE_UNAVAILABLE);
-    let older = server.hits("seg0.ts");
-    let err = run(req.clone()).await.unwrap_err();
-    assert!(
-        matches!(err, Error::Segment { sequence: 1, .. }) && err.retryable(),
-        "{err}"
-    );
-    assert_eq!(server.hits("seg0.ts"), older);
-
-    server.status("seg1.ts", StatusCode::NOT_FOUND);
     let output = run(req).await.unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[4]));

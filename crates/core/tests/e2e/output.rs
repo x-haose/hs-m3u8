@@ -267,7 +267,7 @@ async fn existing_hls_directories_are_replaced_only_when_written_by_the_library(
 }
 
 /// 两者都要时，HLS 目录在下载期间被别人放进了文件：写出前的检查发现后报错，MP4 与 HLS 都没有写出、
-/// 也不留临时文件，任务目录保留；腾出来后再运行，已下载的分片不重下（续传前核对内容时取过一次）。
+/// 也不留临时文件，任务目录保留；腾出来后再运行，分片都已下完、只差合并，不核对也不重下，分片地址已经过期也照常合并。
 #[tokio::test(flavor = "multi_thread")]
 async fn outputs_taken_during_the_download_leave_nothing_behind() {
     let dir = test_dir("output_taken");
@@ -295,9 +295,10 @@ async fn outputs_taken_during_the_download_leave_nothing_behind() {
     assert_eq!(names_in(&dir), ["out", "out.hsdl"]);
 
     std::fs::remove_dir_all(dir.join("out")).unwrap();
+    server.status("seg0.ts", axum::http::StatusCode::FORBIDDEN);
     let output = run(req).await.unwrap();
     assert_hls_matches(&dir.join("out"), &output.mp4.unwrap().path);
-    assert_eq!(server.hits("seg0.ts"), 2);
+    assert_eq!(server.hits("seg0.ts"), 1);
 }
 
 /// 两个任务（任务目录不同）同时输出到同一个 HLS 目录：各在自己的准备目录里备齐，先改名的成功，另一个报已存在；

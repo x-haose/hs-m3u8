@@ -18,7 +18,7 @@ use crate::fetch::Direct;
 use crate::hooks::Hooks;
 use crate::http::{Http, Permit};
 use crate::output;
-use crate::recheck::{Candidate, Recheck, recheck};
+use crate::recheck::{Candidate, OnTransient, Recheck, recheck};
 use crate::resolve::Attempts;
 use crate::{Error, blocking, resolve};
 
@@ -115,7 +115,7 @@ impl Tasks {
     pub(super) fn check(&mut self, direct: Direct, track: usize, overlaps: Vec<Candidate>) {
         let cancel = self.cancel.clone();
         self.set.spawn(async move {
-            let result = recheck(&direct, track, overlaps, &cancel).await;
+            let result = recheck(&direct, track, overlaps, OnTransient::TryNext, &cancel).await;
             Done::Checked { track, result }
         });
     }

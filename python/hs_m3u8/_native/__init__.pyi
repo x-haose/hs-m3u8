@@ -1163,9 +1163,9 @@ class KeyLengthError(SourceError):
 @typing.final
 class KeyOverride:
     r"""
-    自定义 key：加密的分片与 init 段一律用它解密，不请求播放列表里的 key 地址，也不经过 `Hooks.on_key`。用于 key 地址取不到、
-    没写（EXT-X-KEY 没有 URI）或返回的不是真正的 key，而调用方已知 key 的站点；不加密的分片不受影响。`repr` 不显示 key
-    与 IV。
+    自定义 key：加密的分片与 init 段一律用它解密，不请求播放列表里的 key 地址，也不经过 `Hooks.on_key`。用于 key 地址取
+    不到、没写（EXT-X-KEY 没有 URI）或返回的不是真正的 key，而调用方已知 key 的站点；不加密的分片不受影响。`repr` 不显示
+    key 与 IV。
     """
     @property
     def key(self) -> bytes:
@@ -2945,9 +2945,9 @@ class Source:
         r"""
         主播放列表或媒体播放列表的地址，只支持 http/https；读到的是解析后的规范写法（主机名小写、补上路径 `/`、
         百分号编码等），可能与传入的不同。续传时可以与上次的不同（换了令牌、主机或路径）：续传先核对这次取到的与已下载
-        的是同一份内容，点播每条轨的每个不连续段组，取已完成的分片里字节数最大的重新下载（取不到的换次大的），与已存的
-        逐字节比较；直播见 `LiveOptions`。不是时报 `WorkDirProblem.SourceUnverified`。点播的轨 init 段内容变了时，已完成
-        的分片不沿用，重新下载
+        的是同一份内容，点播还有要下载的分片时，每条轨已完成的字节数最多的至多三个不连续段组，各取已完成的分片里字节数
+        最大的重新下载（取不到的换次大的），与已存的逐字节比较；直播见 `LiveOptions`。不是时报
+        `WorkDirProblem.SourceUnverified`。点播的轨 init 段内容变了时，已完成的分片不沿用，重新下载
         """
     @property
     def preference(self) -> Preference:
@@ -3858,10 +3858,11 @@ class WorkDirProblem:
     @typing.final
     class SourceUnverified(WorkDirProblem):
         r"""
-        核对不上这次取到的与已下载的是同一份内容：点播为有一组已完成的分片重新下载后内容不同（见 `Source.url`），多
-        为另一个视频、同一视频的另一档或同一地址换了内容；直播为地址与记录的不同，且接不上之前录到的（有轨内容不同，
-        或没有一条轨核对一致，见 `LiveOptions`）。记录不变：直播可用原来的地址续录、用 `Engine.merge_recorded` 合并
-        已录的部分；或换一个任务目录、放弃任务
+        核对不上这次取到的与已下载的是同一份内容：点播为核对的组里有已完成的分片重新下载后内容不同，或都已取不到（见
+        `Source.url`），多为另一个视频、同一视频的另一档或同一地址换了内容，同一地址也核对不上的多为来源每次输出的
+        字节不同（边转码边出），只能重新下载；直播为地址与记录的不同，且接不上之前录到的（有轨内容不同，或没有一条轨
+        核对一致，见 `LiveOptions`）。记录不变：直播可用原来的地址续录、用 `Engine.merge_recorded` 合并已录的部分；
+        或换一个任务目录、放弃任务
         """
         __match_args__ = ()
         def __new__(cls) -> WorkDirProblem.SourceUnverified: ...
