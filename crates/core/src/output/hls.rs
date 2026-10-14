@@ -175,7 +175,7 @@ fn fill_track<'a>(
     groups: impl Iterator<Item = &'a GroupTrack>,
     cancel: &CancellationToken,
 ) -> Result<TrackFiles, Error> {
-    let place = |src: &Path, dst: &Path| {
+    let cancellable_place = |src: &Path, dst: &Path| {
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
@@ -196,7 +196,7 @@ fn fill_track<'a>(
                     .expect("init 段文件名由本库按指纹生成")
                     .to_owned();
                 if placed_inits.insert(name.clone()) {
-                    place(path, &dir.join(&name))?;
+                    cancellable_place(path, &dir.join(&name))?;
                 }
                 Some(name)
             }
@@ -211,7 +211,7 @@ fn fill_track<'a>(
         let mut segments = Vec::with_capacity(group.segments.len());
         for segment in &group.segments {
             let name = format!("{index}.{ext}");
-            let len = place(&segment.path, &dir.join(&name))?;
+            let len = cancellable_place(&segment.path, &dir.join(&name))?;
             if let Some(bps) = bits_per_second(len, segment.duration_us) {
                 written.peak_bps = Some(written.peak_bps.map_or(bps, |peak| peak.max(bps)));
             }
