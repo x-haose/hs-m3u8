@@ -1050,6 +1050,24 @@ fn a_segment_shrinking_during_the_merge_is_reported() {
     }
 }
 
+/// 写输出时盘满（Linux 的 /dev/full 每次写都报 ENOSPC）：报写文件出错、带上 errno 对应的种类，不报成封装器的错误。
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_disk_while_writing_is_reported_as_a_file_error() {
+    let err = remux(
+        &[Streams::All],
+        &[group([track("ts_long")])],
+        Path::new("/dev/full"),
+        &Cancel::never(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, Error::Io { action: "写入", cause, .. }
+            if cause.kind() == std::io::ErrorKind::StorageFull),
+        "实际 {err:?}"
+    );
+}
+
 /// 组内时间戳往前跳了约 1000 秒（来源在时间戳重新开始处漏标了 EXT-X-DISCONTINUITY）：照写会在输出里留下一大段空档，
 /// 报 TimestampJump，报出的就是空档的长度。两片之间缺了分片时，跳过的可能就是缺的那几片的时长，不核对，照常合并；
 /// 声明的时长不准而内容连续时不误报。
