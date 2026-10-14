@@ -276,8 +276,9 @@ fn init() -> Result<(), Error> {
     static INIT: OnceLock<Result<(), FfmpegError>> = OnceLock::new();
     INIT.get_or_init(|| {
         ffmpeg::init()?;
-        // 封装过程中的 info/warning（如 faststart 第二遍）不输出；错误经返回值上抛
-        ffmpeg::log::set_level(ffmpeg::log::Level::Error);
+        // FFmpeg 的日志不输出：本库的失败经返回值上抛，带着出在哪一组哪条轨；FFmpeg 的消息里有的只是探测时的过程信息（如
+        // 解码器在参数集出现之前的报错，或判断不了的情形），写到进程的标准错误里，调用方既控制不了、也用不上
+        ffmpeg::log::set_level(ffmpeg::log::Level::Quiet);
         Ok(())
     })
     .clone()
