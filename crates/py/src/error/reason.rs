@@ -180,8 +180,12 @@ variants! {
             /// 这个 moof 的起点，字节
             at: u64,
         },
-        /// 加密的分片所用的 EXT-X-KEY 没写 URI（违反 RFC 8216），取不到 key；已知 key 时用 `JobRequest.key`
-        KeyWithoutUri {},
+        /// 要取的分片或 init 段加密而所用的 EXT-X-KEY 没写 URI（违反 RFC 8216），取不到 key；已知 key 时用
+        /// `JobRequest.key`。下载与录制收到播放列表即核对，不等取分片
+        KeyWithoutUri {
+            /// 播放列表的地址
+            url: Address,
+        },
         /// init 段（EXT-X-MAP）是 TS 的节目表（PAT/PMT），本库只支持 fMP4 的 init 段
         TsInit {
             /// init 段的地址

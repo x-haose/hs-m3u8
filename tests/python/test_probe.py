@@ -102,7 +102,7 @@ def test_master_playlists_list_their_tracks_and_the_selection(server: Server) ->
     assert len(result.tracks) == 2
     assert result.tracks[0].segments == 2
     assert result.tracks[0].duration == timedelta(seconds=2.5)
-    assert not result.tracks[0].encrypted
+    assert (result.tracks[0].gaps, result.tracks[0].encrypted, result.tracks[0].needs_custom_key) == (0, False, False)
     assert result.tracks[0].ended
     assert not result.live
     assert_survives_pickle(result)

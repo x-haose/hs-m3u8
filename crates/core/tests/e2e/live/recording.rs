@@ -589,6 +589,33 @@ async fn key_failure_fails_the_task() {
     }
 }
 
+/// 录制中刷新出现没写 URI 的 EXT-X-KEY、又没有自定义 key：收到这份播放列表即明确报不支持，带播放列表地址。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_without_uri_appearing_later_fails_the_task() {
+    let dir = test_dir("live_key_without_uri");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1]);
+    let first = playlist(&[0], false);
+    server.put_sequence(
+        "live.m3u8",
+        vec![
+            first.clone(),
+            first + "#EXT-X-KEY:METHOD=AES-128,IV=0x7E7E7E7E7E7E7E7E7E7E7E7E7E7E7E7E\n#EXTINF:1,\nseg1.ts\n",
+        ],
+    );
+
+    let err = run(live_request(server.url("live.m3u8"), &dir, STALL))
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&err, Error::Unsupported(Unsupported::KeyWithoutUri(url))
+            if **url == server.url("live.m3u8")),
+        "{err}"
+    );
+    assert_eq!(server.hits("seg1.ts"), 0);
+}
+
 /// 直播的分片同样有总上限（直播那份名额）：唯一的名额被一个挂着的分片占着时，下一个分片不发出，挂着的返回后照常
 /// 录完。
 #[tokio::test(flavor = "multi_thread")]

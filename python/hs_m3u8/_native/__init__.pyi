@@ -3204,10 +3204,16 @@ class SourceUnsupported:
     @typing.final
     class KeyWithoutUri(SourceUnsupported):
         r"""
-        加密的分片所用的 EXT-X-KEY 没写 URI（违反 RFC 8216），取不到 key；已知 key 时用 `JobRequest.key`
+        要取的分片或 init 段加密而所用的 EXT-X-KEY 没写 URI（违反 RFC 8216），取不到 key；已知 key 时用
+        `JobRequest.key`。下载与录制收到播放列表即核对，不等取分片
         """
-        __match_args__ = ()
-        def __new__(cls) -> SourceUnsupported.KeyWithoutUri: ...
+        __match_args__ = ("url",)
+        @property
+        def url(self) -> builtins.str:
+            r"""
+            播放列表的地址
+            """
+        def __new__(cls, url: builtins.str) -> SourceUnsupported.KeyWithoutUri: ...
     
     @typing.final
     class TsInit(SourceUnsupported):
@@ -3551,6 +3557,11 @@ class TrackInfo:
         分片数
         """
     @property
+    def gaps(self) -> builtins.int:
+        r"""
+        来源标了 EXT-X-GAP 的分片数（含在 `segments` 里，下载时不取）
+        """
+    @property
     def duration(self) -> datetime.timedelta:
         r"""
         分片声明时长之和；直播为当前窗口的
@@ -3558,12 +3569,17 @@ class TrackInfo:
     @property
     def encrypted(self) -> builtins.bool:
         r"""
-        有 AES-128 加密的分片
+        有 AES-128 加密的分片或 init 段
+        """
+    @property
+    def needs_custom_key(self) -> builtins.bool:
+        r"""
+        有要取的分片或 init 段加密而所用的 EXT-X-KEY 没写 URI：要给自定义 key（`JobRequest.key`）才下得了
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
     def __repr__(self) -> builtins.str: ...
-    def __new__(cls, *, ended: builtins.bool, segments: builtins.int, duration: datetime.timedelta, encrypted: builtins.bool) -> TrackInfo:
+    def __new__(cls, *, ended: builtins.bool, segments: builtins.int, gaps: builtins.int, duration: datetime.timedelta, encrypted: builtins.bool, needs_custom_key: builtins.bool) -> TrackInfo:
         r"""
         各参数即同名属性。
         """

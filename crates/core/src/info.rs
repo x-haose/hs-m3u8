@@ -6,6 +6,8 @@ use hs_m3u8_hls::{
     VariantKey, audio_renditions,
 };
 
+use crate::fetch;
+
 /// 一个变体的属性。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariantInfo {
@@ -90,10 +92,14 @@ pub struct TrackInfo {
     /// 有 EXT-X-ENDLIST：点播，或已结束的直播
     pub ended: bool,
     pub segments: usize,
+    /// 来源标了 EXT-X-GAP 的分片数（含在 `segments` 里，下载时不取）
+    pub gaps: usize,
     /// 分片声明时长之和，微秒；直播为当前窗口的
     pub duration_us: u64,
-    /// 有 AES-128 加密的分片
+    /// 有 AES-128 加密的分片或 init 段
     pub encrypted: bool,
+    /// 有要取的分片或 init 段加密而所用的 EXT-X-KEY 没写 URI：要给自定义 key（[`crate::JobRequest::key`]）才下得了
+    pub needs_custom_key: bool,
 }
 
 impl MasterInfo {
@@ -128,12 +134,17 @@ impl TrackInfo {
         TrackInfo {
             ended: playlist.ended,
             segments: playlist.segments.len(),
+            gaps: playlist.segments.iter().filter(|s| s.gap).count(),
             duration_us: playlist
                 .segments
                 .iter()
                 .map(|s| s.duration_us)
                 .fold(0u64, u64::saturating_add),
-            encrypted: playlist.segments.iter().any(|s| s.key.is_some()),
+            encrypted: playlist
+                .segments
+                .iter()
+                .any(|s| s.key.is_some() || s.init.as_ref().is_some_and(|i| i.key.is_some())),
+            needs_custom_key: fetch::key_without_uri(playlist),
         }
     }
 }

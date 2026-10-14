@@ -8,7 +8,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use hs_m3u8_hls::{InitSection, Segment};
+use hs_m3u8_hls::{InitSection, MediaPlaylist, Segment};
 use hs_m3u8_remux::fmp4;
 use tokio::sync::{OnceCell, watch};
 use tokio::task::JoinSet;
@@ -206,6 +206,15 @@ pub(crate) struct Direct {
 }
 
 impl Direct {
+    /// 见 [`require_key_uris`]，自定义 key 取自任务的请求。
+    pub(crate) fn require_key_uris(
+        &self,
+        url: &Url,
+        playlist: &MediaPlaylist,
+    ) -> Result<(), Error> {
+        require_key_uris(url, playlist, self.ctx.key_override.as_ref())
+    }
+
     /// 拉取第 `track` 条轨的一个分片，不写盘；`init` 见 [`Item`]。失败同排队下载的分片一样包装为
     /// [`Error::Segment`]（取消除外）。
     pub(crate) async fn fetch(
@@ -357,8 +366,34 @@ async fn fetch_segment(
 /// 0 算。猜错时 CBC 只错第一块（ftyp 的长度与类型），init 段的校验会拦下。
 const INIT_IV: [u8; 16] = [0; 16];
 
-/// 解密用的 key：有自定义 key 时用它，否则按 EXT-X-KEY 的地址 `uri` 取（见 [`key_for`]，请求占 `permit`），没有地址报
-/// [`Unsupported::KeyWithoutUri`]。
+/// 播放列表里有要取的分片（没标 EXT-X-GAP 的）或它的 init 段加密而所用的 EXT-X-KEY 没写 URI：没有自定义 key 就取不到
+/// key。
+pub(crate) fn key_without_uri(playlist: &MediaPlaylist) -> bool {
+    playlist.segments.iter().filter(|s| !s.gap).any(|s| {
+        s.key.as_ref().is_some_and(|k| k.uri.is_none())
+            || s.init
+                .as_ref()
+                .and_then(|i| i.key.as_ref())
+                .is_some_and(|k| k.uri.is_none())
+    })
+}
+
+/// 收下播放列表 `url`（开始任务、录制中刷新）时核对取得到 key：见 [`key_without_uri`]，`key` 为请求给的自定义 key；
+/// 取不到时报 [`Unsupported::KeyWithoutUri`]。
+pub(crate) fn require_key_uris(
+    url: &Url,
+    playlist: &MediaPlaylist,
+    key: Option<&KeyOverride>,
+) -> Result<(), Error> {
+    if key.is_none() && key_without_uri(playlist) {
+        return Err(Error::Unsupported(Unsupported::KeyWithoutUri(Box::new(
+            url.clone(),
+        ))));
+    }
+    Ok(())
+}
+
+/// 解密用的 key：有自定义 key 时用它，否则按 EXT-X-KEY 的地址 `uri` 取（见 [`key_for`]，请求占 `permit`）。
 async fn key(
     ctx: &Ctx,
     uri: Option<&Url>,
@@ -368,7 +403,7 @@ async fn key(
     if let Some(given) = ctx.key_override {
         return Ok(given.key);
     }
-    let url = uri.ok_or(Error::Unsupported(Unsupported::KeyWithoutUri))?;
+    let url = uri.expect("没写 URI 的 EXT-X-KEY 在收下播放列表时已报错（见 require_key_uris）");
     key_for(ctx, url, permit, cancel).await
 }
 

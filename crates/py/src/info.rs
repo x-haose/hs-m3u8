@@ -125,10 +125,14 @@ record! {
         pub ended: bool,
         /// 分片数
         pub segments: usize,
+        /// 来源标了 EXT-X-GAP 的分片数（含在 `segments` 里，下载时不取）
+        pub gaps: usize,
         /// 分片声明时长之和；直播为当前窗口的
         pub duration: Duration,
-        /// 有 AES-128 加密的分片
+        /// 有 AES-128 加密的分片或 init 段
         pub encrypted: bool,
+        /// 有要取的分片或 init 段加密而所用的 EXT-X-KEY 没写 URI：要给自定义 key（`JobRequest.key`）才下得了
+        pub needs_custom_key: bool,
     }
 }
 
@@ -215,8 +219,10 @@ impl From<core::TrackInfo> for TrackInfo {
         TrackInfo {
             ended: t.ended,
             segments: t.segments,
+            gaps: t.gaps,
             duration: Duration::from_micros(t.duration_us),
             encrypted: t.encrypted,
+            needs_custom_key: t.needs_custom_key,
         }
     }
 }

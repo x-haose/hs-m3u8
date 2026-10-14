@@ -7,7 +7,7 @@ use hs_m3u8_remux::Streams;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::fetch::Fetcher;
+use crate::fetch::{self, Fetcher};
 use crate::http::{Http, Permit};
 use crate::info::Selected;
 use crate::live::{self, Context, Outcome};
@@ -82,6 +82,9 @@ pub(crate) async fn run(
         .as_ref()
         .map(|m| Selected::of(&m.playlist, &m.selection));
     task.progress.send_modify(|p| p.selected = selection);
+    for t in &resolved.tracks {
+        fetch::require_key_uris(&t.url, &t.playlist, request.key.as_ref())?;
+    }
     if resolved.is_live() || continuing_live && request.live.is_some() {
         run_live(task, preference, resolved, lock).await
     } else {

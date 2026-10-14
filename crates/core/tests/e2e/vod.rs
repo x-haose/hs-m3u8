@@ -1076,7 +1076,8 @@ async fn key_override_replaces_the_playlist_key_and_iv() {
     assert_eq!(server.hits("key"), 0);
 }
 
-/// EXT-X-KEY 没写 URI：没有自定义 key 时取分片即明确报不支持（不是校验失败），有了照常解密。
+/// EXT-X-KEY 没写 URI：探测标出要自定义 key；没有自定义 key 时下载前即明确报不支持、带播放列表地址（不是校验
+/// 失败，不建任务目录），有了照常解密。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_key_without_uri_needs_a_key_override() {
     let dir = test_dir("key_without_uri");
@@ -1091,14 +1092,18 @@ async fn a_key_without_uri_needs_a_key_override() {
          #EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n#EXT-X-ENDLIST\n",
     );
     let mut req = request(server.url("index.m3u8"), &dir);
+    let probe = engine().probe(&req.source).await.unwrap();
+    assert!(probe.tracks[0].encrypted && probe.tracks[0].needs_custom_key);
 
     let err = run(req.clone()).await.unwrap_err();
     assert!(
-        matches!(&err, Error::Segment { cause, .. }
-            if matches!(**cause, Error::Unsupported(Unsupported::KeyWithoutUri))),
+        matches!(&err, Error::Unsupported(Unsupported::KeyWithoutUri(url))
+            if **url == server.url("index.m3u8")),
         "{err}"
     );
     assert!(!err.retryable());
+    assert!(!dir.join("out.hsdl").exists());
+    assert_eq!(server.hits("seg0.ts"), 0);
 
     req.key = Some(KeyOverride { key, iv: None });
     let output = run(req).await.unwrap();

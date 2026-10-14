@@ -648,9 +648,11 @@ fn exception(
                 at,
             },
         )?,
-        E::Unsupported(U::KeyWithoutUri) => {
-            unsupported_source(py, base, SourceUnsupported::KeyWithoutUri {})?
-        }
+        E::Unsupported(U::KeyWithoutUri(url)) => unsupported_source(
+            py,
+            base,
+            SourceUnsupported::KeyWithoutUri { url: Address(*url) },
+        )?,
         E::Unsupported(U::TsInit(url)) => {
             unsupported_source(py, base, SourceUnsupported::TsInit { url: Address(*url) })?
         }
