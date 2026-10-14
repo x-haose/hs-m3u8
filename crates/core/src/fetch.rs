@@ -62,8 +62,41 @@ struct Ctx {
     key_override: Option<KeyOverride>,
     /// 分片与 key 的请求占不占引擎的名额
     permit: Permit,
-    /// key 地址 → 处理后的 16 字节 key；每个地址只拉取一次
-    keys: Mutex<HashMap<Url, Arc<OnceCell<[u8; 16]>>>>,
+    keys: Mutex<Keys>,
+}
+
+/// key 缓存最多记的地址数：远多于常见的并发数（同时在用的 key 不超过在途的分片数）；被淘汰的下次用到时重新拉取。
+const KEY_CACHE: usize = 256;
+
+/// 一个地址处理后的 16 字节 key，拉到后填入；同时取同一地址的只拉一次。
+type KeyCell = Arc<OnceCell<[u8; 16]>>;
+
+/// key 地址 → 处理后的 key，满了淘汰最久没用到的（见 [`KEY_CACHE`]）；在缓存里的地址只拉取一次。
+#[derive(Default)]
+struct Keys {
+    /// 地址 → (key 所在的单元, 最近一次取用时的 `clock`)
+    cells: HashMap<Url, (KeyCell, u64)>,
+    /// 每次取用加一
+    clock: u64,
+}
+
+impl Keys {
+    /// 地址 `url` 的 key 所在的单元；没有时新建，满了先淘汰最久没用到的。
+    fn cell(&mut self, url: &Url) -> KeyCell {
+        self.clock += 1;
+        if !self.cells.contains_key(url) && self.cells.len() >= KEY_CACHE {
+            let oldest = self
+                .cells
+                .iter()
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(url, _)| url.clone())
+                .expect("满了即非空");
+            self.cells.remove(&oldest);
+        }
+        let (cell, used) = self.cells.entry(url.clone()).or_default();
+        *used = self.clock;
+        cell.clone()
+    }
 }
 
 pub(crate) struct Fetcher {
@@ -94,7 +127,7 @@ impl Fetcher {
                 work_dir: work_dir.to_path_buf(),
                 key_override,
                 permit,
-                keys: Mutex::new(HashMap::new()),
+                keys: Mutex::new(Keys::default()),
             }),
             limit: limit.get(),
             pending: VecDeque::new(),
@@ -313,16 +346,14 @@ async fn stored_trex(work_dir: &Path, path: &Path) -> Result<HashMap<u32, u32>, 
     })
 }
 
-/// 取 key：同一地址只拉取一次。`on_key` 回调不改时拉到的必须是 16 字节。拉取失败不缓存，下次重新拉取。
-/// 请求与回调的错误包装为 [`Error::Key`]（取消除外）。
+/// 取 key：在缓存里的地址只拉取一次（见 [`Keys`]）。`on_key` 回调不改时拉到的必须是 16 字节。拉取失败不缓存，下次
+/// 重新拉取。请求与回调的错误包装为 [`Error::Key`]（取消除外）。
 async fn key_for(ctx: &Ctx, url: &Url, cancel: &CancellationToken) -> Result<[u8; 16], Error> {
     let cell = ctx
         .keys
         .lock()
-        .expect("持锁期间只做 HashMap 查找与插入，不会 panic")
-        .entry(url.clone())
-        .or_default()
-        .clone();
+        .expect("持锁期间只做 HashMap 的查找、插入与删除，不会 panic")
+        .cell(url);
     let key = cell
         .get_or_try_init(|| async {
             let wrap = |e: Error| match e {
@@ -355,4 +386,25 @@ async fn key_for(ctx: &Ctx, url: &Url, cancel: &CancellationToken) -> Result<[u8
         })
         .await?;
     Ok(*key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_key_cache_evicts_the_least_recently_used_address() {
+        let url = |n: usize| Url::parse(&format!("https://keys.example/{n}")).unwrap();
+        let mut keys = Keys::default();
+        let first = keys.cell(&url(0));
+        for n in 1..KEY_CACHE {
+            keys.cell(&url(n));
+        }
+        // 再取用第 0 个：满了之后新地址淘汰的是第 1 个
+        assert!(Arc::ptr_eq(&first, &keys.cell(&url(0))));
+        keys.cell(&url(KEY_CACHE));
+        assert_eq!(keys.cells.len(), KEY_CACHE);
+        assert!(keys.cells.contains_key(&url(0)));
+        assert!(!keys.cells.contains_key(&url(1)));
+    }
 }
