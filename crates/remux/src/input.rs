@@ -297,7 +297,7 @@ pub(crate) fn open_chain(
 ) -> Result<format::context::Input, Error> {
     let opened = StreamIo::from_read_seek(chain)
         .and_then(|io| format::input_from_stream(io, None, Some(probe.options())));
-    if let Some(stopped) = read_failure(failure) {
+    if let Some(stopped) = stopped(failure, "读取") {
         return Err(stopped);
     }
     opened.map_err(|cause| Error::OpenInput {
@@ -318,7 +318,7 @@ pub(crate) fn read_packet(
     track: usize,
 ) -> Result<bool, Error> {
     let read = packet.read(ictx);
-    if let Some(stopped) = read_failure(failure) {
+    if let Some(stopped) = stopped(failure, "读取") {
         return Err(stopped);
     }
     match read {
@@ -332,11 +332,11 @@ pub(crate) fn read_packet(
     }
 }
 
-/// 分片链记下的读取中止原因；FFmpeg 只拿到错误码，这里换回带路径的原始错误，或取消。
-fn read_failure(failure: &chain::Failure) -> Option<Error> {
+/// 分片链记下的读取中止原因；FFmpeg 只拿到错误码，这里换回带路径的原始错误（`action` 为报错时说的动作），或取消。
+pub(crate) fn stopped(failure: &chain::Failure, action: &'static str) -> Option<Error> {
     match failure.lock().expect("持锁时只赋值，不会 panic").take()? {
         Stopped::File(path, cause) => Some(Error::Io {
-            action: "读取",
+            action,
             path,
             cause,
         }),
