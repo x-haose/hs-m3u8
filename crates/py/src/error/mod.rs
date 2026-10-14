@@ -1,4 +1,5 @@
-//! 异常：core 的 `Error` 翻译为按处理方式分组的 Python 异常。异常里的原因与位置的类型见 [`reason`]。
+//! 异常：core 的 `Error` 翻译为按处理方式分组的 Python 异常。异常里的原因与位置的类型见 [`reason`]，内容放不进输出的
+//! 原因见 [`output`]。
 //!
 //! 类表示出了什么问题；core 里说明出在哪里的包装（分片、key、失败后收拾）不另成异常类，抛的是包着的原因，位置与
 //! 残留作为基类的属性。`str(异常)` 是 core 给出的完整说明，可否重试与要求的等待也按 core 对最外层的判断。
@@ -11,13 +12,15 @@ use pyo3::types::PyTuple;
 use pyo3::{PyClass, PyClassInitializer};
 use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 
+mod output;
 mod reason;
 mod translate;
 
-pub(crate) use self::reason::Mp4Unsupported;
+use self::output::HlsUnsupported;
+pub(crate) use self::output::Mp4Unsupported;
 use self::reason::{
-    HlsUnsupported, HookKind, IntegrityFailure, Malformed, SegmentRef, SelectFailure,
-    SourceUnsupported, StallReason, WorkDirProblem,
+    HookKind, IntegrityFailure, Malformed, SegmentRef, SelectFailure, SourceUnsupported,
+    StallReason, WorkDirProblem,
 };
 pub(crate) use self::translate::{invalid_input, to_pyerr, traverse};
 use crate::convert::{Address, PyPath, Seq};
@@ -469,6 +472,7 @@ exception! {
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     reason::register(module)?;
+    output::register(module)?;
     module.add_class::<HsM3u8Error>()?;
     module.add_class::<RequestError>()?;
     module.add_class::<InvalidInputError>()?;
