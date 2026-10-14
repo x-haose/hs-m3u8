@@ -196,7 +196,8 @@ pub struct Report {
 pub struct Cancel(Arc<dyn Fn() -> bool + Send + Sync>);
 
 impl Cancel {
-    /// `cancelled` 会在 FFmpeg 的读写回调里被调用，要快、不阻塞。
+    /// `cancelled` 会在 FFmpeg 的读写回调里被调用，要快、不阻塞，不得 panic（在 FFmpeg 的回调里 panic 会中止进程）；
+    /// 一旦返回真须一直为真：各处检查到的取消与读写回调因取消而失败，都按取消报告。
     pub fn new(cancelled: impl Fn() -> bool + Send + Sync + 'static) -> Cancel {
         Cancel(Arc::new(cancelled))
     }

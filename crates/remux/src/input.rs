@@ -62,6 +62,8 @@ impl Input {
         let mut files = Vec::with_capacity(segments.segments.len() + 1);
         for path in paths {
             let len = match &trex {
+                // 逐片核对要读遍各 box，每片之前查取消
+                Some(_) if cancel.is_cancelled() => return Err(Error::Cancelled),
                 Some(trex) => fmp4_len(path, trex)?,
                 None => std::fs::metadata(path).map_err(read_error(path))?.len(),
             };

@@ -65,6 +65,9 @@ impl Packed {
         let mut discarded = 0;
         let mut reference = None;
         for (path, head) in segments.segments.iter().map(|s| &s.path).zip(heads) {
+            if cancel.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
             let read_failed = |cause| Error::Io {
                 action: "读取",
                 path: path.clone(),
