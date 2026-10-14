@@ -165,9 +165,9 @@ impl Source {
     }
 
     /// 写出前核对：包 `packet`（对齐回绕后的 DTS 为 `dts_us`，微秒）比全组已写出的最大 DTS `clock_us` 超出的部分，减去
-    /// 这个输入其间整片都没有包的那几片声明的时长，即输出里整组都没有内容的空档，超过容差（见
-    /// [`crate::input::SegmentMap::tolerance_us`]）时报 [`Unsupported::TimestampJump`]。一路流单独中断、帧稀疏时别的流
-    /// 推着时钟走，不算；片内的跳变照样量得到。没有位置的包（解析器从一个 PES 拆出的后几帧）归在这个输入上一个写出的包
+    /// 这个输入上一个包所在的片（它在那片里之后还有多久不知道，按整片算）与其间各片声明的时长，即输出里整组都没有内容的
+    /// 空档，超过容差（见 [`crate::input::SegmentMap::tolerance_us`]）时报 [`Unsupported::TimestampJump`]。一路流单独
+    /// 中断时别的流推着时钟走，帧稀疏时跨片的间隔有所在的片抵着，都不算；片内的跳变照样量得到。没有位置的包（解析器从一个 PES 拆出的后几帧）归在这个输入上一个写出的包
     /// 所在的分片；其间有缺片或声明的时长判断不了时不核对。往回跳的由写出时的 DTS 严格递增拦下。
     pub(crate) fn check_jump(
         &mut self,
@@ -183,7 +183,7 @@ impl Source {
         let previous = self.last_segment.replace(segment);
         let (Some(clock_us), Some(skipped), Some(tolerance)) = (
             clock_us,
-            segments.declared_between(previous, segment),
+            segments.declared_from(previous, segment),
             segments.tolerance_us(),
         ) else {
             return Ok(());

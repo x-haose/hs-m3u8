@@ -1989,7 +1989,7 @@ class Mp4Unsupported:
         @property
         def jump(self) -> datetime.timedelta:
             r"""
-            空档的长度：与全组已写出的最大时间戳之差，减去其间整片都没有这条轨的包的那几片声明的时长
+            空档至少多长：与全组已写出的最大时间戳之差，减去这条轨上一个包所在的片与其间各片声明的时长
             """
         def __new__(cls, *, group: builtins.int, track: builtins.int, kind: StreamKind, segment: builtins.int, jump: datetime.timedelta) -> Mp4Unsupported.TimestampJump: ...
     

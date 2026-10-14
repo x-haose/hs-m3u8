@@ -177,10 +177,10 @@ impl SegmentMap {
             .checked_sub(1)
     }
 
-    /// 第 `from` 片与第 `to` 片之间各片声明的时长之和，微秒（不含这两片；`from` 为 None 时从第 0 片算起；`from` 不
-    /// 早于 `to` 时为 0）。其间有缺片（缺了的那几片时长不知道）时为 None，不核对。
-    pub(crate) fn declared_between(&self, from: Option<usize>, to: usize) -> Option<u64> {
-        let first = from.map_or(0, |from| from + 1);
+    /// 第 `from` 片起、第 `to` 片之前各片声明的时长之和，微秒（`from` 为 None 时从第 0 片算起；`from` 不早于 `to` 时
+    /// 为 0）。其间有缺片（缺了的那几片时长不知道）时为 None，不核对。
+    pub(crate) fn declared_from(&self, from: Option<usize>, to: usize) -> Option<u64> {
+        let first = from.unwrap_or(0);
         if self
             .gaps
             .iter()

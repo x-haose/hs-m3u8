@@ -1078,7 +1078,7 @@ fn a_full_disk_while_writing_is_reported_as_a_file_error() {
 }
 
 /// 组内时间戳往前跳了约 1000 秒（来源在时间戳重新开始处漏标了 EXT-X-DISCONTINUITY）：照写会在输出里留下一大段空档，
-/// 报 TimestampJump，报出的就是空档的长度。两片之间缺了分片时，跳过的可能就是缺的那几片的时长，不核对，照常合并；
+/// 报 TimestampJump，报出的空档长度为跳过的时长减去上一片声明的时长。两片之间缺了分片时，跳过的可能就是缺的那几片的时长，不核对，照常合并；
 /// 声明的时长不准而内容连续时不误报。
 #[test]
 fn a_forward_timestamp_jump_within_a_group_is_rejected() {
@@ -1102,7 +1102,7 @@ fn a_forward_timestamp_jump_within_a_group_is_rejected() {
                 segment: 1,
                 jump_us,
                 ..
-            }) if (999_000_000..1_001_000_000).contains(&jump_us)
+            }) if (998_000_000..1_000_000_000).contains(&jump_us)
         ),
         "{err:?}"
     );
@@ -1194,6 +1194,35 @@ fn one_stream_pausing_alone_is_not_a_timestamp_jump() {
     .unwrap();
 
     assert_eq!(report.streams.len(), 2);
+}
+
+/// 帧稀疏的纯视频：两片各声明 1 秒，一帧在第一片开头、一帧在第二片末尾，相邻两帧隔了将近两片，没有别的流推着时钟
+/// 走：内容连续，不是时间戳跳变，照常合并。
+#[test]
+fn sparse_frames_across_segments_are_not_a_timestamp_jump() {
+    let dir = work_dir("sparse_frames");
+    let sparse = track("ts_sparse");
+    let declared = TrackSegments {
+        segments: sparse
+            .segments
+            .iter()
+            .map(|s| Segment {
+                path: s.path.clone(),
+                duration_us: 1_000_000,
+            })
+            .collect(),
+        ..sparse
+    };
+
+    let report = remux(
+        &[Streams::All],
+        &[group([declared])],
+        &dir.join("out.mp4"),
+        &Cancel::never(),
+    )
+    .unwrap();
+
+    assert_eq!(report.streams[0].packets, 2);
 }
 
 /// 从 GOP 中间开始的组：第一个关键帧之前的视频包参考的帧不在输出里，不写出、计数，输出的视频每个包都解得出。

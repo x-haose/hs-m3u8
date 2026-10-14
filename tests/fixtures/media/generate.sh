@@ -154,6 +154,13 @@ repeat_enc=(-c:v libx264 -preset veryfast -bf 0 -g 10 -an -f mpegts)
 "${ff[@]}" "${repeat[@]}" -t 1 "${repeat_enc[@]}" "$DIR/ts_repeat/seg0.ts"
 "${ff[@]}" "${repeat[@]}" -ss 0.9 -t 1 -output_ts_offset 0.9 "${repeat_enc[@]}" "$DIR/ts_repeat/seg1.ts"
 
+# 帧稀疏的纯视频：两个各只有一帧的分片，第二帧晚 1.95 秒（调用方把两片都声明为 1 秒：一帧在第一片开头、一帧在第二片
+# 末尾，相邻两帧隔了将近两片，内容仍连续）
+rm -rf -- "${DIR:?}/ts_sparse"
+mkdir -p "$DIR/ts_sparse"
+"${ff[@]}" "${repeat[@]}" -frames:v 1 "${repeat_enc[@]}" "$DIR/ts_sparse/seg0.ts"
+"${ff[@]}" "${repeat[@]}" -frames:v 1 -output_ts_offset 1.95 "${repeat_enc[@]}" "$DIR/ts_sparse/seg1.ts"
+
 # E-AC-3 每帧 3 块（码率高于 1.024 Mbps 时 FFmpeg 的编码器这样编），合并应报放不进 MP4
 rm -rf -- "${DIR:?}/ts_eac3_short"
 mkdir -p "$DIR/ts_eac3_short"
