@@ -52,7 +52,7 @@ variants! {
             /// 音频 rendition 的个数
             count: usize,
         },
-        /// 主播放列表里没有与 `AudioChoice.Matching` 身份相同的音频
+        /// 所选变体的音频组里没有与 `AudioChoice.Matching` 身份相同的音频（变体没有引用音频组时也是）
         AudioNotFound {},
         /// 指定的音频不在所选变体引用的音频组里
         #[pyo3(constructor = (*, index, group))]

@@ -148,11 +148,11 @@ class AudioChoice:
     @typing.final
     class Matching(AudioChoice):
         r"""
-        身份相同的音频（由 `AudioInfo.choice()` 得到）；须在所选变体的音频组里
+        所选变体的音频组里身份相同的音频（由 `AudioInfo.choice()` 得到）
         """
         __match_args__ = ("key",)
         @property
-        def key(self) -> AudioKey:
+        def key(self) -> AudioKey.Stable | AudioKey.Attributes:
             r"""
             身份
             """
@@ -196,13 +196,13 @@ class AudioInfo:
         有独立的媒体播放列表；为 False 时音频混在变体流里，选它即用变体里的音频
         """
     @property
-    def occurrence(self) -> builtins.int:
+    def key(self) -> AudioKey.Stable | AudioKey.Attributes:
         r"""
-        组、名称、语言都相同的音频里排第几（从 0 起）
+        身份，开始任务按它选（`choice()`）
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, index: builtins.int, group: builtins.str, name: typing.Optional[builtins.str], language: typing.Optional[builtins.str], default: builtins.bool, separate: builtins.bool, occurrence: builtins.int) -> AudioInfo:
+    def __new__(cls, *, index: builtins.int, group: builtins.str, name: typing.Optional[builtins.str], language: typing.Optional[builtins.str], default: builtins.bool, separate: builtins.bool, key: AudioKey) -> AudioInfo:
         r"""
         各参数即同名属性。
         """
@@ -212,38 +212,58 @@ class AudioInfo:
         按身份选这个音频，同 `VariantInfo.choice()`。
         """
 
-@typing.final
 class AudioKey:
     r"""
-    音频 rendition 的身份：属性，以及属性完全相同的音频里排第几。各项同 `AudioInfo` 的同名属性。
+    音频 rendition 的身份（见 `AudioInfo.key`），在所选变体引用的音频组里认，同 `VariantKey`。
     """
-    @property
-    def group(self) -> builtins.str:
-        r"""
-        GROUP-ID
-        """
-    @property
-    def name(self) -> typing.Optional[builtins.str]:
-        r"""
-        NAME；来源没写时为 None
-        """
-    @property
-    def language(self) -> typing.Optional[builtins.str]:
-        r"""
-        LANGUAGE；来源没写时为 None
-        """
-    @property
-    def occurrence(self) -> builtins.int:
-        r"""
-        上面几项完全相同的音频里排第几（从 0 起）
-        """
-    def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
-    def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, group: builtins.str, name: typing.Optional[builtins.str], language: typing.Optional[builtins.str], occurrence: builtins.int) -> AudioKey:
-        r"""
-        各参数即同名属性。
-        """
     def __repr__(self) -> builtins.str: ...
+    @typing.final
+    class Stable(AudioKey):
+        r"""
+        来源写了 STABLE-RENDITION-ID：只按它认。组名不算在内：组名不是稳定标识，同一条流经几条路径分发时各路径的组
+        名也不同
+        """
+        __match_args__ = ("id", "occurrence",)
+        @property
+        def id(self) -> builtins.str:
+            r"""
+            STABLE-RENDITION-ID
+            """
+        @property
+        def occurrence(self) -> builtins.int:
+            r"""
+            同一组里稳定 ID 相同的音频里排第几（从 0 起）
+            """
+        def __new__(cls, *, id: builtins.str, occurrence: builtins.int) -> AudioKey.Stable: ...
+    
+    @typing.final
+    class Attributes(AudioKey):
+        r"""
+        来源没写稳定 ID：各项同 `AudioInfo` 的同名属性
+        """
+        __match_args__ = ("group", "name", "language", "occurrence",)
+        @property
+        def group(self) -> builtins.str:
+            r"""
+            GROUP-ID
+            """
+        @property
+        def name(self) -> typing.Optional[builtins.str]:
+            r"""
+            NAME；来源没写时为 None
+            """
+        @property
+        def language(self) -> typing.Optional[builtins.str]:
+            r"""
+            LANGUAGE；来源没写时为 None
+            """
+        @property
+        def occurrence(self) -> builtins.int:
+            r"""
+            上面几项完全相同的音频里排第几（从 0 起）
+            """
+        def __new__(cls, *, group: builtins.str, name: typing.Optional[builtins.str], language: typing.Optional[builtins.str], occurrence: builtins.int) -> AudioKey.Attributes: ...
+    
 
 class Encryption:
     r"""
@@ -2981,7 +3001,7 @@ class SelectFailure:
     @typing.final
     class AudioNotFound(SelectFailure):
         r"""
-        主播放列表里没有与 `AudioChoice.Matching` 身份相同的音频
+        所选变体的音频组里没有与 `AudioChoice.Matching` 身份相同的音频（变体没有引用音频组时也是）
         """
         __match_args__ = ()
         def __new__(cls) -> SelectFailure.AudioNotFound: ...
@@ -3772,7 +3792,7 @@ class VariantChoice:
         """
         __match_args__ = ("key",)
         @property
-        def key(self) -> VariantKey:
+        def key(self) -> VariantKey.Stable | VariantKey.Attributes:
             r"""
             身份
             """
@@ -3811,13 +3831,13 @@ class VariantInfo:
         引用的音频组（AUDIO 属性）；没有时为 None
         """
     @property
-    def occurrence(self) -> builtins.int:
+    def key(self) -> VariantKey.Stable | VariantKey.Attributes:
         r"""
-        下标以外的上面几项完全相同的变体里排第几（从 0 起）
+        身份，开始任务按它选（`choice()`）
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, index: builtins.int, bandwidth: typing.Optional[builtins.int], resolution: typing.Optional[Resolution], codecs: collections.abc.Sequence[builtins.str], audio_group: typing.Optional[builtins.str], occurrence: builtins.int) -> VariantInfo:
+    def __new__(cls, *, index: builtins.int, bandwidth: typing.Optional[builtins.int], resolution: typing.Optional[Resolution], codecs: collections.abc.Sequence[builtins.str], audio_group: typing.Optional[builtins.str], key: VariantKey) -> VariantInfo:
         r"""
         各参数即同名属性。
         """
@@ -3828,43 +3848,62 @@ class VariantInfo:
         探测再取。
         """
 
-@typing.final
 class VariantKey:
     r"""
-    变体的身份：属性，以及属性完全相同的变体里排第几。各项同 `VariantInfo` 的同名属性。
+    变体的身份（见 `VariantInfo.key`）：来源写了稳定 ID 时是它，没写时是属性；再加上身份相同的变体里排第几。
     """
-    @property
-    def bandwidth(self) -> typing.Optional[builtins.int]:
-        r"""
-        BANDWIDTH，bit/s；来源没写时为 None
-        """
-    @property
-    def resolution(self) -> typing.Optional[Resolution]:
-        r"""
-        RESOLUTION；来源没写时为 None
-        """
-    @property
-    def codecs(self) -> builtins.tuple[builtins.str, ...]:
-        r"""
-        CODECS 拆开后的各项
-        """
-    @property
-    def audio_group(self) -> typing.Optional[builtins.str]:
-        r"""
-        引用的音频组；没有时为 None
-        """
-    @property
-    def occurrence(self) -> builtins.int:
-        r"""
-        上面几项完全相同的变体里排第几（从 0 起）
-        """
-    def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
-    def __hash__(self) -> builtins.int: ...
-    def __new__(cls, *, bandwidth: typing.Optional[builtins.int], resolution: typing.Optional[Resolution], codecs: collections.abc.Sequence[builtins.str], audio_group: typing.Optional[builtins.str], occurrence: builtins.int) -> VariantKey:
-        r"""
-        各参数即同名属性。
-        """
     def __repr__(self) -> builtins.str: ...
+    @typing.final
+    class Stable(VariantKey):
+        r"""
+        来源写了 STABLE-VARIANT-ID：只按它认，属性变了也是同一条
+        """
+        __match_args__ = ("id", "occurrence",)
+        @property
+        def id(self) -> builtins.str:
+            r"""
+            STABLE-VARIANT-ID
+            """
+        @property
+        def occurrence(self) -> builtins.int:
+            r"""
+            稳定 ID 相同的变体里排第几（从 0 起）；同一条流经几条路径分发时，稳定 ID 相同的有几个
+            """
+        def __new__(cls, *, id: builtins.str, occurrence: builtins.int) -> VariantKey.Stable: ...
+    
+    @typing.final
+    class Attributes(VariantKey):
+        r"""
+        来源没写稳定 ID：各项同 `VariantInfo` 的同名属性。找的时候不看变体有没有稳定 ID，来源后来写上了也找得回
+        """
+        __match_args__ = ("bandwidth", "resolution", "codecs", "audio_group", "occurrence",)
+        @property
+        def bandwidth(self) -> typing.Optional[builtins.int]:
+            r"""
+            BANDWIDTH，bit/s；来源没写时为 None
+            """
+        @property
+        def resolution(self) -> typing.Optional[Resolution]:
+            r"""
+            RESOLUTION；来源没写时为 None
+            """
+        @property
+        def codecs(self) -> builtins.tuple[builtins.str, ...]:
+            r"""
+            CODECS 拆开后的各项
+            """
+        @property
+        def audio_group(self) -> typing.Optional[builtins.str]:
+            r"""
+            引用的音频组；没有时为 None
+            """
+        @property
+        def occurrence(self) -> builtins.int:
+            r"""
+            上面几项完全相同的变体里排第几（从 0 起）
+            """
+        def __new__(cls, *, bandwidth: typing.Optional[builtins.int], resolution: typing.Optional[Resolution], codecs: collections.abc.Sequence[builtins.str], audio_group: typing.Optional[builtins.str], occurrence: builtins.int) -> VariantKey.Attributes: ...
+    
 
 @typing.final
 class VolumeUnavailableError(HsM3u8Error):

@@ -305,11 +305,110 @@ fn redundant_variants_are_told_apart_by_position() {
     );
     for index in [0, 1] {
         let key = VariantKey::of(&m, index).unwrap();
-        assert_eq!(key.occurrence, index);
+        assert!(
+            matches!(key, VariantKey::Attributes { occurrence, .. } if occurrence == index),
+            "{key:?}"
+        );
         let preference = Preference {
             variant: VariantChoice::Matching(key),
             audio: AudioChoice::Default,
         };
         assert_eq!(select(&m, &preference).unwrap().variant_index, index);
     }
+}
+
+/// 同一条流经两条路径分发（RFC 8216bis 的 Content Steering 示例）：两条路径的稳定 ID 相同，组名与地址不同。
+const PATHWAYS: &str = "#EXTM3U\n\
+    #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"A\",NAME=\"English\",DEFAULT=YES,URI=\"eng.m3u8\",LANGUAGE=\"en\",STABLE-RENDITION-ID=\"Audio-37262\"\n\
+    #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"B\",NAME=\"ENGLISH\",DEFAULT=YES,URI=\"https://b.example.com/audio-eng.m3u8\",LANGUAGE=\"en\",STABLE-RENDITION-ID=\"Audio-37262\"\n\
+    #EXT-X-STREAM-INF:BANDWIDTH=1280000,AUDIO=\"A\",STABLE-VARIANT-ID=\"Video-128\"\n128/video.m3u8\n\
+    #EXT-X-STREAM-INF:BANDWIDTH=7680000,AUDIO=\"A\",STABLE-VARIANT-ID=\"Video-768\"\n768/video.m3u8\n\
+    #EXT-X-STREAM-INF:BANDWIDTH=1280000,AUDIO=\"B\",STABLE-VARIANT-ID=\"Video-128\"\nhttps://backup.example.com/128/video.m3u8\n\
+    #EXT-X-STREAM-INF:BANDWIDTH=7680000,AUDIO=\"B\",STABLE-VARIANT-ID=\"Video-768\"\nhttps://backup.example.com/768/video.m3u8\n";
+
+/// 写了稳定 ID 时只按它认：之后拉到的主播放列表码率、组名、地址都变了，前面还多了变体，仍选到同一路径上的那两条。
+#[test]
+fn stable_ids_find_the_same_tracks_after_attributes_change() {
+    let before = master(PATHWAYS);
+    assert_eq!(before.variants[3].stable_id.as_deref(), Some("Video-768"));
+    assert_eq!(
+        before.renditions[1].stable_id.as_deref(),
+        Some("Audio-37262")
+    );
+    let preference = matching(&before, 3, 1);
+    assert_eq!(
+        preference.variant,
+        VariantChoice::Matching(VariantKey::Stable {
+            id: "Video-768".into(),
+            occurrence: 1
+        })
+    );
+    assert_eq!(
+        preference.audio,
+        AudioChoice::Matching(AudioKey::Stable {
+            id: "Audio-37262".into(),
+            occurrence: 0
+        })
+    );
+
+    let after = master(&format!(
+        "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,STABLE-VARIANT-ID=\"Video-2160\"\n2160/video.m3u8\n{}",
+        PATHWAYS
+            .trim_start_matches("#EXTM3U\n")
+            .replace("7680000", "7700000")
+            .replace("\"A\"", "\"cdn-a\"")
+            .replace("\"B\"", "\"cdn-b\"")
+            .replace("video.m3u8", "video.m3u8?t=2"),
+    ));
+    let selected = select(&after, &preference).unwrap();
+    assert_eq!(selected.variant_index, 4);
+    assert_eq!(
+        selected.variant.uri.as_str(),
+        "https://backup.example.com/768/video.m3u8?t=2"
+    );
+    let audio = selected.audio.unwrap();
+    assert_eq!((audio.index, audio.rendition.group.as_str()), (1, "cdn-b"));
+}
+
+/// 音频按身份在所选变体的音频组里找：另一条路径上的变体配它那一组里稳定 ID 相同的音频；变体没有引用音频组时报找不到。
+#[test]
+fn matching_audio_is_looked_up_in_the_variant_group() {
+    let m = master(PATHWAYS);
+    let preference = Preference {
+        variant: VariantChoice::Index(1),
+        audio: AudioChoice::Matching(AudioKey::of(&m, 1).unwrap()),
+    };
+    let audio = select(&m, &preference).unwrap().audio.unwrap();
+    assert_eq!((audio.index, audio.rendition.group.as_str()), (0, "A"));
+
+    let without_group = master(&format!(
+        "#EXTM3U\n{EN}#EXT-X-STREAM-INF:BANDWIDTH=1000\nv.m3u8\n"
+    ));
+    let preference = Preference {
+        variant: VariantChoice::Best,
+        audio: AudioChoice::Matching(AudioKey::of(&without_group, 0).unwrap()),
+    };
+    assert_eq!(
+        select(&without_group, &preference).unwrap_err(),
+        SelectError::AudioNotFound
+    );
+}
+
+/// 没写稳定 ID 时按属性认，之后来源写上了稳定 ID 也找得回。
+#[test]
+fn attribute_keys_find_tracks_that_gained_stable_ids() {
+    let before = master(&format!("#EXTM3U\n{EN}{LOW}"));
+    let preference = matching(&before, 0, 0);
+    assert!(matches!(
+        preference.variant,
+        VariantChoice::Matching(VariantKey::Attributes { .. })
+    ));
+    let after = master(&format!(
+        "#EXTM3U\n{}{}",
+        EN.replace("DEFAULT=YES", "DEFAULT=YES,STABLE-RENDITION-ID=\"en\""),
+        LOW.replace("AUDIO=", "STABLE-VARIANT-ID=\"low\",AUDIO="),
+    ));
+    let selected = select(&after, &preference).unwrap();
+    assert_eq!(selected.variant_index, 0);
+    assert_eq!(selected.audio.unwrap().index, 0);
 }

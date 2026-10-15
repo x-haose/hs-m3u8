@@ -154,6 +154,13 @@ fn request(url: Url, dir: &Path) -> JobRequest {
     request
 }
 
+/// 任务目录 `work` 的格式版本，取自它的 job.json；手写 outputs.json 时照抄（两个文件的格式版本相同）。
+fn format_version(work: &Path) -> u64 {
+    let job: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(work.join("job.json")).unwrap()).unwrap();
+    job["format_version"].as_u64().unwrap()
+}
+
 fn engine() -> Engine {
     Engine::new(NonZeroUsize::new(8).unwrap())
 }

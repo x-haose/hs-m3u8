@@ -137,8 +137,8 @@ def test_selections_the_master_cannot_satisfy_are_reported(server: Server, tmp_p
     server.put("master.m3u8", MASTER)
     for name in ["video.m3u8", "audio.m3u8", "other.m3u8"]:
         server.put(name, MEDIA)
-    absent_variant = VariantKey(bandwidth=1, resolution=None, codecs=[], audio_group=None, occurrence=0)
-    absent_audio = AudioKey(group="aud", name="Deutsch", language="de", occurrence=0)
+    absent_variant = VariantKey.Attributes(bandwidth=1, resolution=None, codecs=[], audio_group=None, occurrence=0)
+    absent_audio = AudioKey.Stable(id="de", occurrence=0)
     cases: list[tuple[Preference, SelectFailure]] = [
         (Preference(variant=VariantChoice.Matching(absent_variant)), SelectFailure.VariantNotFound()),
         (

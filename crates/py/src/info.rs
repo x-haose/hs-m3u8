@@ -8,7 +8,7 @@ use pyo3_stub_gen::derive::gen_stub_pymethods;
 
 use crate::convert::{Count, Seq};
 use crate::record::record;
-use crate::request::{AudioChoice, VariantChoice};
+use crate::request::{AudioChoice, AudioKey, VariantChoice, VariantKey};
 
 record! {
     /// 分辨率（RESOLUTION 属性）。
@@ -34,8 +34,8 @@ record! {
         pub codecs: Seq<String>,
         /// 引用的音频组（AUDIO 属性）；没有时为 None
         pub audio_group: Option<String>,
-        /// 下标以外的上面几项完全相同的变体里排第几（从 0 起）
-        pub occurrence: usize,
+        /// 身份，开始任务按它选（`choice()`）
+        pub key: VariantKey,
     }
 }
 
@@ -47,13 +47,7 @@ impl VariantInfo {
     #[gen_stub(override_return_type(type_repr = "VariantChoice.Matching"))]
     fn choice(&self) -> VariantChoice {
         VariantChoice::Matching {
-            key: crate::request::VariantKey {
-                bandwidth: self.bandwidth.map(Count),
-                resolution: self.resolution.clone(),
-                codecs: self.codecs.clone(),
-                audio_group: self.audio_group.clone(),
-                occurrence: Count(self.occurrence),
-            },
+            key: self.key.clone(),
         }
     }
 }
@@ -74,8 +68,8 @@ record! {
         pub default: bool,
         /// 有独立的媒体播放列表；为 False 时音频混在变体流里，选它即用变体里的音频
         pub separate: bool,
-        /// 组、名称、语言都相同的音频里排第几（从 0 起）
-        pub occurrence: usize,
+        /// 身份，开始任务按它选（`choice()`）
+        pub key: AudioKey,
     }
 }
 
@@ -86,12 +80,7 @@ impl AudioInfo {
     #[gen_stub(override_return_type(type_repr = "AudioChoice.Matching"))]
     fn choice(&self) -> AudioChoice {
         AudioChoice::Matching {
-            key: crate::request::AudioKey {
-                group: self.group.clone(),
-                name: self.name.clone(),
-                language: self.language.clone(),
-                occurrence: Count(self.occurrence),
-            },
+            key: self.key.clone(),
         }
     }
 }
@@ -177,7 +166,7 @@ impl From<core::VariantInfo> for VariantInfo {
             resolution: v.resolution.map(Resolution::from),
             codecs: Seq(v.codecs),
             audio_group: v.audio_group,
-            occurrence: v.occurrence,
+            key: v.key.into(),
         }
     }
 }
@@ -191,7 +180,7 @@ impl From<core::AudioInfo> for AudioInfo {
             language: a.language,
             default: a.default,
             separate: a.separate,
-            occurrence: a.occurrence,
+            key: a.key.into(),
         }
     }
 }

@@ -10,7 +10,7 @@ use url::Url;
 use crate::hooks::{HookKind, Hooks, Purpose, run_hook};
 use crate::http::{Http, Permit};
 use crate::request::Source;
-use crate::selection::{SelectionKey, track_streams};
+use crate::selection::{SelectionRecord, track_streams};
 use crate::{Error, Unsupported};
 
 /// 解析得到的一条轨：媒体播放列表的地址与首次拉到的内容。
@@ -31,14 +31,14 @@ pub(crate) struct Resolved {
 pub(crate) struct Chosen {
     pub playlist: MasterPlaylist,
     pub selection: Selection,
-    /// 记进任务目录的选轨身份
-    pub key: SelectionKey,
+    /// 记进任务目录的选轨
+    pub record: SelectionRecord,
 }
 
 impl Resolved {
-    /// 记进任务目录的选轨身份；来源本身是媒体播放列表时为 None。
-    pub(crate) fn selection_key(&self) -> Option<SelectionKey> {
-        self.master.as_ref().map(|m| m.key.clone())
+    /// 记进任务目录的选轨；来源本身是媒体播放列表时为 None。
+    pub(crate) fn selection_record(&self) -> Option<SelectionRecord> {
+        self.master.as_ref().map(|m| m.record.clone())
     }
 
     /// 有任一条轨的播放列表没有 EXT-X-ENDLIST 即为直播。
@@ -48,16 +48,16 @@ impl Resolved {
 
     /// 各轨的取流方式。
     pub(crate) fn streams(&self) -> Vec<Streams> {
-        track_streams(self.master.as_ref().map(|m| &m.key))
+        track_streams(self.master.as_ref().map(|m| &m.record))
     }
 }
 
-/// 拉取来源并选轨。`recorded` 为任务目录记录的选轨：有记录时按它找回同一条轨，不按偏好重新选；
+/// 拉取来源并选轨。`recorded` 为任务目录记录的选轨：有记录时按它找回同一条轨，不按偏好重新选，记录原样沿用；
 /// 主播放列表里找不到它时为 `Ok(None)`。
 pub(crate) async fn resolve(
     http: &Http,
     source: &Source,
-    recorded: Option<&SelectionKey>,
+    recorded: Option<&SelectionRecord>,
     cancel: &CancellationToken,
 ) -> Result<Option<Resolved>, Error> {
     let hooks = &source.hooks;
@@ -71,14 +71,17 @@ pub(crate) async fn resolve(
                 master: None,
             },
             Playlist::Master(master) => {
-                let selection = match recorded {
-                    Some(key) => match key.find(&master) {
-                        Some(selection) => selection,
+                let (selection, record) = match recorded {
+                    Some(record) => match record.find(&master) {
+                        Some(selection) => (selection, record.clone()),
                         None => return Ok(None),
                     },
-                    None => hls::select(&master, &source.preference)?,
+                    None => {
+                        let selection = hls::select(&master, &source.preference)?;
+                        let record = SelectionRecord::of(&selection, &master);
+                        (selection, record)
+                    }
                 };
-                let key = SelectionKey::of(&selection, &master);
                 let url = selection.variant.uri.clone();
                 let playlist = fetch_media(http, hooks, &url, Attempts::Retrying, cancel).await?;
                 let mut tracks = vec![ResolvedTrack { url, playlist }];
@@ -95,7 +98,7 @@ pub(crate) async fn resolve(
                     master: Some(Chosen {
                         playlist: master,
                         selection,
-                        key,
+                        record,
                     }),
                 }
             }

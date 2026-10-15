@@ -7,7 +7,7 @@ use super::{assert_hls_matches, both, names_in, request_to};
 use crate::server::Server;
 #[cfg(unix)]
 use crate::{Writable, is_root, make_writable};
-use crate::{apple_double, engine, fixture, request, run, test_dir};
+use crate::{apple_double, engine, fixture, format_version, request, run, test_dir};
 
 /// 已有的 HLS 目录：为空（系统自动生成的元数据文件不算）可以直接写；全是本库写出的文件时不覆盖就报已存在、
 /// 覆盖即替换；里面有别的文件时覆盖也不替换，报另一种错误。元数据文件含 macOS 在 exFAT 等卷上为每个文件与目录
@@ -249,7 +249,7 @@ async fn interrupted_swaps_are_recovered_before_anything_else() {
     std::fs::write(&temp, "写了一半").unwrap();
     std::fs::write(&aside, "旧").unwrap();
     let record = serde_json::json!({
-        "format_version": 11,
+        "format_version": format_version(&work),
         "swapped": false,
         "outputs": [{"kind": "mp4", "target": target, "fingerprint": "0123456789abcdef"}],
     });

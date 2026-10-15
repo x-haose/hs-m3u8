@@ -22,6 +22,8 @@ pub struct Variant {
     pub codecs: Vec<String>,
     /// AUDIO 属性：引用的音频 rendition 组
     pub audio: Option<String>,
+    /// STABLE-VARIANT-ID：跨两次拉取主播放列表标识同一条流，稳定 ID 相同的流内容相同；原样保留，不核对规范限定的字符集
+    pub stable_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -40,6 +42,8 @@ pub struct Rendition {
     pub default: bool,
     /// None 表示该 rendition 的媒体混在变体流里
     pub uri: Option<Url>,
+    /// STABLE-RENDITION-ID，含义同 [`Variant::stable_id`]
+    pub stable_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +97,7 @@ pub(crate) fn parse(text: &str, url: &Url) -> Result<MasterPlaylist, Malformed> 
                     resolution: info.resolution,
                     codecs: info.codecs,
                     audio: info.audio,
+                    stable_id: info.stable_id,
                 });
             }
         }
@@ -118,6 +123,7 @@ struct StreamInf {
     resolution: Option<Resolution>,
     codecs: Vec<String>,
     audio: Option<String>,
+    stable_id: Option<String>,
 }
 
 fn parse_stream_inf(value: &str) -> Result<StreamInf, SyntaxError> {
@@ -139,6 +145,7 @@ fn parse_stream_inf(value: &str) -> Result<StreamInf, SyntaxError> {
             })
             .unwrap_or_default(),
         audio: attrs.get("AUDIO").map(str::to_owned),
+        stable_id: attrs.get("STABLE-VARIANT-ID").map(str::to_owned),
     })
 }
 
@@ -161,6 +168,7 @@ fn parse_media(value: &str, url: &Url) -> Result<Rendition, SyntaxError> {
             .get("DEFAULT")
             .is_some_and(|d| d.eq_ignore_ascii_case("YES")),
         uri: attrs.get("URI").map(|u| resolve(url, u)).transpose()?,
+        stable_id: attrs.get("STABLE-RENDITION-ID").map(str::to_owned),
     })
 }
 

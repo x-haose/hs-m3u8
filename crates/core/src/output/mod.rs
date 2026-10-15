@@ -20,7 +20,7 @@ pub(crate) use self::options::{ResolvedOutput, absolute_path};
 
 use self::commit::{Commit, Occupant};
 use crate::error::io_error;
-use crate::selection::SelectionKey;
+use crate::selection::SelectionRecord;
 use crate::workdir::{Layout, OutputKind, SegmentName, WorkDir};
 use crate::{
     Error, FileCount, Leftover, LeftoverKind, LiveReport, Missed, Mp4Output, Output, Progress,
@@ -35,8 +35,8 @@ pub(crate) struct Content {
     pub groups: Vec<Vec<GroupTrack>>,
     /// 输出的分片数，各轨合计
     pub segments: usize,
-    /// 记进任务目录的选轨身份；来源本身是媒体播放列表时为 None
-    pub selection: Option<SelectionKey>,
+    /// 记进任务目录的选轨；来源本身是媒体播放列表时为 None
+    pub selection: Option<SelectionRecord>,
     /// 见 [`Output::missed`]
     pub missed: Vec<Missed>,
     pub live: Option<LiveReport>,
@@ -243,7 +243,7 @@ fn writing(groups: &[Vec<GroupTrack>], options: &ResolvedOutput) -> Writing {
 fn write_files(
     streams: &[Streams],
     groups: &[Vec<GroupTrack>],
-    selection: Option<&SelectionKey>,
+    selection: Option<&SelectionRecord>,
     options: &ResolvedOutput,
     cancel: &CancellationToken,
     advance: &Advance,
@@ -281,7 +281,7 @@ fn write_files(
 fn write_temps(
     streams: &[Streams],
     groups: &[Vec<GroupTrack>],
-    selection: Option<&SelectionKey>,
+    selection: Option<&SelectionRecord>,
     options: &ResolvedOutput,
     cancel: &CancellationToken,
     advance: &Advance,

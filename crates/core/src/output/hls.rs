@@ -24,7 +24,7 @@ use super::commit::Occupant;
 use crate::entries::{self, is_canonical_number};
 use crate::error::io_error;
 use crate::ident::Fingerprint;
-use crate::selection::SelectionKey;
+use crate::selection::SelectionRecord;
 use crate::{Error, HlsUnsupported, Unsupported};
 
 const INDEX: &str = "index.m3u8";
@@ -61,7 +61,7 @@ pub(super) fn occupant(dir: &Path) -> Result<Occupant, Error> {
 /// 在合并 MP4 之前判定。
 pub(super) fn check_content(
     groups: &[Vec<GroupTrack>],
-    selection: Option<&SelectionKey>,
+    selection: Option<&SelectionRecord>,
 ) -> Result<(), Error> {
     let has_init: Vec<Vec<bool>> = groups
         .iter()
@@ -110,7 +110,7 @@ pub(super) fn stage(
     stage: &Path,
     work_dir: &Path,
     groups: &[Vec<GroupTrack>],
-    selection: Option<&SelectionKey>,
+    selection: Option<&SelectionRecord>,
     cancel: &CancellationToken,
     placed: &dyn Fn(usize),
 ) -> Result<(), Error> {
@@ -123,7 +123,7 @@ fn fill(
     stage: &Path,
     work_dir: &Path,
     groups: &[Vec<GroupTrack>],
-    selection: Option<&SelectionKey>,
+    selection: Option<&SelectionRecord>,
     cancel: &CancellationToken,
     placed: &dyn Fn(usize),
 ) -> Result<(), Error> {
@@ -315,7 +315,7 @@ fn media_playlist(groups: &[PlaylistGroup], prefix: &str) -> String {
 /// 视频与独立音频分离时的主播放列表：第 0 条轨为变体，第 1 条为音频 rendition。BANDWIDTH 为 `bandwidth`，分辨率与编码照
 /// 抄来源（来源没写的也不写）；音频组固定为 `audio`。名称与语言照抄来源，带有引号或换行（带引号的字符串里不允许）时不
 /// 用：没有可用的名称时名称为 `audio`，语言不写。
-fn master_playlist(selection: &SelectionKey, bandwidth: u64) -> String {
+fn master_playlist(selection: &SelectionRecord, bandwidth: u64) -> String {
     let audio = selection
         .audio
         .as_ref()
@@ -398,6 +398,7 @@ mod tests {
     use hs_m3u8_hls::{AudioKey, Playlist, Resolution, Url, VariantKey, parse};
 
     use super::*;
+    use crate::selection::{AudioRecord, VariantRecord};
 
     fn url() -> Url {
         Url::parse("file:///out/index.m3u8").unwrap()
@@ -455,23 +456,27 @@ mod tests {
         );
     }
 
-    fn selection(name: Option<&str>, language: Option<&str>, codecs: &[&str]) -> SelectionKey {
-        SelectionKey {
-            variant: VariantKey {
+    fn selection(name: Option<&str>, language: Option<&str>, codecs: &[&str]) -> SelectionRecord {
+        SelectionRecord {
+            variant: VariantRecord {
+                key: VariantKey::Stable {
+                    id: "v".into(),
+                    occurrence: 0,
+                },
                 bandwidth: Some(2_000_000),
                 resolution: Some(Resolution {
                     width: 1280,
                     height: 720,
                 }),
                 codecs: codecs.iter().map(|c| (*c).to_owned()).collect(),
-                audio_group: Some("source-group".into()),
-                occurrence: 0,
             },
-            audio: Some(AudioKey {
-                group: "source-group".into(),
+            audio: Some(AudioRecord {
+                key: AudioKey::Stable {
+                    id: "a".into(),
+                    occurrence: 0,
+                },
                 name: name.map(str::to_owned),
                 language: language.map(str::to_owned),
-                occurrence: 0,
             }),
         }
     }

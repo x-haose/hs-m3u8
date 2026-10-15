@@ -116,7 +116,7 @@ async fn run_live(
     let record = JobRecord {
         preference_digest,
         url_digest: url_digest(&task.request.source.url),
-        selection: resolved.selection_key(),
+        selection: resolved.selection_record(),
         kind: RecordKind::Live,
     };
     let dir = WorkDir::open(task.output.work_dir.clone(), record, lock).await?;
@@ -149,7 +149,7 @@ async fn run_vod(
     lock: Option<Lock>,
 ) -> Result<Output, Error> {
     let streams = resolved.streams();
-    let selection = resolved.selection_key();
+    let selection = resolved.selection_record();
     let plan = Plan::new(resolved.tracks, task.request.key.is_some())?;
     let record = JobRecord {
         preference_digest,

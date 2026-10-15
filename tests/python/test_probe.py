@@ -13,6 +13,7 @@ import pytest
 from conftest import Server, assert_survives_pickle
 from hs_m3u8 import (
     AudioChoice,
+    AudioKey,
     Engine,
     HookError,
     HookKind,
@@ -42,6 +43,7 @@ from hs_m3u8 import (
     Target,
     Timeouts,
     VariantChoice,
+    VariantKey,
 )
 
 MASTER = """#EXTM3U
@@ -148,6 +150,38 @@ def test_choices_by_identity_find_the_same_tracks_after_the_master_changes(serve
     with pytest.raises(SelectError) as gone:
         probe(Source(server.url("master.m3u8"), preference=preference))
     assert gone.value.reason == SelectFailure.VariantNotFound()
+
+
+def test_stable_ids_identify_tracks_whose_attributes_change(server: Server) -> None:
+    stable = (
+        MASTER.replace('URI="audio.m3u8"', 'URI="audio.m3u8",STABLE-RENDITION-ID="en"')
+        .replace('URI="audio_ja.m3u8"', 'URI="audio_ja.m3u8",STABLE-RENDITION-ID="ja"')
+        .replace('AUDIO="aud"\nlow', 'AUDIO="aud",STABLE-VARIANT-ID="low"\nlow')
+        .replace('AUDIO="aud"\nhigh', 'AUDIO="aud",STABLE-VARIANT-ID="high"\nhigh')
+    )
+    put_master(server)
+    server.put("master.m3u8", stable)
+    probed = probe(Source(server.url("master.m3u8")))
+    assert probed.master is not None
+    low, ja = probed.master.variants[0], probed.master.audio[1]
+    assert low.key == VariantKey.Stable(id="low", occurrence=0)
+    assert ja.key == AudioKey.Stable(id="ja", occurrence=0)
+    preference = Preference(variant=low.choice(), audio=ja.choice())
+    assert_survives_pickle(preference)
+    # 码率、编码、组名都变了：按稳定 ID 仍选到原来那两条
+    server.put(
+        "master.m3u8",
+        stable.replace("BANDWIDTH=800000", "BANDWIDTH=900000")
+        .replace("avc1.4d401e", "avc1.4d401f")
+        .replace('"aud"', '"audio-v2"'),
+    )
+
+    moved = probe(Source(server.url("master.m3u8"), preference=preference))
+
+    assert moved.master is not None
+    assert (moved.master.selected.variant.index, moved.master.selected.variant.bandwidth) == (0, 900000)
+    assert moved.master.selected.audio is not None
+    assert (moved.master.selected.audio.group, moved.master.selected.audio.language) == ("audio-v2", "ja")
 
 
 def test_media_playlists_have_no_master_and_live_ones_are_reported(server: Server) -> None:

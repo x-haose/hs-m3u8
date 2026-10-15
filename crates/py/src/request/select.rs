@@ -31,19 +31,31 @@ variants! {
     }
 }
 
-record! {
-    /// 变体的身份：属性，以及属性完全相同的变体里排第几。各项同 `VariantInfo` 的同名属性。
-    pub struct VariantKey {
-        /// BANDWIDTH，bit/s；来源没写时为 None
-        pub bandwidth: Option<Count<u64>>,
-        /// RESOLUTION；来源没写时为 None
-        pub resolution: Option<Resolution>,
-        /// CODECS 拆开后的各项
-        pub codecs: Seq<String>,
-        /// 引用的音频组；没有时为 None
-        pub audio_group: Option<String>,
-        /// 上面几项完全相同的变体里排第几（从 0 起）
-        pub occurrence: Count<usize>,
+variants! {
+    /// 变体的身份（见 `VariantInfo.key`）：来源写了稳定 ID 时是它，没写时是属性；再加上身份相同的变体里排第几。
+    pub enum VariantKey {
+        /// 来源写了 STABLE-VARIANT-ID：只按它认，属性变了也是同一条
+        #[pyo3(constructor = (*, id, occurrence))]
+        Stable {
+            /// STABLE-VARIANT-ID
+            id: String,
+            /// 稳定 ID 相同的变体里排第几（从 0 起）；同一条流经几条路径分发时，稳定 ID 相同的有几个
+            occurrence: Count<usize>,
+        },
+        /// 来源没写稳定 ID：各项同 `VariantInfo` 的同名属性。找的时候不看变体有没有稳定 ID，来源后来写上了也找得回
+        #[pyo3(constructor = (*, bandwidth, resolution, codecs, audio_group, occurrence))]
+        Attributes {
+            /// BANDWIDTH，bit/s；来源没写时为 None
+            bandwidth: Option<Count<u64>>,
+            /// RESOLUTION；来源没写时为 None
+            resolution: Option<Resolution>,
+            /// CODECS 拆开后的各项
+            codecs: Seq<String>,
+            /// 引用的音频组；没有时为 None
+            audio_group: Option<String>,
+            /// 上面几项完全相同的变体里排第几（从 0 起）
+            occurrence: Count<usize>,
+        },
     }
 }
 
@@ -63,7 +75,7 @@ variants! {
             /// 下标
             index: Count<usize>,
         },
-        /// 身份相同的音频（由 `AudioInfo.choice()` 得到）；须在所选变体的音频组里
+        /// 所选变体的音频组里身份相同的音频（由 `AudioInfo.choice()` 得到）
         Matching {
             /// 身份
             key: AudioKey,
@@ -71,17 +83,30 @@ variants! {
     }
 }
 
-record! {
-    /// 音频 rendition 的身份：属性，以及属性完全相同的音频里排第几。各项同 `AudioInfo` 的同名属性。
-    pub struct AudioKey {
-        /// GROUP-ID
-        pub group: String,
-        /// NAME；来源没写时为 None
-        pub name: Option<String>,
-        /// LANGUAGE；来源没写时为 None
-        pub language: Option<String>,
-        /// 上面几项完全相同的音频里排第几（从 0 起）
-        pub occurrence: Count<usize>,
+variants! {
+    /// 音频 rendition 的身份（见 `AudioInfo.key`），在所选变体引用的音频组里认，同 `VariantKey`。
+    pub enum AudioKey {
+        /// 来源写了 STABLE-RENDITION-ID：只按它认。组名不算在内：组名不是稳定标识，同一条流经几条路径分发时各路径的组
+        /// 名也不同
+        #[pyo3(constructor = (*, id, occurrence))]
+        Stable {
+            /// STABLE-RENDITION-ID
+            id: String,
+            /// 同一组里稳定 ID 相同的音频里排第几（从 0 起）
+            occurrence: Count<usize>,
+        },
+        /// 来源没写稳定 ID：各项同 `AudioInfo` 的同名属性
+        #[pyo3(constructor = (*, group, name, language, occurrence))]
+        Attributes {
+            /// GROUP-ID
+            group: String,
+            /// NAME；来源没写时为 None
+            name: Option<String>,
+            /// LANGUAGE；来源没写时为 None
+            language: Option<String>,
+            /// 上面几项完全相同的音频里排第几（从 0 起）
+            occurrence: Count<usize>,
+        },
     }
 }
 
@@ -165,46 +190,92 @@ impl Preference {
 
 impl From<core::hls::VariantKey> for VariantKey {
     fn from(key: core::hls::VariantKey) -> Self {
-        VariantKey {
-            bandwidth: key.bandwidth.map(Count),
-            resolution: key.resolution.map(Resolution::from),
-            codecs: Seq(key.codecs),
-            audio_group: key.audio_group,
-            occurrence: Count(key.occurrence),
+        match key {
+            core::hls::VariantKey::Stable { id, occurrence } => VariantKey::Stable {
+                id,
+                occurrence: Count(occurrence),
+            },
+            core::hls::VariantKey::Attributes {
+                bandwidth,
+                resolution,
+                codecs,
+                audio_group,
+                occurrence,
+            } => VariantKey::Attributes {
+                bandwidth: bandwidth.map(Count),
+                resolution: resolution.map(Resolution::from),
+                codecs: Seq(codecs),
+                audio_group,
+                occurrence: Count(occurrence),
+            },
         }
     }
 }
 
 impl VariantKey {
     fn to_core(&self) -> core::hls::VariantKey {
-        core::hls::VariantKey {
-            bandwidth: self.bandwidth.map(|b| b.0),
-            resolution: self.resolution.as_ref().map(Resolution::to_core),
-            codecs: self.codecs.0.clone(),
-            audio_group: self.audio_group.clone(),
-            occurrence: self.occurrence.0,
+        match self.clone() {
+            VariantKey::Stable { id, occurrence } => core::hls::VariantKey::Stable {
+                id,
+                occurrence: occurrence.0,
+            },
+            VariantKey::Attributes {
+                bandwidth,
+                resolution,
+                codecs,
+                audio_group,
+                occurrence,
+            } => core::hls::VariantKey::Attributes {
+                bandwidth: bandwidth.map(|b| b.0),
+                resolution: resolution.as_ref().map(Resolution::to_core),
+                codecs: codecs.0,
+                audio_group,
+                occurrence: occurrence.0,
+            },
         }
     }
 }
 
 impl From<core::hls::AudioKey> for AudioKey {
     fn from(key: core::hls::AudioKey) -> Self {
-        AudioKey {
-            group: key.group,
-            name: key.name,
-            language: key.language,
-            occurrence: Count(key.occurrence),
+        match key {
+            core::hls::AudioKey::Stable { id, occurrence } => AudioKey::Stable {
+                id,
+                occurrence: Count(occurrence),
+            },
+            core::hls::AudioKey::Attributes {
+                group,
+                name,
+                language,
+                occurrence,
+            } => AudioKey::Attributes {
+                group,
+                name,
+                language,
+                occurrence: Count(occurrence),
+            },
         }
     }
 }
 
 impl AudioKey {
     fn to_core(&self) -> core::hls::AudioKey {
-        core::hls::AudioKey {
-            group: self.group.clone(),
-            name: self.name.clone(),
-            language: self.language.clone(),
-            occurrence: self.occurrence.0,
+        match self.clone() {
+            AudioKey::Stable { id, occurrence } => core::hls::AudioKey::Stable {
+                id,
+                occurrence: occurrence.0,
+            },
+            AudioKey::Attributes {
+                group,
+                name,
+                language,
+                occurrence,
+            } => core::hls::AudioKey::Attributes {
+                group,
+                name,
+                language,
+                occurrence: occurrence.0,
+            },
         }
     }
 }

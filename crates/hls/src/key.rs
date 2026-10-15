@@ -1,111 +1,166 @@
-//! 变体与音频 rendition 的身份：属性，以及属性完全相同的里面排第几。地址常带令牌、主播放列表会增删重排变体，按身份
-//! 能在后来拉到的主播放列表里找回同一条轨（见 [`crate::VariantChoice::Matching`]）。
+//! 变体与音频 rendition 的身份：来源写了稳定 ID 时是它，没写时是属性；再加上身份相同的里面排第几。地址常带令牌、
+//! 主播放列表会增删重排变体，按身份能在后来拉到的主播放列表里找回同一条轨（见 [`crate::VariantChoice::Matching`]）。
 
 use crate::{MasterPlaylist, Rendition, Resolution, Variant, audio_renditions};
 
-/// 变体的身份。各项取自 [`Variant`] 的同名属性（`audio_group` 即 [`Variant::audio`]）。
+/// 变体的身份。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VariantKey {
-    /// BANDWIDTH，bit/s
-    pub bandwidth: Option<u64>,
-    pub resolution: Option<Resolution>,
-    pub codecs: Vec<String>,
-    /// 引用的音频组（AUDIO 属性）
-    pub audio_group: Option<String>,
-    /// 主播放列表中上面几项与它完全相同的变体里排第几（从 0 起）；冗余流（RFC 8216 6.2.3）的属性完全相同
-    pub occurrence: usize,
+pub enum VariantKey {
+    /// 来源写了 STABLE-VARIANT-ID：只按它认，属性变了也是同一条
+    Stable {
+        id: String,
+        /// 主播放列表中稳定 ID 相同的变体里排第几（从 0 起）；同一条流经几条路径分发时，稳定 ID 相同的有几个
+        occurrence: usize,
+    },
+    /// 来源没写稳定 ID：各项取自 [`Variant`] 的同名属性（`audio_group` 即 [`Variant::audio`]）。找的时候不看变体有没有
+    /// 稳定 ID，来源后来写上了也找得回
+    Attributes {
+        /// BANDWIDTH，bit/s
+        bandwidth: Option<u64>,
+        resolution: Option<Resolution>,
+        codecs: Vec<String>,
+        /// 引用的音频组（AUDIO 属性）
+        audio_group: Option<String>,
+        /// 主播放列表中上面几项与它完全相同的变体里排第几（从 0 起）；冗余流（RFC 8216 6.2.3）的属性完全相同
+        occurrence: usize,
+    },
 }
 
 impl VariantKey {
     /// `master` 里第 `index` 个变体的身份；下标超出范围时为 None。
     pub fn of(master: &MasterPlaylist, index: usize) -> Option<VariantKey> {
         let variant = master.variants.get(index)?;
-        let mut key = VariantKey {
-            bandwidth: variant.bandwidth,
-            resolution: variant.resolution,
-            codecs: variant.codecs.clone(),
-            audio_group: variant.audio.clone(),
-            occurrence: 0,
+        let mut key = match &variant.stable_id {
+            Some(id) => VariantKey::Stable {
+                id: id.clone(),
+                occurrence: 0,
+            },
+            None => VariantKey::Attributes {
+                bandwidth: variant.bandwidth,
+                resolution: variant.resolution,
+                codecs: variant.codecs.clone(),
+                audio_group: variant.audio.clone(),
+                occurrence: 0,
+            },
         };
-        key.occurrence = master.variants[..index]
+        let earlier = master.variants[..index]
             .iter()
-            .filter(|v| key.same_attributes(v))
+            .filter(|v| key.matches(v))
             .count();
+        let (VariantKey::Stable { occurrence, .. } | VariantKey::Attributes { occurrence, .. }) =
+            &mut key;
+        *occurrence = earlier;
         Some(key)
     }
 
     /// 身份是它的变体在 `master` 里的下标；没有时为 None。
     pub fn find(&self, master: &MasterPlaylist) -> Option<usize> {
+        let (VariantKey::Stable { occurrence, .. } | VariantKey::Attributes { occurrence, .. }) =
+            self;
         master
             .variants
             .iter()
             .enumerate()
-            .filter(|(_, v)| self.same_attributes(v))
-            .nth(self.occurrence)
+            .filter(|(_, v)| self.matches(v))
+            .nth(*occurrence)
             .map(|(index, _)| index)
     }
 
-    fn same_attributes(&self, variant: &Variant) -> bool {
-        let VariantKey {
-            bandwidth,
-            resolution,
-            codecs,
-            audio_group,
-            occurrence: _,
-        } = self;
-        variant.bandwidth == *bandwidth
-            && variant.resolution == *resolution
-            && variant.codecs == *codecs
-            && variant.audio == *audio_group
+    /// 除排第几以外与 `variant` 相同。
+    fn matches(&self, variant: &Variant) -> bool {
+        match self {
+            VariantKey::Stable { id, occurrence: _ } => variant.stable_id.as_ref() == Some(id),
+            VariantKey::Attributes {
+                bandwidth,
+                resolution,
+                codecs,
+                audio_group,
+                occurrence: _,
+            } => {
+                variant.bandwidth == *bandwidth
+                    && variant.resolution == *resolution
+                    && variant.codecs == *codecs
+                    && variant.audio == *audio_group
+            }
+        }
     }
 }
 
-/// 音频 rendition 的身份。各项取自 [`Rendition`] 的同名属性（`group` 即 [`Rendition::group`]）。
+/// 音频 rendition 的身份，在所选变体引用的音频组里认。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AudioKey {
-    /// GROUP-ID
-    pub group: String,
-    /// NAME
-    pub name: Option<String>,
-    /// LANGUAGE
-    pub language: Option<String>,
-    /// 主播放列表中上面几项与它完全相同的音频 rendition 里排第几（从 0 起）；同组同语言同名的音频（违反 RFC 8216
-    /// 4.3.4.1.1 的 NAME 唯一，但确有其事）只能这样区分
-    pub occurrence: usize,
+pub enum AudioKey {
+    /// 来源写了 STABLE-RENDITION-ID：只按它认，同 [`VariantKey::Stable`]。组名不算在内：组名不是稳定标识，同一条流经
+    /// 几条路径分发时各路径的组名也不同
+    Stable {
+        id: String,
+        /// 同一组里稳定 ID 相同的音频 rendition 里排第几（从 0 起）
+        occurrence: usize,
+    },
+    /// 来源没写稳定 ID：各项取自 [`Rendition`] 的同名属性（`group` 即 [`Rendition::group`]），同
+    /// [`VariantKey::Attributes`]
+    Attributes {
+        /// GROUP-ID
+        group: String,
+        /// NAME
+        name: Option<String>,
+        /// LANGUAGE
+        language: Option<String>,
+        /// 主播放列表中上面几项与它完全相同的音频 rendition 里排第几（从 0 起）；同组同语言同名的音频（违反 RFC 8216
+        /// 4.3.4.1.1 的 NAME 唯一，但确有其事）只能这样区分
+        occurrence: usize,
+    },
 }
 
 impl AudioKey {
     /// `master` 里第 `index` 个音频 rendition（口径同 [`crate::AudioChoice::Index`]）的身份；下标超出范围时为 None。
     pub fn of(master: &MasterPlaylist, index: usize) -> Option<AudioKey> {
         let (_, rendition) = audio_renditions(master).nth(index)?;
-        let mut key = AudioKey {
-            group: rendition.group.clone(),
-            name: rendition.name.clone(),
-            language: rendition.language.clone(),
-            occurrence: 0,
+        let mut key = match &rendition.stable_id {
+            Some(id) => AudioKey::Stable {
+                id: id.clone(),
+                occurrence: 0,
+            },
+            None => AudioKey::Attributes {
+                group: rendition.group.clone(),
+                name: rendition.name.clone(),
+                language: rendition.language.clone(),
+                occurrence: 0,
+            },
         };
-        key.occurrence = audio_renditions(master)
+        let earlier = audio_renditions(master)
             .take(index)
-            .filter(|(_, r)| key.same_attributes(r))
+            .filter(|(_, r)| r.group == rendition.group && key.matches(r))
             .count();
+        let (AudioKey::Stable { occurrence, .. } | AudioKey::Attributes { occurrence, .. }) =
+            &mut key;
+        *occurrence = earlier;
         Some(key)
     }
 
-    /// 身份是它的音频 rendition 在 `master` 里的位置（口径同 [`crate::AudioChoice::Index`]）；没有时为 None。
-    pub fn find(&self, master: &MasterPlaylist) -> Option<usize> {
+    /// 身份是它的、在 `group` 组里的音频 rendition 在 `master` 里的位置（口径同 [`crate::AudioChoice::Index`]）；没有时
+    /// 为 None。
+    pub fn find(&self, master: &MasterPlaylist, group: &str) -> Option<usize> {
+        let (AudioKey::Stable { occurrence, .. } | AudioKey::Attributes { occurrence, .. }) = self;
         audio_renditions(master)
-            .filter(|(_, r)| self.same_attributes(r))
-            .nth(self.occurrence)
+            .filter(|(_, r)| r.group == group && self.matches(r))
+            .nth(*occurrence)
             .map(|(index, _)| index)
     }
 
-    fn same_attributes(&self, rendition: &Rendition) -> bool {
-        let AudioKey {
-            group,
-            name,
-            language,
-            occurrence: _,
-        } = self;
-        rendition.group == *group && rendition.name == *name && rendition.language == *language
+    /// 除排第几以外与 `rendition` 相同。
+    fn matches(&self, rendition: &Rendition) -> bool {
+        match self {
+            AudioKey::Stable { id, occurrence: _ } => rendition.stable_id.as_ref() == Some(id),
+            AudioKey::Attributes {
+                group,
+                name,
+                language,
+                occurrence: _,
+            } => {
+                rendition.group == *group
+                    && rendition.name == *name
+                    && rendition.language == *language
+            }
+        }
     }
 }

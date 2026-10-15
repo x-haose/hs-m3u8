@@ -6,13 +6,13 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::ident::digest_hex;
-use crate::selection::{SelectionKey, track_streams};
+use crate::selection::{AudioRecord, SelectionRecord, VariantRecord, track_streams};
 use crate::{JobType, WorkDirProblem};
 
 /// 任务目录格式的版本：job.json 与 outputs.json 的字段，分片与 init 段的文件名、其中指纹与摘要的编码，以及下载时对
 /// 文件内容的改写（fMP4 长度写 0 的最后一个 box 改为实际长度）。任何一项改变都要升；两个文件都带它，读到别的版本
 /// 一律拒绝。
-pub(super) const FORMAT_VERSION: u32 = 11;
+pub(super) const FORMAT_VERSION: u32 = 12;
 
 /// 任务目录记录的任务；续传、续录时须与当前请求相符。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,7 +23,7 @@ pub(crate) struct JobRecord {
     /// [`super::WorkDir::adopt_url`] 改记
     pub url_digest: String,
     /// 所选的变体与音频；来源本身是媒体播放列表时为 None
-    pub selection: Option<SelectionKey>,
+    pub selection: Option<SelectionRecord>,
     pub kind: RecordKind,
 }
 
@@ -68,7 +68,9 @@ impl JobRecord {
                 current: current_type,
             });
         }
-        if self.selection != current.selection {
+        if self.selection.as_ref().map(SelectionRecord::keys)
+            != current.selection.as_ref().map(SelectionRecord::keys)
+        {
             return Some(WorkDirProblem::TracksMismatch);
         }
         match (&self.kind, &current.kind) {
@@ -80,24 +82,24 @@ impl JobRecord {
     }
 }
 
-/// 选轨偏好的摘要（SHA-256 十六进制）。语言代码与选轨一样不区分 ASCII 大小写；按身份选的写成 job.json 里选轨的写法
+/// 选轨偏好的摘要（SHA-256 十六进制）。语言代码与选轨一样不区分 ASCII 大小写；按身份选的写成 job.json 里身份的写法
 /// （JSON，其中换行已转义）。每项一行；语言里不会有换行（由 [`crate::Source`] 的校验保证），编码没有歧义。
 pub(crate) fn preference_digest(preference: &Preference) -> String {
     let variant = match &preference.variant {
         VariantChoice::Best => "best".to_owned(),
         VariantChoice::Index(index) => format!("index {index}"),
-        VariantChoice::Matching(key) => format!("matching {}", json(&VariantFile::from(key))),
+        VariantChoice::Matching(key) => format!("matching {}", json(&VariantKeyFile::from(key))),
     };
     let audio = match &preference.audio {
         AudioChoice::Default => "default".to_owned(),
         AudioChoice::Language(language) => format!("language {}", language.to_ascii_lowercase()),
         AudioChoice::Index(index) => format!("index {index}"),
-        AudioChoice::Matching(key) => format!("matching {}", json(&AudioFile::from(key))),
+        AudioChoice::Matching(key) => format!("matching {}", json(&AudioKeyFile::from(key))),
     };
     digest_hex(format!("variant {variant}\naudio {audio}\n"))
 }
 
-/// job.json 里选轨的一项的 JSON。
+/// job.json 里一项身份的 JSON。
 fn json(file: &impl Serialize) -> String {
     serde_json::to_string(file).expect("只含数字、字符串与数组，序列化不会失败")
 }
@@ -126,7 +128,7 @@ enum JobFile {
     },
 }
 
-/// [`SelectionKey`] 在 job.json 中的写法。
+/// [`SelectionRecord`] 在 job.json 中的写法。
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SelectionFile {
@@ -137,21 +139,53 @@ struct SelectionFile {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VariantFile {
+    key: VariantKeyFile,
     bandwidth: Option<u64>,
     /// [宽, 高]
     resolution: Option<[u32; 2]>,
     codecs: Vec<String>,
-    audio_group: Option<String>,
-    occurrence: usize,
 }
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AudioFile {
-    group: String,
+    key: AudioKeyFile,
     name: Option<String>,
     language: Option<String>,
-    occurrence: usize,
+}
+
+/// [`VariantKey`] 在 job.json 中的写法。
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
+enum VariantKeyFile {
+    Stable {
+        id: String,
+        occurrence: usize,
+    },
+    Attributes {
+        bandwidth: Option<u64>,
+        /// [宽, 高]
+        resolution: Option<[u32; 2]>,
+        codecs: Vec<String>,
+        audio_group: Option<String>,
+        occurrence: usize,
+    },
+}
+
+/// [`AudioKey`] 在 job.json 中的写法。
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
+enum AudioKeyFile {
+    Stable {
+        id: String,
+        occurrence: usize,
+    },
+    Attributes {
+        group: String,
+        name: Option<String>,
+        language: Option<String>,
+        occurrence: usize,
+    },
 }
 
 /// 先只读版本号：不认识的版本直接拒绝，不按当前格式去解释它。
@@ -226,75 +260,136 @@ pub(super) fn decode(bytes: &[u8]) -> Result<JobRecord, WorkDirProblem> {
     Ok(JobRecord {
         preference_digest,
         url_digest,
-        selection: selection.map(SelectionKey::from),
+        selection: selection.map(SelectionRecord::from),
         kind,
     })
 }
 
-impl From<&SelectionKey> for SelectionFile {
-    fn from(key: &SelectionKey) -> Self {
+impl From<&SelectionRecord> for SelectionFile {
+    fn from(record: &SelectionRecord) -> Self {
+        let variant = &record.variant;
         SelectionFile {
-            variant: VariantFile::from(&key.variant),
-            audio: key.audio.as_ref().map(AudioFile::from),
+            variant: VariantFile {
+                key: VariantKeyFile::from(&variant.key),
+                bandwidth: variant.bandwidth,
+                resolution: variant.resolution.map(resolution_file),
+                codecs: variant.codecs.clone(),
+            },
+            audio: record.audio.as_ref().map(|audio| AudioFile {
+                key: AudioKeyFile::from(&audio.key),
+                name: audio.name.clone(),
+                language: audio.language.clone(),
+            }),
         }
     }
 }
 
-impl From<SelectionFile> for SelectionKey {
+impl From<SelectionFile> for SelectionRecord {
     fn from(file: SelectionFile) -> Self {
-        SelectionKey {
-            variant: file.variant.into(),
-            audio: file.audio.map(AudioKey::from),
+        let variant = file.variant;
+        SelectionRecord {
+            variant: VariantRecord {
+                key: variant.key.into(),
+                bandwidth: variant.bandwidth,
+                resolution: variant.resolution.map(resolution),
+                codecs: variant.codecs,
+            },
+            audio: file.audio.map(|audio| AudioRecord {
+                key: audio.key.into(),
+                name: audio.name,
+                language: audio.language,
+            }),
         }
     }
 }
 
-impl From<&VariantKey> for VariantFile {
+impl From<&VariantKey> for VariantKeyFile {
     fn from(key: &VariantKey) -> Self {
-        VariantFile {
-            bandwidth: key.bandwidth,
-            resolution: key.resolution.map(|r| [r.width, r.height]),
-            codecs: key.codecs.clone(),
-            audio_group: key.audio_group.clone(),
-            occurrence: key.occurrence,
+        match key.clone() {
+            VariantKey::Stable { id, occurrence } => VariantKeyFile::Stable { id, occurrence },
+            VariantKey::Attributes {
+                bandwidth,
+                resolution: r,
+                codecs,
+                audio_group,
+                occurrence,
+            } => VariantKeyFile::Attributes {
+                bandwidth,
+                resolution: r.map(resolution_file),
+                codecs,
+                audio_group,
+                occurrence,
+            },
         }
     }
 }
 
-impl From<VariantFile> for VariantKey {
-    fn from(file: VariantFile) -> Self {
-        VariantKey {
-            bandwidth: file.bandwidth,
-            resolution: file
-                .resolution
-                .map(|[width, height]| Resolution { width, height }),
-            codecs: file.codecs,
-            audio_group: file.audio_group,
-            occurrence: file.occurrence,
+impl From<VariantKeyFile> for VariantKey {
+    fn from(file: VariantKeyFile) -> Self {
+        match file {
+            VariantKeyFile::Stable { id, occurrence } => VariantKey::Stable { id, occurrence },
+            VariantKeyFile::Attributes {
+                bandwidth,
+                resolution: r,
+                codecs,
+                audio_group,
+                occurrence,
+            } => VariantKey::Attributes {
+                bandwidth,
+                resolution: r.map(resolution),
+                codecs,
+                audio_group,
+                occurrence,
+            },
         }
     }
 }
 
-impl From<&AudioKey> for AudioFile {
+impl From<&AudioKey> for AudioKeyFile {
     fn from(key: &AudioKey) -> Self {
-        AudioFile {
-            group: key.group.clone(),
-            name: key.name.clone(),
-            language: key.language.clone(),
-            occurrence: key.occurrence,
+        match key.clone() {
+            AudioKey::Stable { id, occurrence } => AudioKeyFile::Stable { id, occurrence },
+            AudioKey::Attributes {
+                group,
+                name,
+                language,
+                occurrence,
+            } => AudioKeyFile::Attributes {
+                group,
+                name,
+                language,
+                occurrence,
+            },
         }
     }
 }
 
-impl From<AudioFile> for AudioKey {
-    fn from(file: AudioFile) -> Self {
-        AudioKey {
-            group: file.group,
-            name: file.name,
-            language: file.language,
-            occurrence: file.occurrence,
+impl From<AudioKeyFile> for AudioKey {
+    fn from(file: AudioKeyFile) -> Self {
+        match file {
+            AudioKeyFile::Stable { id, occurrence } => AudioKey::Stable { id, occurrence },
+            AudioKeyFile::Attributes {
+                group,
+                name,
+                language,
+                occurrence,
+            } => AudioKey::Attributes {
+                group,
+                name,
+                language,
+                occurrence,
+            },
         }
     }
+}
+
+/// 分辨率在 job.json 中写成 [宽, 高]。
+fn resolution_file(r: Resolution) -> [u32; 2] {
+    [r.width, r.height]
+}
+
+fn resolution([width, height]: [u32; 2]) -> Resolution {
+    Resolution { width, height }
 }
 
 #[cfg(test)]
@@ -302,7 +397,7 @@ mod tests {
     use super::*;
 
     fn variant_key() -> VariantKey {
-        VariantKey {
+        VariantKey::Attributes {
             bandwidth: Some(2000),
             resolution: Some(Resolution {
                 width: 1280,
@@ -315,11 +410,44 @@ mod tests {
     }
 
     fn audio_key() -> AudioKey {
-        AudioKey {
+        AudioKey::Attributes {
             group: "aud".into(),
             name: Some("Eng\n\"lish\"".into()),
             language: Some("en".into()),
             occurrence: 0,
+        }
+    }
+
+    fn stable_variant_key() -> VariantKey {
+        VariantKey::Stable {
+            id: "Video-768".into(),
+            occurrence: 1,
+        }
+    }
+
+    fn stable_audio_key() -> AudioKey {
+        AudioKey::Stable {
+            id: "Audio-37262".into(),
+            occurrence: 0,
+        }
+    }
+
+    fn selection(variant: VariantKey, audio: AudioKey) -> SelectionRecord {
+        SelectionRecord {
+            variant: VariantRecord {
+                key: variant,
+                bandwidth: Some(2000),
+                resolution: Some(Resolution {
+                    width: 1280,
+                    height: 720,
+                }),
+                codecs: vec!["avc1.640020".into()],
+            },
+            audio: Some(AudioRecord {
+                key: audio,
+                name: Some("Eng\n\"lish\"".into()),
+                language: Some("en".into()),
+            }),
         }
     }
 
@@ -328,18 +456,20 @@ mod tests {
         let live = JobRecord {
             preference_digest: "ab".into(),
             url_digest: "cd".into(),
-            selection: Some(SelectionKey {
-                variant: variant_key(),
-                audio: Some(audio_key()),
-            }),
+            selection: Some(selection(variant_key(), stable_audio_key())),
             kind: RecordKind::Live,
         };
         let bytes = encode(&live);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"kind":"live","format_version":11,"preference_digest":"ab","url_digest":"cd","selection":{"variant":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020","mp4a.40.2"],"audio_group":"aud","occurrence":1},"audio":{"group":"aud","name":"Eng\n\"lish\"","language":"en","occurrence":0}}}"#
+            r#"{"kind":"live","format_version":12,"preference_digest":"ab","url_digest":"cd","selection":{"variant":{"key":{"attributes":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020","mp4a.40.2"],"audio_group":"aud","occurrence":1}},"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"]},"audio":{"key":{"stable":{"id":"Audio-37262","occurrence":0}},"name":"Eng\n\"lish\"","language":"en"}}}"#
         );
         assert_eq!(decode(&bytes), Ok(live));
+        let stable = JobRecord {
+            selection: Some(selection(stable_variant_key(), audio_key())),
+            ..decode(&bytes).unwrap()
+        };
+        assert_eq!(decode(&encode(&stable)), Ok(stable));
         let vod = JobRecord {
             preference_digest: "ab".into(),
             url_digest: "cd".into(),
@@ -351,21 +481,22 @@ mod tests {
         assert_eq!(decode(&encode(&vod)), Ok(vod));
 
         assert_eq!(
-            decode(br#"{"kind":"vod","format_version":12}"#),
+            decode(br#"{"kind":"vod","format_version":11}"#),
             Err(WorkDirProblem::UnsupportedVersion {
                 file: "job.json",
-                found: 12,
-                supported: 11
+                found: 11,
+                supported: 12
             })
         );
         for rejected in [
             r#"{"kind":"vod","format_version":1,"plan_digest":"cd"}"#,
             r#"{"kind":"vod","format_version":9,"address_digest":"a","preference_digest":"b","selection":null,"plan_digest":"p"}"#,
-            r#"{"kind":"vod","format_version":11,"preference_digest":"a","url_digest":"u","selection":null,"plan_digest":"p","extra":1}"#,
-            r#"{"format_version":11,"preference_digest":"a","url_digest":"u","selection":null,"plan_digest":"p"}"#,
-            r#"{"kind":"vod","format_version":11,"preference_digest":"a","url_digest":"u","selection":null}"#,
-            r#"{"kind":"vod","format_version":11,"preference_digest":"a","selection":null,"plan_digest":"p"}"#,
-            r#"{"kind":"live","format_version":11,"preference_digest":"a","url_digest":"u","selection":{"variant":{"bandwidth":1,"resolution":null,"codecs":[],"audio_group":null,"occurrence":0,"uri":"x"},"audio":null}}"#,
+            r#"{"kind":"vod","format_version":12,"preference_digest":"a","url_digest":"u","selection":null,"plan_digest":"p","extra":1}"#,
+            r#"{"format_version":12,"preference_digest":"a","url_digest":"u","selection":null,"plan_digest":"p"}"#,
+            r#"{"kind":"vod","format_version":12,"preference_digest":"a","url_digest":"u","selection":null}"#,
+            r#"{"kind":"vod","format_version":12,"preference_digest":"a","selection":null,"plan_digest":"p"}"#,
+            r#"{"kind":"live","format_version":12,"preference_digest":"a","url_digest":"u","selection":{"variant":{"key":{"stable":{"id":"x","occurrence":0,"uri":"x"}},"bandwidth":null,"resolution":null,"codecs":[]},"audio":null}}"#,
+            r#"{"kind":"live","format_version":12,"preference_digest":"a","url_digest":"u","selection":{"variant":{"key":{"uri":{"id":"x","occurrence":0}},"bandwidth":null,"resolution":null,"codecs":[]},"audio":null}}"#,
         ] {
             assert!(decode(rejected.as_bytes()).is_err(), "{rejected}");
         }
@@ -397,7 +528,15 @@ mod tests {
         };
         assert_eq!(
             preference_digest(&matching),
-            "637fe82fd21de8ce7bf46eb87425456eb43b181c20ba3f347dea595db3135250"
+            "8afe2f1e8436a3017dc5bcfe0f341f700ec1dc74d3572588a4ac0f5752644798"
+        );
+        let stable = Preference {
+            variant: VariantChoice::Matching(stable_variant_key()),
+            audio: AudioChoice::Matching(stable_audio_key()),
+        };
+        assert_eq!(
+            preference_digest(&stable),
+            "02b624dd66508e2ffd0183f2de17849dd9faae72a2e8f7c2b18810cec796b03f"
         );
 
         let url = Url::parse("https://a.example:8443/live.m3u8?token=1").unwrap();

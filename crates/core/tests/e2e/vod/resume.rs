@@ -282,6 +282,38 @@ async fn resume_finds_the_same_identical_audio_rendition() {
     assert_eq!(server.hits("a/seg1.m4s"), 0);
 }
 
+/// 变体写了稳定 ID：中断期间它的码率变了、前面多了更高的变体，续传按稳定 ID 找回它（按属性就找不到了）。
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_finds_the_variant_by_its_stable_id() {
+    let dir = test_dir("resume_stable_id");
+    let server = Server::start().await;
+    put_ts_a_variant(&server, "a");
+    put_ts_a_variant(&server, "c");
+    let variant = |bandwidth: u32| {
+        format!(
+            "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION=160x90,STABLE-VARIANT-ID=\"a\"\n\
+             a/v.m3u8\n"
+        )
+    };
+    server.put("master.m3u8", format!("#EXTM3U\n{}", variant(1)));
+    let req = request(server.url("master.m3u8"), &dir);
+    server.remove("a/seg1.ts");
+    assert!(matches!(run(req.clone()).await, Err(Error::Segment { .. })));
+    server.put("a/seg1.ts", fixture("ts_a/seg1.ts"));
+    server.put(
+        "master.m3u8",
+        format!(
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=9,RESOLUTION=1920x1080\nc/v.m3u8\n{}",
+            variant(2)
+        ),
+    );
+
+    let output = run(req).await.unwrap();
+
+    assert_output(&output, &expected_ts_a(&dir));
+    assert_eq!(server.hits("c/v.m3u8"), 0);
+}
+
 /// 上次一个分片都没下完就中断：目录里没有可续的内容，不按记录的选轨找回（那个变体已从主播放列表里删掉），
 /// 按偏好重新选。
 #[tokio::test(flavor = "multi_thread")]

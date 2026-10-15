@@ -23,21 +23,15 @@ pub struct VariantInfo {
     pub codecs: Vec<String>,
     /// 引用的音频组（AUDIO 属性）
     pub audio_group: Option<String>,
-    /// 下标以外的上面几项完全相同的变体里排第几（从 0 起）
-    pub occurrence: usize,
+    /// 身份，开始任务按它选（[`VariantInfo::choice`]）
+    pub key: VariantKey,
 }
 
 impl VariantInfo {
     /// 按身份选这个变体（[`VariantChoice::Matching`]）：探测之后主播放列表增删重排了变体，开始任务时也选到它。续传
     /// 时给当初得到的那个，不要重新探测再取。
     pub fn choice(&self) -> VariantChoice {
-        VariantChoice::Matching(VariantKey {
-            bandwidth: self.bandwidth,
-            resolution: self.resolution,
-            codecs: self.codecs.clone(),
-            audio_group: self.audio_group.clone(),
-            occurrence: self.occurrence,
-        })
+        VariantChoice::Matching(self.key.clone())
     }
 }
 
@@ -54,19 +48,14 @@ pub struct AudioInfo {
     pub default: bool,
     /// 有独立的媒体播放列表；为 false 时音频混在变体流里，选它即用变体里的音频
     pub separate: bool,
-    /// 组、名称、语言都相同的音频 rendition 里排第几（从 0 起）
-    pub occurrence: usize,
+    /// 身份，开始任务按它选（[`AudioInfo::choice`]）
+    pub key: AudioKey,
 }
 
 impl AudioInfo {
     /// 按身份选这个音频 rendition（[`AudioChoice::Matching`]），同 [`VariantInfo::choice`]。
     pub fn choice(&self) -> AudioChoice {
-        AudioChoice::Matching(AudioKey {
-            group: self.group.clone(),
-            name: self.name.clone(),
-            language: self.language.clone(),
-            occurrence: self.occurrence,
-        })
+        AudioChoice::Matching(self.key.clone())
     }
 }
 
@@ -155,28 +144,27 @@ impl TrackInfo {
 }
 
 fn variant_info(master: &MasterPlaylist, index: usize) -> VariantInfo {
-    let key = VariantKey::of(master, index).expect("下标在范围内");
+    let variant = &master.variants[index];
     VariantInfo {
         index,
-        bandwidth: key.bandwidth,
-        resolution: key.resolution,
-        codecs: key.codecs,
-        audio_group: key.audio_group,
-        occurrence: key.occurrence,
+        bandwidth: variant.bandwidth,
+        resolution: variant.resolution,
+        codecs: variant.codecs.clone(),
+        audio_group: variant.audio.clone(),
+        key: VariantKey::of(master, index).expect("下标在范围内"),
     }
 }
 
 /// 第 `index` 个音频 rendition（口径同 [`AudioChoice::Index`]）。
 fn audio_info(master: &MasterPlaylist, index: usize) -> AudioInfo {
     let (_, rendition) = audio_renditions(master).nth(index).expect("下标在范围内");
-    let key = AudioKey::of(master, index).expect("下标在范围内");
     AudioInfo {
         index,
-        group: key.group,
-        name: key.name,
-        language: key.language,
+        group: rendition.group.clone(),
+        name: rendition.name.clone(),
+        language: rendition.language.clone(),
         default: rendition.default,
         separate: rendition.uri.is_some(),
-        occurrence: key.occurrence,
+        key: AudioKey::of(master, index).expect("下标在范围内"),
     }
 }

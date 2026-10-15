@@ -9,7 +9,7 @@ use hs_m3u8_core::{CancellationToken, Error, Leftover, LeftoverKind, Unsettled, 
 use crate::server::Server;
 #[cfg(unix)]
 use crate::{Writable, is_root};
-use crate::{engine, fixture, request, run, test_dir};
+use crate::{engine, fixture, format_version, request, run, test_dir};
 
 const TWO_SEGMENTS: &str =
     "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n#EXT-X-ENDLIST\n";
@@ -38,7 +38,7 @@ async fn failed_job(dir: &Path) -> PathBuf {
 /// 在任务目录 `work` 里记下 MP4 输出 `target` 换上没做完，返回它的临时名与挪开的名字。
 fn record_unfinished(work: &Path, target: &Path) -> (PathBuf, PathBuf) {
     let record = serde_json::json!({
-        "format_version": 11,
+        "format_version": format_version(work),
         "swapped": false,
         "outputs": [{"kind": "mp4", "target": target, "fingerprint": FINGERPRINT}],
     });
