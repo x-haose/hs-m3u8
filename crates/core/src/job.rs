@@ -55,12 +55,13 @@ pub(crate) async fn run(
     let (request, root) = (&task.request, &task.output.work_dir);
     let preference = preference_digest(&request.source.preference);
     // 任务目录里有可续的记录时，选轨偏好不符在联网之前就报（WorkDir::open 加锁后照样核对）；相符时按记录的选轨找回
-    // 同一条轨，记录的是直播且请求开启了直播时按直播继续，即使播放列表已出现 ENDLIST（中断期间直播结束了）。没开启
-    // 直播时按点播运行，由 WorkDir::open 报类型不符
+    // 同一条轨（重新选轨时两样都不做，按这次的偏好选）。记录的是直播且请求开启了直播时按直播继续，即使播放列表已出现
+    // ENDLIST（中断期间直播结束了）。没开启直播时按点播运行，由 WorkDir::open 报类型不符
     let recorded = read_resumable(root.clone()).await?;
-    if let Some(problem) = recorded
-        .as_ref()
-        .and_then(|r| r.preference_conflict(&preference))
+    if !request.reselect
+        && let Some(problem) = recorded
+            .as_ref()
+            .and_then(|r| r.preference_conflict(&preference))
     {
         return Err(Error::WorkDir {
             path: root.clone(),
@@ -70,7 +71,10 @@ pub(crate) async fn run(
     let continuing_live = recorded
         .as_ref()
         .is_some_and(|r| matches!(r.kind, RecordKind::Live));
-    let selection = recorded.as_ref().and_then(|r| r.selection.as_ref());
+    let selection = recorded
+        .as_ref()
+        .filter(|_| !request.reselect)
+        .and_then(|r| r.selection.as_ref());
     let resolved = resolve::resolve(&task.http, &request.source, selection, &task.cancel)
         .await?
         .ok_or_else(|| Error::WorkDir {
@@ -119,7 +123,8 @@ async fn run_live(
         selection: resolved.selection_record(),
         kind: RecordKind::Live,
     };
-    let dir = WorkDir::open(task.output.work_dir.clone(), record, lock).await?;
+    let reselect = task.request.reselect;
+    let dir = WorkDir::open(task.output.work_dir.clone(), record, lock, reselect).await?;
     let mut fetcher = task.fetcher(&dir, Permit::Live);
     let ctx = Context {
         http: task.http.clone(),
@@ -159,7 +164,8 @@ async fn run_vod(
             plan_digest: plan.digest(),
         },
     };
-    let dir = WorkDir::open(task.output.work_dir.clone(), record, lock).await?;
+    let reselect = task.request.reselect;
+    let dir = WorkDir::open(task.output.work_dir.clone(), record, lock, reselect).await?;
     let mut fetcher = task.fetcher(&dir, Permit::Vod);
     let mp4 = task.output.get(OutputKind::Mp4).map(|_| streams.as_slice());
     let groups =
@@ -192,7 +198,7 @@ pub(crate) async fn merge_recorded(
             problem: WorkDirProblem::NotLiveRecording,
         });
     }
-    let dir = WorkDir::open(root, record, lock).await?;
+    let dir = WorkDir::open(root, record, lock, false).await?;
     let streams = dir.record().streams();
     let stored = dir.scan(streams.len()).await?;
     live::count_stored(&stored, &progress);

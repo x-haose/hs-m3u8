@@ -20,7 +20,7 @@ pub(crate) struct JobRecord {
     /// 见 [`preference_digest`]；来源是媒体播放列表（`selection` 为 None）时选轨偏好不起作用，不核对
     pub preference_digest: String,
     /// 见 [`url_digest`]。地址变了仍可沿用目录：核对过这次取到的与已下载的是同一份内容之后，用
-    /// [`super::WorkDir::adopt_url`] 改记
+    /// [`super::WorkDir::adopt_record`] 改记
     pub url_digest: String,
     /// 所选的变体与音频；来源本身是媒体播放列表时为 None
     pub selection: Option<SelectionRecord>,
@@ -56,9 +56,15 @@ impl JobRecord {
             .then_some(WorkDirProblem::PreferenceChanged)
     }
 
-    /// 记录为 `self` 的目录不能用于当前请求 `current` 的原因；地址不比较（见 `url_digest`）。
-    pub(super) fn conflict(&self, current: &JobRecord) -> Option<WorkDirProblem> {
-        if let Some(problem) = self.preference_conflict(&current.preference_digest) {
+    /// 所选轨的身份；来源本身是媒体播放列表时为 None。
+    pub(super) fn selection_keys(&self) -> Option<(&VariantKey, Option<&AudioKey>)> {
+        self.selection.as_ref().map(SelectionRecord::keys)
+    }
+
+    /// 记录为 `self` 的目录不能用于当前请求 `current` 的原因；地址不比较（见 `url_digest`）。`reselect`（见
+    /// [`crate::JobRequest::reselect`]）时选轨偏好与所选的轨也不比较，只要求轨道结构（各轨的取流方式）相同。
+    pub(super) fn conflict(&self, current: &JobRecord, reselect: bool) -> Option<WorkDirProblem> {
+        if !reselect && let Some(problem) = self.preference_conflict(&current.preference_digest) {
             return Some(problem);
         }
         let (recorded, current_type) = (self.job_type(), current.job_type());
@@ -68,9 +74,12 @@ impl JobRecord {
                 current: current_type,
             });
         }
-        if self.selection.as_ref().map(SelectionRecord::keys)
-            != current.selection.as_ref().map(SelectionRecord::keys)
-        {
+        let same_tracks = if reselect {
+            self.streams() == current.streams()
+        } else {
+            self.selection_keys() == current.selection_keys()
+        };
+        if !same_tracks {
             return Some(WorkDirProblem::TracksMismatch);
         }
         match (&self.kind, &current.kind) {
@@ -500,6 +509,55 @@ mod tests {
         ] {
             assert!(decode(rejected.as_bytes()).is_err(), "{rejected}");
         }
+    }
+
+    /// 重新选轨时选轨偏好与所选的轨不比较，只比轨道结构（各轨的取流方式）；不重新选轨时各报各的不同。
+    #[test]
+    fn reselecting_compares_only_the_track_layout() {
+        let recorded = JobRecord {
+            preference_digest: "a".into(),
+            url_digest: "u".into(),
+            selection: Some(selection(variant_key(), audio_key())),
+            kind: RecordKind::Live,
+        };
+        let other = JobRecord {
+            preference_digest: "b".into(),
+            selection: Some(selection(stable_variant_key(), stable_audio_key())),
+            ..recorded.clone()
+        };
+        let other_tracks = JobRecord {
+            preference_digest: "a".into(),
+            ..other.clone()
+        };
+        assert_eq!(
+            recorded.conflict(&other, false),
+            Some(WorkDirProblem::PreferenceChanged)
+        );
+        assert_eq!(
+            recorded.conflict(&other_tracks, false),
+            Some(WorkDirProblem::TracksMismatch)
+        );
+        assert_eq!(recorded.conflict(&other, true), None);
+
+        let muxed_audio = JobRecord {
+            selection: Some(SelectionRecord {
+                audio: None,
+                ..selection(variant_key(), audio_key())
+            }),
+            ..recorded.clone()
+        };
+        let media = JobRecord {
+            selection: None,
+            ..recorded.clone()
+        };
+        for (a, b) in [(&recorded, &muxed_audio), (&recorded, &media)] {
+            assert_eq!(a.conflict(b, true), Some(WorkDirProblem::TracksMismatch));
+        }
+        assert_eq!(muxed_audio.conflict(&media, true), None);
+        assert_eq!(
+            muxed_audio.conflict(&media, false),
+            Some(WorkDirProblem::TracksMismatch)
+        );
     }
 
     /// 摘要写在 job.json 里，值变了即任务目录格式变了，须升格式版本。期望值是按各函数文档所述的编码，用另一个

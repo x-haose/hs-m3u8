@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use hs_m3u8_core::hls::AudioChoice;
+use hs_m3u8_core::hls::{AudioChoice, VariantChoice};
 use hs_m3u8_core::{
     Error, JobType, LiveEnd, LiveOptions, LiveReport, MissReason, Mp4Unsupported, Stage, Target,
     Unsupported, Url, WorkDirProblem,
@@ -297,6 +297,88 @@ async fn continue_finds_the_recorded_variant() {
         ),
         "{err}"
     );
+}
+
+/// 记录的变体码率变了，重新选轨按这次的偏好选：选出的变体接不上已录的（同名分片内容不同）时报 SourceUnverified；选出的
+/// 接得上时续录并改记。
+#[tokio::test(flavor = "multi_thread")]
+async fn reselecting_continues_only_when_the_window_matches() {
+    let dir = test_dir("live_reselect");
+    let server = Server::start().await;
+    for i in 0..2 {
+        server.put(
+            &format!("lo/seg{i}.ts"),
+            fixture(&format!("ts_long/seg{i}.ts")),
+        );
+        server.put(
+            &format!("hi/seg{i}.ts"),
+            fixture(&format!("ts_a/seg{i}.ts")),
+        );
+    }
+    let media = |dir: &str, end: bool| playlist_in(&format!("{dir}/"), &[0, 1], end);
+    server.put("lo.m3u8", media("lo", false));
+    server.put("hi.m3u8", media("hi", true));
+    let master = |name: &str, bandwidth: u32| {
+        format!("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION=160x90\n{name}.m3u8\n")
+    };
+    server.put("master.m3u8", master("lo", 1));
+    let mut req = live_request(server.url("master.m3u8"), &dir, STALL);
+    interrupt(&req, |p| p.segments.done == 2).await;
+    req.reselect = true;
+
+    server.put("master.m3u8", master("hi", 2));
+    let err = run(req.clone()).await.unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::WorkDir {
+                problem: WorkDirProblem::SourceUnverified,
+                ..
+            }
+        ),
+        "{err}"
+    );
+
+    server.put("master.m3u8", master("lo", 3));
+    server.put("lo.m3u8", media("lo", true));
+    let output = run(req).await.unwrap();
+
+    assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
+}
+
+/// 只是换了偏好的写法，选出的还是记录的那条（身份相同）：不重新选轨报 PreferenceChanged；重新选轨不必核对内容，窗口
+/// 已滑过、没有可核对的重叠也照常续录（另起会话），与地址、选轨都没变时相同。
+#[tokio::test(flavor = "multi_thread")]
+async fn reselecting_the_same_tracks_needs_no_verification() {
+    let dir = test_dir("live_reselect_same");
+    let server = Server::start().await;
+    put_long(&server, "", &[0, 1, 2, 3]);
+    server.put("live.m3u8", playlist(&[0, 1], false));
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=160x90\nlive.m3u8\n",
+    );
+    let mut req = live_request(server.url("master.m3u8"), &dir, STALL);
+    interrupt(&req, |p| p.segments.done == 2).await;
+    server.put("live.m3u8", playlist(&[2, 3], true));
+    req.source.preference.variant = VariantChoice::Index(0);
+    let changed = run(req.clone()).await.unwrap_err();
+    assert!(
+        matches!(
+            changed,
+            Error::WorkDir {
+                problem: WorkDirProblem::PreferenceChanged,
+                ..
+            }
+        ),
+        "{changed}"
+    );
+
+    req.reselect = true;
+    let output = run(req).await.unwrap();
+
+    assert_output(&output, &expected_long(&dir, &[0, 1, 2, 3], &[2, 2]));
+    assert_eq!(outcome(&output), report(LiveEnd::EndList, 2, vec![]));
 }
 
 /// 地址只有查询串（令牌）变了：窗口与已录的接得上才续录；接不上时无法确认是同一个直播，明确失败。

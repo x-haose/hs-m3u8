@@ -474,6 +474,23 @@ def test_a_new_address_resumes_only_with_the_same_content(server: Server, tmp_pa
     assert server.hits("tok3/seg0.ts") == 1
 
 
+def test_reselecting_follows_the_new_preference(server: Server, tmp_path: Path) -> None:
+    server.put("master.m3u8", "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nindex.m3u8\n")
+    server.put("index.m3u8", VOD)
+    server.put("seg0.ts", fixture("ts_a/seg0.ts"))
+    output = OutputOptions(Target.Mp4(tmp_path / "out.mp4"))
+    with pytest.raises(HttpError):
+        run(JobRequest(Source(server.url("master.m3u8")), output, concurrency=1))
+    server.put("seg1.ts", fixture("ts_a/seg1.ts"))
+    by_index = Source(server.url("master.m3u8"), preference=Preference(variant=VariantChoice.Index(0)))
+
+    with pytest.raises(WorkDirError) as changed:
+        run(JobRequest(by_index, output))
+    assert changed.value.problem == WorkDirProblem.PreferenceChanged()
+    # 选出的还是记录的那条：改记偏好后接着下
+    assert run(JobRequest(by_index, output, reselect=True)).segments == 2
+
+
 def test_live_recordings_stop_on_request_and_merge_what_was_recorded(server: Server, tmp_path: Path) -> None:
     put_media(server, LIVE)
     gate = server.gate("seg1.ts")
@@ -820,6 +837,7 @@ def test_requests_survive_pickle_by_value(tmp_path: Path) -> None:
         key=KeyOverride(bytes(range(16)), iv=bytes(16)),
         concurrency=3,
         live=LiveOptions(max_duration=timedelta(minutes=5)),
+        reselect=True,
     )
 
     for value in (request, Unsettled.Report(), RequestParts("https://example.com/a.ts", headers={"a": "b"})):

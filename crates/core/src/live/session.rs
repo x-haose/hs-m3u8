@@ -1,4 +1,4 @@
-//! 续录时的会话判定：由各轨的结论定下会话编号、各轨的起点，以及完整来源地址变了时怎么办（纯计算；
+//! 续录时的会话判定：由各轨的结论定下会话编号、各轨的起点，以及本次的记录须核对时怎么办（纯计算；
 //! 等各轨的候选、核对内容见 [`super::deciding`]）。
 //!
 //! 一条轨的窗口与它最近一次有分片的会话重叠（身份与编号一致），且重叠的分片重新下载后与已存的逐字节相同，
@@ -109,10 +109,10 @@ pub(super) enum Undecided {
     Unaligned(usize),
 }
 
-/// 完整来源地址与目录里记录的不同时怎么办。
+/// 本次的记录须核对内容才能改记时（完整来源地址不同，或重新选轨选出的轨不同）怎么办。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum NewUrl {
-    /// 改记当前地址：目录里还没有录过的分片，或接着旧会话录（见模块说明）
+pub(super) enum NewRecord {
+    /// 改记本次的：目录里还没有录过的分片，或接着旧会话录（见模块说明）
     Adopt,
     /// 要另起会话：有轨内容不同，或没有一条轨核对一致，无法确认是同一个直播
     Unverified,
@@ -123,7 +123,7 @@ pub(super) enum NewUrl {
 /// 判定结果。
 pub(super) struct Decision {
     pub session: u32,
-    pub new_url: NewUrl,
+    pub new_record: NewRecord,
     /// 各轨的起点；None 为这次不录（已录满，或见 [`Verdict::Ended`]）
     pub tracks: Vec<Option<Start>>,
 }
@@ -133,7 +133,7 @@ impl Decision {
     pub(super) fn first(tracks: usize) -> Self {
         Decision {
             session: 0,
-            new_url: NewUrl::Adopt,
+            new_record: NewRecord::Adopt,
             tracks: (0..tracks)
                 .map(|_| Some(Start::New(SessionStart::Fresh)))
                 .collect(),
@@ -229,12 +229,12 @@ impl Verdicts {
                 .checked_add(1)
                 .ok_or(Undecided::SessionsExhausted)?
         };
-        let new_url = if !recording {
-            NewUrl::Keep
+        let new_record = if !recording {
+            NewRecord::Keep
         } else if continued {
-            NewUrl::Adopt
+            NewRecord::Adopt
         } else {
-            NewUrl::Unverified
+            NewRecord::Unverified
         };
         let tracks = std::mem::take(&mut self.recorded)
             .into_iter()
@@ -251,7 +251,7 @@ impl Verdicts {
             .collect();
         Ok(Decision {
             session,
-            new_url,
+            new_record,
             tracks,
         })
     }
@@ -309,7 +309,7 @@ mod tests {
             full.tracks[..],
             [None, Some(Start::New(SessionStart::Fresh))]
         ));
-        assert_eq!(full.new_url, NewUrl::Adopt);
+        assert_eq!(full.new_record, NewRecord::Adopt);
 
         // 视频已录满、核对不了：音频不知道与旧会话哪段时间对得上，另起的会话里视频不录，合并不进去
         assert!(matches!(
@@ -327,7 +327,7 @@ mod tests {
                 Some(Start::New(SessionStart::Fresh))
             ]
         ));
-        assert_eq!(matched.new_url, NewUrl::Adopt);
+        assert_eq!(matched.new_record, NewRecord::Adopt);
 
         // 视频接不上：另起会话，视频从窗口起点录
         let differs = decide(false, Verdict::Differs, Verdict::Unrecorded).unwrap();

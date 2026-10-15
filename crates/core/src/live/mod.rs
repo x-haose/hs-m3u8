@@ -123,7 +123,7 @@ struct Recorder<'a> {
 /// 录制：定下会话，从首次拉到的播放列表开始，直到满足结束条件，并等已列出的分片下完。要合并 MP4 时 `mp4` 为各轨的
 /// 取流方式，录制中核对能否放进 MP4（见 [`Mp4Check`]），放不进的原因放进进度，录制照常进行。
 ///
-/// 目录里记录的完整来源地址与本次的不同时（见 [`WorkDir::url_changed`]），处理见 [`session::NewUrl`]。
+/// 本次的记录须核对内容才能改记时（见 [`WorkDir::unverified`]），处理见 [`session::NewRecord`]。
 pub(crate) async fn record(
     ctx: Context<'_>,
     tracks: Vec<ResolvedTrack>,

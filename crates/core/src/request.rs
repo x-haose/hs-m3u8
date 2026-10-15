@@ -15,14 +15,14 @@ use crate::{Error, hls};
 /// 来源与访问它的方式；探测（[`crate::Engine::probe`]）与下载（[`JobRequest::source`]）共用。
 #[derive(Clone)]
 pub struct Source {
-    /// 主播放列表或媒体播放列表的地址，续传时可以与上次的不同（换了令牌、主机或路径）。续传先核对这次取到的与已下载的
-    /// 是同一份内容：点播每条轨已完成的字节数最多的至多 16 个不连续段组，各取已完成的分片里字节数最大的重新下载（取不到
-    /// 的换次大的），与已存的逐字节比较，分片都已下完、地址也与上次相同时不核对；直播见 [`LiveOptions`]。不是时报
-    /// [`crate::WorkDirProblem::SourceUnverified`]。点播的轨 init 段内容变了时，已完成的分片不沿用，重新下载
+    /// 主播放列表或媒体播放列表的地址，续传时可以与上次的不同（换了令牌、主机或路径）。续传先核对这次取到的与已下载的是
+    /// 同一份内容：点播每条轨已完成的字节数最多的至多 16 个不连续段组，各取已完成的分片里字节数最大的重新下载（取不到的
+    /// 换次大的），与已存的逐字节比较，分片都已下完、地址与所选的轨也与上次相同时不核对；直播见 [`LiveOptions`]。不是时
+    /// 报 [`crate::WorkDirProblem::SourceUnverified`]。点播的轨 init 段内容变了时，已完成的分片不沿用，重新下载
     pub url: Url,
     /// 选轨偏好。来源是主播放列表时，与任务目录记录的不同报 [`crate::WorkDirProblem::PreferenceChanged`]；任务目录里
-    /// 有已完成的分片时按记录的变体与音频找回同一条轨，不按偏好重新选。按身份选的（`Matching`）续传时要给当初那个，
-    /// 重新探测后再 `choice()` 得到的属性可能变了
+    /// 有已完成的分片时按记录的变体与音频找回同一条轨，不按偏好重新选（[`JobRequest::reselect`] 时重新选）。按身份选的
+    /// （`Matching`）续传时要给当初那个，重新探测后再 `choice()` 得到的属性可能变了
     pub preference: hls::Preference,
     pub http: HttpOptions,
     pub hooks: Arc<dyn Hooks>,
@@ -144,6 +144,12 @@ pub struct JobRequest {
     pub concurrency: NonZeroUsize,
     /// 直播的录制方式；None 时拒绝直播（[`Error::LiveNotEnabled`]）
     pub live: Option<LiveOptions>,
+    /// 任务目录里有已完成的分片时按这次的选轨偏好重新选轨，不按记录找回，选轨偏好与记录的不同也不报错。选出的轨与记录
+    /// 的身份不同时（含来源从主播放列表换成某一档的媒体播放列表，或反过来），与地址变了一样先核对已下载的是同一份内容
+    /// （见 [`Source::url`]、[`LiveOptions`]），核对上才沿用目录、改记选轨与偏好，否则报
+    /// [`crate::WorkDirProblem::SourceUnverified`]、记录不变；只有偏好不同时直接改记。轨道结构（有无独立音频）与记录的
+    /// 不同仍报 [`crate::WorkDirProblem::TracksMismatch`]
+    pub reselect: bool,
 }
 
 /// 自定义 key：加密的分片与 init 段一律用它解密，不请求播放列表里的 key 地址，也不经过 [`crate::Hooks::on_key`]。用于
@@ -169,6 +175,7 @@ impl JobRequest {
             key: None,
             concurrency: Self::DEFAULT_CONCURRENCY,
             live: Some(LiveOptions::default()),
+            reselect: false,
         }
     }
 
@@ -247,9 +254,9 @@ pub(crate) fn check_header(name: &str, value: &str) -> Result<(), String> {
 /// 续录：任务中断后用同样的请求再次运行。至少一条轨当前的窗口与之前录到的接得上（重叠的分片重新下载后内容相同；已录满、
 /// 这次不录的轨同样核对），且没有一条轨内容不同时，接着录：补上窗口内之前没录完的分片，时间线连续，之前没录到的轨从窗口
 /// 起点并入；否则另起一段，与之前的首尾相接（中断期间的内容不在输出中），之前录过的分片不重录，另起的一段里有轨这次不录
-/// （已录满或没有内容）时报 [`crate::WorkDirProblem::Unaligned`]。最后一并合并。地址与记录的不同时，接着录才改记新地
-/// 址，另起一段报 [`crate::WorkDirProblem::SourceUnverified`]；这次没有要录的轨（都已录满或已结束）时不改记，直接合并。
-/// 不联网、只合并已录到的部分用 [`crate::Engine::merge_recorded`]。
+/// （已录满或没有内容）时报 [`crate::WorkDirProblem::Unaligned`]。最后一并合并。地址或重新选出的轨（见
+/// [`JobRequest::reselect`]）与记录的不同时，接着录才改记，另起一段报 [`crate::WorkDirProblem::SourceUnverified`]；这次
+/// 没有要录的轨（都已录满或已结束）时不改记，直接合并。不联网、只合并已录到的部分用 [`crate::Engine::merge_recorded`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveOptions {
     /// 每条轨的分片声明时长之和达到此值后不再录，各轨都达到即结束；计入之前各会话已录到的、本次排入下载的、

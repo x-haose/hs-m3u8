@@ -102,9 +102,9 @@ record! {
     /// 续录：任务中断后用同样的请求再次运行。至少一条轨当前的窗口与之前录到的接得上（重叠的分片重新下载后内容相同；已录
     /// 满、这次不录的轨同样核对），且没有一条轨内容不同时，接着录：补上窗口内之前没录完的分片，时间线连续，之前没录到的
     /// 轨从窗口起点并入；否则另起一段，与之前的首尾相接（中断期间的内容不在输出中），之前录过的分片不重录，另起的一段里
-    /// 有轨这次不录（已录满或没有内容）时报 `WorkDirProblem.Unaligned`。最后一并合并。地址与记录的不同时，接着录才改记
-    /// 新地址，另起一段报 `WorkDirProblem.SourceUnverified`；这次没有要录的轨时不改记，直接合并。不联网、只合并已录到的
-    /// 部分用 `Engine.merge_recorded`。
+    /// 有轨这次不录（已录满或没有内容）时报 `WorkDirProblem.Unaligned`。最后一并合并。地址或重新选出的轨（见
+    /// `JobRequest.reselect`）与记录的不同时，接着录才改记，另起一段报 `WorkDirProblem.SourceUnverified`；这次没有要录
+    /// 的轨时不改记，直接合并。不联网、只合并已录到的部分用 `Engine.merge_recorded`。
     pub struct LiveOptions {
         /// 每条轨的分片声明时长之和达到此值后不再录，各轨都达到即结束；计入之前各会话已录到的、本次排入下载的、本次
         /// 列出了但取不到的，不计窗口已滑过的与之前运行里缺失的。None 不限，不能为 0
@@ -163,6 +163,11 @@ pub struct JobRequest {
     pub concurrency: Positive<NonZeroUsize>,
     /// 直播的录制方式；None 时遇到直播抛 `LiveNotEnabledError`
     pub live: Option<LiveOptions>,
+    /// 任务目录里有已完成的分片时按这次的选轨偏好重新选轨，不按记录找回，选轨偏好与记录的不同也不报错。选出的轨与记录
+    /// 的身份不同时（含来源从主播放列表换成某一档的媒体播放列表，或反过来），与地址变了一样先核对已下载的是同一份内容
+    /// （见 `Source.url`、`LiveOptions`），核对上才沿用目录、改记选轨与偏好，否则报 `WorkDirProblem.SourceUnverified`、
+    /// 记录不变；只有偏好不同时直接改记。轨道结构（有无独立音频）与记录的不同仍报 `WorkDirProblem.TracksMismatch`
+    pub reselect: bool,
 }
 
 impl PartialEq for JobRequest {
@@ -172,6 +177,7 @@ impl PartialEq for JobRequest {
             && self.key == other.key
             && self.concurrency == other.concurrency
             && self.live == other.live
+            && self.reselect == other.reselect
     }
 }
 
@@ -184,6 +190,7 @@ impl Hash for JobRequest {
         self.key.hash(state);
         self.concurrency.hash(state);
         self.live.hash(state);
+        self.reselect.hash(state);
     }
 }
 
@@ -203,6 +210,7 @@ pyo3_stub_gen::inventory::submit! {
                 key: typing.Optional[KeyOverride] = None,
                 concurrency: builtins.int = ...,
                 live: typing.Optional[LiveOptions] = ...,
+                reselect: builtins.bool = False,
             ) -> JobRequest:
                 """`concurrency` 默认 16，小于 1 时抛 `InvalidInputError`；`live` 默认 `LiveOptions()`。"""
         "#
@@ -221,6 +229,7 @@ impl JobRequest {
         key = None,
         concurrency = Positive(core::JobRequest::DEFAULT_CONCURRENCY),
         live = Some(LiveOptions::from(core::LiveOptions::default())),
+        reselect = false,
     ))]
     fn new(
         source: Py<Source>,
@@ -228,6 +237,7 @@ impl JobRequest {
         key: Option<KeyOverride>,
         concurrency: Positive<NonZeroUsize>,
         live: Option<LiveOptions>,
+        reselect: bool,
     ) -> Self {
         JobRequest {
             source,
@@ -235,6 +245,7 @@ impl JobRequest {
             key,
             concurrency,
             live,
+            reselect,
         }
     }
 
@@ -244,8 +255,10 @@ impl JobRequest {
         let key = self.key.clone().into_pyobject(py)?.repr()?;
         let live = self.live.clone().into_pyobject(py)?.repr()?;
         Ok(format!(
-            "JobRequest(source={source}, output={output}, key={key}, concurrency={}, live={live})",
-            self.concurrency.0
+            "JobRequest(source={source}, output={output}, key={key}, concurrency={}, live={live}, \
+             reselect={})",
+            self.concurrency.0,
+            if self.reselect { "True" } else { "False" },
         ))
     }
 
@@ -261,6 +274,7 @@ impl JobRequest {
                 key,
                 concurrency,
                 live,
+                reselect,
             }),
         )
     }
@@ -286,6 +300,7 @@ impl JobRequest {
             max_duration: live.max_duration,
             stall_timeout: live.stall_timeout,
         });
+        request.reselect = self.reselect;
         Ok(request)
     }
 }

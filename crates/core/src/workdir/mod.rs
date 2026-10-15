@@ -113,8 +113,8 @@ pub(crate) struct WorkDir {
     layout: Layout,
     /// 打开时给的记录，即本次任务
     record: JobRecord,
-    /// 见 [`WorkDir::url_changed`]
-    url_changed: bool,
+    /// 见 [`WorkDir::unverified`]
+    unverified: bool,
     lock: Lock,
 }
 
@@ -136,16 +136,18 @@ impl WorkDir {
 
     /// 打开或新建任务目录并加锁；`lock` 为 [`WorkDir::lock_existing`] 已加上的锁。
     ///
-    /// 已有 `job.json` 时其记录须与 `record` 相符（见 [`JobRecord::conflict`]，地址不比较，见
-    /// [`WorkDir::url_changed`]），不符时报那个原因；但目录里还没有已完成的分片时，直接改为当前任务：删掉之前的 init
-    /// 段，不是本库写的文件留下。没有 `job.json` 时目录必须不存在或为空（`.part` 残留与锁文件除外），以免把别人的
-    /// 目录当成任务目录（成功后会整个删除）。
+    /// 已有 `job.json` 时其记录须与 `record` 相符（见 [`JobRecord::conflict`]，`reselect` 同
+    /// [`crate::JobRequest::reselect`]），不符时报那个原因；但目录里还没有已完成的分片时，直接改为当前任务：删掉之前的
+    /// init 段，不是本库写的文件留下。相符而有差别时，须核对内容的见 [`WorkDir::unverified`]，其余的（重新选轨只差选轨
+    /// 偏好）直接改记。没有 `job.json` 时目录必须不存在或为空（`.part` 残留与锁文件除外），以免把别人的目录当成任务目录
+    /// （成功后会整个删除）。
     pub(crate) async fn open(
         root: PathBuf,
         record: JobRecord,
         lock: Option<Lock>,
+        reselect: bool,
     ) -> Result<WorkDir, Error> {
-        blocking(move || open(root, record, lock)).await?
+        blocking(move || open(root, record, lock, reselect)).await?
     }
 
     pub(crate) fn layout(&self) -> &Layout {
@@ -157,15 +159,16 @@ impl WorkDir {
         &self.record
     }
 
-    /// 沿用了目录里原有的记录，而其中的完整来源地址与打开时给的不同（换了令牌、主机或路径）；记录的其余各项
-    /// [`WorkDir::open`] 已核对一致。核对过这次取到的是同一份内容（点播见 [`crate::vod::download`]，直播见
-    /// [`crate::LiveOptions`]）之后用 [`WorkDir::adopt_url`] 改记。新建或改为当前任务时为 false。
-    pub(crate) fn url_changed(&self) -> bool {
-        self.url_changed
+    /// 沿用了目录里原有的记录，而打开时给的与它的差别要核对过内容才能改记：完整来源地址不同（换了令牌、主机或路径），
+    /// 或重新选轨选出的轨与记录的身份不同（见 [`crate::JobRequest::reselect`]）。核对过这次取到的是同一份内容（点播见
+    /// [`crate::vod::download`]，直播见 [`crate::LiveOptions`]）之后用 [`WorkDir::adopt_record`] 改记。新建或改为当前
+    /// 任务时为 false。
+    pub(crate) fn unverified(&self) -> bool {
+        self.unverified
     }
 
-    /// 把 `job.json` 中的记录换成本次的：核对过这次取到的是同一份内容后，改记当前的地址。
-    pub(crate) async fn adopt_url(&self) -> Result<(), Error> {
+    /// 把 `job.json` 中的记录换成本次的（见 [`WorkDir::unverified`]）。
+    pub(crate) async fn adopt_record(&self) -> Result<(), Error> {
         let path = self.layout.root.join(JOB_FILE);
         let bytes = encode(&self.record);
         blocking(move || write_atomic(&path, &bytes)).await?
@@ -237,7 +240,12 @@ fn read_job(root: &Path) -> Result<Option<JobRecord>, Error> {
     }
 }
 
-fn open(root: PathBuf, record: JobRecord, lock: Option<Lock>) -> Result<WorkDir, Error> {
+fn open(
+    root: PathBuf,
+    record: JobRecord,
+    lock: Option<Lock>,
+    reselect: bool,
+) -> Result<WorkDir, Error> {
     let job_path = root.join(JOB_FILE);
     let lock = match lock {
         Some(lock) => lock,
@@ -252,7 +260,7 @@ fn open(root: PathBuf, record: JobRecord, lock: Option<Lock>) -> Result<WorkDir,
     let layout = Layout { root: root.clone() };
     let previous = match read_job(&root)? {
         None => None,
-        Some(recorded) => match recorded.conflict(&record) {
+        Some(recorded) => match recorded.conflict(&record, reselect) {
             None => Some(recorded),
             Some(_) if !has_completed_segments(&layout)? => None,
             Some(problem) => {
@@ -271,11 +279,16 @@ fn open(root: PathBuf, record: JobRecord, lock: Option<Lock>) -> Result<WorkDir,
         }
         write_atomic(&job_path, &encode(&record))?;
     }
-    let url_changed = previous.is_some_and(|p| p.url_digest != record.url_digest);
+    let unverified = previous.as_ref().is_some_and(|p| {
+        p.url_digest != record.url_digest || p.selection_keys() != record.selection_keys()
+    });
+    if previous.as_ref().is_some_and(|p| *p != record) && !unverified {
+        write_atomic(&job_path, &encode(&record))?;
+    }
     Ok(WorkDir {
         layout,
         record,
-        url_changed,
+        unverified,
         lock,
     })
 }

@@ -314,6 +314,58 @@ async fn resume_finds_the_variant_by_its_stable_id() {
     assert_eq!(server.hits("c/v.m3u8"), 0);
 }
 
+/// 记录的变体码率变了，按身份找不到（SelectionGone）；重新选轨按这次的偏好选，选出的身份与记录的不同，先核对已下载的：
+/// 内容不同的（同名分片换了内容）报 SourceUnverified，别的分片不下；内容相同的核对后接着下。
+#[tokio::test(flavor = "multi_thread")]
+async fn reselecting_verifies_the_content_before_continuing() {
+    let dir = test_dir("resume_reselect");
+    let server = Server::start().await;
+    put_ts_a_variant(&server, "a");
+    let master = |bandwidth: u32| {
+        format!("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},RESOLUTION=160x90\na/v.m3u8\n")
+    };
+    server.put("master.m3u8", master(1));
+    let mut req = request(server.url("master.m3u8"), &dir);
+    server.remove("a/seg1.ts");
+    assert!(matches!(run(req.clone()).await, Err(Error::Segment { .. })));
+    server.put("a/seg1.ts", fixture("ts_a/seg1.ts"));
+    server.put("master.m3u8", master(2));
+    let gone = run(req.clone()).await.unwrap_err();
+    assert!(
+        matches!(
+            gone,
+            Error::WorkDir {
+                problem: WorkDirProblem::SelectionGone,
+                ..
+            }
+        ),
+        "{gone}"
+    );
+
+    req.reselect = true;
+    server.put("a/seg0.ts", fixture("ts_b/seg0.ts"));
+    let differs = run(req.clone()).await.unwrap_err();
+    assert!(
+        matches!(
+            differs,
+            Error::WorkDir {
+                problem: WorkDirProblem::SourceUnverified,
+                ..
+            }
+        ),
+        "{differs}"
+    );
+    let seg1_hits = server.hits("a/seg1.ts");
+
+    server.put("a/seg0.ts", fixture("ts_a/seg0.ts"));
+    let output = run(req).await.unwrap();
+
+    assert_output(&output, &expected_ts_a(&dir));
+    // 第一次下载一次，两次核对各一次
+    assert_eq!(server.hits("a/seg0.ts"), 3);
+    assert_eq!(server.hits("a/seg1.ts"), seg1_hits + 1);
+}
+
 /// 上次一个分片都没下完就中断：目录里没有可续的内容，不按记录的选轨找回（那个变体已从主播放列表里删掉），
 /// 按偏好重新选。
 #[tokio::test(flavor = "multi_thread")]
