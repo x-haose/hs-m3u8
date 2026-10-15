@@ -33,8 +33,7 @@ record! {
     pub struct Progress {
         /// 所处的阶段
         pub stage: Stage,
-        /// 所选的变体与音频；解析完成前、或来源本身是媒体播放列表时为 None。有已完成分片的任务目录按记录找回原来的
-        /// 轨，不一定是偏好会选的那条
+        /// 所选的变体与音频（怎样选见 `Preference`）；解析完成前、或来源本身是媒体播放列表时为 None
         pub selected: Option<Selected>,
         /// 分片数，各轨合计
         pub segments: SegmentCounts,

@@ -26,9 +26,9 @@ use crate::{Error, Progress, Stage, WorkDirProblem, blocking};
 ///
 /// 任务目录里有已完成的分片时，先核对这次取到的是同一份内容（要核对哪些见 [`to_verify`]）：要核对的各组里已完成的分片重
 /// 新下载第一个取得到的，与已存的比较（见 [`recheck`]，重试后仍是临时故障即如实上抛）。有组不同或都已取不到报
-/// [`WorkDirProblem::SourceUnverified`]，都相同而记录须核对（见 [`WorkDir::unverified`]）时改记。分片名与时长相同的两个
-/// 视频（只靠查询串区分的、同一视频的另一档、同一地址换了内容的）计划摘要相同，只能这样分开；按组核对，各视频共用的片头
-/// 片尾（单独的组）不会让别的组蒙混过关。
+/// [`WorkDirProblem::SourceUnverified`]，都相同而记录有须核对的差别（见 [`WorkDir::source_change`]）时改记。分片名与时
+/// 长相同的两个视频（只靠查询串区分的、同一视频的另一档、同一地址换了内容的）计划摘要相同，只能这样分开；按组核对，各视
+/// 频共用的片头片尾（单独的组）不会让别的组蒙混过关。
 ///
 /// init 段每次都重新拉取（地址常带每次会话不同的签名，内容决定文件名）；任一项失败时取消其余项并返回该错误，
 /// 任务被取消时返回 [`Error::Cancelled`]。
@@ -116,8 +116,8 @@ async fn verify_completed(
 ) -> Result<(), Error> {
     let layout = dir.layout();
     let groups = recheck_candidates(plan, names, layout);
-    let (tracks, unverified) = (plan.tracks.len(), dir.unverified());
-    let Some(picked) = blocking(move || to_verify(groups, tracks, unverified)).await?? else {
+    let (tracks, changed) = (plan.tracks.len(), dir.source_change().is_some());
+    let Some(picked) = blocking(move || to_verify(groups, tracks, changed)).await?? else {
         return Ok(());
     };
     match recheck_all(&fetcher.direct(), picked, fetcher.limit(), cancel).await? {
@@ -129,7 +129,7 @@ async fn verify_completed(
             });
         }
     }
-    if unverified {
+    if changed {
         dir.adopt_record().await?;
     }
     Ok(())
@@ -203,14 +203,14 @@ struct Group {
     candidates: Vec<Candidate>,
 }
 
-/// `groups`（各组各轨的分片，`tracks` 为轨数）里要核对的：计划里的分片都已完成、记录也无须核对（`unverified` 为 false，
-/// 见 [`WorkDir::unverified`]）时为 None：这次不下载，又是上次那个请求，没有可核对的必要；否则每条轨已完成的字节数最多
-/// 的至多 [`RECHECK_GROUPS`] 组，各组已完成的分片按字节数从大到小、至多 [`RECHECK_TRIES`] 个（大的不像黑场、静音那样容
-/// 易彼此相同）。
+/// `groups`（各组各轨的分片，`tracks` 为轨数）里要核对的：计划里的分片都已完成、记录也没有须核对的差别（`changed` 为
+/// false，见 [`WorkDir::source_change`]）时为 None：这次不下载，又是上次那个请求，没有可核对的必要；否则每条轨已完成的
+/// 字节数最多的至多 [`RECHECK_GROUPS`] 组，各组已完成的分片按字节数从大到小、至多 [`RECHECK_TRIES`] 个（大的不像黑场、
+/// 静音那样容易彼此相同）。
 fn to_verify(
     groups: Vec<Group>,
     tracks: usize,
-    unverified: bool,
+    changed: bool,
 ) -> Result<Option<Vec<Group>>, Error> {
     let mut all_done = true;
     // 各轨各组：(已完成的字节数, 按字节数从大到小的已完成分片)
@@ -231,7 +231,7 @@ fn to_verify(
         let largest = sized.into_iter().take(RECHECK_TRIES).map(|(_, c)| c);
         by_track[track].push((total, largest.collect()));
     }
-    if all_done && !unverified {
+    if all_done && !changed {
         return Ok(None);
     }
     let mut picked = Vec::new();

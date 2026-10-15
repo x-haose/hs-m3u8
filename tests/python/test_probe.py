@@ -164,16 +164,14 @@ def test_stable_ids_identify_tracks_whose_attributes_change(server: Server) -> N
     probed = probe(Source(server.url("master.m3u8")))
     assert probed.master is not None
     low, ja = probed.master.variants[0], probed.master.audio[1]
-    assert low.key == VariantKey.Stable(id="low", occurrence=0)
+    assert low.key == VariantKey.Stable(id="low", audio_group="aud", occurrence=0)
     assert ja.key == AudioKey.Stable(id="ja", occurrence=0)
     preference = Preference(variant=low.choice(), audio=ja.choice())
     assert_survives_pickle(preference)
-    # 码率、编码、组名都变了：按稳定 ID 仍选到原来那两条
+    # 码率与编码档次变了：按稳定 ID 仍选到原来那两条
     server.put(
         "master.m3u8",
-        stable.replace("BANDWIDTH=800000", "BANDWIDTH=900000")
-        .replace("avc1.4d401e", "avc1.4d401f")
-        .replace('"aud"', '"audio-v2"'),
+        stable.replace("BANDWIDTH=800000", "BANDWIDTH=900000").replace("avc1.4d401e", "avc1.4d401f"),
     )
 
     moved = probe(Source(server.url("master.m3u8"), preference=preference))
@@ -181,7 +179,7 @@ def test_stable_ids_identify_tracks_whose_attributes_change(server: Server) -> N
     assert moved.master is not None
     assert (moved.master.selected.variant.index, moved.master.selected.variant.bandwidth) == (0, 900000)
     assert moved.master.selected.audio is not None
-    assert (moved.master.selected.audio.group, moved.master.selected.audio.language) == ("audio-v2", "ja")
+    assert (moved.master.selected.audio.index, moved.master.selected.audio.language) == (1, "ja")
 
 
 def test_media_playlists_have_no_master_and_live_ones_are_reported(server: Server) -> None:

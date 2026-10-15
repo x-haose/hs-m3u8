@@ -16,8 +16,8 @@ use crate::request::JobRequest;
 use crate::resolve::{self, Resolved};
 use crate::vod::{self, Plan};
 use crate::workdir::{
-    self, JobRecord, Lock, OutputKind, RecordKind, Stored, WorkDir, preference_digest,
-    read_resumable, url_digest,
+    self, JobRecord, Lock, OutputKind, RecordKind, SelectionCheck, Stored, WorkDir,
+    preference_digest, read_resumable, url_digest,
 };
 use crate::{
     Error, Leftover, LeftoverKind, LiveReport, Output, Progress, Stage, Unsettled, WorkDirProblem,
@@ -123,8 +123,7 @@ async fn run_live(
         selection: resolved.selection_record(),
         kind: RecordKind::Live,
     };
-    let reselect = task.request.reselect;
-    let dir = WorkDir::open(task.output.work_dir.clone(), record, lock, reselect).await?;
+    let dir = WorkDir::open(task.output.work_dir.clone(), record, lock, task.check()).await?;
     let mut fetcher = task.fetcher(&dir, Permit::Live);
     let ctx = Context {
         http: task.http.clone(),
@@ -164,8 +163,7 @@ async fn run_vod(
             plan_digest: plan.digest(),
         },
     };
-    let reselect = task.request.reselect;
-    let dir = WorkDir::open(task.output.work_dir.clone(), record, lock, reselect).await?;
+    let dir = WorkDir::open(task.output.work_dir.clone(), record, lock, task.check()).await?;
     let mut fetcher = task.fetcher(&dir, Permit::Vod);
     let mp4 = task.output.get(OutputKind::Mp4).map(|_| streams.as_slice());
     let groups =
@@ -198,7 +196,7 @@ pub(crate) async fn merge_recorded(
             problem: WorkDirProblem::NotLiveRecording,
         });
     }
-    let dir = WorkDir::open(root, record, lock, false).await?;
+    let dir = WorkDir::open(root, record, lock, SelectionCheck::SameTracks).await?;
     let streams = dir.record().streams();
     let stored = dir.scan(streams.len()).await?;
     live::count_stored(&stored, &progress);
@@ -272,6 +270,15 @@ fn merge_live(
 }
 
 impl Task {
+    /// 打开任务目录时怎样比较所选的轨：重新选轨时只要求轨道结构相同。
+    fn check(&self) -> SelectionCheck {
+        if self.request.reselect {
+            SelectionCheck::SameLayout
+        } else {
+            SelectionCheck::SameTracks
+        }
+    }
+
     /// 下载任务目录 `dir` 的分片的下载器；`permit` 见 [`Fetcher::new`]。
     fn fetcher(&self, dir: &WorkDir, permit: Permit) -> Fetcher {
         Fetcher::new(

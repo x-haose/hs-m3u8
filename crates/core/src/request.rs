@@ -20,9 +20,10 @@ pub struct Source {
     /// 换次大的），与已存的逐字节比较，分片都已下完、地址与所选的轨也与上次相同时不核对；直播见 [`LiveOptions`]。不是时
     /// 报 [`crate::WorkDirProblem::SourceUnverified`]。点播的轨 init 段内容变了时，已完成的分片不沿用，重新下载
     pub url: Url,
-    /// 选轨偏好。来源是主播放列表时，与任务目录记录的不同报 [`crate::WorkDirProblem::PreferenceChanged`]；任务目录里
-    /// 有已完成的分片时按记录的变体与音频找回同一条轨，不按偏好重新选（[`JobRequest::reselect`] 时重新选）。按身份选的
-    /// （`Matching`）续传时要给当初那个，重新探测后再 `choice()` 得到的属性可能变了
+    /// 选轨偏好。来源是主播放列表时，与任务目录记录的不同报 [`crate::WorkDirProblem::PreferenceChanged`]；任务目录里有
+    /// 已完成的分片时按记录的身份找回同一条轨，不按偏好重新选（[`JobRequest::reselect`] 时重新选）。按身份选的
+    /// （`Matching`）续传时要给当初那个：重新探测后再 `choice()` 得到的身份可能不同（来源没写稳定 ID 时身份含码率等属
+    /// 性），选的仍是同一内容时用 [`JobRequest::reselect`]
     pub preference: hls::Preference,
     pub http: HttpOptions,
     pub hooks: Arc<dyn Hooks>,
@@ -144,11 +145,12 @@ pub struct JobRequest {
     pub concurrency: NonZeroUsize,
     /// 直播的录制方式；None 时拒绝直播（[`Error::LiveNotEnabled`]）
     pub live: Option<LiveOptions>,
-    /// 任务目录里有已完成的分片时按这次的选轨偏好重新选轨，不按记录找回，选轨偏好与记录的不同也不报错。选出的轨与记录
-    /// 的身份不同时（含来源从主播放列表换成某一档的媒体播放列表，或反过来），与地址变了一样先核对已下载的是同一份内容
-    /// （见 [`Source::url`]、[`LiveOptions`]），核对上才沿用目录、改记选轨与偏好，否则报
-    /// [`crate::WorkDirProblem::SourceUnverified`]、记录不变；只有偏好不同时直接改记。轨道结构（有无独立音频）与记录的
-    /// 不同仍报 [`crate::WorkDirProblem::TracksMismatch`]
+    /// 任务目录里有已完成的分片时按这次的选轨偏好重新选轨，不按记录找回，选轨偏好与记录的不同也不报错。用于选的仍是同一
+    /// 内容而记录找不回、或偏好的写法变了（如重新探测后再选）；换清晰度另开任务目录。选出的轨与记录的身份不同时（含来源
+    /// 从主播放列表换成某一档的媒体播放列表，或反过来），与地址变了一样先核对已下载的是同一份内容（见 [`Source::url`]、
+    /// [`LiveOptions`]），核对上才沿用目录、改记，否则报 [`crate::WorkDirProblem::SourceUnverified`]、记录不变；身份相
+    /// 同只差偏好时直接改记。轨道结构（有无独立音频）与记录的不同仍报 [`crate::WorkDirProblem::TracksMismatch`]，点播的
+    /// 分片与记录的不一致仍报 [`crate::WorkDirProblem::PlanChanged`]
     pub reselect: bool,
 }
 
@@ -254,9 +256,10 @@ pub(crate) fn check_header(name: &str, value: &str) -> Result<(), String> {
 /// 续录：任务中断后用同样的请求再次运行。至少一条轨当前的窗口与之前录到的接得上（重叠的分片重新下载后内容相同；已录满、
 /// 这次不录的轨同样核对），且没有一条轨内容不同时，接着录：补上窗口内之前没录完的分片，时间线连续，之前没录到的轨从窗口
 /// 起点并入；否则另起一段，与之前的首尾相接（中断期间的内容不在输出中），之前录过的分片不重录，另起的一段里有轨这次不录
-/// （已录满或没有内容）时报 [`crate::WorkDirProblem::Unaligned`]。最后一并合并。地址或重新选出的轨（见
-/// [`JobRequest::reselect`]）与记录的不同时，接着录才改记，另起一段报 [`crate::WorkDirProblem::SourceUnverified`]；这次
-/// 没有要录的轨（都已录满或已结束）时不改记，直接合并。不联网、只合并已录到的部分用 [`crate::Engine::merge_recorded`]。
+/// （已录满或没有内容）时报 [`crate::WorkDirProblem::Unaligned`]。最后一并合并。地址与记录的不同时，接着录才改记，另起
+/// 一段报 [`crate::WorkDirProblem::SourceUnverified`]，这次没有要录的轨（都已录满或已结束）时不改记，直接合并；重新选
+/// 出的轨身份与记录的不同（见 [`JobRequest::reselect`]）而目录里已有它的分片时，须它自己接得上（已录满的同样核对），
+/// 别的轨接得上不算，否则同样报错。不联网、只合并已录到的部分用 [`crate::Engine::merge_recorded`]。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveOptions {
     /// 每条轨的分片声明时长之和达到此值后不再录，各轨都达到即结束；计入之前各会话已录到的、本次排入下载的、

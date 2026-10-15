@@ -2,11 +2,11 @@
 //! 影响；本地 HLS 的主播放列表按其中的属性写变体与音频（只合并时只有它可用）。
 
 use hs_m3u8_hls::{
-    AudioKey, MasterPlaylist, Resolution, SelectedAudio, Selection, VariantKey, audio_renditions,
+    AudioKey, MasterPlaylist, Resolution, SelectedAudio, Selection, Variant, VariantKey,
 };
 use hs_m3u8_remux::Streams;
 
-/// 一次选轨。属性是选轨时来源写的，续传沿用记录、不随之后拉到的主播放列表更新：身份相同的轨内容相同。
+/// 一次选轨。属性是首次选出这些轨时来源写的，之后身份相同即沿用、不随拉到的主播放列表更新：身份相同的轨内容相同。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SelectionRecord {
     pub variant: VariantRecord,
@@ -55,17 +55,18 @@ impl SelectionRecord {
         }
     }
 
-    /// 在 `master` 中找回这次选轨：音频在找到的变体引用的音频组里找，且须有独立的媒体播放列表；找不到时为 None。
+    /// 在 `master` 中找回这次选轨：音频在找到的变体引用的音频组里找，且须有独立的媒体播放列表；找到的变体分辨率或编码
+    /// 种类与记录的不同（见 [`VariantRecord::agrees`]）也算找不到。
     pub(crate) fn find(&self, master: &MasterPlaylist) -> Option<Selection> {
         let variant_index = self.variant.key.find(master)?;
         let variant = &master.variants[variant_index];
+        if !self.variant.agrees(variant) {
+            return None;
+        }
         let audio = match &self.audio {
             None => None,
             Some(audio) => {
-                let index = audio.key.find(master, variant.audio.as_deref()?)?;
-                let (_, rendition) = audio_renditions(master)
-                    .nth(index)
-                    .expect("找到的位置在范围内");
+                let (index, rendition) = audio.key.find(master, variant.audio.as_deref()?)?;
                 Some(SelectedAudio {
                     index,
                     uri: rendition.uri.clone()?,
@@ -79,10 +80,29 @@ impl SelectionRecord {
             audio,
         })
     }
+}
 
-    /// 身份：两次选轨身份相同即同一组轨，属性不比较。
-    pub(crate) fn keys(&self) -> (&VariantKey, Option<&AudioKey>) {
-        (&self.variant.key, self.audio.as_ref().map(|a| &a.key))
+impl VariantRecord {
+    /// `variant` 与记录的分辨率、编码种类（CODECS 各项点号前的那段，不分大小写）不矛盾：两边都写了的才比，码率与编码的
+    /// 档次会重新测量、改写，不比。按属性认的身份本身含这些属性，只有按稳定 ID 认的会不符：来源把同一稳定 ID 给了另一
+    /// 档，违反了稳定 ID 的约定。
+    fn agrees(&self, variant: &Variant) -> bool {
+        let families = |codecs: &[String]| {
+            let mut families: Vec<String> = codecs
+                .iter()
+                .map(|c| c.split('.').next().unwrap_or_default().to_ascii_lowercase())
+                .collect();
+            families.sort();
+            families
+        };
+        let resolution = match (self.resolution, variant.resolution) {
+            (Some(recorded), Some(current)) => recorded == current,
+            _ => true,
+        };
+        let codecs = self.codecs.is_empty()
+            || variant.codecs.is_empty()
+            || families(&self.codecs) == families(&variant.codecs);
+        resolution && codecs
     }
 }
 
@@ -92,5 +112,52 @@ pub(crate) fn track_streams(selection: Option<&SelectionRecord>) -> Vec<Streams>
     match selection.and_then(|s| s.audio.as_ref()) {
         Some(_) => vec![Streams::Video, Streams::Audio],
         None => vec![Streams::All],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hs_m3u8_hls::{Playlist, Preference, Url, parse, select};
+
+    use super::*;
+
+    fn master(stream_inf: &str) -> MasterPlaylist {
+        let text =
+            format!("#EXTM3U\n#EXT-X-STREAM-INF:{stream_inf},STABLE-VARIANT-ID=\"v\"\nv.m3u8\n");
+        let url = Url::parse("https://example.com/master.m3u8").unwrap();
+        match parse(&text, &url).unwrap() {
+            Playlist::Master(master) => master,
+            Playlist::Media(_) => panic!("应为主播放列表"),
+        }
+    }
+
+    /// 按稳定 ID 找回的变体，码率与编码档次变了照样是它；分辨率或编码种类变了，即来源把这个稳定 ID 给了另一档，不当作
+    /// 同一条。
+    #[test]
+    fn a_stable_id_given_to_another_rendition_is_not_found() {
+        let before = master("BANDWIDTH=1000,RESOLUTION=640x360,CODECS=\"avc1.4d401e,mp4a.40.2\"");
+        let selection = select(&before, &Preference::default()).unwrap();
+        let record = SelectionRecord::of(&selection, &before);
+        for (stream_inf, found) in [
+            (
+                "BANDWIDTH=2000,RESOLUTION=640x360,CODECS=\"mp4a.40.5,AVC1.640028\"",
+                true,
+            ),
+            ("BANDWIDTH=2000", true),
+            (
+                "BANDWIDTH=1000,RESOLUTION=1280x720,CODECS=\"avc1.4d401e,mp4a.40.2\"",
+                false,
+            ),
+            (
+                "BANDWIDTH=1000,RESOLUTION=640x360,CODECS=\"hvc1.1.6.L93.B0,mp4a.40.2\"",
+                false,
+            ),
+        ] {
+            assert_eq!(
+                record.find(&master(stream_inf)).is_some(),
+                found,
+                "{stream_inf}"
+            );
+        }
     }
 }

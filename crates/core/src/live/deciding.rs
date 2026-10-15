@@ -5,7 +5,7 @@
 use hs_m3u8_hls::MediaPlaylist;
 use tokio::time::Instant;
 
-use super::session::{Decision, NewRecord, Undecided, Verdict, Verdicts};
+use super::session::{Decision, Undecided, Verdict, Verdicts};
 use super::track::Fetched;
 use super::window::overlaps;
 use super::{Phase, Recorder};
@@ -125,7 +125,8 @@ impl Recorder<'_> {
         }
     }
 
-    /// 各轨都有结论时定下会话；会话编号已达上限时目录无法再用，另起的会话合并不进去时报错（见 [`Undecided`]）。
+    /// 各轨都有结论时定下会话；本次的记录有须核对的差别而核对不上、会话编号已达上限时目录无法再用、另起的会话合并不进去
+    /// 时报错（见 [`Undecided`]）。
     async fn decide_if_complete(&mut self) -> Result<(), Error> {
         let Phase::Deciding(verdicts) = &mut self.phase else {
             return Ok(());
@@ -136,6 +137,12 @@ impl Recorder<'_> {
         let decision = match verdicts.decide() {
             Ok(decision) => decision,
             Err(Undecided::SessionsExhausted) => return Err(self.sessions_exhausted()),
+            Err(Undecided::Unverified) => {
+                return Err(Error::WorkDir {
+                    path: self.dir.layout().root().to_path_buf(),
+                    problem: WorkDirProblem::SourceUnverified,
+                });
+            }
             Err(Undecided::Unaligned(track)) => {
                 return Err(Error::WorkDir {
                     path: self.dir.layout().root().to_path_buf(),
@@ -146,20 +153,11 @@ impl Recorder<'_> {
         self.enter_session(decision).await
     }
 
-    /// 定下会话：本次的记录须核对时（见 [`WorkDir::unverified`]）按 [`NewRecord`] 处理；记下要录的轨的起点；各轨按起点
-    /// 建窗口（这次不录的不建），开始逐份处理暂存的播放列表。
+    /// 定下会话：本次的记录有须核对的差别（见 [`WorkDir::source_change`]）而已核对上时改记；记下要录的轨的起点；各轨按
+    /// 起点建窗口（这次不录的不建），开始逐份处理暂存的播放列表。
     async fn enter_session(&mut self, decision: Decision) -> Result<(), Error> {
-        if self.dir.unverified() {
-            match decision.new_record {
-                NewRecord::Adopt => self.dir.adopt_record().await?,
-                NewRecord::Keep => {}
-                NewRecord::Unverified => {
-                    return Err(Error::WorkDir {
-                        path: self.dir.layout().root().to_path_buf(),
-                        problem: WorkDirProblem::SourceUnverified,
-                    });
-                }
-            }
+        if decision.adopt && self.dir.source_change().is_some() {
+            self.dir.adopt_record().await?;
         }
         self.phase = Phase::Decided {
             session: decision.session,

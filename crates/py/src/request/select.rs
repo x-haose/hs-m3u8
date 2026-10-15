@@ -32,14 +32,17 @@ variants! {
 }
 
 variants! {
-    /// 变体的身份（见 `VariantInfo.key`）：来源写了稳定 ID 时是它，没写时是属性；再加上身份相同的变体里排第几。
+    /// 变体的身份（见 `VariantInfo.key`）：来源写了稳定 ID 时以它为主，没写时是属性；再加上身份相同的变体里排第几。
     pub enum VariantKey {
-        /// 来源写了 STABLE-VARIANT-ID：只按它认，属性变了也是同一条
-        #[pyo3(constructor = (*, id, occurrence))]
+        /// 来源写了 STABLE-VARIANT-ID：按它与引用的音频组认，码率、编码等属性变了也是同一条。同一条流常按音频组各列一行
+        /// （如 AAC 与 E-AC-3 各一组），稳定 ID 相同，靠音频组区分
+        #[pyo3(constructor = (*, id, audio_group, occurrence))]
         Stable {
             /// STABLE-VARIANT-ID
             id: String,
-            /// 稳定 ID 相同的变体里排第几（从 0 起）；同一条流经几条路径分发时，稳定 ID 相同的有几个
+            /// 引用的音频组；没有时为 None
+            audio_group: Option<String>,
+            /// 上面两项都相同的变体里排第几（从 0 起）；同一条流经几条路径分发而组名相同时有几个
             occurrence: Count<usize>,
         },
         /// 来源没写稳定 ID：各项同 `VariantInfo` 的同名属性。找的时候不看变体有没有稳定 ID，来源后来写上了也找得回
@@ -84,10 +87,9 @@ variants! {
 }
 
 variants! {
-    /// 音频 rendition 的身份（见 `AudioInfo.key`），在所选变体引用的音频组里认，同 `VariantKey`。
+    /// 音频 rendition 的身份（见 `AudioInfo.key`），在所选变体引用的音频组里认（组由变体给出），同 `VariantKey`。
     pub enum AudioKey {
-        /// 来源写了 STABLE-RENDITION-ID：只按它认。组名不算在内：组名不是稳定标识，同一条流经几条路径分发时各路径的组
-        /// 名也不同
+        /// 来源写了 STABLE-RENDITION-ID：只按它认
         #[pyo3(constructor = (*, id, occurrence))]
         Stable {
             /// STABLE-RENDITION-ID
@@ -113,8 +115,9 @@ variants! {
 record! {
     @custom_new
     /// 选轨偏好。来源是主播放列表时，与任务目录记录的不同抛 `WorkDirError`（`WorkDirProblem.PreferenceChanged`）；任务
-    /// 目录里有已完成的分片时按记录的变体与音频找回同一条轨，不按偏好重新选（`JobRequest.reselect` 时重新选）。按身份选
-    /// 的（`Matching`）续传时要给当初那个，重新探测后再 `choice()` 得到的属性可能变了。
+    /// 目录里有已完成的分片时按记录的身份找回同一条轨，不按偏好重新选（`JobRequest.reselect` 时重新选）。按身份选的
+    /// （`Matching`）续传时要给当初那个：重新探测后再 `choice()` 得到的身份可能不同（来源没写稳定 ID 时身份含码率等属
+    /// 性），选的仍是同一内容时用 `JobRequest.reselect`。
     pub struct Preference {
         /// 选哪个变体
         pub variant: VariantChoice,
@@ -191,8 +194,13 @@ impl Preference {
 impl From<core::hls::VariantKey> for VariantKey {
     fn from(key: core::hls::VariantKey) -> Self {
         match key {
-            core::hls::VariantKey::Stable { id, occurrence } => VariantKey::Stable {
+            core::hls::VariantKey::Stable {
                 id,
+                audio_group,
+                occurrence,
+            } => VariantKey::Stable {
+                id,
+                audio_group,
                 occurrence: Count(occurrence),
             },
             core::hls::VariantKey::Attributes {
@@ -215,8 +223,13 @@ impl From<core::hls::VariantKey> for VariantKey {
 impl VariantKey {
     fn to_core(&self) -> core::hls::VariantKey {
         match self.clone() {
-            VariantKey::Stable { id, occurrence } => core::hls::VariantKey::Stable {
+            VariantKey::Stable {
                 id,
+                audio_group,
+                occurrence,
+            } => core::hls::VariantKey::Stable {
+                id,
+                audio_group,
                 occurrence: occurrence.0,
             },
             VariantKey::Attributes {

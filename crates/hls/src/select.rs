@@ -66,7 +66,7 @@ pub enum SelectError {
     #[error("变体下标 {index} 超出范围（共 {count} 个）")]
     VariantIndexOutOfRange { index: usize, count: usize },
     /// 主播放列表里没有身份与 [`VariantChoice::Matching`] 相同的变体
-    #[error("主播放列表里没有所选的变体（身份相同的已不在）")]
+    #[error("主播放列表里没有身份相同的变体")]
     VariantNotFound,
     #[error("音频组 {group} 中没有语言为 {language} 的 rendition，可选：{available:?}")]
     AudioLanguageNotFound {
@@ -78,9 +78,10 @@ pub enum SelectError {
     #[error("音频下标 {index} 超出范围（共 {count} 个）")]
     AudioIndexOutOfRange { index: usize, count: usize },
     /// 所选变体引用的音频组里没有身份与 [`AudioChoice::Matching`] 相同的音频 rendition（变体没有引用音频组时也是）
-    #[error("所选变体的音频组里没有所选的音频（身份相同的）")]
+    #[error("所选变体的音频组里没有身份相同的音频")]
     AudioNotFound,
-    /// 指定的音频 rendition 不在所选变体引用的音频组里（变体没有引用音频组时 `group` 为 None）
+    /// 按下标指定（[`AudioChoice::Index`]）的音频 rendition 不在所选变体引用的音频组里（变体没有引用音频组时 `group`
+    /// 为 None）
     #[error("第 {index} 个音频不在所选变体的音频组（{}）里", group.as_deref().unwrap_or("无"))]
     NotVariantAudio { index: usize, group: Option<String> },
 }
@@ -102,13 +103,8 @@ pub fn select(master: &MasterPlaylist, preference: &Preference) -> Result<Select
     let audio = match (&preference.audio, group) {
         (AudioChoice::Index(index), group) => Some(audio_by_index(master, *index, group)?),
         (AudioChoice::Matching(key), group) => {
-            let index = group
-                .and_then(|group| key.find(master, group))
-                .ok_or(SelectError::AudioNotFound)?;
-            let (_, rendition) = audio_renditions(master)
-                .nth(index)
-                .expect("找到的位置在范围内");
-            Some((index, rendition))
+            let found = group.and_then(|group| key.find(master, group));
+            Some(found.ok_or(SelectError::AudioNotFound)?)
         }
         (AudioChoice::Language(language), Some(group)) => {
             Some(audio_by_language(master, group, language)?)

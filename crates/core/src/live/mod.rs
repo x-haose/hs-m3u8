@@ -123,7 +123,7 @@ struct Recorder<'a> {
 /// 录制：定下会话，从首次拉到的播放列表开始，直到满足结束条件，并等已列出的分片下完。要合并 MP4 时 `mp4` 为各轨的
 /// 取流方式，录制中核对能否放进 MP4（见 [`Mp4Check`]），放不进的原因放进进度，录制照常进行。
 ///
-/// 本次的记录须核对内容才能改记时（见 [`WorkDir::unverified`]），处理见 [`session::NewRecord`]。
+/// 本次的记录有须核对的差别时（见 [`WorkDir::source_change`]），能否改记见 [`session`]。
 pub(crate) async fn record(
     ctx: Context<'_>,
     tracks: Vec<ResolvedTrack>,
@@ -168,7 +168,7 @@ pub(crate) async fn record(
 
 /// 录制开始时的阶段：目录里有录过的分片时先判定接着哪个会话录，没有时直接录第 0 个会话。
 fn initial_phase(stored: &Stored, dir: &WorkDir) -> Result<Phase, Error> {
-    let verdicts = Verdicts::new(stored).map_err(|reason| Error::WorkDir {
+    let verdicts = Verdicts::new(stored, dir.source_change()).map_err(|reason| Error::WorkDir {
         path: dir.layout().root().to_path_buf(),
         problem: WorkDirProblem::Corrupt(reason),
     })?;

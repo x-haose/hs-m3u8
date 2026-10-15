@@ -344,6 +344,7 @@ async fn reselecting_verifies_the_content_before_continuing() {
 
     req.reselect = true;
     server.put("a/seg0.ts", fixture("ts_b/seg0.ts"));
+    let seg1_hits = server.hits("a/seg1.ts");
     let differs = run(req.clone()).await.unwrap_err();
     assert!(
         matches!(
@@ -355,7 +356,7 @@ async fn reselecting_verifies_the_content_before_continuing() {
         ),
         "{differs}"
     );
-    let seg1_hits = server.hits("a/seg1.ts");
+    assert_eq!(server.hits("a/seg1.ts"), seg1_hits);
 
     server.put("a/seg0.ts", fixture("ts_a/seg0.ts"));
     let output = run(req).await.unwrap();

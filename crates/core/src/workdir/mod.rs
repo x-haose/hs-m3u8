@@ -25,6 +25,7 @@ mod removal;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) use self::lock::Lock;
 use self::lock::acquire;
@@ -34,7 +35,9 @@ use self::names::{init_file_name, parse_init_name, parse_segment_name, segment_f
 pub(crate) use self::outputs::{
     OutputKind, PendingOutput, clear_outputs, outputs_file, read_outputs, record_outputs,
 };
-pub(crate) use self::record::{JobRecord, RecordKind, preference_digest, url_digest};
+pub(crate) use self::record::{
+    JobRecord, RecordKind, SelectionCheck, preference_digest, url_digest,
+};
 use self::record::{decode, encode};
 pub(crate) use self::removal::remove;
 use self::removal::{remove_steps, remove_tracks};
@@ -111,11 +114,29 @@ impl Layout {
 /// 已打开并加锁的任务目录；锁在 drop 时释放。
 pub(crate) struct WorkDir {
     layout: Layout,
-    /// 打开时给的记录，即本次任务
+    /// 打开时 `job.json` 里的记录：打开时给的（新建、改为当前任务，或与原有的差别无须核对、已直接改记），或与它有须核对
+    /// 的差别的原有记录
     record: JobRecord,
-    /// 见 [`WorkDir::unverified`]
-    unverified: bool,
+    /// 打开时给的记录与原有的有须核对内容才能改记的差别时，为打开时给的记录与差别
+    pending: Option<Pending>,
+    /// `pending` 已核对上、已改记（见 [`WorkDir::adopt_record`]）
+    adopted: AtomicBool,
     lock: Lock,
+}
+
+/// 等核对内容的记录。
+struct Pending {
+    record: JobRecord,
+    change: SourceChange,
+}
+
+/// 打开时给的记录与目录里原有的差别中，要核对过内容才能改记的。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SourceChange {
+    /// 完整来源地址不同（换了令牌、主机或路径）
+    pub url: bool,
+    /// 按轨道顺序，所选的轨身份与记录的不同（重新选轨时才会，见 [`crate::JobRequest::reselect`]）
+    pub tracks: Vec<bool>,
 }
 
 impl WorkDir {
@@ -136,42 +157,49 @@ impl WorkDir {
 
     /// 打开或新建任务目录并加锁；`lock` 为 [`WorkDir::lock_existing`] 已加上的锁。
     ///
-    /// 已有 `job.json` 时其记录须与 `record` 相符（见 [`JobRecord::conflict`]，`reselect` 同
-    /// [`crate::JobRequest::reselect`]），不符时报那个原因；但目录里还没有已完成的分片时，直接改为当前任务：删掉之前的
-    /// init 段，不是本库写的文件留下。相符而有差别时，须核对内容的见 [`WorkDir::unverified`]，其余的（重新选轨只差选轨
-    /// 偏好）直接改记。没有 `job.json` 时目录必须不存在或为空（`.part` 残留与锁文件除外），以免把别人的目录当成任务目录
-    /// （成功后会整个删除）。
+    /// 已有 `job.json` 时其记录须与 `record` 相符（所选的轨按 `check` 比较，见 [`JobRecord::conflict`]），不符时报那个
+    /// 原因；但目录里还没有已完成的分片时，直接改为当前任务：删掉之前的 init 段，不是本库写的文件留下。相符时，身份相同
+    /// 的轨沿用记录里的属性；其余差别中须核对内容的见 [`WorkDir::source_change`]，无须核对的（选轨偏好）直接改记。没有
+    /// `job.json` 时目录必须不存在或为空（`.part` 残留与锁文件除外），以免把别人的目录当成任务目录（成功后会整个删
+    /// 除）。
     pub(crate) async fn open(
         root: PathBuf,
         record: JobRecord,
         lock: Option<Lock>,
-        reselect: bool,
+        check: SelectionCheck,
     ) -> Result<WorkDir, Error> {
-        blocking(move || open(root, record, lock, reselect)).await?
+        blocking(move || open(root, record, lock, check)).await?
     }
 
     pub(crate) fn layout(&self) -> &Layout {
         &self.layout
     }
 
-    /// 本次任务的记录（打开时给的）。
+    /// 生效的记录，即 `job.json` 里的：有须核对的差别（见 [`WorkDir::source_change`]）而还没改记时为目录里原有的，合并
+    /// 与写出输出照它描述已有的内容；否则为打开时给的。
     pub(crate) fn record(&self) -> &JobRecord {
-        &self.record
+        match &self.pending {
+            Some(pending) if self.adopted.load(Ordering::Acquire) => &pending.record,
+            _ => &self.record,
+        }
     }
 
-    /// 沿用了目录里原有的记录，而打开时给的与它的差别要核对过内容才能改记：完整来源地址不同（换了令牌、主机或路径），
-    /// 或重新选轨选出的轨与记录的身份不同（见 [`crate::JobRequest::reselect`]）。核对过这次取到的是同一份内容（点播见
-    /// [`crate::vod::download`]，直播见 [`crate::LiveOptions`]）之后用 [`WorkDir::adopt_record`] 改记。新建或改为当前
-    /// 任务时为 false。
-    pub(crate) fn unverified(&self) -> bool {
-        self.unverified
+    /// 打开时给的记录与目录里原有的有须核对内容才能改记的差别；没有（新建、改为当前任务、没有差别或差别无须核对）时为
+    /// None。核对过这次取到的是同一份内容（点播见 [`crate::vod::download`]，直播见 [`crate::LiveOptions`]）之后用
+    /// [`WorkDir::adopt_record`] 改记。
+    pub(crate) fn source_change(&self) -> Option<&SourceChange> {
+        self.pending.as_ref().map(|pending| &pending.change)
     }
 
-    /// 把 `job.json` 中的记录换成本次的（见 [`WorkDir::unverified`]）。
+    /// 把 `job.json` 中的记录换成打开时给的，此后它是生效的记录；只在有须核对的差别（见 [`WorkDir::source_change`]）且
+    /// 已核对上时调用。
     pub(crate) async fn adopt_record(&self) -> Result<(), Error> {
+        let pending = self.pending.as_ref().expect("只在有须核对的差别时改记");
         let path = self.layout.root.join(JOB_FILE);
-        let bytes = encode(&self.record);
-        blocking(move || write_atomic(&path, &bytes)).await?
+        let bytes = encode(&pending.record);
+        blocking(move || write_atomic(&path, &bytes)).await??;
+        self.adopted.store(true, Ordering::Release);
+        Ok(())
     }
 
     /// 直播录制目录中前 `tracks` 条轨已完成的分片与 init 段。
@@ -244,7 +272,7 @@ fn open(
     root: PathBuf,
     record: JobRecord,
     lock: Option<Lock>,
-    reselect: bool,
+    check: SelectionCheck,
 ) -> Result<WorkDir, Error> {
     let job_path = root.join(JOB_FILE);
     let lock = match lock {
@@ -260,7 +288,7 @@ fn open(
     let layout = Layout { root: root.clone() };
     let previous = match read_job(&root)? {
         None => None,
-        Some(recorded) => match recorded.conflict(&record, reselect) {
+        Some(recorded) => match recorded.conflict(&record, check) {
             None => Some(recorded),
             Some(_) if !has_completed_segments(&layout)? => None,
             Some(problem) => {
@@ -271,24 +299,37 @@ fn open(
             }
         },
     };
-    if previous.is_none() {
-        // 不是本库写的文件（如删除任务目录时留下的）不影响读写，删除任务目录时照常指出
-        let tracks = root.join(TRACKS_DIR);
-        if exists(&tracks)? {
-            remove_tracks(&tracks, &mut Vec::new())?;
+    let (record, pending) = match previous {
+        None => {
+            // 不是本库写的文件（如删除任务目录时留下的）不影响读写，删除任务目录时照常指出
+            let tracks = root.join(TRACKS_DIR);
+            if exists(&tracks)? {
+                remove_tracks(&tracks, &mut Vec::new())?;
+            }
+            write_atomic(&job_path, &encode(&record))?;
+            (record, None)
         }
-        write_atomic(&job_path, &encode(&record))?;
-    }
-    let unverified = previous.as_ref().is_some_and(|p| {
-        p.url_digest != record.url_digest || p.selection_keys() != record.selection_keys()
-    });
-    if previous.as_ref().is_some_and(|p| *p != record) && !unverified {
-        write_atomic(&job_path, &encode(&record))?;
-    }
+        Some(previous) => {
+            let record = record.keeping_attributes_of(&previous);
+            let change = SourceChange {
+                url: previous.url_digest != record.url_digest,
+                tracks: previous.changed_tracks(&record),
+            };
+            if change.url || change.tracks.contains(&true) {
+                (previous, Some(Pending { record, change }))
+            } else {
+                if previous != record {
+                    write_atomic(&job_path, &encode(&record))?;
+                }
+                (record, None)
+            }
+        }
+    };
     Ok(WorkDir {
         layout,
         record,
-        unverified,
+        pending,
+        adopted: AtomicBool::new(false),
         lock,
     })
 }

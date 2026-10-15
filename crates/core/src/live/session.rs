@@ -1,4 +1,4 @@
-//! 续录时的会话判定：由各轨的结论定下会话编号、各轨的起点，以及本次的记录须核对时怎么办（纯计算；
+//! 续录时的会话判定：由各轨的结论定下会话编号、各轨的起点，以及本次的记录有须核对的差别时能否改记（纯计算；
 //! 等各轨的候选、核对内容见 [`super::deciding`]）。
 //!
 //! 一条轨的窗口与它最近一次有分片的会话重叠（身份与编号一致），且重叠的分片重新下载后与已存的逐字节相同，
@@ -7,10 +7,14 @@
 //! 最近的会话就是它的轨补录没录完的分片，其余要录的轨跳过录过的序号并入（之前没录到的从窗口起点并入）；否则另起一个
 //! 会话，接得上的轨跳过录过的序号。没有一条轨核对一致时，之前没录到的轨不知道与哪段时间对得上，不并入旧会话。另起的
 //! 会话里有轨不录（已录满或这次没有内容）时，它在这个会话里没有分片，录到的合并不进去，判定时即报错。
+//!
+//! 本次的记录与目录里的有须核对的差别（见 [`SourceChange`]）时：所选的轨身份变了的轨，目录里已有它的分片的，须它自己
+//! 核对一致，别的轨接得上不能替它作证；地址变了的，须接着最近的会话录。做不到即无法确认是同一内容，判定时报错；这次没
+//! 有要录的轨而地址变了时不改记，照常合并。
 
 use std::collections::BTreeMap;
 
-use crate::workdir::{SegmentFile, SegmentName, SessionStart, Stored};
+use crate::workdir::{SegmentFile, SegmentName, SessionStart, SourceChange, Stored};
 
 /// 一条轨在会话开始时的状况。
 pub(super) enum Start {
@@ -103,27 +107,19 @@ pub(super) enum Verdict {
 /// 作不出判定的原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Undecided {
+    /// 本次的记录有须核对的差别而核对不上（见模块说明）
+    Unverified,
     /// 要另起会话而会话编号已达上限
     SessionsExhausted,
     /// 要另起会话，而第几条轨在这个会话里不录（已录满或这次没有内容）：会话里各轨都有的组才合并得了，录到的合并不进去
     Unaligned(usize),
 }
 
-/// 本次的记录须核对内容才能改记时（完整来源地址不同，或重新选轨选出的轨不同）怎么办。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum NewRecord {
-    /// 改记本次的：目录里还没有录过的分片，或接着旧会话录（见模块说明）
-    Adopt,
-    /// 要另起会话：有轨内容不同，或没有一条轨核对一致，无法确认是同一个直播
-    Unverified,
-    /// 这次没有要录的轨：不改记，照常合并
-    Keep,
-}
-
 /// 判定结果。
 pub(super) struct Decision {
     pub session: u32,
-    pub new_record: NewRecord,
+    /// 本次的记录有须核对的差别时，已核对上、改记（见模块说明）；没有这种差别时不起作用
+    pub adopt: bool,
     /// 各轨的起点；None 为这次不录（已录满，或见 [`Verdict::Ended`]）
     pub tracks: Vec<Option<Start>>,
 }
@@ -133,7 +129,7 @@ impl Decision {
     pub(super) fn first(tracks: usize) -> Self {
         Decision {
             session: 0,
-            new_record: NewRecord::Adopt,
+            adopt: true,
             tracks: (0..tracks)
                 .map(|_| Some(Start::New(SessionStart::Fresh)))
                 .collect(),
@@ -150,12 +146,17 @@ pub(super) struct Verdicts {
     /// 各轨已录满 max_duration、这次不录
     full: Vec<bool>,
     verdicts: Vec<Option<Verdict>>,
+    /// 本次的记录与目录里的须核对的差别
+    change: Option<SourceChange>,
 }
 
 impl Verdicts {
-    /// 由目录里已录的内容开始判定；一个分片都没有时为 Ok(None)（直接录第 0 个会话）。某轨最近的会话里分片记的
-    /// 起点不一致时目录内容矛盾，返回原因。
-    pub(super) fn new(stored: &Stored) -> Result<Option<Self>, String> {
+    /// 由目录里已录的内容开始判定，`change` 为本次的记录与目录里的须核对的差别；一个分片都没有时为 Ok(None)（直接录
+    /// 第 0 个会话）。某轨最近的会话里分片记的起点不一致时目录内容矛盾，返回原因。
+    pub(super) fn new(
+        stored: &Stored,
+        change: Option<&SourceChange>,
+    ) -> Result<Option<Self>, String> {
         let Some(previous_session) = stored
             .segments
             .iter()
@@ -176,6 +177,7 @@ impl Verdicts {
             recorded,
             full: stored.segments.iter().map(|_| false).collect(),
             verdicts: stored.segments.iter().map(|_| None).collect(),
+            change: change.cloned(),
         }))
     }
 
@@ -219,6 +221,20 @@ impl Verdicts {
         let recording = records.contains(&true);
         let continued =
             verdicts.contains(&Verdict::Matches) && !verdicts.contains(&Verdict::Differs);
+        let adopt = match &self.change {
+            None => false,
+            Some(change) => {
+                let unproven = change.tracks.iter().zip(&verdicts).zip(&self.recorded).any(
+                    |((&changed, &verdict), recorded)| {
+                        changed && recorded.is_some() && verdict != Verdict::Matches
+                    },
+                );
+                if unproven || (change.url && recording && !continued) {
+                    return Err(Undecided::Unverified);
+                }
+                !change.url || recording
+            }
+        };
         let session = if continued || !recording {
             previous
         } else {
@@ -228,13 +244,6 @@ impl Verdicts {
             previous
                 .checked_add(1)
                 .ok_or(Undecided::SessionsExhausted)?
-        };
-        let new_record = if !recording {
-            NewRecord::Keep
-        } else if continued {
-            NewRecord::Adopt
-        } else {
-            NewRecord::Unverified
         };
         let tracks = std::mem::take(&mut self.recorded)
             .into_iter()
@@ -251,7 +260,7 @@ impl Verdicts {
             .collect();
         Ok(Decision {
             session,
-            new_record,
+            adopt,
             tracks,
         })
     }
@@ -289,15 +298,38 @@ mod tests {
     /// 视频（第 0 条轨）在会话 3 录过、音频（第 1 条轨）一个分片都没录到，视频已录满时 `video_full`，判定结论为
     /// `video` 与 `audio` 时的结果。
     fn decide(video_full: bool, video: Verdict, audio: Verdict) -> Result<Decision, Undecided> {
-        let mut verdicts = Verdicts {
+        decide_with(false, [video_full, false], None, [video, audio])
+    }
+
+    /// 视频（第 0 条轨）在会话 3 录过，音频（第 1 条轨）也录过时 `audio_recorded`；各轨已录满为 `full`，本次的记录与
+    /// 目录里须核对的差别为 `change`，各轨的结论为 `verdicts` 时的结果。
+    fn decide_with(
+        audio_recorded: bool,
+        full: [bool; 2],
+        change: Option<SourceChange>,
+        verdicts: [Verdict; 2],
+    ) -> Result<Decision, Undecided> {
+        let mut decision = Verdicts {
             previous_session: 3,
-            recorded: vec![Some(recorded(3, &[10, 11])), None],
-            full: vec![video_full, false],
+            recorded: vec![
+                Some(recorded(3, &[10, 11])),
+                audio_recorded.then(|| recorded(3, &[10, 11])),
+            ],
+            full: full.to_vec(),
             verdicts: vec![None, None],
+            change,
         };
-        verdicts.conclude(0, video);
-        verdicts.conclude(1, audio);
-        verdicts.decide()
+        for (track, verdict) in verdicts.into_iter().enumerate() {
+            decision.conclude(track, verdict);
+        }
+        decision.decide()
+    }
+
+    fn change(url: bool, tracks: [bool; 2]) -> Option<SourceChange> {
+        Some(SourceChange {
+            url,
+            tracks: tracks.to_vec(),
+        })
     }
 
     #[test]
@@ -309,7 +341,6 @@ mod tests {
             full.tracks[..],
             [None, Some(Start::New(SessionStart::Fresh))]
         ));
-        assert_eq!(full.new_record, NewRecord::Adopt);
 
         // 视频已录满、核对不了：音频不知道与旧会话哪段时间对得上，另起的会话里视频不录，合并不进去
         assert!(matches!(
@@ -327,7 +358,6 @@ mod tests {
                 Some(Start::New(SessionStart::Fresh))
             ]
         ));
-        assert_eq!(matched.new_record, NewRecord::Adopt);
 
         // 视频接不上：另起会话，视频从窗口起点录
         let differs = decide(false, Verdict::Differs, Verdict::Unrecorded).unwrap();
@@ -339,5 +369,58 @@ mod tests {
                 Some(Start::New(SessionStart::Fresh))
             ]
         ));
+    }
+
+    /// 地址变了：接着最近的会话录才改记，要另起会话时报错；这次没有要录的轨时不改记，照常合并。
+    #[test]
+    fn a_new_address_is_adopted_only_when_the_session_continues() {
+        let url = || change(true, [false, false]);
+        let both = |video, audio| decide_with(true, [false, false], url(), [video, audio]);
+        assert!(both(Verdict::Matches, Verdict::Matches).unwrap().adopt);
+        assert!(matches!(
+            both(Verdict::Differs, Verdict::Matches),
+            Err(Undecided::Unverified)
+        ));
+        let full = decide_with(
+            true,
+            [true, true],
+            url(),
+            [Verdict::Unverifiable, Verdict::Unverifiable],
+        );
+        assert!(!full.unwrap().adopt);
+    }
+
+    /// 重新选轨换了身份的轨：目录里有它的分片时，须它自己核对一致，已录满、这次没有内容而核对不了的都不行，别的轨接得上
+    /// 不能替它作证；目录里没有它的分片时无须核对。
+    #[test]
+    fn a_track_whose_identity_changed_must_match_by_itself() {
+        let audio = || change(false, [false, true]);
+        for (full, unproven) in [
+            (true, Verdict::Unverifiable),
+            (false, Verdict::Ended),
+            (false, Verdict::Differs),
+        ] {
+            assert!(
+                matches!(
+                    decide_with(true, [false, full], audio(), [Verdict::Matches, unproven]),
+                    Err(Undecided::Unverified)
+                ),
+                "{unproven:?}"
+            );
+        }
+        let matched = decide_with(
+            true,
+            [false, true],
+            audio(),
+            [Verdict::Matches, Verdict::Matches],
+        );
+        assert!(matched.unwrap().adopt);
+        let unrecorded = decide_with(
+            false,
+            [false, false],
+            audio(),
+            [Verdict::Matches, Verdict::Unrecorded],
+        );
+        assert!(unrecorded.unwrap().adopt);
     }
 }

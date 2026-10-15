@@ -461,6 +461,7 @@ mod tests {
             variant: VariantRecord {
                 key: VariantKey::Stable {
                     id: "v".into(),
+                    audio_group: Some("source-group".into()),
                     occurrence: 0,
                 },
                 bandwidth: Some(2_000_000),

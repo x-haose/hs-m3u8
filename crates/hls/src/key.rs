@@ -1,4 +1,4 @@
-//! 变体与音频 rendition 的身份：来源写了稳定 ID 时是它，没写时是属性；再加上身份相同的里面排第几。地址常带令牌、
+//! 变体与音频 rendition 的身份：来源写了稳定 ID 时以它为主，没写时是属性；再加上身份相同的里面排第几。地址常带令牌、
 //! 主播放列表会增删重排变体，按身份能在后来拉到的主播放列表里找回同一条轨（见 [`crate::VariantChoice::Matching`]）。
 
 use crate::{MasterPlaylist, Rendition, Resolution, Variant, audio_renditions};
@@ -6,10 +6,13 @@ use crate::{MasterPlaylist, Rendition, Resolution, Variant, audio_renditions};
 /// 变体的身份。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VariantKey {
-    /// 来源写了 STABLE-VARIANT-ID：只按它认，属性变了也是同一条
+    /// 来源写了 STABLE-VARIANT-ID：按它与引用的音频组认，码率、编码等属性变了也是同一条。同一条流常按音频组各列一行
+    /// （如 AAC 与 E-AC-3 各一组），稳定 ID 相同，靠音频组区分
     Stable {
         id: String,
-        /// 主播放列表中稳定 ID 相同的变体里排第几（从 0 起）；同一条流经几条路径分发时，稳定 ID 相同的有几个
+        /// 引用的音频组（AUDIO 属性）
+        audio_group: Option<String>,
+        /// 主播放列表中上面两项都相同的变体里排第几（从 0 起）；同一条流经几条路径分发而组名相同时有几个
         occurrence: usize,
     },
     /// 来源没写稳定 ID：各项取自 [`Variant`] 的同名属性（`audio_group` 即 [`Variant::audio`]）。找的时候不看变体有没有
@@ -33,6 +36,7 @@ impl VariantKey {
         let mut key = match &variant.stable_id {
             Some(id) => VariantKey::Stable {
                 id: id.clone(),
+                audio_group: variant.audio.clone(),
                 occurrence: 0,
             },
             None => VariantKey::Attributes {
@@ -69,7 +73,11 @@ impl VariantKey {
     /// 除排第几以外与 `variant` 相同。
     fn matches(&self, variant: &Variant) -> bool {
         match self {
-            VariantKey::Stable { id, occurrence: _ } => variant.stable_id.as_ref() == Some(id),
+            VariantKey::Stable {
+                id,
+                audio_group,
+                occurrence: _,
+            } => variant.stable_id.as_ref() == Some(id) && variant.audio == *audio_group,
             VariantKey::Attributes {
                 bandwidth,
                 resolution,
@@ -86,11 +94,10 @@ impl VariantKey {
     }
 }
 
-/// 音频 rendition 的身份，在所选变体引用的音频组里认。
+/// 音频 rendition 的身份，在所选变体引用的音频组里认（组由变体给出）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AudioKey {
-    /// 来源写了 STABLE-RENDITION-ID：只按它认，同 [`VariantKey::Stable`]。组名不算在内：组名不是稳定标识，同一条流经
-    /// 几条路径分发时各路径的组名也不同
+    /// 来源写了 STABLE-RENDITION-ID：只按它认，同 [`VariantKey::Stable`]
     Stable {
         id: String,
         /// 同一组里稳定 ID 相同的音频 rendition 里排第几（从 0 起）
@@ -137,14 +144,17 @@ impl AudioKey {
         Some(key)
     }
 
-    /// 身份是它的、在 `group` 组里的音频 rendition 在 `master` 里的位置（口径同 [`crate::AudioChoice::Index`]）；没有时
-    /// 为 None。
-    pub fn find(&self, master: &MasterPlaylist, group: &str) -> Option<usize> {
+    /// 身份是它的、在 `group` 组里的音频 rendition，与它在 `master` 里的位置（口径同 [`crate::AudioChoice::Index`]）；
+    /// 没有时为 None。
+    pub fn find<'a>(
+        &self,
+        master: &'a MasterPlaylist,
+        group: &str,
+    ) -> Option<(usize, &'a Rendition)> {
         let (AudioKey::Stable { occurrence, .. } | AudioKey::Attributes { occurrence, .. }) = self;
         audio_renditions(master)
             .filter(|(_, r)| r.group == group && self.matches(r))
             .nth(*occurrence)
-            .map(|(index, _)| index)
     }
 
     /// 除排第几以外与 `rendition` 相同。

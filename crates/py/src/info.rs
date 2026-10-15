@@ -42,8 +42,8 @@ record! {
 #[gen_stub_pymethods]
 #[pymethods]
 impl VariantInfo {
-    /// 按身份选这个变体：探测之后主播放列表增删重排了变体，开始任务时也选到它。续传时给当初得到的那个，不要重新
-    /// 探测再取。
+    /// 按身份选这个变体：探测之后主播放列表增删重排了变体，开始任务时也选到它。续传时给当初得到的那个，见
+    /// `Preference`。
     #[gen_stub(override_return_type(type_repr = "VariantChoice.Matching"))]
     fn choice(&self) -> VariantChoice {
         VariantChoice::Matching {
@@ -130,7 +130,7 @@ record! {
     /// 探测结果（`Engine.probe`）。
     pub struct Probe {
         /// 来源是主播放列表时：可选的变体与音频，以及按选轨偏好选中的。新开的下载选的与它相同；探测不读任务目录，
-        /// 续传时下载按记录找回原来的轨，可能与它不同。来源本身是媒体播放列表时为 None
+        /// 续传时下载怎样选见 `Preference`，可能与它不同。来源本身是媒体播放列表时为 None
         pub master: Option<MasterInfo>,
         /// 所选各轨的概况：第 0 条为所选变体（或来源本身），第 1 条（若有）为独立的音频
         pub tracks: Seq<TrackInfo>,

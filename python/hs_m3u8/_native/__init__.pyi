@@ -214,14 +214,13 @@ class AudioInfo:
 
 class AudioKey:
     r"""
-    音频 rendition 的身份（见 `AudioInfo.key`），在所选变体引用的音频组里认，同 `VariantKey`。
+    音频 rendition 的身份（见 `AudioInfo.key`），在所选变体引用的音频组里认（组由变体给出），同 `VariantKey`。
     """
     def __repr__(self) -> builtins.str: ...
     @typing.final
     class Stable(AudioKey):
         r"""
-        来源写了 STABLE-RENDITION-ID：只按它认。组名不算在内：组名不是稳定标识，同一条流经几条路径分发时各路径的组
-        名也不同
+        来源写了 STABLE-RENDITION-ID：只按它认
         """
         __match_args__ = ("id", "occurrence",)
         @property
@@ -1200,10 +1199,12 @@ class JobRequest:
     @property
     def reselect(self) -> builtins.bool:
         r"""
-        任务目录里有已完成的分片时按这次的选轨偏好重新选轨，不按记录找回，选轨偏好与记录的不同也不报错。选出的轨与记录
-        的身份不同时（含来源从主播放列表换成某一档的媒体播放列表，或反过来），与地址变了一样先核对已下载的是同一份内容
-        （见 `Source.url`、`LiveOptions`），核对上才沿用目录、改记选轨与偏好，否则报 `WorkDirProblem.SourceUnverified`、
-        记录不变；只有偏好不同时直接改记。轨道结构（有无独立音频）与记录的不同仍报 `WorkDirProblem.TracksMismatch`
+        任务目录里有已完成的分片时按这次的选轨偏好重新选轨，不按记录找回，选轨偏好与记录的不同也不报错。用于选的仍是同一
+        内容而记录找不回、或偏好的写法变了（如重新探测后再选）；换清晰度另开任务目录。选出的轨与记录的身份不同时（含来源
+        从主播放列表换成某一档的媒体播放列表，或反过来），与地址变了一样先核对已下载的是同一份内容（见 `Source.url`、
+        `LiveOptions`），核对上才沿用目录、改记，否则报 `WorkDirProblem.SourceUnverified`、记录不变；身份相同只差偏好时
+        直接改记。轨道结构（有无独立音频）与记录的不同仍报 `WorkDirProblem.TracksMismatch`，点播的分片与记录的不一致仍报
+        `WorkDirProblem.PlanChanged`
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
@@ -1466,9 +1467,10 @@ class LiveOptions:
     续录：任务中断后用同样的请求再次运行。至少一条轨当前的窗口与之前录到的接得上（重叠的分片重新下载后内容相同；已录
     满、这次不录的轨同样核对），且没有一条轨内容不同时，接着录：补上窗口内之前没录完的分片，时间线连续，之前没录到的
     轨从窗口起点并入；否则另起一段，与之前的首尾相接（中断期间的内容不在输出中），之前录过的分片不重录，另起的一段里
-    有轨这次不录（已录满或没有内容）时报 `WorkDirProblem.Unaligned`。最后一并合并。地址或重新选出的轨（见
-    `JobRequest.reselect`）与记录的不同时，接着录才改记，另起一段报 `WorkDirProblem.SourceUnverified`；这次没有要录
-    的轨时不改记，直接合并。不联网、只合并已录到的部分用 `Engine.merge_recorded`。
+    有轨这次不录（已录满或没有内容）时报 `WorkDirProblem.Unaligned`。最后一并合并。地址与记录的不同时，接着录才改
+    记，另起一段报 `WorkDirProblem.SourceUnverified`，这次没有要录的轨时不改记，直接合并；重新选出的轨身份与记录的不
+    同（见 `JobRequest.reselect`）而目录里已有它的分片时，须它自己接得上（已录满的同样核对），别的轨接得上不算，否则
+    同样报错。不联网、只合并已录到的部分用 `Engine.merge_recorded`。
     """
     @property
     def max_duration(self) -> typing.Optional[datetime.timedelta]:
@@ -2388,8 +2390,9 @@ class PlaylistError(SourceError):
 class Preference:
     r"""
     选轨偏好。来源是主播放列表时，与任务目录记录的不同抛 `WorkDirError`（`WorkDirProblem.PreferenceChanged`）；任务
-    目录里有已完成的分片时按记录的变体与音频找回同一条轨，不按偏好重新选（`JobRequest.reselect` 时重新选）。按身份选
-    的（`Matching`）续传时要给当初那个，重新探测后再 `choice()` 得到的属性可能变了。
+    目录里有已完成的分片时按记录的身份找回同一条轨，不按偏好重新选（`JobRequest.reselect` 时重新选）。按身份选的
+    （`Matching`）续传时要给当初那个：重新探测后再 `choice()` 得到的身份可能不同（来源没写稳定 ID 时身份含码率等属
+    性），选的仍是同一内容时用 `JobRequest.reselect`。
     """
     @property
     def variant(self) -> VariantChoice.Best | VariantChoice.Index | VariantChoice.Matching:
@@ -2419,7 +2422,7 @@ class Probe:
     def master(self) -> typing.Optional[MasterInfo]:
         r"""
         来源是主播放列表时：可选的变体与音频，以及按选轨偏好选中的。新开的下载选的与它相同；探测不读任务目录，
-        续传时下载按记录找回原来的轨，可能与它不同。来源本身是媒体播放列表时为 None
+        续传时下载怎样选见 `Preference`，可能与它不同。来源本身是媒体播放列表时为 None
         """
     @property
     def tracks(self) -> builtins.tuple[TrackInfo, ...]:
@@ -2453,8 +2456,7 @@ class Progress:
     @property
     def selected(self) -> typing.Optional[Selected]:
         r"""
-        所选的变体与音频；解析完成前、或来源本身是媒体播放列表时为 None。有已完成分片的任务目录按记录找回原来的
-        轨，不一定是偏好会选的那条
+        所选的变体与音频（怎样选见 `Preference`）；解析完成前、或来源本身是媒体播放列表时为 None
         """
     @property
     def segments(self) -> SegmentCounts:
@@ -3017,7 +3019,7 @@ class SelectFailure:
     @typing.final
     class NotVariantAudio(SelectFailure):
         r"""
-        指定的音频不在所选变体引用的音频组里
+        按下标指定（`AudioChoice.Index`）的音频不在所选变体引用的音频组里
         """
         __match_args__ = ("index", "group",)
         @property
@@ -3852,32 +3854,38 @@ class VariantInfo:
     def __repr__(self) -> builtins.str: ...
     def choice(self) -> VariantChoice.Matching:
         r"""
-        按身份选这个变体：探测之后主播放列表增删重排了变体，开始任务时也选到它。续传时给当初得到的那个，不要重新
-        探测再取。
+        按身份选这个变体：探测之后主播放列表增删重排了变体，开始任务时也选到它。续传时给当初得到的那个，见
+        `Preference`。
         """
 
 class VariantKey:
     r"""
-    变体的身份（见 `VariantInfo.key`）：来源写了稳定 ID 时是它，没写时是属性；再加上身份相同的变体里排第几。
+    变体的身份（见 `VariantInfo.key`）：来源写了稳定 ID 时以它为主，没写时是属性；再加上身份相同的变体里排第几。
     """
     def __repr__(self) -> builtins.str: ...
     @typing.final
     class Stable(VariantKey):
         r"""
-        来源写了 STABLE-VARIANT-ID：只按它认，属性变了也是同一条
+        来源写了 STABLE-VARIANT-ID：按它与引用的音频组认，码率、编码等属性变了也是同一条。同一条流常按音频组各列一行
+        （如 AAC 与 E-AC-3 各一组），稳定 ID 相同，靠音频组区分
         """
-        __match_args__ = ("id", "occurrence",)
+        __match_args__ = ("id", "audio_group", "occurrence",)
         @property
         def id(self) -> builtins.str:
             r"""
             STABLE-VARIANT-ID
             """
         @property
+        def audio_group(self) -> typing.Optional[builtins.str]:
+            r"""
+            引用的音频组；没有时为 None
+            """
+        @property
         def occurrence(self) -> builtins.int:
             r"""
-            稳定 ID 相同的变体里排第几（从 0 起）；同一条流经几条路径分发时，稳定 ID 相同的有几个
+            上面两项都相同的变体里排第几（从 0 起）；同一条流经几条路径分发而组名相同时有几个
             """
-        def __new__(cls, *, id: builtins.str, occurrence: builtins.int) -> VariantKey.Stable: ...
+        def __new__(cls, *, id: builtins.str, audio_group: typing.Optional[builtins.str], occurrence: builtins.int) -> VariantKey.Stable: ...
     
     @typing.final
     class Attributes(VariantKey):
@@ -4071,7 +4079,8 @@ class WorkDirProblem:
     @typing.final
     class PlanChanged(WorkDirProblem):
         r"""
-        点播：播放列表的分片与记录的不一致，不能续传
+        点播：播放列表的分片与记录的不一致（多为换了另一档或来源重新生成了分片），已下载的不能沿用，重新选轨也不行；
+        换一个任务目录，或放弃任务（`Engine.discard`）
         """
         __match_args__ = ()
         def __new__(cls) -> WorkDirProblem.PlanChanged: ...
@@ -4079,8 +4088,9 @@ class WorkDirProblem:
     @typing.final
     class SelectionGone(WorkDirProblem):
         r"""
-        记录的变体或音频已不在主播放列表中（身份相同的已不在）。可按这次的偏好重新选轨（`JobRequest.reselect`，核对
-        过内容才沿用目录）；已录的直播可用 `Engine.merge_recorded` 合并，或换一个任务目录重新开始
+        记录的变体或音频已不在主播放列表中：身份相同的已不在，或按稳定 ID 找到的那条分辨率、编码种类与记录的不同。选
+        的仍是同一内容时，重新探测后用新得到的 `choice()`（或别的偏好）并重新选轨（`JobRequest.reselect`，核对过内容
+        才沿用目录）；已录的直播可用 `Engine.merge_recorded` 合并，或换一个任务目录重新开始
         """
         __match_args__ = ()
         def __new__(cls) -> WorkDirProblem.SelectionGone: ...
@@ -4089,10 +4099,10 @@ class WorkDirProblem:
     class SourceUnverified(WorkDirProblem):
         r"""
         核对不上这次取到的与已下载的是同一份内容：点播为核对的组里有已完成的分片重新下载后内容不同，或都已取不到（见
-        `Source.url`），多为另一个视频、同一视频的另一档或同一地址换了内容，同一地址也核对不上的多为来源每次输出的
-        字节不同（边转码边出），只能重新下载；直播为地址或重新选出的轨（`JobRequest.reselect`）与记录的不同，且接不
-        上之前录到的（有轨内容不同，或没有一条轨核对一致，见 `LiveOptions`）。记录不变：直播可用原来的地址与选轨续
-        录、用 `Engine.merge_recorded` 合并已录的部分；或换一个任务目录、放弃任务
+        `Source.url`），多为另一个视频、同一视频的另一档或同一地址换了内容，同一地址也核对不上的多为来源每次输出的字
+        节不同（边转码边出），只能重新下载；直播为地址或重新选出的轨（`JobRequest.reselect`）与记录的不同，且接不上
+        之前录到的（有轨内容不同，或没有一条轨核对一致，或重新选出的轨这次核对不了，见 `LiveOptions`）。记录不变：可
+        用原来的地址与选轨续传、续录，直播还可用 `Engine.merge_recorded` 合并已录的部分；或换一个任务目录、放弃任务
         """
         __match_args__ = ()
         def __new__(cls) -> WorkDirProblem.SourceUnverified: ...

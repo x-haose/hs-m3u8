@@ -346,6 +346,58 @@ async fn reselecting_continues_only_when_the_window_matches() {
     assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
 }
 
+/// 音频已录满后中断，重新选轨改选另一条音频（分片名不同，没有可核对的重叠）：视频接得上也不能替音频作证，已录满的
+/// 音频核对不了即报 SourceUnverified，job.json 不变，不会把两条音频记成同一条。
+#[tokio::test(flavor = "multi_thread")]
+async fn reselecting_a_full_track_needs_its_own_proof() {
+    let dir = test_dir("live_reselect_full");
+    let server = Server::start().await;
+    put_long(&server, "v/", &[0, 1, 2, 3]);
+    put_long(&server, "a/", &[0, 1]);
+    for i in 0..2 {
+        server.put(
+            &format!("f/fr-seg{i}.ts"),
+            fixture(&format!("ts_a/seg{i}.ts")),
+        );
+    }
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n\
+         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",LANGUAGE=\"en\",DEFAULT=YES,URI=\"audio.m3u8\"\n\
+         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"fr\",LANGUAGE=\"fr\",URI=\"audio_fr.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=320x180,AUDIO=\"aud\"\nvideo.m3u8\n",
+    );
+    server.put("video.m3u8", playlist_in("v/", &[0], false));
+    server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
+    server.put("audio_fr.m3u8", playlist_in("f/fr-", &[0, 1], false));
+    let mut req = live_request(server.url("master.m3u8"), &dir, STALL);
+    req.live = Some(LiveOptions {
+        max_duration: Some(Duration::from_secs(2)),
+        stall_timeout: STALL,
+    });
+    interrupt(&req, |p| p.segments.done == 3).await;
+    let job_json = dir.join("out.hsdl/job.json");
+    let recorded = std::fs::read(&job_json).unwrap();
+
+    server.put("video.m3u8", playlist_in("v/", &[0, 1, 2, 3], false));
+    req.reselect = true;
+    req.source.preference.audio = AudioChoice::Language("fr".into());
+    let err = run(req).await.unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::WorkDir {
+                problem: WorkDirProblem::SourceUnverified,
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert_eq!(std::fs::read(&job_json).unwrap(), recorded);
+    assert_eq!(server.hits("v/seg1.ts"), 0);
+}
+
 /// 只是换了偏好的写法，选出的还是记录的那条（身份相同）：不重新选轨报 PreferenceChanged；重新选轨不必核对内容，窗口
 /// 已滑过、没有可核对的重叠也照常续录（另起会话），与地址、选轨都没变时相同。
 #[tokio::test(flavor = "multi_thread")]

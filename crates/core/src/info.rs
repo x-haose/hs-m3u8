@@ -29,7 +29,7 @@ pub struct VariantInfo {
 
 impl VariantInfo {
     /// 按身份选这个变体（[`VariantChoice::Matching`]）：探测之后主播放列表增删重排了变体，开始任务时也选到它。续传
-    /// 时给当初得到的那个，不要重新探测再取。
+    /// 时给当初得到的那个，见 [`crate::Source::preference`]。
     pub fn choice(&self) -> VariantChoice {
         VariantChoice::Matching(self.key.clone())
     }

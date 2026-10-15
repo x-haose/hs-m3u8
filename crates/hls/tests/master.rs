@@ -326,7 +326,8 @@ const PATHWAYS: &str = "#EXTM3U\n\
     #EXT-X-STREAM-INF:BANDWIDTH=1280000,AUDIO=\"B\",STABLE-VARIANT-ID=\"Video-128\"\nhttps://backup.example.com/128/video.m3u8\n\
     #EXT-X-STREAM-INF:BANDWIDTH=7680000,AUDIO=\"B\",STABLE-VARIANT-ID=\"Video-768\"\nhttps://backup.example.com/768/video.m3u8\n";
 
-/// 写了稳定 ID 时只按它认：之后拉到的主播放列表码率、组名、地址都变了，前面还多了变体，仍选到同一路径上的那两条。
+/// 写了稳定 ID 时按它与音频组认：之后拉到的主播放列表码率变了、地址换了令牌、前面多了变体、两条路径换了先后，仍选到
+/// 同一路径上的那两条。
 #[test]
 fn stable_ids_find_the_same_tracks_after_attributes_change() {
     let before = master(PATHWAYS);
@@ -340,7 +341,8 @@ fn stable_ids_find_the_same_tracks_after_attributes_change() {
         preference.variant,
         VariantChoice::Matching(VariantKey::Stable {
             id: "Video-768".into(),
-            occurrence: 1
+            audio_group: Some("B".into()),
+            occurrence: 0
         })
     );
     assert_eq!(
@@ -351,23 +353,75 @@ fn stable_ids_find_the_same_tracks_after_attributes_change() {
         })
     );
 
+    let lines: Vec<&str> = PATHWAYS.lines().collect();
+    let row = |i: usize| {
+        format!(
+            "{}\n{}?t=2\n",
+            lines[i].replace("7680000", "7700000"),
+            lines[i + 1]
+        )
+    };
     let after = master(&format!(
-        "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,STABLE-VARIANT-ID=\"Video-2160\"\n2160/video.m3u8\n{}",
-        PATHWAYS
-            .trim_start_matches("#EXTM3U\n")
-            .replace("7680000", "7700000")
-            .replace("\"A\"", "\"cdn-a\"")
-            .replace("\"B\"", "\"cdn-b\"")
-            .replace("video.m3u8", "video.m3u8?t=2"),
+        "#EXTM3U\n{}\n{}\n#EXT-X-STREAM-INF:BANDWIDTH=1,STABLE-VARIANT-ID=\"Video-2160\"\n2160/video.m3u8\n{}{}{}{}",
+        lines[1],
+        lines[2],
+        row(7),
+        row(9),
+        row(3),
+        row(5),
     ));
     let selected = select(&after, &preference).unwrap();
-    assert_eq!(selected.variant_index, 4);
+    assert_eq!(selected.variant_index, 2);
     assert_eq!(
         selected.variant.uri.as_str(),
         "https://backup.example.com/768/video.m3u8?t=2"
     );
     let audio = selected.audio.unwrap();
-    assert_eq!((audio.index, audio.rendition.group.as_str()), (1, "cdn-b"));
+    assert_eq!((audio.index, audio.rendition.group.as_str()), (1, "B"));
+}
+
+/// 同一条视频流按音频组各列一行（稳定 ID 相同）：音频组区分这几行，之后中间多了一组、几行换了先后，按身份仍选到原来
+/// 那组的那行。
+#[test]
+fn rows_of_one_stream_are_told_apart_by_audio_group() {
+    let media = |group: &str, id: &str| {
+        format!(
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"{group}\",NAME=\"en\",DEFAULT=YES,URI=\"{id}.m3u8\",STABLE-RENDITION-ID=\"{id}\"\n"
+        )
+    };
+    let row = |group: &str, codec: &str| {
+        format!(
+            "#EXT-X-STREAM-INF:BANDWIDTH=5000000,CODECS=\"avc1.640028,{codec}\",AUDIO=\"{group}\",STABLE-VARIANT-ID=\"v1080\"\nv1080.m3u8\n"
+        )
+    };
+    let before = master(&format!(
+        "#EXTM3U\n{}{}{}{}",
+        media("aac", "aac-en"),
+        media("ec3", "ec3-en"),
+        row("aac", "mp4a.40.2"),
+        row("ec3", "ec-3"),
+    ));
+    let preference = Preference {
+        variant: VariantChoice::Matching(VariantKey::of(&before, 1).unwrap()),
+        audio: AudioChoice::Default,
+    };
+    let after = master(&format!(
+        "#EXTM3U\n{}{}{}{}{}{}",
+        media("aac", "aac-en"),
+        media("ac3", "ac3-en"),
+        media("ec3", "ec3-en"),
+        row("ec3", "ec-3"),
+        row("ac3", "ac-3"),
+        row("aac", "mp4a.40.2"),
+    ));
+
+    let selected = select(&after, &preference).unwrap();
+
+    assert_eq!(selected.variant.audio.as_deref(), Some("ec3"));
+    assert_eq!(
+        selected.audio.unwrap().rendition.stable_id.as_deref(),
+        Some("ec3-en")
+    );
 }
 
 /// 音频按身份在所选变体的音频组里找：另一条路径上的变体配它那一组里稳定 ID 相同的音频；变体没有引用音频组时报找不到。

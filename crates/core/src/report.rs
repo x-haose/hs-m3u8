@@ -12,8 +12,8 @@ use crate::{FetchErrorKind, FetchFailure, HttpFailure, Mp4Unsupported, Purpose, 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Progress {
     pub stage: Stage,
-    /// 所选的变体与音频 rendition；解析完成前、或来源本身是媒体播放列表时为 None。有已完成分片的任务目录按
-    /// 记录找回原来的轨，不一定是偏好会选的那条
+    /// 所选的变体与音频 rendition（怎样选见 [`crate::Source::preference`]）；解析完成前、或来源本身是媒体播放列表时为
+    /// None
     pub selected: Option<Selected>,
     /// 分片数，各轨合计
     pub segments: SegmentCounts,
