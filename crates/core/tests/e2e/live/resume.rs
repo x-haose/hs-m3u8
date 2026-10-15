@@ -398,6 +398,62 @@ async fn reselecting_a_full_track_needs_its_own_proof() {
     assert_eq!(server.hits("v/seg1.ts"), 0);
 }
 
+/// 来源把记录的稳定 ID 给了另一档（分辨率不同、分片接不上）：续录报 SelectionGone；照说明重新选轨，选出的身份相同而
+/// 分辨率不同，不算同一条，按轨核对接不上即报 SourceUnverified，job.json 不变，不把两档录进同一条轨。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stable_id_given_to_another_rendition_needs_proof() {
+    let dir = test_dir("live_reselect_rendition");
+    let server = Server::start().await;
+    put_long(&server, "lo/", &[0, 1]);
+    for i in 0..2 {
+        server.put(
+            &format!("hi/hd-seg{i}.ts"),
+            fixture(&format!("ts_a/seg{i}.ts")),
+        );
+    }
+    let master = |name: &str, resolution: &str| {
+        format!(
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION={resolution},STABLE-VARIANT-ID=\"v\"\n\
+             {name}.m3u8\n"
+        )
+    };
+    server.put("master.m3u8", master("lo", "160x90"));
+    server.put("lo.m3u8", playlist_in("lo/", &[0, 1], false));
+    server.put("hi.m3u8", playlist_in("hi/hd-", &[0, 1], true));
+    let mut req = live_request(server.url("master.m3u8"), &dir, STALL);
+    interrupt(&req, |p| p.segments.done == 2).await;
+    let job_json = dir.join("out.hsdl/job.json");
+    let recorded = std::fs::read(&job_json).unwrap();
+
+    server.put("master.m3u8", master("hi", "1280x720"));
+    let gone = run(req.clone()).await.unwrap_err();
+    assert!(
+        matches!(
+            gone,
+            Error::WorkDir {
+                problem: WorkDirProblem::SelectionGone,
+                ..
+            }
+        ),
+        "{gone}"
+    );
+    req.reselect = true;
+    let err = run(req).await.unwrap_err();
+
+    assert!(
+        matches!(
+            err,
+            Error::WorkDir {
+                problem: WorkDirProblem::SourceUnverified,
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert_eq!(std::fs::read(&job_json).unwrap(), recorded);
+    assert_eq!(server.hits("hi/hd-seg0.ts"), 0);
+}
+
 /// 只是换了偏好的写法，选出的还是记录的那条（身份相同）：不重新选轨报 PreferenceChanged；重新选轨不必核对内容，窗口
 /// 已滑过、没有可核对的重叠也照常续录（另起会话），与地址、选轨都没变时相同。
 #[tokio::test(flavor = "multi_thread")]

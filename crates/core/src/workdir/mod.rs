@@ -176,10 +176,10 @@ impl WorkDir {
     }
 
     /// 生效的记录，即 `job.json` 里的：有须核对的差别（见 [`WorkDir::source_change`]）而还没改记时为目录里原有的，合并
-    /// 与写出输出照它描述已有的内容；否则为打开时给的。
+    /// 与写出输出照它描述已有的内容；否则为打开时给的（同一条轨沿用原有的属性）。
     pub(crate) fn record(&self) -> &JobRecord {
         match &self.pending {
-            Some(pending) if self.adopted.load(Ordering::Acquire) => &pending.record,
+            Some(pending) if self.adopted.load(Ordering::Relaxed) => &pending.record,
             _ => &self.record,
         }
     }
@@ -198,7 +198,7 @@ impl WorkDir {
         let path = self.layout.root.join(JOB_FILE);
         let bytes = encode(&pending.record);
         blocking(move || write_atomic(&path, &bytes)).await??;
-        self.adopted.store(true, Ordering::Release);
+        self.adopted.store(true, Ordering::Relaxed);
         Ok(())
     }
 

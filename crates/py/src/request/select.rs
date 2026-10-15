@@ -115,9 +115,10 @@ variants! {
 record! {
     @custom_new
     /// 选轨偏好。来源是主播放列表时，与任务目录记录的不同抛 `WorkDirError`（`WorkDirProblem.PreferenceChanged`）；任务
-    /// 目录里有已完成的分片时按记录的身份找回同一条轨，不按偏好重新选（`JobRequest.reselect` 时重新选）。按身份选的
-    /// （`Matching`）续传时要给当初那个：重新探测后再 `choice()` 得到的身份可能不同（来源没写稳定 ID 时身份含码率等属
-    /// 性），选的仍是同一内容时用 `JobRequest.reselect`。
+    /// 目录里有已完成的分片时按记录的身份找回同一条轨，不按偏好重新选（`JobRequest.reselect` 时重新选）；找回的变体分辨
+    /// 率、编码种类须与记录的相符，来源把同一稳定 ID 给了另一档时不算同一条。按身份选的（`Matching`）续传时要给当初那
+    /// 个：重新探测后再 `choice()` 得到的身份可能不同（来源没写稳定 ID 时身份含码率等属性），选的仍是同一内容时用
+    /// `JobRequest.reselect`。
     pub struct Preference {
         /// 选哪个变体
         pub variant: VariantChoice,

@@ -66,33 +66,30 @@ impl JobRecord {
             .then_some(WorkDirProblem::PreferenceChanged)
     }
 
-    /// 所选变体的身份；来源本身是媒体播放列表时为 None。
-    fn variant_key(&self) -> Option<&VariantKey> {
-        self.selection.as_ref().map(|s| &s.variant.key)
-    }
-
-    /// 所选的独立音频 rendition 的身份；没有时为 None。
-    fn audio_key(&self) -> Option<&AudioKey> {
-        let audio = self.selection.as_ref().and_then(|s| s.audio.as_ref());
-        audio.map(|a| &a.key)
-    }
-
-    /// 与 `current` 相比，各轨所选的轨身份是否不同，按轨道顺序：第 0 条比所选变体（来源本身是媒体播放列表时为没有），
-    /// 第 1 条（若有）比独立的音频；属性不比较，身份相同即同一条轨。两者轨道结构（见 [`JobRecord::streams`]）相同时才有
-    /// 意义。
+    /// 与 `current` 相比，各轨所选的是否不是同一条，按轨道顺序：第 0 条比所选变体（来源本身是媒体播放列表时为没有，同一
+    /// 条见 [`VariantRecord::same_as`]），第 1 条（若有）比独立音频的身份。两者轨道结构（见 [`JobRecord::streams`]）相
+    /// 同时才有意义。
     pub(super) fn changed_tracks(&self, current: &JobRecord) -> Vec<bool> {
-        let mut changed = vec![self.variant_key() != current.variant_key()];
+        let (recorded, current) = (self.selection.as_ref(), current.selection.as_ref());
+        let variant = match (recorded, current) {
+            (Some(recorded), Some(current)) => !recorded.variant.same_as(&current.variant),
+            (recorded, current) => recorded.is_some() != current.is_some(),
+        };
+        let mut changed = vec![variant];
         if self.streams().len() > 1 {
-            changed.push(self.audio_key() != current.audio_key());
+            let audio = |s: Option<&SelectionRecord>| -> Option<AudioKey> {
+                s.and_then(|s| s.audio.as_ref()).map(|a| a.key.clone())
+            };
+            changed.push(audio(recorded) != audio(current));
         }
         changed
     }
 
-    /// `self` 里与 `recorded` 身份相同的轨，属性换成 `recorded` 里的：身份相同的轨沿用首次记下的属性（见
-    /// [`SelectionRecord`]）。
+    /// `self` 里与 `recorded` 是同一条（见 [`JobRecord::changed_tracks`]）的轨，属性换成 `recorded` 里的：同一条轨沿用
+    /// 首次记下的属性（见 [`SelectionRecord`]）。
     pub(super) fn keeping_attributes_of(mut self, recorded: &JobRecord) -> JobRecord {
         if let (Some(current), Some(recorded)) = (&mut self.selection, &recorded.selection) {
-            if current.variant.key == recorded.variant.key {
+            if recorded.variant.same_as(&current.variant) {
                 current.variant = recorded.variant.clone();
             }
             if let (Some(current), Some(recorded)) = (&mut current.audio, &recorded.audio)

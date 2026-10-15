@@ -317,20 +317,25 @@ fn redundant_variants_are_told_apart_by_position() {
     }
 }
 
-/// 同一条流经两条路径分发（RFC 8216bis 的 Content Steering 示例）：两条路径的稳定 ID 相同，组名与地址不同。
-const PATHWAYS: &str = "#EXTM3U\n\
-    #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"A\",NAME=\"English\",DEFAULT=YES,URI=\"eng.m3u8\",LANGUAGE=\"en\",STABLE-RENDITION-ID=\"Audio-37262\"\n\
-    #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"B\",NAME=\"ENGLISH\",DEFAULT=YES,URI=\"https://b.example.com/audio-eng.m3u8\",LANGUAGE=\"en\",STABLE-RENDITION-ID=\"Audio-37262\"\n\
-    #EXT-X-STREAM-INF:BANDWIDTH=1280000,AUDIO=\"A\",STABLE-VARIANT-ID=\"Video-128\"\n128/video.m3u8\n\
-    #EXT-X-STREAM-INF:BANDWIDTH=7680000,AUDIO=\"A\",STABLE-VARIANT-ID=\"Video-768\"\n768/video.m3u8\n\
-    #EXT-X-STREAM-INF:BANDWIDTH=1280000,AUDIO=\"B\",STABLE-VARIANT-ID=\"Video-128\"\nhttps://backup.example.com/128/video.m3u8\n\
+/// 同一条流经两条路径分发（RFC 8216bis 的 Content Steering 示例）：两条路径的稳定 ID 相同，组名与地址不同。下面是两条
+/// 路径各自的音频与变体。
+const AUDIO_A: &str = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"A\",NAME=\"English\",DEFAULT=YES,URI=\"eng.m3u8\",LANGUAGE=\"en\",STABLE-RENDITION-ID=\"Audio-37262\"\n";
+const AUDIO_B: &str = "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"B\",NAME=\"ENGLISH\",DEFAULT=YES,URI=\"https://b.example.com/audio-eng.m3u8\",LANGUAGE=\"en\",STABLE-RENDITION-ID=\"Audio-37262\"\n";
+const VARIANTS_A: &str = "#EXT-X-STREAM-INF:BANDWIDTH=1280000,AUDIO=\"A\",STABLE-VARIANT-ID=\"Video-128\"\n128/video.m3u8\n\
+    #EXT-X-STREAM-INF:BANDWIDTH=7680000,AUDIO=\"A\",STABLE-VARIANT-ID=\"Video-768\"\n768/video.m3u8\n";
+const VARIANTS_B: &str = "#EXT-X-STREAM-INF:BANDWIDTH=1280000,AUDIO=\"B\",STABLE-VARIANT-ID=\"Video-128\"\nhttps://backup.example.com/128/video.m3u8\n\
     #EXT-X-STREAM-INF:BANDWIDTH=7680000,AUDIO=\"B\",STABLE-VARIANT-ID=\"Video-768\"\nhttps://backup.example.com/768/video.m3u8\n";
+
+/// 两条路径的音频之后依次是 `variants` 各段变体的主播放列表。
+fn pathways(variants: &[&str]) -> MasterPlaylist {
+    master(&format!("#EXTM3U\n{AUDIO_A}{AUDIO_B}{}", variants.concat()))
+}
 
 /// 写了稳定 ID 时按它与音频组认：之后拉到的主播放列表码率变了、地址换了令牌、前面多了变体、两条路径换了先后，仍选到
 /// 同一路径上的那两条。
 #[test]
 fn stable_ids_find_the_same_tracks_after_attributes_change() {
-    let before = master(PATHWAYS);
+    let before = pathways(&[VARIANTS_A, VARIANTS_B]);
     assert_eq!(before.variants[3].stable_id.as_deref(), Some("Video-768"));
     assert_eq!(
         before.renditions[1].stable_id.as_deref(),
@@ -353,23 +358,17 @@ fn stable_ids_find_the_same_tracks_after_attributes_change() {
         })
     );
 
-    let lines: Vec<&str> = PATHWAYS.lines().collect();
-    let row = |i: usize| {
-        format!(
-            "{}\n{}?t=2\n",
-            lines[i].replace("7680000", "7700000"),
-            lines[i + 1]
-        )
+    // 码率变了、地址换了令牌，路径 B 排到了前面，最前面还多了一档
+    let changed = |variants: &str| {
+        variants
+            .replace("7680000", "7700000")
+            .replace("video.m3u8\n", "video.m3u8?t=2\n")
     };
-    let after = master(&format!(
-        "#EXTM3U\n{}\n{}\n#EXT-X-STREAM-INF:BANDWIDTH=1,STABLE-VARIANT-ID=\"Video-2160\"\n2160/video.m3u8\n{}{}{}{}",
-        lines[1],
-        lines[2],
-        row(7),
-        row(9),
-        row(3),
-        row(5),
-    ));
+    let after = pathways(&[
+        "#EXT-X-STREAM-INF:BANDWIDTH=1,STABLE-VARIANT-ID=\"Video-2160\"\n2160/video.m3u8\n",
+        &changed(VARIANTS_B),
+        &changed(VARIANTS_A),
+    ]);
     let selected = select(&after, &preference).unwrap();
     assert_eq!(selected.variant_index, 2);
     assert_eq!(
@@ -427,7 +426,7 @@ fn rows_of_one_stream_are_told_apart_by_audio_group() {
 /// 音频按身份在所选变体的音频组里找：另一条路径上的变体配它那一组里稳定 ID 相同的音频；变体没有引用音频组时报找不到。
 #[test]
 fn matching_audio_is_looked_up_in_the_variant_group() {
-    let m = master(PATHWAYS);
+    let m = pathways(&[VARIANTS_A, VARIANTS_B]);
     let preference = Preference {
         variant: VariantChoice::Index(1),
         audio: AudioChoice::Matching(AudioKey::of(&m, 1).unwrap()),

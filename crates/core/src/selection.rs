@@ -2,7 +2,8 @@
 //! 影响；本地 HLS 的主播放列表按其中的属性写变体与音频（只合并时只有它可用）。
 
 use hs_m3u8_hls::{
-    AudioKey, MasterPlaylist, Resolution, SelectedAudio, Selection, Variant, VariantKey,
+    AudioKey, CodecKind, MasterPlaylist, Resolution, SelectedAudio, Selection, VariantKey,
+    codec_family,
 };
 use hs_m3u8_remux::Streams;
 
@@ -60,7 +61,7 @@ impl SelectionRecord {
     pub(crate) fn find(&self, master: &MasterPlaylist) -> Option<Selection> {
         let variant_index = self.variant.key.find(master)?;
         let variant = &master.variants[variant_index];
-        if !self.variant.agrees(variant) {
+        if !self.variant.agrees(variant.resolution, &variant.codecs) {
             return None;
         }
         let audio = match &self.audio {
@@ -83,25 +84,39 @@ impl SelectionRecord {
 }
 
 impl VariantRecord {
-    /// `variant` 与记录的分辨率、编码种类（CODECS 各项点号前的那段，不分大小写）不矛盾：两边都写了的才比，码率与编码的
-    /// 档次会重新测量、改写，不比。按属性认的身份本身含这些属性，只有按稳定 ID 认的会不符：来源把同一稳定 ID 给了另一
-    /// 档，违反了稳定 ID 的约定。
-    fn agrees(&self, variant: &Variant) -> bool {
+    /// 与 `other` 是同一条变体：身份相同，且分辨率、编码种类不矛盾（见 [`VariantRecord::agrees`]）。
+    pub(crate) fn same_as(&self, other: &VariantRecord) -> bool {
+        self.key == other.key && self.agrees(other.resolution, &other.codecs)
+    }
+
+    /// 与分辨率 `resolution`、编码 `codecs` 不矛盾：两边都写了的才比；编码比种类（见 [`codec_family`]），不比码率与编码
+    /// 的档次（会重新测量、改写）。引用了音频组时 CODECS 还列出组里所有音频的编码（组里加一种语言就会变），只比视频的；
+    /// 没引用时音频混在流里，比视频与音频的；字幕的都不比。按属性认的身份本身含这些属性，只有按稳定 ID 认的会不符：来源
+    /// 把同一稳定 ID 给了另一档，违反了稳定 ID 的约定。
+    fn agrees(&self, resolution: Option<Resolution>, codecs: &[String]) -> bool {
+        let (VariantKey::Stable { audio_group, .. } | VariantKey::Attributes { audio_group, .. }) =
+            &self.key;
+        let compared = |kind| match kind {
+            CodecKind::Video => true,
+            CodecKind::Audio => audio_group.is_none(),
+            CodecKind::Subtitles => false,
+        };
         let families = |codecs: &[String]| {
             let mut families: Vec<String> = codecs
                 .iter()
-                .map(|c| c.split('.').next().unwrap_or_default().to_ascii_lowercase())
+                .filter(|c| compared(CodecKind::of(c)))
+                .map(|c| codec_family(c))
                 .collect();
             families.sort();
             families
         };
-        let resolution = match (self.resolution, variant.resolution) {
+        let resolution = match (self.resolution, resolution) {
             (Some(recorded), Some(current)) => recorded == current,
             _ => true,
         };
         let codecs = self.codecs.is_empty()
-            || variant.codecs.is_empty()
-            || families(&self.codecs) == families(&variant.codecs);
+            || codecs.is_empty()
+            || families(&self.codecs) == families(codecs);
         resolution && codecs
     }
 }
@@ -121,9 +136,12 @@ mod tests {
 
     use super::*;
 
+    /// 一个写了稳定 ID 的变体，属性为 `stream_inf`；另有音频组 aud，变体写了 `AUDIO="aud"` 时取用它。
     fn master(stream_inf: &str) -> MasterPlaylist {
-        let text =
-            format!("#EXTM3U\n#EXT-X-STREAM-INF:{stream_inf},STABLE-VARIANT-ID=\"v\"\nv.m3u8\n");
+        let text = format!(
+            "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",DEFAULT=YES,URI=\"en.m3u8\"\n\
+             #EXT-X-STREAM-INF:{stream_inf},STABLE-VARIANT-ID=\"v\"\nv.m3u8\n"
+        );
         let url = Url::parse("https://example.com/master.m3u8").unwrap();
         match parse(&text, &url).unwrap() {
             Playlist::Master(master) => master,
@@ -131,33 +149,67 @@ mod tests {
         }
     }
 
-    /// 按稳定 ID 找回的变体，码率与编码档次变了照样是它；分辨率或编码种类变了，即来源把这个稳定 ID 给了另一档，不当作
-    /// 同一条。
-    #[test]
-    fn a_stable_id_given_to_another_rendition_is_not_found() {
-        let before = master("BANDWIDTH=1000,RESOLUTION=640x360,CODECS=\"avc1.4d401e,mp4a.40.2\"");
+    /// 选出 `before` 的变体后，按记录在 `after` 里各是否找得回。
+    fn found_in(before: &str, after: &[(&str, bool)]) {
+        let before = master(before);
         let selection = select(&before, &Preference::default()).unwrap();
         let record = SelectionRecord::of(&selection, &before);
-        for (stream_inf, found) in [
-            (
-                "BANDWIDTH=2000,RESOLUTION=640x360,CODECS=\"mp4a.40.5,AVC1.640028\"",
-                true,
-            ),
-            ("BANDWIDTH=2000", true),
-            (
-                "BANDWIDTH=1000,RESOLUTION=1280x720,CODECS=\"avc1.4d401e,mp4a.40.2\"",
-                false,
-            ),
-            (
-                "BANDWIDTH=1000,RESOLUTION=640x360,CODECS=\"hvc1.1.6.L93.B0,mp4a.40.2\"",
-                false,
-            ),
-        ] {
+        for &(stream_inf, found) in after {
             assert_eq!(
                 record.find(&master(stream_inf)).is_some(),
                 found,
                 "{stream_inf}"
             );
         }
+    }
+
+    /// 按稳定 ID 找回的变体，码率、编码档次变了或加了字幕照样是它；分辨率、视频编码种类、混在流里的音频编码种类变了，
+    /// 即来源把这个稳定 ID 给了另一档，不当作同一条。
+    #[test]
+    fn a_stable_id_given_to_another_rendition_is_not_found() {
+        found_in(
+            "BANDWIDTH=1000,RESOLUTION=640x360,CODECS=\"avc1.4d401e,mp4a.40.2\"",
+            &[
+                (
+                    "BANDWIDTH=2000,RESOLUTION=640x360,CODECS=\"mp4a.40.5,AVC1.640028\"",
+                    true,
+                ),
+                ("BANDWIDTH=2000", true),
+                (
+                    "BANDWIDTH=1000,RESOLUTION=640x360,CODECS=\"avc1.4d401e,mp4a.40.2,wvtt\"",
+                    true,
+                ),
+                (
+                    "BANDWIDTH=1000,RESOLUTION=1280x720,CODECS=\"avc1.4d401e,mp4a.40.2\"",
+                    false,
+                ),
+                (
+                    "BANDWIDTH=1000,RESOLUTION=640x360,CODECS=\"hvc1.1.6.L93.B0,mp4a.40.2\"",
+                    false,
+                ),
+                (
+                    "BANDWIDTH=1000,RESOLUTION=640x360,CODECS=\"avc1.4d401e,ac-3\"",
+                    false,
+                ),
+            ],
+        );
+    }
+
+    /// 变体引用了音频组时，CODECS 还列出组里所有音频的编码：组里加了别的编码的音频不算变了，视频编码种类变了才算。
+    #[test]
+    fn audio_group_codecs_do_not_count_against_the_variant() {
+        found_in(
+            "BANDWIDTH=1000,CODECS=\"avc1.4d401e,mp4a.40.2\",AUDIO=\"aud\"",
+            &[
+                (
+                    "BANDWIDTH=1000,CODECS=\"avc1.4d401e,mp4a.40.2,ac-3\",AUDIO=\"aud\"",
+                    true,
+                ),
+                (
+                    "BANDWIDTH=1000,CODECS=\"hvc1.1.6.L93.B0,mp4a.40.2\",AUDIO=\"aud\"",
+                    false,
+                ),
+            ],
+        );
     }
 }

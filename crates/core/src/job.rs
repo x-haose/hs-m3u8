@@ -123,7 +123,13 @@ async fn run_live(
         selection: resolved.selection_record(),
         kind: RecordKind::Live,
     };
-    let dir = WorkDir::open(task.output.work_dir.clone(), record, lock, task.check()).await?;
+    let dir = WorkDir::open(
+        task.output.work_dir.clone(),
+        record,
+        lock,
+        task.selection_check(),
+    )
+    .await?;
     let mut fetcher = task.fetcher(&dir, Permit::Live);
     let ctx = Context {
         http: task.http.clone(),
@@ -163,7 +169,13 @@ async fn run_vod(
             plan_digest: plan.digest(),
         },
     };
-    let dir = WorkDir::open(task.output.work_dir.clone(), record, lock, task.check()).await?;
+    let dir = WorkDir::open(
+        task.output.work_dir.clone(),
+        record,
+        lock,
+        task.selection_check(),
+    )
+    .await?;
     let mut fetcher = task.fetcher(&dir, Permit::Vod);
     let mp4 = task.output.get(OutputKind::Mp4).map(|_| streams.as_slice());
     let groups =
@@ -271,7 +283,7 @@ fn merge_live(
 
 impl Task {
     /// 打开任务目录时怎样比较所选的轨：重新选轨时只要求轨道结构相同。
-    fn check(&self) -> SelectionCheck {
+    fn selection_check(&self) -> SelectionCheck {
         if self.request.reselect {
             SelectionCheck::SameLayout
         } else {

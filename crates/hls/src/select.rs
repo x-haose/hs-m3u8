@@ -2,7 +2,7 @@
 
 use url::Url;
 
-use crate::{AudioKey, MasterPlaylist, Rendition, RenditionKind, Variant, VariantKey};
+use crate::{AudioKey, CodecKind, MasterPlaylist, Rendition, RenditionKind, Variant, VariantKey};
 
 /// 调用方对选轨的要求；默认取最高画质的变体与其音频组里的默认 rendition。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -141,20 +141,14 @@ fn best_variant(master: &MasterPlaylist) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
-/// 变体确定是纯音频：写了 CODECS，且列出的都是音频或字幕编码（RFC 6381 的写法，按点号前的那段认）。没写 CODECS、
-/// 或有认不出的编码时不算：可能有视频。
+/// 变体确定是纯音频：写了 CODECS，且列出的都是音频或字幕编码（见 [`CodecKind`]）。没写 CODECS、或有认不出的编码时
+/// 不算：可能有视频。
 fn audio_only(variant: &Variant) -> bool {
-    const NOT_VIDEO: [&str; 12] = [
-        "mp4a", "ac-3", "ec-3", "ac-4", "opus", "flac", "alac", "dtsc", "dtse", "dtsh", "wvtt",
-        "stpp",
-    ];
     !variant.codecs.is_empty()
-        && variant.codecs.iter().all(|codec| {
-            let family = codec.split('.').next().unwrap_or_default();
-            NOT_VIDEO
-                .iter()
-                .any(|known| family.eq_ignore_ascii_case(known))
-        })
+        && variant
+            .codecs
+            .iter()
+            .all(|codec| CodecKind::of(codec) != CodecKind::Video)
 }
 
 /// 主播放列表里的音频 rendition 与它们的位置（口径同 [`AudioChoice::Index`]）。

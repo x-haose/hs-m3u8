@@ -13,7 +13,7 @@ use crate::{FetchErrorKind, FetchFailure, HttpFailure, Mp4Unsupported, Purpose, 
 pub struct Progress {
     pub stage: Stage,
     /// 所选的变体与音频 rendition（怎样选见 [`crate::Source::preference`]）；解析完成前、或来源本身是媒体播放列表时为
-    /// None
+    /// None。重新选轨而选出的与记录的不是同一条时为这次选出的，核对上才沿用；核对不上时输出仍照任务目录里记录的
     pub selected: Option<Selected>,
     /// 分片数，各轨合计
     pub segments: SegmentCounts,
