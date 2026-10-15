@@ -9,20 +9,19 @@ use hs_m3u8_core::{
 };
 
 use super::{
-    STALL, expected_split, live_request, missed, outcome, playlist, playlist_in,
-    playlist_with_target, put_long, put_split_master, report, split_source,
+    JUDGED_TARGET, STALL, expected_split, judged_in, live_request, missed, outcome, playlist,
+    playlist_with_target, put_long, put_split_master, report, split_source_with_target,
 };
 use crate::server::Server;
 use crate::{assert_output, engine, expected_long, fixture, run, test_dir};
 
-/// 播放列表不再出现新分片，随后被删除（404）：超过 stall_timeout 即按直播已结束收尾；停滞期间进度里报
-/// 刷新失败，收尾后清空。
+/// 播放列表不再出现新分片，随后被删除（404）：到了停滞时长即按直播已结束收尾；停滞期间进度里报刷新失败，收尾后清空。
 #[tokio::test(flavor = "multi_thread")]
 async fn removed_playlist_ends_recording() {
     let dir = test_dir("live_gone");
     let server = Server::start().await;
     put_long(&server, "", &[0, 1]);
-    server.put("live.m3u8", playlist(&[0, 1], false));
+    server.put("live.m3u8", judged_in("", &[0, 1], false));
 
     let job = engine()
         .start(live_request(server.url("live.m3u8"), &dir, STALL))
@@ -55,15 +54,11 @@ async fn no_new_segments_ends_recording() {
     let dir = test_dir("live_idle");
     let server = Server::start().await;
     put_long(&server, "", &[0, 1]);
-    server.put("live.m3u8", playlist(&[0, 1], false));
+    server.put("live.m3u8", judged_in("", &[0, 1], false));
 
-    let output = run(live_request(
-        server.url("live.m3u8"),
-        &dir,
-        Duration::from_millis(500),
-    ))
-    .await
-    .unwrap();
+    let output = run(live_request(server.url("live.m3u8"), &dir, STALL))
+        .await
+        .unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
     let end = LiveEnd::Stalled {
@@ -80,8 +75,8 @@ async fn a_stall_after_the_process_was_suspended_is_judged_on_a_fresh_refresh() 
     let dir = test_dir("live_suspended");
     let server = Server::start().await;
     put_long(&server, "", &[0, 1, 2, 3]);
-    server.put("live.m3u8", playlist(&[0, 1], false));
-    // stall_timeout 取 1 毫秒：实际至少等三个 0.1 秒的目标时长
+    server.put("live.m3u8", judged_in("", &[0, 1], false));
+    // stall_timeout 取 1 毫秒：实际等三个目标时长，即 3 秒
     let job = engine()
         .start(live_request(
             server.url("live.m3u8"),
@@ -91,9 +86,9 @@ async fn a_stall_after_the_process_was_suspended_is_judged_on_a_fresh_refresh() 
         .unwrap();
     let mut progress = job.control().progress();
     progress.wait_for(|p| p.segments.done == 2).await.unwrap();
-    server.put("live.m3u8", playlist(&[0, 1, 2, 3], false));
+    server.put("live.m3u8", judged_in("", &[0, 1, 2, 3], false));
     // 停住唯一的运行时线程，模拟进程被挂起：其间录制与测试服务都不运行，时钟照走，超过停滞时长
-    std::thread::sleep(Duration::from_millis(600));
+    std::thread::sleep(Duration::from_secs(4));
 
     let output = job.wait().await.unwrap();
 
@@ -146,9 +141,10 @@ async fn gaps_listed_with_unrecordable_segments_still_stall() {
     let server = Server::start().await;
     put_long(&server, "", &[0]);
     let window = |count: u64| {
-        let mut text =
-            "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:1,\nseg0.ts\n"
-                .to_owned();
+        let mut text = format!(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:{JUDGED_TARGET}\n#EXT-X-MEDIA-SEQUENCE:0\n\
+             #EXTINF:1,\nseg0.ts\n"
+        );
         for i in 1..=count {
             text += &format!("#EXT-X-GAP\n#EXTINF:1,\ngap{i}.ts\n#EXTINF:1,\nmissing{i}.ts\n");
         }
@@ -156,13 +152,9 @@ async fn gaps_listed_with_unrecordable_segments_still_stall() {
     };
     server.put_sequence("live.m3u8", (0..200).map(window).collect());
 
-    let err = run(live_request(
-        server.url("live.m3u8"),
-        &dir,
-        Duration::from_millis(500),
-    ))
-    .await
-    .unwrap_err();
+    let err = run(live_request(server.url("live.m3u8"), &dir, STALL))
+        .await
+        .unwrap_err();
 
     assert!(
         matches!(
@@ -184,10 +176,11 @@ async fn gaps_listed_with_unrecordable_segments_still_stall() {
 async fn one_track_whose_playlist_is_removed_ends_the_recording() {
     let dir = test_dir("live_track_gone");
     let server = Server::start().await;
-    // 视频前几次刷新没有新分片，之后出 seg1：它最近一次录到新分片明显晚于音频轨
-    let mut video_refreshes = vec![(1, 0, false); 5];
+    // 视频前两次刷新没有新分片，之后出 seg1：它最近一次录到新分片明显晚于音频轨
+    let mut video_refreshes = vec![(1, 0, false); 2];
     video_refreshes.push((2, 0, false));
-    let (video, audio) = split_source(&server, &video_refreshes, &[(1, 0, false)]);
+    let (video, audio) =
+        split_source_with_target(&server, JUDGED_TARGET, &video_refreshes, &[(1, 0, false)]);
     let job = engine()
         .start(live_request(server.url("master.m3u8"), &dir, STALL))
         .unwrap();
@@ -222,7 +215,7 @@ async fn one_failing_track_fails_the_recording() {
     let windows: Vec<String> = (0..200u64)
         .map(|n| {
             format!(
-                "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MEDIA-SEQUENCE:{n}\n\
+                "#EXTM3U\n#EXT-X-TARGETDURATION:{JUDGED_TARGET}\n#EXT-X-MEDIA-SEQUENCE:{n}\n\
                  #EXT-X-MAP:URI=\"video/init.mp4\"\n#EXTINF:1,\nvideo/s{n}.m4s\n\
                  #EXTINF:1,\nvideo/s{}.m4s\n",
                 n + 1
@@ -238,8 +231,10 @@ async fn one_failing_track_fails_the_recording() {
     server.put_sequence("video.m3u8", windows);
     server.put(
         "audio.m3u8",
-        "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MAP:URI=\"audio/init.mp4\"\n\
-         #EXTINF:1,\naudio/seg0.m4s\n",
+        format!(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:{JUDGED_TARGET}\n#EXT-X-MAP:URI=\"audio/init.mp4\"\n\
+             #EXTINF:1,\naudio/seg0.m4s\n"
+        ),
     );
     put_split_master(&server);
     let job = engine()
@@ -271,9 +266,8 @@ async fn one_failing_track_fails_the_recording() {
     assert!(dir.join("out.hsdl/job.json").exists());
 }
 
-/// 音频轨每次都有新分片、但它们的 init 段一直 404：一个都录不到，超过 stall_timeout 即任务失败，
-/// 不会无限录下去；停滞那一刻即使有刷新在途，原因也是取不到分片。音频的目标时长 0.3 秒，「仍在列出新分片」的
-/// 判定留有 0.6 秒。
+/// 音频轨每次都有新分片、但它们的 init 段一直 404：一个都录不到，到了停滞时长即任务失败，不会无限录下去；停滞那一刻
+/// 即使有刷新在途，原因也是取不到分片。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_track_that_records_nothing_fails_the_recording() {
     let dir = test_dir("live_unrecordable");
@@ -286,13 +280,15 @@ async fn a_track_that_records_nothing_fails_the_recording() {
     }
     server.put(
         "video.m3u8",
-        "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXT-X-MAP:URI=\"video/init.mp4\"\n\
-         #EXTINF:1,\nvideo/seg0.m4s\n#EXTINF:1,\nvideo/seg1.m4s\n",
+        format!(
+            "#EXTM3U\n#EXT-X-TARGETDURATION:{JUDGED_TARGET}\n#EXT-X-MAP:URI=\"video/init.mp4\"\n\
+             #EXTINF:1,\nvideo/seg0.m4s\n#EXTINF:1,\nvideo/seg1.m4s\n"
+        ),
     );
     let audio: Vec<String> = (0..100u64)
         .map(|n| {
             format!(
-                "#EXTM3U\n#EXT-X-TARGETDURATION:0.3\n#EXT-X-MEDIA-SEQUENCE:{n}\n\
+                "#EXTM3U\n#EXT-X-TARGETDURATION:{JUDGED_TARGET}\n#EXT-X-MEDIA-SEQUENCE:{n}\n\
                  #EXT-X-MAP:URI=\"audio/missing.mp4\"\n#EXTINF:1,\naudio/seg{n}.m4s\n"
             )
         })
@@ -326,20 +322,18 @@ async fn a_track_that_records_nothing_fails_the_recording() {
 async fn segments_that_keep_failing_temporarily_are_retryable() {
     let dir = test_dir("live_segments_503");
     let server = Server::start().await;
-    let windows: Vec<String> = (0..100u64).map(|n| playlist(&[n, n + 1], false)).collect();
+    let windows: Vec<String> = (0..100u64)
+        .map(|n| judged_in("", &[n, n + 1], false))
+        .collect();
     for n in 0..=100u64 {
         let path = format!("seg{n}.ts");
         server.status_retry_after(&path, StatusCode::SERVICE_UNAVAILABLE, "3600");
     }
     server.put_sequence("live.m3u8", windows);
 
-    let err = run(live_request(
-        server.url("live.m3u8"),
-        &dir,
-        Duration::from_millis(500),
-    ))
-    .await
-    .unwrap_err();
+    let err = run(live_request(server.url("live.m3u8"), &dir, STALL))
+        .await
+        .unwrap_err();
 
     assert!(
         matches!(
@@ -364,13 +358,9 @@ async fn playlists_that_stay_empty_stall_retryably() {
     let dir = test_dir("live_stays_empty");
     let server = Server::start().await;
     put_long(&server, "", &[0]);
-    server.put("live.m3u8", playlist(&[0], false));
+    server.put("live.m3u8", judged_in("", &[0], false));
     let job = engine()
-        .start(live_request(
-            server.url("live.m3u8"),
-            &dir,
-            Duration::from_millis(500),
-        ))
+        .start(live_request(server.url("live.m3u8"), &dir, STALL))
         .unwrap();
     let mut progress = job.control().progress();
     progress.wait_for(|p| p.segments.done == 1).await.unwrap();
@@ -399,16 +389,15 @@ async fn a_missing_last_segment_does_not_turn_the_end_into_a_failure() {
     put_long(&server, "", &[0, 1]);
     server.put_sequence(
         "live.m3u8",
-        vec![playlist(&[0, 1], false), playlist(&[0, 1, 2], false)],
+        vec![
+            judged_in("", &[0, 1], false),
+            judged_in("", &[0, 1, 2], false),
+        ],
     );
 
-    let output = run(live_request(
-        server.url("live.m3u8"),
-        &dir,
-        Duration::from_millis(500),
-    ))
-    .await
-    .unwrap();
+    let output = run(live_request(server.url("live.m3u8"), &dir, STALL))
+        .await
+        .unwrap();
 
     assert_output(&output, &expected_long(&dir, &[0, 1], &[2]));
     let end = LiveEnd::Stalled {
@@ -428,11 +417,12 @@ async fn queued_segments_do_not_stall_a_track() {
     let dir = test_dir("live_queued");
     let server = Server::start().await;
     // 音频第一份没有分片，视频的 seg0 先占住唯一的下载名额；音频随后列出的分片都排在它后面。
-    // 音频刷新十次后多出 seg2 并结束：等到它被排入下载时，已经过了好几个停滞时长
+    // 音频刷新五次后多出 seg2 并结束：等到它被排入下载时，已经过了不止一个停滞时长
     let mut audio = vec![(0, 0, false)];
-    audio.extend([(2, 0, false); 10]);
+    audio.extend([(2, 0, false); 5]);
     audio.push((3, 0, true));
-    let (video, audio) = split_source(&server, &[(2, 0, false), (2, 0, true)], &audio);
+    let video = [(2, 0, false), (2, 0, true)];
+    let (video, audio) = split_source_with_target(&server, JUDGED_TARGET, &video, &audio);
     let gate = server.gate("video/seg0.m4s");
     let job = engine()
         .start(live_request(
@@ -458,26 +448,22 @@ async fn queued_segments_do_not_stall_a_track() {
 async fn a_frozen_track_fails_while_the_other_keeps_going() {
     let dir = test_dir("live_frozen_track");
     let server = Server::start().await;
-    put_long(&server, "", &[0, 1, 2, 3]);
-    server.put_sequence(
-        "video.m3u8",
-        vec![
-            playlist_with_target("0.3", &[0], false),
-            playlist_with_target("0.3", &[0, 1], false),
-            playlist_with_target("0.3", &[0, 1, 2], false),
-            playlist_with_target("0.3", &[0, 1, 2, 3], false),
-        ],
-    );
-    server.put("audio.m3u8", playlist(&[0], false));
+    put_long(&server, "a/", &[0]);
+    // 视频每次刷新窗口前移一个分片，持续远长于音频的停滞时长；内容重复无妨，任务以失败结束、不合并
+    for n in 0..=12u64 {
+        server.put(
+            &format!("v/seg{n}.ts"),
+            fixture(&format!("ts_long/seg{}.ts", n % 4)),
+        );
+    }
+    let windows = (0..12u64).map(|n| judged_in("v/", &[n, n + 1], false));
+    server.put_sequence("video.m3u8", windows.collect());
+    server.put("audio.m3u8", judged_in("a/", &[0], false));
     put_split_master(&server);
 
-    let err = run(live_request(
-        server.url("master.m3u8"),
-        &dir,
-        Duration::from_millis(500),
-    ))
-    .await
-    .unwrap_err();
+    let err = run(live_request(server.url("master.m3u8"), &dir, STALL))
+        .await
+        .unwrap_err();
 
     assert!(
         matches!(
@@ -596,15 +582,20 @@ async fn a_failing_other_track_is_not_taken_as_the_end() {
     server.put_sequence(
         "video.m3u8",
         vec![
-            playlist_in("v/", &[0], false),
-            playlist_in("v/", &[0, 1], false),
-            playlist_in("v/", &[0, 1, 2], false),
+            judged_in("v/", &[0], false),
+            judged_in("v/", &[0, 1], false),
+            judged_in("v/", &[0, 1, 2], false),
         ],
     );
-    server.put("audio.m3u8", playlist_in("a/", &[0], false));
+    server.put("audio.m3u8", judged_in("a/", &[0], false));
     put_split_master(&server);
+    // 音频的停滞时长 6 秒，远长于视频列出 seg2 所需的三次刷新：视频开始失败之后音频才停滞
     let job = engine()
-        .start(live_request(server.url("master.m3u8"), &dir, STALL))
+        .start(live_request(
+            server.url("master.m3u8"),
+            &dir,
+            Duration::from_secs(6),
+        ))
         .unwrap();
     let mut progress = job.control().progress();
     progress.wait_for(|p| p.segments.done == 4).await.unwrap();

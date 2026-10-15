@@ -9,8 +9,8 @@ use hs_m3u8_core::{Error, HttpErrorKind, LiveEnd, LiveOptions, StallCause, Stall
 use hs_m3u8_remux::{DiscontinuityGroup, Streams};
 
 use super::{
-    STALL, expected_split, expected_split_long, interrupt, live_request, media_playlist, outcome,
-    playlist, playlist_in, put_long, put_split_master, report, run_until_full,
+    STALL, expected_split, expected_split_long, interrupt, judged_in, live_request, media_playlist,
+    outcome, playlist, playlist_in, put_long, put_split_master, report, run_until_full,
     signed_fmp4_playlist, slow_retry, split_source,
 };
 use crate::server::Server;
@@ -50,17 +50,17 @@ async fn a_waiting_track_stops_while_another_keeps_going() {
     put_split_master(&server);
     put_long(&server, "v/", &[0, 1]);
     put_long(&server, "a/", &[0, 1]);
-    server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
-    server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
-    let req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(500));
+    server.put("video.m3u8", judged_in("v/", &[0, 1], false));
+    server.put("audio.m3u8", judged_in("a/", &[0, 1], false));
+    let req = live_request(server.url("master.m3u8"), &dir, STALL);
     interrupt(&req, |p| p.segments.done == 4).await;
 
     // 视频每次刷新多一个分片（会话定下之前不下载，不必有内容），远长于音频停滞所需的时间
     let growing = (2..100)
-        .map(|last| playlist_in("v/", &(0..=last).collect::<Vec<u64>>(), false))
+        .map(|last| judged_in("v/", &(0..=last).collect::<Vec<u64>>(), false))
         .collect();
     server.put_sequence("video.m3u8", growing);
-    server.put("audio.m3u8", playlist_in("a/", &[], false));
+    server.put("audio.m3u8", judged_in("a/", &[], false));
     let err = run(req).await.unwrap_err();
 
     assert!(
@@ -85,12 +85,12 @@ async fn an_ended_live_with_an_emptied_track_ends_normally() {
     put_split_master(&server);
     put_long(&server, "v/", &[0, 1]);
     put_long(&server, "a/", &[0, 1]);
-    server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
-    server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
-    let req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(500));
+    server.put("video.m3u8", judged_in("v/", &[0, 1], false));
+    server.put("audio.m3u8", judged_in("a/", &[0, 1], false));
+    let req = live_request(server.url("master.m3u8"), &dir, STALL);
     interrupt(&req, |p| p.segments.done == 4).await;
 
-    server.put("audio.m3u8", playlist_in("a/", &[], false));
+    server.put("audio.m3u8", judged_in("a/", &[], false));
     let output = run(req).await.unwrap();
 
     assert_output(&output, &expected_split_long(&dir, &[(&[0, 1], &[0, 1])]));
@@ -141,13 +141,13 @@ async fn a_stall_while_deciding_still_records_listed_segments() {
     put_split_master(&server);
     put_long(&server, "v/", &[0, 1, 2, 3]);
     put_long(&server, "a/", &[0, 1]);
-    server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
-    server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
-    let req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(500));
+    server.put("video.m3u8", judged_in("v/", &[0, 1], false));
+    server.put("audio.m3u8", judged_in("a/", &[0, 1], false));
+    let req = live_request(server.url("master.m3u8"), &dir, STALL);
     interrupt(&req, |p| p.segments.done == 4).await;
 
-    server.put("video.m3u8", playlist_in("v/", &[0, 1, 2, 3], true));
-    server.put("audio.m3u8", playlist_in("a/", &[], false));
+    server.put("video.m3u8", judged_in("v/", &[0, 1, 2, 3], true));
+    server.put("audio.m3u8", judged_in("a/", &[], false));
     let output = run(req).await.unwrap();
 
     let want = expected_split_long(&dir, &[(&[0, 1, 2, 3], &[0, 1])]);
@@ -255,13 +255,13 @@ async fn tracks_without_candidates_all_end_together() {
     put_split_master(&server);
     put_long(&server, "v/", &[0, 1]);
     put_long(&server, "a/", &[0, 1]);
-    server.put("video.m3u8", playlist_in("v/", &[0, 1], false));
-    server.put("audio.m3u8", playlist_in("a/", &[0, 1], false));
-    let req = live_request(server.url("master.m3u8"), &dir, Duration::from_millis(300));
+    server.put("video.m3u8", judged_in("v/", &[0, 1], false));
+    server.put("audio.m3u8", judged_in("a/", &[0, 1], false));
+    let req = live_request(server.url("master.m3u8"), &dir, STALL);
     interrupt(&req, |p| p.segments.done == 4).await;
 
-    server.put("video.m3u8", playlist_in("v/", &[], false));
-    server.put("audio.m3u8", playlist_in("a/", &[], false));
+    server.put("video.m3u8", judged_in("v/", &[], false));
+    server.put("audio.m3u8", judged_in("a/", &[], false));
     let output = tokio::time::timeout(Duration::from_secs(10), run(req))
         .await
         .expect("还没拿到候选的轨应一起结束")
@@ -441,24 +441,24 @@ async fn inits_of_recorded_segments_are_not_fetched_again() {
     assert_output(&output, &want);
 }
 
-/// 核对花的时间（重试退避使它长于 stall_timeout）不计入停滞，其间播放列表没有新分片也不算：会话定下后照常刷新，
+/// 核对花的时间（重试退避使它长于停滞时长）不计入停滞，其间播放列表没有新分片也不算：会话定下后照常刷新，
 /// 录到之后出现的分片。
 #[tokio::test(flavor = "multi_thread")]
 async fn slow_check_does_not_count_as_a_stall() {
     let dir = test_dir("deciding_slow_check");
     let server = Server::start().await;
     put_long(&server, "", &[0, 1, 2, 3]);
-    server.put("live.m3u8", playlist(&[0, 1], false));
-    let mut req = live_request(server.url("live.m3u8"), &dir, Duration::from_millis(300));
+    server.put("live.m3u8", judged_in("", &[0, 1], false));
+    let mut req = live_request(server.url("live.m3u8"), &dir, STALL);
     interrupt(&req, |p| p.segments.done == 2).await;
 
-    // 核对 seg1 先失败两次，退避合计至少 600 毫秒；其间播放列表一直没有新分片、也没结束（约 100 毫秒刷新一次，
-    // 前六次都是 [0,1]），之后才出现 2、3
-    req.source.http.retry = slow_retry(Duration::from_millis(400));
+    // 核对 seg1 先失败两次，退避合计 4 秒，长于 3 秒的停滞时长；其间播放列表一直没有新分片、也没结束（约 1 秒刷新
+    // 一次，前六次都是 [0,1]），之后才出现 2、3
+    req.source.http.retry = slow_retry(Duration::from_secs(2));
     server.fail("seg1.ts", 2);
-    let mut windows = vec![playlist(&[0, 1], false); 6];
-    windows.push(playlist(&[0, 1, 2], false));
-    windows.push(playlist(&[0, 1, 2, 3], true));
+    let mut windows = vec![judged_in("", &[0, 1], false); 6];
+    windows.push(judged_in("", &[0, 1, 2], false));
+    windows.push(judged_in("", &[0, 1, 2, 3], true));
     server.put_sequence("live.m3u8", windows);
     let output = run(req).await.unwrap();
 

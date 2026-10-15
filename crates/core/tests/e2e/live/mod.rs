@@ -1,5 +1,6 @@
 //! 直播录制：播放列表按请求次数逐步变化，模拟刷新、窗口滑动、结束、中断与服务器前后矛盾。
-//! 样本 ts_long 为 4 个时间戳连续的 1 秒分片；TARGETDURATION 设为 0.1 秒，刷新间隔随之很短。
+//! 样本 ts_long 为 4 个时间戳连续的 1 秒分片；TARGETDURATION 设为 0.1 秒，刷新间隔随之很短。结论取决于停滞判定的用例
+//! 用 [`JUDGED_TARGET`]。
 
 mod consistency;
 mod deciding;
@@ -31,6 +32,15 @@ fn playlist(indices: &[u64], end: bool) -> String {
 /// 同 [`playlist`]，分片路径为 `<dir>seg<i>.ts`，与 [`put_long`] 的 `dir` 对应。
 fn playlist_in(dir: &str, indices: &[u64], end: bool) -> String {
     media_playlist("0.1", dir, indices, end)
+}
+
+/// 结论取决于停滞判定的用例的目标时长，秒。判定时在途的刷新只再等它所在那条轨的一个目标时长，取真实 HLS 的最小值，
+/// 本地请求在负载下慢到几百毫秒也来得及返回；这类用例的停滞时长因此至少 3 秒（三个目标时长）。
+const JUDGED_TARGET: &str = "1";
+
+/// 同 [`playlist_in`]，TARGETDURATION 为 [`JUDGED_TARGET`]。
+fn judged_in(dir: &str, indices: &[u64], end: bool) -> String {
+    media_playlist(JUDGED_TARGET, dir, indices, end)
 }
 
 /// 同 [`playlist`]，TARGETDURATION 为 `target` 秒。
@@ -138,6 +148,16 @@ fn split_source(
     video: &[(usize, u32, bool)],
     audio: &[(usize, u32, bool)],
 ) -> (Vec<&'static str>, Vec<&'static str>) {
+    split_source_with_target(server, "0.1", video, audio)
+}
+
+/// 同 [`split_source`]，TARGETDURATION 为 `target` 秒。
+fn split_source_with_target(
+    server: &Server,
+    target: &str,
+    video: &[(usize, u32, bool)],
+    audio: &[(usize, u32, bool)],
+) -> (Vec<&'static str>, Vec<&'static str>) {
     let video_segments = vec!["seg0.m4s", "seg1.m4s"];
     let audio_segments = vec!["seg0.m4s", "seg1.m4s", "seg2.m4s"];
     for (kind, names) in [("video", &video_segments), ("audio", &audio_segments)] {
@@ -149,7 +169,7 @@ fn split_source(
         }
     }
     let media = |kind: &str, &(count, sig, end): &(usize, u32, bool)| {
-        signed_fmp4_playlist(kind, "0.1", count, sig, end)
+        signed_fmp4_playlist(kind, target, count, sig, end)
     };
     server.put_sequence(
         "video.m3u8",
