@@ -57,7 +57,7 @@ impl SelectionRecord {
     }
 
     /// 在 `master` 中找回这次选轨：音频在找到的变体引用的音频组里找，且须有独立的媒体播放列表；找到的变体分辨率或编码
-    /// 种类与记录的不同（见 [`VariantRecord::agrees`]）也算找不到。
+    /// 种类、音频的语言与记录的不同（见 [`VariantRecord::agrees`]、[`AudioRecord::agrees`]）也算找不到。
     pub(crate) fn find(&self, master: &MasterPlaylist) -> Option<Selection> {
         let variant_index = self.variant.key.find(master)?;
         let variant = &master.variants[variant_index];
@@ -68,6 +68,9 @@ impl SelectionRecord {
             None => None,
             Some(audio) => {
                 let (index, rendition) = audio.key.find(master, variant.audio.as_deref()?)?;
+                if !audio.agrees(rendition.language.as_deref()) {
+                    return None;
+                }
                 Some(SelectedAudio {
                     index,
                     uri: rendition.uri.clone()?,
@@ -121,6 +124,22 @@ impl VariantRecord {
     }
 }
 
+impl AudioRecord {
+    /// 与 `other` 是同一条音频：身份相同，且语言不矛盾（见 [`AudioRecord::agrees`]）。
+    pub(crate) fn same_as(&self, other: &AudioRecord) -> bool {
+        self.key == other.key && self.agrees(other.language.as_deref())
+    }
+
+    /// 与语言 `language` 不矛盾：两边都写了的才比，不分大小写；NAME 会本地化改写，不比。按属性认的身份本身含语言，只有
+    /// 按稳定 ID 认的会不符：来源把同一稳定 ID 给了另一条音频，违反了稳定 ID 的约定。
+    fn agrees(&self, language: Option<&str>) -> bool {
+        match (self.language.as_deref(), language) {
+            (Some(recorded), Some(current)) => recorded.eq_ignore_ascii_case(current),
+            _ => true,
+        }
+    }
+}
+
 /// 各轨的取流方式：选了独立音频 rendition 时，第 0 条轨只取视频（变体里混着的音频不用，与播放器一致），
 /// 第 1 条轨取音频；否则只有一条轨，全取。来源本身是媒体播放列表时 `selection` 为 None。
 pub(crate) fn track_streams(selection: Option<&SelectionRecord>) -> Vec<Streams> {
@@ -137,28 +156,28 @@ mod tests {
     use super::*;
 
     /// 一个写了稳定 ID 的变体，属性为 `stream_inf`；另有音频组 aud，变体写了 `AUDIO="aud"` 时取用它。
-    fn master(stream_inf: &str) -> MasterPlaylist {
-        let text = format!(
+    fn variant_master(stream_inf: &str) -> String {
+        format!(
             "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"en\",DEFAULT=YES,URI=\"en.m3u8\"\n\
              #EXT-X-STREAM-INF:{stream_inf},STABLE-VARIANT-ID=\"v\"\nv.m3u8\n"
-        );
-        let url = Url::parse("https://example.com/master.m3u8").unwrap();
-        match parse(&text, &url).unwrap() {
-            Playlist::Master(master) => master,
-            Playlist::Media(_) => panic!("应为主播放列表"),
-        }
+        )
     }
 
-    /// 选出 `before` 的变体后，按记录在 `after` 里各是否找得回。
-    fn found_in(before: &str, after: &[(&str, bool)]) {
-        let before = master(before);
+    /// 由 `master` 生成的主播放列表：按默认偏好在 `before` 版里选轨记下，在各 `after` 版里是否找得回。
+    fn found_in(master: impl Fn(&str) -> String, before: &str, after: &[(&str, bool)]) {
+        let url = Url::parse("https://example.com/master.m3u8").unwrap();
+        let parsed = |text: String| match parse(&text, &url).unwrap() {
+            Playlist::Master(master) => master,
+            Playlist::Media(_) => panic!("应为主播放列表"),
+        };
+        let before = parsed(master(before));
         let selection = select(&before, &Preference::default()).unwrap();
         let record = SelectionRecord::of(&selection, &before);
-        for &(stream_inf, found) in after {
+        for &(version, found) in after {
             assert_eq!(
-                record.find(&master(stream_inf)).is_some(),
+                record.find(&parsed(master(version))).is_some(),
                 found,
-                "{stream_inf}"
+                "{version}"
             );
         }
     }
@@ -168,6 +187,7 @@ mod tests {
     #[test]
     fn a_stable_id_given_to_another_rendition_is_not_found() {
         found_in(
+            variant_master,
             "BANDWIDTH=1000,RESOLUTION=640x360,CODECS=\"avc1.4d401e,mp4a.40.2\"",
             &[
                 (
@@ -199,16 +219,39 @@ mod tests {
     #[test]
     fn audio_group_codecs_do_not_count_against_the_variant() {
         found_in(
+            variant_master,
             "BANDWIDTH=1000,CODECS=\"avc1.4d401e,mp4a.40.2\",AUDIO=\"aud\"",
             &[
                 (
-                    "BANDWIDTH=1000,CODECS=\"avc1.4d401e,mp4a.40.2,ac-3\",AUDIO=\"aud\"",
+                    "BANDWIDTH=1000,CODECS=\"avc1.4d401e,mp4a.40.2,ec+3\",AUDIO=\"aud\"",
                     true,
                 ),
                 (
                     "BANDWIDTH=1000,CODECS=\"hvc1.1.6.L93.B0,mp4a.40.2\",AUDIO=\"aud\"",
                     false,
                 ),
+            ],
+        );
+    }
+
+    /// 按稳定 ID 找回的音频，名称改写了、语言大小写不同照样是它；语言变了，即来源把这个稳定 ID 给了另一条音频，不当作
+    /// 同一条。
+    #[test]
+    fn a_stable_audio_id_given_to_another_language_is_not_found() {
+        let master = |media: &str| {
+            format!(
+                "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",DEFAULT=YES,URI=\"a.m3u8\",\
+                 STABLE-RENDITION-ID=\"a1\",{media}\n\
+                 #EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO=\"aud\"\nv.m3u8\n"
+            )
+        };
+        found_in(
+            master,
+            "NAME=\"English\",LANGUAGE=\"en\"",
+            &[
+                ("NAME=\"英语\",LANGUAGE=\"EN\"", true),
+                ("NAME=\"English\"", true),
+                ("NAME=\"English\",LANGUAGE=\"ja\"", false),
             ],
         );
     }

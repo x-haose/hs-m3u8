@@ -452,7 +452,7 @@ exception! {
 }
 
 exception! {
-    /// 直播没有录到可合并的分片。
+    /// 直播没有录到可合并的分片：任务目录不存在或没有已完成的分片，或录到的都合并不了（每组都缺某条轨的分片）。
     pub struct NothingRecordedError extends HsM3u8Error {}
 }
 

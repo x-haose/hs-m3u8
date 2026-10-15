@@ -67,8 +67,8 @@ impl JobRecord {
     }
 
     /// 与 `current` 相比，各轨所选的是否不是同一条，按轨道顺序：第 0 条比所选变体（来源本身是媒体播放列表时为没有，同一
-    /// 条见 [`VariantRecord::same_as`]），第 1 条（若有）比独立音频的身份。两者轨道结构（见 [`JobRecord::streams`]）相
-    /// 同时才有意义。
+    /// 条见 [`VariantRecord::same_as`]），第 1 条（若有）比独立的音频（见 [`AudioRecord::same_as`]）。两者轨道结构（见
+    /// [`JobRecord::streams`]）相同时才有意义。
     pub(super) fn changed_tracks(&self, current: &JobRecord) -> Vec<bool> {
         let (recorded, current) = (self.selection.as_ref(), current.selection.as_ref());
         let variant = match (recorded, current) {
@@ -77,10 +77,11 @@ impl JobRecord {
         };
         let mut changed = vec![variant];
         if self.streams().len() > 1 {
-            let audio = |s: Option<&SelectionRecord>| -> Option<AudioKey> {
-                s.and_then(|s| s.audio.as_ref()).map(|a| a.key.clone())
-            };
-            changed.push(audio(recorded) != audio(current));
+            let audio = |s: Option<&SelectionRecord>| s.and_then(|s| s.audio.clone());
+            changed.push(match (audio(recorded), audio(current)) {
+                (Some(recorded), Some(current)) => !recorded.same_as(&current),
+                (recorded, current) => recorded.is_some() != current.is_some(),
+            });
         }
         changed
     }
@@ -93,7 +94,7 @@ impl JobRecord {
                 current.variant = recorded.variant.clone();
             }
             if let (Some(current), Some(recorded)) = (&mut current.audio, &recorded.audio)
-                && current.key == recorded.key
+                && recorded.same_as(current)
             {
                 *current = recorded.clone();
             }

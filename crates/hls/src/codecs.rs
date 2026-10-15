@@ -10,8 +10,9 @@ pub enum CodecKind {
 
 impl CodecKind {
     pub fn of(codec: &str) -> CodecKind {
-        const AUDIO: [&str; 10] = [
-            "mp4a", "ac-3", "ec-3", "ac-4", "opus", "flac", "alac", "dtsc", "dtse", "dtsh",
+        const AUDIO: [&str; 15] = [
+            "mp4a", "ac-3", "ec-3", "ec+3", "ac-4", "opus", "flac", "alac", "dtsc", "dtse", "dtsh",
+            "dtsl", "dtsx", "mha1", "mhm1",
         ];
         const SUBTITLES: [&str; 2] = ["wvtt", "stpp"];
         let family = codec_family(codec);

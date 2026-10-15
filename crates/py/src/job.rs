@@ -1,7 +1,7 @@
 //! 运行中的任务：等结果、取消、停止、读进度。
 
 use std::any::Any;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 
 use hs_m3u8_core as core;
 use pyo3::coroutine::CancelHandle;
@@ -89,9 +89,12 @@ impl Failure {
             visit.call(exception)?;
         }
         // 正在翻译时不等：这次少报的引用只会使相关对象这一轮不被回收
-        if let Ok(error) = self.error.try_lock()
-            && let Some(error) = &*error
-        {
+        let error = match self.error.try_lock() {
+            Ok(error) => Some(error),
+            Err(TryLockError::WouldBlock) => None,
+            Err(TryLockError::Poisoned(_)) => panic!("持锁期间不会 panic"),
+        };
+        if let Some(error) = error.as_deref().and_then(Option::as_ref) {
             crate::error::traverse(error, visit)?;
         }
         Ok(())

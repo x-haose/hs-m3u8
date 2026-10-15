@@ -51,8 +51,10 @@ pub fn prepare_fork(
 /// 此刻没被拿着才关掉继承来的锁文件。被拿着时，拿着它的是父进程里的线程，不在子进程里，这把锁再也放不开：继承来的
 /// 锁文件留到子进程退出，子进程里再加锁的任务会一直等着。
 pub fn close_inherited_locks() {
-    if let Ok(mut held) = HELD.try_lock() {
-        held.0.clear();
+    match HELD.try_lock() {
+        Ok(mut held) => held.0.clear(),
+        Err(std::sync::TryLockError::WouldBlock) => {}
+        Err(std::sync::TryLockError::Poisoned(_)) => panic!("持锁期间不会 panic"),
     }
 }
 

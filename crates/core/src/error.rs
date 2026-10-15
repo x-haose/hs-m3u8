@@ -107,6 +107,7 @@ pub enum Error {
         path: PathBuf,
         problem: WorkDirProblem,
     },
+    /// 直播没有录到可合并的分片：任务目录不存在或没有已完成的分片，或录到的都合并不了（每组都缺某条轨的分片）
     #[error("直播没有录到可合并的分片")]
     NothingRecorded,
     /// 第 `track` 条轨长时间没有录到新分片，且不是直播正常结束（见 [`crate::StallCause`]）

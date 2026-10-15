@@ -162,7 +162,7 @@ impl Engine {
     /// [`Stage::Writing`]；开始写出前可取消，停止不起作用。参数错误时立即返回错误；不在 tokio 运行时内调用会 panic。
     ///
     /// 任务目录见 [`OutputOptions::resolved_work_dir`]。目录里是点播的下载时报
-    /// [`WorkDirProblem::NotLiveRecording`]（点播用同样的请求再次运行即可续传）；目录不存在或没有已完成的分片时报
+    /// [`WorkDirProblem::NotLiveRecording`]（点播用同样的请求再次运行即可续传）；没有可合并的分片时报
     /// [`Error::NothingRecorded`]。结果的 [`LiveReport::end`] 为 None。
     pub fn merge_recorded(&self, output: OutputOptions) -> Result<Job, Error> {
         let output = output.resolve()?;
