@@ -160,4 +160,4 @@ make compat       # 对外契约与最近的发布比较：Python 接口（griff
 uv run --no-sync python examples/download.py   # 运行示例（先 make ffmpeg 与 make py_develop）
 ```
 
-换 Python 版本另给目录，如 `make py_test VENV=.venv-3.15 UV_PYTHON=3.15`。Windows：在已加载 MSVC 环境的 MSYS2 中运行 `third_party/ffmpeg/build.sh`，其余步骤见 `.github/workflows/rust.yml`。发布用的 sdist 与各平台 wheel 由 `.github/workflows/wheels.yml` 构建并测试。升了任务目录的格式版本（`crates/core/src/workdir` 下 job.json 的格式版本）时，发布前用 `cargo test -p hs-m3u8-core --test e2e -- --ignored --exact samples::write_samples` 生成新版本的样本，outputs.json 的格式版本升了时照 `tests/fixtures/workdir/outputs` 下已有的写法补上新版本的样本。
+换 Python 版本另给目录，如 `make py_test VENV=.venv-3.15 UV_PYTHON=3.15`。Windows：在已加载 MSVC 环境的 MSYS2 中运行 `third_party/ffmpeg/build.sh`，其余步骤见 `.github/workflows/rust.yml`。发布用的 sdist 与各平台 wheel 由 `.github/workflows/wheels.yml` 构建并测试；推送标签 `v<版本>`（与 `Cargo.toml` 的版本一致）时全部通过后发布到 PyPI。升了任务目录的格式版本（`crates/core/src/workdir` 下 job.json 的格式版本）时，发布前用 `cargo test -p hs-m3u8-core --test e2e -- --ignored --exact samples::write_samples` 生成新版本的样本，outputs.json 的格式版本升了时照 `tests/fixtures/workdir/outputs` 下已有的写法补上新版本的样本。

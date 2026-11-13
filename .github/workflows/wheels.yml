@@ -1,10 +1,10 @@
 name: wheels
 
 # 构建发布用的 sdist 与各平台的 wheel：每个 wheel 装进干净的环境跑 Python 端到端测试，sdist 按 LICENSES/NOTICE.txt
-# 写的步骤（先 build.sh、再 maturin）从源码构建一次。只构建与测试，不发布；产物作为工作流的附件保留。
+# 写的步骤（先 build.sh、再 maturin）从源码构建一次。产物作为工作流的附件保留；推 v 开头的标签时全部通过后发布到 PyPI。
 on:
   push:
-    branches: [rewrite/rust]
+    branches: [master]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -190,3 +190,34 @@ jobs:
         with:
           name: wheel-windows-x86_64
           path: dist/*.whl
+
+  # 可信发布（OIDC）：PyPI 上登记了本仓库的这个工作流与 pypi 环境，不用长期有效的令牌。标签须为 v<包的版本>，版本只能
+  # 发布一次，不符时在上传前失败
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [sdist, linux, macos, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/project/hs-m3u8/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+
+      # sdist 与 4 个 wheel，文件名里的版本都与标签相符
+      - name: 核对产物与标签
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          ls dist
+          test "$(ls dist | wc -l)" -eq 5
+          test -f "dist/hs_m3u8-$version.tar.gz"
+          test "$(ls dist/hs_m3u8-"$version"-*.whl | wc -l)" -eq 4
+
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
