@@ -1,9 +1,9 @@
 //! 任务目录格式的兼容：已发布版本写的任务目录样本，当前版本照样续传、只合并与放弃。
 //!
-//! 样本在 tests/fixtures/workdir/job/<job.json 的格式版本>/<名字>/ 下：`work/` 为当时的版本运行留下的任务目录，`source/`
-//! 为接着它续传、续录时的来源（入口为 `index.m3u8`，连同 init 段与分片；直播的播放列表已结束，没有新分片），原样提供。
-//! 各样本由 [`write_samples`] 生成，名字与覆盖的形态见 [`SAMPLES`]。发布后不再改动，`make compat` 对照发布标签核对；
-//! 其中的文件名都认得、覆盖了文件名的各种写法由 core 的单元测试核对。
+//! 样本在 tests/fixtures/workdir/job/<job.json 的格式版本>/<名字>/ 下：`work/` 为当时的版本运行留下的任务目录（vod 另加的
+//! `.part` 除外），`source/` 为接着它续传、续录时的来源（入口为 `index.m3u8`，连同 init 段与分片；直播的播放列表已结束），
+//! 原样提供。各样本由 [`write_samples`] 生成，名字与覆盖的形态见 [`SAMPLES`]。发布后不再改动，`make compat` 对照发布标签
+//! 核对；//! 其中的文件名都认得、覆盖了文件名的各种写法由 core 的单元测试核对。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -18,13 +18,16 @@ use crate::{engine, fixture, request, run, test_dir};
 
 /// 每个格式版本的样本：
 /// - `vod`：主播放列表（变体与音频按属性认）的视频加独立音频 fMP4 点播，音频最后一个分片取不到而失败；另有进程在写
-///   job.json 与一个分片时被杀留下的 `.part`
+///   job.json 与一个分片时被杀会留下的 `.part`，按本库写文件的方式另加（见 [`leave_partial_files`]）
 /// - `vod-ts`：媒体播放列表来源（不选轨）、带不连续段的 TS 点播，最后一个分片取不到而失败
 /// - `vod-muxed`：主播放列表里音频混在视频里的变体（没有独立音频），TS 点播，最后一个分片取不到而失败
 /// - `live`：写了稳定 ID 的视频加独立音频 fMP4 直播，录完各轨列出的分片后中断
 /// - `live-sessions`：视频加独立音频 TS 直播，会话 0 里有不连续段；中断后音频窗口已前移、续录另起会话 1（视频跳过会话
-///   0 录过的序号，起点写作 `after<序号>`），再中断
+///   0 录过的序号，起点写作 `after<序号>`），再中断。续录的来源里视频多出一个没录过的分片（见 [`NEW_ON_CONTINUE`]）
 const SAMPLES: [&str; 5] = ["vod", "vod-ts", "vod-muxed", "live", "live-sessions"];
+
+/// 直播样本续录的来源里没录过的分片数：续录时都要录进来。
+const NEW_ON_CONTINUE: [(&str, usize); 2] = [("live", 0), ("live-sessions", 1)];
 
 /// 各格式版本的全部样本目录，按版本、名字排列；系统生成的 `.DS_Store` 之类不算。最新的版本须有 [`SAMPLES`] 中的
 /// 每一个（core 的单元测试核对最新的版本即当前的格式版本）。
@@ -227,8 +230,8 @@ async fn live_samples_merge() {
     }
 }
 
-/// 直播样本接着录（本地服务的端口每次不同，即换了地址，核对过录到的才接着录）：来源已结束、没有新分片，接着各轨最近
-/// 的会话录，不另起会话，已录的都合并进去。
+/// 直播样本接着录（本地服务的端口每次不同，即换了地址，核对过录到的才接着录）：接着各轨最近的会话录、不另起会话，
+/// 来源里没录过的分片（见 [`NEW_ON_CONTINUE`]）都录进来，已录的都合并进去。
 #[tokio::test(flavor = "multi_thread")]
 async fn live_samples_continue() {
     for sample in samples().into_iter().filter(|s| kind_of(s) == "live") {
@@ -236,6 +239,8 @@ async fn live_samples_continue() {
         copy_dir(&sample.join("work"), &dir.join("out.hsdl"));
         let (names, sessions) = recorded(&sample);
         let (server, _) = serve(&sample.join("source")).await;
+        let name = sample.file_name().unwrap().to_str().unwrap();
+        let (_, new) = NEW_ON_CONTINUE.iter().find(|(n, _)| *n == name).unwrap();
 
         let job = engine()
             .start(live_request(server.url("index.m3u8"), &dir, STALL))
@@ -245,7 +250,7 @@ async fn live_samples_continue() {
 
         assert_eq!(
             (progress.borrow().segments.done, output.missed),
-            (names.len(), vec![]),
+            (names.len() + new, vec![]),
             "{}",
             sample.display()
         );
@@ -339,7 +344,7 @@ async fn write_samples() {
         "{video:?}"
     );
     assert!(video.keys().any(|n| parts(n)[3] != "0"), "{video:?}");
-    source.put("v.m3u8", ts_playlist("v/", 0..3, 0, &[1], true));
+    source.put("v.m3u8", ts_playlist("v/", 0..4, 0, &[1], true));
     source.put("a.m3u8", ts_playlist("a/", 2..4, 1, &[], true));
     save(&req, "live-sessions", &source.files);
 }

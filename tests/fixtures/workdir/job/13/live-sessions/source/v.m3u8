@@ -9,4 +9,6 @@ v/seg0.ts
 v/seg1.ts
 #EXTINF:1,
 v/seg2.ts
+#EXTINF:1,
+v/seg3.ts
 #EXT-X-ENDLIST
