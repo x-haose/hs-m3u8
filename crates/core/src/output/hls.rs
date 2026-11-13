@@ -217,7 +217,7 @@ fn fill_track<'a>(
             if cancel.is_cancelled() {
                 return Err(Error::Cancelled);
             }
-            let ext = content.check(&segment.path, work_dir, (group_index, track))?;
+            let ext = content.check(&segment.path, work_dir, group_index, track)?;
             let name = format!("{index}.{ext}");
             let len = place(&segment.path, &dir.join(&name))?;
             placed(1);
@@ -243,12 +243,13 @@ enum Content {
 }
 
 impl Content {
-    /// 核对分片 `path`（在第 `at.0` 组第 `at.1` 条轨），返回它在本地 HLS 里的扩展名（见 [`extension`]）。
+    /// 核对第 `group` 组第 `track` 条轨的分片 `path`，返回它在本地 HLS 里的扩展名（见 [`extension`]）。
     fn check(
         &mut self,
         path: &Path,
         work_dir: &Path,
-        at: (usize, usize),
+        group: usize,
+        track: usize,
     ) -> Result<&'static str, Error> {
         match self {
             Content::Fmp4(trex) => {
@@ -261,7 +262,6 @@ impl Content {
             Content::Standalone(first) => {
                 let format = sniff(path, work_dir)?;
                 if *first.get_or_insert(format) != format {
-                    let (group, track) = at;
                     return Err(Error::Unsupported(Unsupported::Hls(
                         HlsUnsupported::FormatChangedInGroup { group, track },
                     )));
