@@ -1,13 +1,17 @@
 name: wheels
 
 # 构建发布用的 sdist 与各平台的 wheel：每个 wheel 装进干净的环境跑 Python 端到端测试，sdist 按 LICENSES/NOTICE.txt
-# 写的步骤（先 build.sh、再 maturin）从源码构建一次。产物作为工作流的附件保留；推 v 开头的标签时全部通过后发布到 PyPI。
+# 写的步骤（先 build.sh、再 maturin）从源码构建一次。产物作为工作流的附件保留；推 v 开头的标签时另跑 rust.yml 的全部
+# 检查，都通过后发布到 PyPI。
 on:
   push:
     branches: [master]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   UV_PYTHON: "3.12"
@@ -191,19 +195,38 @@ jobs:
           name: wheel-windows-x86_64
           path: dist/*.whl
 
-  # 可信发布（OIDC）：PyPI 上登记了本仓库的这个工作流与 pypi 环境，不用长期有效的令牌。标签须为 v<包的版本>，版本只能
-  # 发布一次，不符时在上传前失败
+  # 发布之前对标签所在的提交跑全部检查（含任务目录样本与对外契约，与上一次发布比较）
+  checks:
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/rust.yml
+
+  # 可信发布（OIDC），不用长期有效的令牌：须在 PyPI 上登记本仓库、这个工作流与 pypi 环境，否则上传时失败。版本只能
+  # 发布一次，标签、提交或产物不合要求时在上传前失败
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [sdist, linux, macos, windows]
+    needs: [checks, sdist, linux, macos, windows]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment:
       name: pypi
       url: https://pypi.org/project/hs-m3u8/
     permissions:
+      contents: read
       id-token: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # 只发布 v<主>.<次>.<修订>（与 scripts/check_compat.py 认的发布标签一致），且提交已在 master 上
+      - name: 核对标签与提交
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "标签须为 v<主>.<次>.<修订>：$TAG"; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/master || { echo "$TAG 所在的提交不在 master 上"; exit 1; }
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
@@ -215,9 +238,15 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           version="${TAG#v}"
-          ls dist
-          test "$(ls dist | wc -l)" -eq 5
+          shopt -s nullglob
+          all=(dist/*)
+          wheels=(dist/hs_m3u8-"$version"-*.whl)
+          printf '%s\n' "${all[@]}"
+          test "${#all[@]}" -eq 5
           test -f "dist/hs_m3u8-$version.tar.gz"
-          test "$(ls dist/hs_m3u8-"$version"-*.whl | wc -l)" -eq 4
+          test "${#wheels[@]}" -eq 4
 
+      # 重跑（上次只传了一部分）时跳过已在 PyPI 上的文件：用的是同一次运行的产物，内容相同；首次运行遇到已存在的照样失败
       - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          skip-existing: ${{ github.run_attempt > 1 }}

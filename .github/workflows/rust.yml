@@ -5,6 +5,11 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+  # wheels.yml 发布之前对标签所在的提交跑一遍全部检查
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   check:
