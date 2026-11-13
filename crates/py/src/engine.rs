@@ -58,7 +58,7 @@ pyo3_stub_gen::inventory::submit! {
                 旁），取消送到时放弃已做完的照常返回。开始之前就被取消的直接抛出，什么也不做。
 
                 路径为空或不合要求时抛 `InvalidInputError`。任务目录正被任务使用时抛 `WorkDirError`
-                （`WorkDirProblem.Locked`），不是本库的任务目录时为 `WorkDirProblem.NotEmpty`。记录是另一个格式版本写的
+                （`WorkDirProblem.Locked`），不是本库的任务目录时为 `WorkDirProblem.NotEmpty`。记录是本库读不了的格式版本写的
                 （`UnsupportedVersion`）或无法解析（`Corrupt`）时什么也不动：不知道它记着什么就不收拾，可用写下它的版本
                 放弃，或由用户删掉记录（`outputs.json`；写了一半的临时输出与没能放回的旧输出以 `hsdl-` 开头，留在输出旁）
                 后再放弃。"""
@@ -132,7 +132,7 @@ impl Engine {
     /// 旁），取消送到时放弃已做完的照常返回。开始之前就被取消的直接抛出，什么也不做。
     ///
     /// 路径为空或不合要求时抛 `InvalidInputError`。任务目录正被任务使用时抛 `WorkDirError`
-    /// （`WorkDirProblem.Locked`），不是本库的任务目录时为 `WorkDirProblem.NotEmpty`。记录是另一个格式版本写的
+    /// （`WorkDirProblem.Locked`），不是本库的任务目录时为 `WorkDirProblem.NotEmpty`。记录是本库读不了的格式版本写的
     /// （`UnsupportedVersion`）或无法解析（`Corrupt`）时什么也不动：不知道它记着什么就不收拾，可用写下它的版本
     /// 放弃，或由用户删掉记录（`outputs.json`；写了一半的临时输出与没能放回的旧输出以 `hsdl-` 开头，留在输出旁）
     /// 后再放弃。

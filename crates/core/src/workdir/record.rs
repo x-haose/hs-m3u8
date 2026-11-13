@@ -9,10 +9,14 @@ use crate::ident::digest_hex;
 use crate::selection::{AudioRecord, SelectionRecord, VariantRecord, track_streams};
 use crate::{JobType, WorkDirProblem};
 
-/// 任务目录格式的版本：job.json 与 outputs.json 的字段，分片与 init 段的文件名、其中指纹与摘要的编码，以及下载时对
-/// 文件内容的改写（fMP4 长度写 0 的最后一个 box 改为实际长度）。任何一项改变都要升；两个文件都带它，读到别的版本
-/// 一律拒绝。
-pub(super) const FORMAT_VERSION: u32 = 13;
+/// job.json 的格式版本，也是任务目录里其余内容的格式版本：job.json 的字段，分片与 init 段的文件名、其中指纹与摘要的
+/// 编码，以及下载时对文件内容的改写（fMP4 长度写 0 的最后一个 box 改为实际长度）。任何一项改变都要升。outputs.json
+/// 另有自己的版本（见 [`super::outputs::OUTPUTS_FORMAT_VERSION`]）。
+///
+/// 兼容约定（outputs.json 同）：1.0 写的是版本 13；此后的版本读得了所有已发布版本写的任务目录（按旧格式读取，或打开
+/// 时就地升级），各已发布版本的样本在 tests/fixtures/workdir 下，发布后不再改动。比本库新的版本与 1.0 之前开发中的
+/// 版本报 [`WorkDirProblem::UnsupportedVersion`]。
+pub(super) const JOB_FORMAT_VERSION: u32 = 13;
 
 /// 任务目录记录的任务；续传、续录时须与当前请求相符。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,7 +166,7 @@ pub(crate) fn url_digest(url: &Url) -> String {
     digest_hex(url.as_str())
 }
 
-/// `job.json` 的写法。`format_version` 不等于 [`FORMAT_VERSION`] 时拒绝。
+/// `job.json` 的写法。`format_version` 不等于 [`JOB_FORMAT_VERSION`] 时拒绝。
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 enum JobFile {
@@ -248,23 +252,27 @@ struct Version {
     format_version: u32,
 }
 
-/// 任务目录里名为 `file` 的 JSON 文件的格式版本是不是 [`FORMAT_VERSION`]：读不出版本号为内容无法识别，是别的
-/// 版本为版本不受支持。
-pub(super) fn check_version(bytes: &[u8], file: &'static str) -> Result<(), WorkDirProblem> {
+/// 任务目录里名为 `file` 的 JSON 文件的格式版本是不是 `supported`：读不出版本号为内容无法识别，是别的版本为版本不
+/// 受支持。
+pub(super) fn check_version(
+    bytes: &[u8],
+    file: &'static str,
+    supported: u32,
+) -> Result<(), WorkDirProblem> {
     let version: Version = serde_json::from_slice(bytes)
         .map_err(|e| WorkDirProblem::Corrupt(format!("{file} 无法解析：{e}")))?;
-    if version.format_version != FORMAT_VERSION {
+    if version.format_version != supported {
         return Err(WorkDirProblem::UnsupportedVersion {
             file,
             found: version.format_version,
-            supported: FORMAT_VERSION,
+            supported,
         });
     }
     Ok(())
 }
 
 pub(super) fn encode(record: &JobRecord) -> Vec<u8> {
-    let format_version = FORMAT_VERSION;
+    let format_version = JOB_FORMAT_VERSION;
     let preference_digest = record.preference_digest.clone();
     let url_digest = record.url_digest.clone();
     let selection = record.selection.as_ref().map(SelectionFile::from);
@@ -289,7 +297,7 @@ pub(super) fn encode(record: &JobRecord) -> Vec<u8> {
 /// 解析 `job.json`。
 pub(super) fn decode(bytes: &[u8]) -> Result<JobRecord, WorkDirProblem> {
     let unreadable = |e| WorkDirProblem::Corrupt(format!("job.json 无法解析：{e}"));
-    check_version(bytes, "job.json")?;
+    check_version(bytes, "job.json", JOB_FORMAT_VERSION)?;
     let (preference_digest, url_digest, selection, kind) =
         match serde_json::from_slice(bytes).map_err(unreadable)? {
             JobFile::Vod {
@@ -670,6 +678,36 @@ mod tests {
             url_digest(&url),
             "afd3a584486c3d8f1240bf03a547070da7f147f4a8dd68e49a419956c1b2e743"
         );
+    }
+
+    /// 已发布版本的 job.json 样本（tests/fixtures/workdir/job/<版本>/ 下的任务目录与单独的记录，发布后不再改动）都读得
+    /// 了；当前版本的按当前写法重新写出逐字节相同，改了写法而没升版本时在这里失败。
+    #[test]
+    fn released_samples_are_readable() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/workdir/job");
+        let mut checked = 0;
+        for dir in std::fs::read_dir(&root).unwrap() {
+            let dir = dir.unwrap().path();
+            let version: u32 = dir.file_name().unwrap().to_str().unwrap().parse().unwrap();
+            for sample in std::fs::read_dir(&dir).unwrap() {
+                let sample = sample.unwrap().path();
+                let path = if sample.is_dir() {
+                    sample.join("job.json")
+                } else {
+                    sample
+                };
+                let bytes = std::fs::read(&path).unwrap();
+                let written: Version = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(written.format_version, version, "{}", path.display());
+                let record = decode(&bytes).unwrap_or_else(|e| panic!("{}：{e}", path.display()));
+                if version == JOB_FORMAT_VERSION {
+                    assert_eq!(encode(&record), bytes, "{}", path.display());
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "{} 下没有样本", root.display());
     }
 
     #[test]

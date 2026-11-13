@@ -335,7 +335,7 @@ class Engine:
         旁），取消送到时放弃已做完的照常返回。开始之前就被取消的直接抛出，什么也不做。
         
         路径为空或不合要求时抛 `InvalidInputError`。任务目录正被任务使用时抛 `WorkDirError`
-        （`WorkDirProblem.Locked`），不是本库的任务目录时为 `WorkDirProblem.NotEmpty`。记录是另一个格式版本写的
+        （`WorkDirProblem.Locked`），不是本库的任务目录时为 `WorkDirProblem.NotEmpty`。记录是本库读不了的格式版本写的
         （`UnsupportedVersion`）或无法解析（`Corrupt`）时什么也不动：不知道它记着什么就不收拾，可用写下它的版本
         放弃，或由用户删掉记录（`outputs.json`；写了一半的临时输出与没能放回的旧输出以 `hsdl-` 开头，留在输出旁）
         后再放弃。
@@ -4011,7 +4011,8 @@ class WorkDirProblem:
     @typing.final
     class UnsupportedVersion(WorkDirProblem):
         r"""
-        记录是另一个格式版本写的：比本库新时用更新的版本续传；旧时用写下它的版本做完，或放弃任务
+        记录是本库读不了的格式版本写的：比本库新，用写下它的或更新的版本续传、放弃。1.0 起各发布版本写的都读得了，比
+        本库旧的只会是 1.0 之前开发中的版本写的
         """
         __match_args__ = ("file", "found", "supported",)
         @property
@@ -4027,7 +4028,7 @@ class WorkDirProblem:
         @property
         def supported(self) -> builtins.int:
             r"""
-            本库支持的版本
+            本库写的版本
             """
         def __new__(cls, *, file: builtins.str, found: builtins.int, supported: builtins.int) -> WorkDirProblem.UnsupportedVersion: ...
     

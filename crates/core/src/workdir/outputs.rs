@@ -7,13 +7,17 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::record::{FORMAT_VERSION, check_version};
+use super::record::check_version;
 use super::write_atomic;
 use crate::error::io_error;
 use crate::ident::Fingerprint;
 use crate::{Error, WorkDirProblem, busy, volume};
 
 pub(super) const OUTPUTS_FILE: &str = "outputs.json";
+
+/// outputs.json 的格式版本，只管它自己的字段，与 job.json 的各自升；兼容约定同
+/// [`super::record::JOB_FORMAT_VERSION`]。放弃任务要先读懂它，读不懂时什么也不动。
+pub(super) const OUTPUTS_FORMAT_VERSION: u32 = 13;
 
 /// 输出的种类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,7 +126,7 @@ pub(crate) fn outputs_file(root: &Path) -> PathBuf {
     root.join(OUTPUTS_FILE)
 }
 
-/// `outputs.json` 的写法。`format_version` 不等于 [`FORMAT_VERSION`] 时拒绝。保留名不写进去，由输出路径与指纹
+/// `outputs.json` 的写法。`format_version` 不等于 [`OUTPUTS_FORMAT_VERSION`] 时拒绝。保留名不写进去，由输出路径与指纹
 /// 算出：记录只能指向输出旁的保留名，碰不到别的路径。
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -150,7 +154,7 @@ enum KindFile {
 
 fn encode(outputs: &[PendingOutput], swapped: bool) -> Vec<u8> {
     let file = OutputsFile {
-        format_version: FORMAT_VERSION,
+        format_version: OUTPUTS_FORMAT_VERSION,
         swapped,
         outputs: outputs
             .iter()
@@ -174,7 +178,7 @@ fn encode(outputs: &[PendingOutput], swapped: bool) -> Vec<u8> {
 
 /// 解析 `outputs.json`。
 fn decode(bytes: &[u8]) -> Result<OutputsRecord, WorkDirProblem> {
-    check_version(bytes, OUTPUTS_FILE)?;
+    check_version(bytes, OUTPUTS_FILE, OUTPUTS_FORMAT_VERSION)?;
     let file: OutputsFile = serde_json::from_slice(bytes)
         .map_err(|e| WorkDirProblem::Corrupt(format!("{OUTPUTS_FILE} 无法解析：{e}")))?;
     let outputs = file
@@ -202,6 +206,41 @@ fn decode(bytes: &[u8]) -> Result<OutputsRecord, WorkDirProblem> {
         swapped: file.swapped,
         outputs,
     })
+}
+
+/// 已发布版本的样本（tests/fixtures/workdir/outputs/<版本>/，发布后不再改动）。路径的写法随平台不同，各平台读自己的。
+#[cfg(test)]
+mod released {
+    use super::*;
+
+    /// 都读得了；当前版本的按当前写法重新写出逐字节相同，改了写法而没升版本时在这里失败。
+    #[test]
+    fn samples_are_readable() {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/workdir/outputs");
+        let platform = if cfg!(windows) {
+            "windows.json"
+        } else {
+            "unix.json"
+        };
+        let mut checked = 0;
+        for dir in fs::read_dir(&root).unwrap() {
+            let dir = dir.unwrap().path();
+            let version: u32 = dir.file_name().unwrap().to_str().unwrap().parse().unwrap();
+            let path = dir.join(platform);
+            let bytes = fs::read(&path).unwrap();
+            let written: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(written["format_version"], version, "{}", path.display());
+            let record = decode(&bytes).unwrap_or_else(|e| panic!("{}：{e}", path.display()));
+            assert!(!record.outputs.is_empty(), "{}", path.display());
+            if version == OUTPUTS_FORMAT_VERSION {
+                let rewritten = encode(&record.outputs, record.swapped);
+                assert_eq!(rewritten, bytes, "{}", path.display());
+            }
+            checked += 1;
+        }
+        assert!(checked > 0, "{} 下没有样本", root.display());
+    }
 }
 
 /// 路径的写法随平台不同，字面 JSON 在 Unix 上核对；别的平台由端到端测试写入、读回记录。

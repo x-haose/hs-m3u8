@@ -5,6 +5,7 @@ mod discard;
 mod http;
 mod live;
 mod output;
+mod samples;
 mod server;
 mod vod;
 
@@ -154,12 +155,8 @@ fn request(url: Url, dir: &Path) -> JobRequest {
     request
 }
 
-/// 任务目录 `work` 的格式版本，取自它的 job.json；手写 outputs.json 时照抄（两个文件的格式版本相同）。
-fn format_version(work: &Path) -> u64 {
-    let job: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(work.join("job.json")).unwrap()).unwrap();
-    job["format_version"].as_u64().unwrap()
-}
+/// 手写 outputs.json 用的格式版本：1.0 写的版本，此后的版本照样要读得了。
+const OUTPUTS_FORMAT_VERSION: u64 = 13;
 
 fn engine() -> Engine {
     Engine::new(NonZeroUsize::new(8).unwrap())

@@ -62,7 +62,7 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-选轨偏好、请求头与代理、站点适配回调在 `Source` 上，输出种类与任务目录在 `OutputOptions` 上，并发、直播录制方式与自定义 key 在 `JobRequest` 上。中断后用同样的请求再次运行即续传，选轨偏好变了而选的仍是同一内容（如重新探测后再选）时用 `JobRequest(..., reselect=True)`，核对过已下载的确是同一内容才沿用；换清晰度另开任务目录；直播用 `job.stop()` 停止并写出已录到的部分。放弃任务用 `Engine.discard(任务目录)`，它会收拾写到一半的输出。数据类、枚举取值与异常都能 pickle（如交给进程池），只保证同一版本之间。
+选轨偏好、请求头与代理、站点适配回调在 `Source` 上，输出种类与任务目录在 `OutputOptions` 上，并发、直播录制方式与自定义 key 在 `JobRequest` 上。中断后用同样的请求再次运行即续传，选轨偏好变了而选的仍是同一内容（如重新探测后再选）时用 `JobRequest(..., reselect=True)`，核对过已下载的确是同一内容才沿用；换清晰度另开任务目录；直播用 `job.stop()` 停止并写出已录到的部分。放弃任务用 `Engine.discard(任务目录)`，它会收拾写到一半的输出。升级本库后，旧版本留下的任务目录照常续传、合并与放弃；用旧版本打开新版本写的任务目录时抛 `WorkDirError`（`WorkDirProblem.UnsupportedVersion`）。数据类、枚举取值与异常都能 pickle（如交给进程池），只保证同一版本之间。
 
 仓库的 [examples](https://github.com/x-haose/hs-m3u8/tree/master/examples) 目录里是可以直接运行的示例，用的是公开的测试流：`download.py`（最简单的用法）、`progress.py`（进度与失败的分类）、`probe.py`（探测后挑清晰度）、`live.py`（录制直播，Ctrl+C 停止）、`hooks.py`（站点适配回调）、`batch.py`（批量下载）。
 
@@ -159,4 +159,4 @@ make licenses     # 依赖或 FFmpeg 的版本变了之后重新生成 LICENSES 
 uv run --no-sync python examples/download.py   # 运行示例（先 make ffmpeg 与 make py_develop）
 ```
 
-换 Python 版本另给目录，如 `make py_test VENV=.venv-3.15 UV_PYTHON=3.15`。Windows：在已加载 MSVC 环境的 MSYS2 中运行 `third_party/ffmpeg/build.sh`，其余步骤见 `.github/workflows/rust.yml`。发布用的 sdist 与各平台 wheel 由 `.github/workflows/wheels.yml` 构建并测试。
+换 Python 版本另给目录，如 `make py_test VENV=.venv-3.15 UV_PYTHON=3.15`。Windows：在已加载 MSVC 环境的 MSYS2 中运行 `third_party/ffmpeg/build.sh`，其余步骤见 `.github/workflows/rust.yml`。发布用的 sdist 与各平台 wheel 由 `.github/workflows/wheels.yml` 构建并测试。升了任务目录的格式版本（`crates/core/src/workdir` 下 job.json 的格式版本）时，发布前用 `cargo test -p hs-m3u8-core --test e2e -- --ignored --exact samples::write_samples` 生成新版本的样本，outputs.json 的格式版本升了时照 `tests/fixtures/workdir/outputs` 下已有的写法补上新版本的样本。
