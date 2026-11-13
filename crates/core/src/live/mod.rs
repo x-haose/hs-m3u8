@@ -229,6 +229,9 @@ impl<'a> Recorder<'a> {
         phase: Phase,
         mp4: Option<Mp4Check>,
     ) -> Recorder<'a> {
+        if let Phase::Decided { session } = phase {
+            ctx.progress.send_modify(|p| p.session = Some(session));
+        }
         Recorder {
             http: ctx.http.clone(),
             hooks: ctx.hooks.clone(),
@@ -576,7 +579,7 @@ impl<'a> Recorder<'a> {
             .session()
             .checked_add(1)
             .ok_or_else(|| self.sessions_exhausted())?;
-        self.phase = Phase::Decided { session };
+        self.decide(session);
         self.tracks[track].restart(cause, fetched);
         self.new_sessions.push(NewSession { session, cause });
         Ok(())
@@ -588,6 +591,12 @@ impl<'a> Recorder<'a> {
             path: self.dir.layout().root().to_path_buf(),
             problem: WorkDirProblem::Corrupt("会话编号已达上限".into()),
         }
+    }
+
+    /// 定下录制的会话，进度里随之写上。
+    fn decide(&mut self, session: u32) {
+        self.phase = Phase::Decided { session };
+        self.progress.send_modify(|p| p.session = Some(session));
     }
 
     /// 录制中的会话编号。

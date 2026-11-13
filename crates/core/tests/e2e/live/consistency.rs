@@ -9,7 +9,7 @@ use super::{
     put_long, put_split_master, report, slow_retry,
 };
 use crate::server::Server;
-use crate::{assert_output, expected_long, fixture, run, test_dir};
+use crate::{assert_output, engine, expected_long, fixture, run, test_dir};
 
 /// 每次刷新都被 302 到不同的路径（CDN 调度），分片用相对地址：同一分片的地址随之变化，但文件名相同，不算服务器错误。
 #[tokio::test(flavor = "multi_thread")]
@@ -120,7 +120,7 @@ fn report_with(
 }
 
 /// 媒体序号回退且与上次窗口不重叠，连续两次即认定编码器重启：只录一条轨，另起会话 1 从新窗口的起点接着录，
-/// 两个会话首尾相接。
+/// 两个会话首尾相接；进度里的会话编号随之变为 1。
 #[tokio::test(flavor = "multi_thread")]
 async fn sequence_regression_starts_a_new_session() {
     let dir = test_dir("live_restart");
@@ -136,9 +136,13 @@ async fn sequence_regression_starts_a_new_session() {
         ],
     );
 
-    let output = run(live_request(server.url("live.m3u8"), &dir, STALL))
-        .await
+    let job = engine()
+        .start(live_request(server.url("live.m3u8"), &dir, STALL))
         .unwrap();
+    let progress = job.control().progress();
+    let output = job.wait().await.unwrap();
+
+    assert_eq!(progress.borrow().session, Some(1));
 
     assert_output(&output, &expected_long(&dir, &[2, 3, 0, 1], &[2, 2]));
     let restarted = NewSession {

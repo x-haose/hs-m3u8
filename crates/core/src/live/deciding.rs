@@ -159,9 +159,7 @@ impl Recorder<'_> {
         if decision.adopt && self.dir.source_change().is_some() {
             self.dir.adopt_record().await?;
         }
-        self.phase = Phase::Decided {
-            session: decision.session,
-        };
+        self.decide(decision.session);
         let now = Instant::now();
         for (track, start) in decision.tracks.into_iter().enumerate() {
             self.tracks[track].enter_session(start, now);
