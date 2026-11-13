@@ -5,7 +5,7 @@ name: wheels
 # 检查，都通过后发布到 PyPI。
 on:
   push:
-    branches: [master]
+    branches: [main]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
@@ -195,7 +195,7 @@ jobs:
           name: wheel-windows-x86_64
           path: dist/*.whl
 
-  # 推标签时先核对：只发布 v<主>.<次>.<修订>（与 scripts/check_compat.py 认的发布标签一致），且提交已在 master 上
+  # 推标签时先核对：只发布 v<主>.<次>.<修订>（与 scripts/check_compat.py 认的发布标签一致），且提交已在 main 上
   tag:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
@@ -211,7 +211,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "标签须为 v<主>.<次>.<修订>：$TAG"; exit 1; }
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/master || { echo "$TAG 所在的提交不在 master 上"; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$TAG 所在的提交不在 main 上"; exit 1; }
 
   # 发布之前对标签所在的提交跑全部检查（含任务目录样本与对外契约，与上一次发布比较）
   checks:

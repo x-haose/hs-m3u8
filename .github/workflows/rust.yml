@@ -2,7 +2,7 @@ name: rust
 
 on:
   push:
-    branches: [master]
+    branches: [main]
   pull_request:
   workflow_dispatch:
   # wheels.yml 发布之前对标签所在的提交跑一遍全部检查
