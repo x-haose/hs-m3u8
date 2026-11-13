@@ -11,11 +11,12 @@
 //! EXT-X-DISCONTINUITY；组内缺失的分片不标出，保留原时间戳，与 MP4 一致：缺失往往只在一条轨上，只给一条轨
 //! 加不连续标记会让各轨的不连续段编号对不上（RFC 8216 6.2.4 要求各轨一致）。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 
+use hs_m3u8_remux::fmp4;
 use hs_m3u8_remux::standalone::{self, Format};
 use tokio_util::sync::CancellationToken;
 
@@ -25,7 +26,7 @@ use crate::entries::{self, is_canonical_number};
 use crate::error::io_error;
 use crate::ident::Fingerprint;
 use crate::selection::SelectionRecord;
-use crate::{Error, HlsUnsupported, Unsupported};
+use crate::{Error, HlsUnsupported, Unsupported, WorkDirProblem};
 
 const INDEX: &str = "index.m3u8";
 
@@ -193,6 +194,7 @@ fn fill_track<'a>(
     };
     let mut index = 0usize;
     for group in groups {
+        let format = check_group(group, work_dir)?;
         let init = match &group.init {
             Some(path) => {
                 let name = path
@@ -208,12 +210,7 @@ fn fill_track<'a>(
             }
             None => None,
         };
-        let first = &group.segments.first().expect("每组每轨至少一个分片").path;
-        // 同一不连续段组内文件格式不变（RFC 8216 6.2.1：格式变化处必须有 EXT-X-DISCONTINUITY）
-        let ext = match group.init {
-            Some(_) => FMP4,
-            None => extension(sniff(first, work_dir)?),
-        };
+        let ext = format.map_or(FMP4, extension);
         let mut segments = Vec::with_capacity(group.segments.len());
         for segment in &group.segments {
             let name = format!("{index}.{ext}");
@@ -235,6 +232,41 @@ fn bits_per_second(len: u64, duration_us: u64) -> Option<u64> {
     let bits = u128::from(len) * 8 * 1_000_000;
     let duration = u128::from(duration_us);
     (duration > 0).then(|| u64::try_from(bits.div_ceil(duration)).unwrap_or(u64::MAX))
+}
+
+/// 放进本地 HLS 之前核对一组里一条轨的文件，返回没有 init 段的分片的格式（有 init 段时为 None）。下载时都核对过，
+/// 通不过即任务目录里的文件被改动过，报任务目录损坏：没有 init 段的分片须认得出格式（见 [`standalone::read_head`]），
+/// 且与组里第一个相同（RFC 8216 6.2.1：格式变化处必须有 EXT-X-DISCONTINUITY）；fMP4 的 init 段与分片的结构须完整
+/// （见 [`fmp4::check`]）。
+fn check_group(group: &GroupTrack, work_dir: &Path) -> Result<Option<Format>, Error> {
+    let corrupt = |detail: String| Error::WorkDir {
+        path: work_dir.to_path_buf(),
+        problem: WorkDirProblem::Corrupt(detail),
+    };
+    let Some(init_path) = &group.init else {
+        let first = &group.segments.first().expect("每组每轨至少一个分片").path;
+        let format = sniff(first, work_dir)?;
+        for segment in &group.segments[1..] {
+            if sniff(&segment.path, work_dir)? != format {
+                let path = segment.path.display();
+                return Err(corrupt(format!("分片格式与同组的第一个分片不同：{path}")));
+            }
+        }
+        return Ok(Some(format));
+    };
+    let read = |path: &Path| fs::read(path).map_err(io_error("读取", path));
+    let broken = |path: &Path, problem: fmp4::Problem| {
+        corrupt(format!("{} 的 fMP4 结构不对：{problem}", path.display()))
+    };
+    let init = read(init_path)?;
+    let trex: HashMap<u32, u32> =
+        fmp4::trex_sample_sizes(&init).map_err(|problem| broken(init_path, problem))?;
+    fmp4::check(&init, &trex).map_err(|problem| broken(init_path, problem))?;
+    for segment in &group.segments {
+        fmp4::check(&read(&segment.path)?, &trex)
+            .map_err(|problem| broken(&segment.path, problem))?;
+    }
+    Ok(None)
 }
 
 /// 没有 init 段的分片的格式（见 [`standalone::read_head`]）。

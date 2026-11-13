@@ -604,7 +604,8 @@ async fn merge_recorded_merges_without_the_network() {
     assert_eq!(outcome(&output), (Some(want), vec![]));
 }
 
-/// 任务目录里的分片被改成认不出的内容（下载时都核对过）：合并 MP4 与写本地 HLS 都报任务目录损坏。
+/// 任务目录里的分片被改成认不出的内容（下载时都核对过）：合并 MP4 与写本地 HLS 都报任务目录损坏。改的是组里的第二个
+/// 分片：本地 HLS 按第一个分片定扩展名，其余的同样要核对。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_tampered_segment_is_a_corrupt_work_dir_for_every_target() {
     let dir = test_dir("resume_tampered");
@@ -617,8 +618,17 @@ async fn a_tampered_segment_is_a_corrupt_work_dir_for_every_target() {
     let segment = std::fs::read_dir(work_dir.join("tracks/0"))
         .unwrap()
         .map(|e| e.unwrap().path())
-        .find(|p| p.extension().is_some_and(|e| e == "seg"))
+        .filter(|p| p.extension().is_some_and(|e| e == "seg"))
+        .max()
         .unwrap();
+    assert!(
+        segment
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("0-fresh-1-")
+    );
     std::fs::write(&segment, b"<html>not a segment</html>").unwrap();
 
     for target in [
