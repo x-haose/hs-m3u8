@@ -39,6 +39,8 @@ build-backend = "maturin"
 # 开发工具固定版本：类型检查与格式的结果随版本变化
 dev = [
     "basedpyright==1.40.2",
+    # 对外契约检查：Python 接口与最近的发布比较（scripts/check_compat.py）
+    "griffe==2.4.1",
     "maturin==1.15.0",
     "mypy==2.4.0",
     "pytest==9.1.1",
@@ -104,6 +106,8 @@ ignore = [
 "examples/**" = ["T201", "D103"]
 # 运行 PATH 里的 cargo（与 Makefile 一样），参数是写死的与 deny.toml 里的平台
 "scripts/licenses.py" = ["S603", "S607"]
+# 运行 PATH 里的 git 与 griffe，参数是写死的与 git 列出的标签
+"scripts/check_compat.py" = ["S603", "S607"]
 
 [tool.mypy]
 strict = true

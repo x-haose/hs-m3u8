@@ -16,7 +16,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
+      # 完整的历史与标签：对外契约要与最近的发布比较（make compat）
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - name: MSVC 环境（Windows）
         if: runner.os == 'Windows'
@@ -47,7 +50,7 @@ jobs:
         env:
           UV_PYTHON: "3.12"
 
-      # 检查项定义在 Makefile 的 rs_* 目标里。依赖图、许可证、覆盖率与 Python 的检查与平台无关，只在 Linux 上查；
+      # 检查项定义在 Makefile 的 rs_* 目标里。依赖图、许可证、覆盖率、对外契约与 Python 的检查与平台无关，只在 Linux 上查；
       # 格式、clippy、文档与测试涉及各平台专属的代码（cfg 下的、sysproxy 的 macOS 与 Windows 实现），三个平台都查
       - name: 安装 cargo-deny 与 cargo-llvm-cov（Linux）
         if: runner.os == 'Linux'
@@ -57,7 +60,7 @@ jobs:
 
       - name: 全部检查（Linux）
         if: runner.os == 'Linux'
-        run: make rs_check py_check py_cov
+        run: make rs_check py_check py_cov compat
 
       # abi3 的 wheel 在更新的 Python 上也要能用
       - name: 最新版 Python 上的测试（Linux）

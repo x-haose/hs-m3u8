@@ -1,6 +1,6 @@
 .PHONY: check ffmpeg ffmpeg_present licenses \
 	rs_check rs_fmt rs_lint rs_clippy rs_doc rs_test rs_cov \
-	py_check py_cov py_env py_develop py_stubs py_test
+	py_check py_cov py_env py_develop py_stubs py_test compat
 
 FFMPEG_DIST := third_party/ffmpeg/dist
 
@@ -16,7 +16,11 @@ export PYO3_PYTHON := $(PYTHON)
 # README 里的 Python 示例抽成文件（每个代码块一个）放在这里做类型检查
 README_EXAMPLES := target/readme-examples
 
-check: rs_check py_check py_cov
+check: rs_check py_check py_cov compat
+
+# 对外契约（Python 接口、任务目录格式）与最近的发布比较；要完整的提交历史与标签
+compat: py_env
+	uv run --no-sync python scripts/check_compat.py
 
 # Rust 的全部检查；CI 按平台调用其中的子目标
 rs_check: rs_fmt rs_lint rs_clippy rs_doc rs_test rs_cov

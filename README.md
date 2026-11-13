@@ -150,12 +150,13 @@ Windows 上在已加载 MSVC 环境的 MSYS2 里运行 `build.sh`。已按 `buil
 
 ```bash
 make ffmpeg       # 下载并编译精简 FFmpeg 静态库到 third_party/ffmpeg/dist，只需一次
-make check        # 全部检查：Rust（格式、依赖方向、禁止压制属性、cargo-deny、随发布包的声明、clippy、文档、测试、覆盖率）与 Python
+make check        # 全部检查：Rust（格式、依赖方向、禁止压制属性、cargo-deny、随发布包的声明、clippy、文档、测试、覆盖率）、Python 与对外契约
 make py_develop   # 构建扩展模块并装进 .venv
 make py_test      # Python 端到端测试
 make py_cov       # Python 绑定的覆盖率：插桩后生成一遍存根、跑一遍端到端测试
 make py_stubs     # 改了绑定的类型后重新生成类型存根（python/hs_m3u8）
 make licenses     # 依赖或 FFmpeg 的版本变了之后重新生成 LICENSES 下的声明
+make compat       # 对外契约与最近的发布比较：Python 接口（griffe）、已发布的任务目录样本不得改动
 uv run --no-sync python examples/download.py   # 运行示例（先 make ffmpeg 与 make py_develop）
 ```
 
