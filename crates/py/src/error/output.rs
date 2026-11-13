@@ -173,17 +173,19 @@ variants! {
 }
 
 variants! {
-    /// 本地 HLS 表示不了的内容；可只输出 MP4（`Target.Mp4`）。
+    /// 本地 HLS 表示不了的内容。
     pub enum HlsUnsupported {
         /// 这条轨里不用 init 段的不连续段组排在用 init 段（fMP4）的组后面：EXT-X-MAP 一直作用到下一个
-        /// EXT-X-MAP。直播续录时服务器从 fMP4 换成 TS 会这样
+        /// EXT-X-MAP。直播续录时服务器从 fMP4 换成 TS 会这样。可只输出 MP4（`Target.Mp4`）
         MixedInit {
             /// 第几条轨
             track: usize,
         },
-        /// 音视频分离时主播放列表必须写码率，而某条轨的分片声明的时长都为 0 算不出，来源也没写
+        /// 音视频分离时主播放列表必须写码率，而某条轨的分片声明的时长都为 0 算不出，来源也没写。可只输出 MP4
+        /// （`Target.Mp4`）
         BandwidthUnknown {},
-        /// 不用 init 段的一条轨在这一组里换了分片格式（TS 与打包音频，或打包音频的格式之间），来源没在换格式处标不连续
+        /// 不用 init 段的一条轨在这一组里换了分片格式（TS 与打包音频，或打包音频的格式之间），来源没在换格式处标不连续。
+        /// MP4 同样放不进（`Mp4Unsupported.FormatChangedInGroup`）
         #[pyo3(constructor = (*, group, track))]
         FormatChangedInGroup {
             /// 第几个不连续段组

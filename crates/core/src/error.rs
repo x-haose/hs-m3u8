@@ -318,7 +318,7 @@ pub enum Unsupported {
     /// 都录到的组按会话、不连续段排列的下标
     #[error("{0}")]
     Mp4(Mp4Unsupported),
-    /// 本地 HLS 表示不了这些内容，可只输出 MP4（[`crate::Target::Mp4`]）
+    /// 本地 HLS 表示不了这些内容；能否改为只输出 MP4（[`crate::Target::Mp4`]）见各项
     #[error("{0}")]
     Hls(HlsUnsupported),
     #[error("同一不连续段内 EXT-X-MAP 发生变化（第 {track} 条轨，不连续段 {discontinuity}）")]
@@ -352,15 +352,15 @@ fn base_data_offset_text(at: u64) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HlsUnsupported {
     /// 第 `track` 条轨里没有 init 段的不连续段组排在有 init 段（fMP4）的组后面：EXT-X-MAP 一直作用到下一个
-    /// EXT-X-MAP，前面的 init 段会被用在后面的组上。直播续录时服务器从 fMP4 换成 TS 会这样
+    /// EXT-X-MAP，前面的 init 段会被用在后面的组上。直播续录时服务器从 fMP4 换成 TS 会这样。可只输出 MP4
     #[error("第 {track} 条轨在 fMP4 的段之后又有不用 init 段的段，本地 HLS 无法表示")]
     MixedInit { track: usize },
     /// 不用 init 段的第 `track` 条轨在第 `group` 个不连续段组里换了分片格式（TS 与打包音频，或打包音频的格式之间），
     /// 来源没在换格式处标 EXT-X-DISCONTINUITY（RFC 8216 6.2.1 要求标）：本地 HLS 的分片扩展名须与格式相符，而一组共用
-    /// 一种格式
+    /// 一种格式。MP4 同样放不进，合并时报 [`Mp4Unsupported::FormatChangedInGroup`]
     #[error("第 {group} 组第 {track} 条轨的分片格式在组内变了，本地 HLS 无法表示")]
     FormatChangedInGroup { group: usize, track: usize },
-    /// 音视频分离时主播放列表必须写码率（BANDWIDTH），而某条轨的分片声明的时长都为 0 算不出，来源也没写
+    /// 音视频分离时主播放列表必须写码率（BANDWIDTH），而某条轨的分片声明的时长都为 0 算不出，来源也没写。可只输出 MP4
     #[error(
         "某条轨的分片声明的时长都为 0、来源也没写 BANDWIDTH，算不出本地 HLS 主播放列表必填的码率"
     )]

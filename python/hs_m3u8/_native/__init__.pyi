@@ -470,14 +470,14 @@ class FileError(HsM3u8Error):
 
 class HlsUnsupported:
     r"""
-    本地 HLS 表示不了的内容；可只输出 MP4（`Target.Mp4`）。
+    本地 HLS 表示不了的内容。
     """
     def __repr__(self) -> builtins.str: ...
     @typing.final
     class MixedInit(HlsUnsupported):
         r"""
         这条轨里不用 init 段的不连续段组排在用 init 段（fMP4）的组后面：EXT-X-MAP 一直作用到下一个
-        EXT-X-MAP。直播续录时服务器从 fMP4 换成 TS 会这样
+        EXT-X-MAP。直播续录时服务器从 fMP4 换成 TS 会这样。可只输出 MP4（`Target.Mp4`）
         """
         __match_args__ = ("track",)
         @property
@@ -490,7 +490,8 @@ class HlsUnsupported:
     @typing.final
     class BandwidthUnknown(HlsUnsupported):
         r"""
-        音视频分离时主播放列表必须写码率，而某条轨的分片声明的时长都为 0 算不出，来源也没写
+        音视频分离时主播放列表必须写码率，而某条轨的分片声明的时长都为 0 算不出，来源也没写。可只输出 MP4
+        （`Target.Mp4`）
         """
         __match_args__ = ()
         def __new__(cls) -> HlsUnsupported.BandwidthUnknown: ...
@@ -498,7 +499,8 @@ class HlsUnsupported:
     @typing.final
     class FormatChangedInGroup(HlsUnsupported):
         r"""
-        不用 init 段的一条轨在这一组里换了分片格式（TS 与打包音频，或打包音频的格式之间），来源没在换格式处标不连续
+        不用 init 段的一条轨在这一组里换了分片格式（TS 与打包音频，或打包音频的格式之间），来源没在换格式处标不连续。
+        MP4 同样放不进（`Mp4Unsupported.FormatChangedInGroup`）
         """
         __match_args__ = ("group", "track",)
         @property
@@ -517,7 +519,7 @@ class HlsUnsupported:
 @typing.final
 class HlsUnsupportedError(RequestError):
     r"""
-    本地 HLS 表示不了这些内容；可只输出 MP4（`Target.Mp4`）。
+    本地 HLS 表示不了这些内容；能否改为只输出 MP4（`Target.Mp4`）见原因的各项。
     """
     @property
     def reason(self) -> HlsUnsupported.MixedInit | HlsUnsupported.BandwidthUnknown | HlsUnsupported.FormatChangedInGroup:

@@ -298,7 +298,7 @@ exception! {
 }
 
 exception! {
-    /// 本地 HLS 表示不了这些内容；可只输出 MP4（`Target.Mp4`）。
+    /// 本地 HLS 表示不了这些内容；能否改为只输出 MP4（`Target.Mp4`）见原因的各项。
     pub struct HlsUnsupportedError extends RequestError {
         /// 表示不了的原因
         pub reason: HlsUnsupported,
