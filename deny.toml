@@ -30,6 +30,7 @@ allow = [
     "MIT",
     "Unicode-3.0",
     "WTFPL", # ffmpeg-next、ffmpeg-sys-next
+    "Zlib", # foldhash（hashbrown 的默认哈希，经 rusqlite 引入）
 ]
 # 只对下列包放行白名单之外的宽松许可证
 exceptions = [

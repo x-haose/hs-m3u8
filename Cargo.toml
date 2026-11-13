@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/hls", "crates/py", "crates/remux", "crates/sysproxy"]
+members = ["crates/app", "crates/core", "crates/hls", "crates/py", "crates/remux", "crates/sysproxy"]
 
 [workspace.package]
 # 发布的版本（SemVer）；Python 包的版本由 maturin 按 PEP 440 换写，如 1.0.0-dev.0 即 1.0.0.dev0
@@ -27,6 +27,8 @@ pyo3 = { version = "0.29.3", features = ["abi3-py312", "experimental-async", "mu
 # 默认特性带 numpy 等类型的存根支持，用不上；infer_signature 生成参数默认值的写法
 pyo3-stub-gen = { version = "0.23.1", default-features = false, features = ["infer_signature"] }
 reqwest = { version = "0.13.5", features = ["cookies", "socks"] }
+# bundled：随应用编译 SQLite，不依赖系统里的版本
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 rustls = { version = "0.23.46", default-features = false, features = ["std"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

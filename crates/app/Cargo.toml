@@ -1,0 +1,24 @@
+[package]
+name = "hs-m3u8-app"
+version.workspace = true
+description = "Desktop application domain: task storage, task lifecycle and throttled progress over hs-m3u8-core, without any UI framework"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+hs-m3u8-core = { path = "../core" }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+axum.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
+
+[lints]
+workspace = true

@@ -50,7 +50,7 @@ rs_doc: ffmpeg_present py_env
 rs_test: ffmpeg_present py_env
 	cargo test --workspace
 
-# 数据正确性模块（hls、core、remux）的行覆盖各自不低于 80%
+# 数据正确性模块（hls、core、remux，与桌面应用的任务存储与生命周期 app）的行覆盖各自不低于 80%
 rs_cov: ffmpeg_present
 	@cargo llvm-cov --version >/dev/null 2>&1 || { echo "缺少 cargo-llvm-cov，版本见 .github/workflows/rust.yml"; exit 1; }
 	# 源码改动后旧的插桩产物会混进统计，先清掉
@@ -58,6 +58,7 @@ rs_cov: ffmpeg_present
 	cargo llvm-cov -p hs-m3u8-hls --fail-under-lines 80 --summary-only
 	cargo llvm-cov -p hs-m3u8-core --fail-under-lines 80 --summary-only
 	cargo llvm-cov -p hs-m3u8-remux --fail-under-lines 80 --summary-only
+	cargo llvm-cov -p hs-m3u8-app --fail-under-lines 80 --summary-only
 
 # 装好的 FFmpeg 须是当前的构建脚本装的（标记文件是装它的脚本的副本）：改了组件而本地没重新构建时在这里失败，不让
 # 测试以缺组件的样子失败
