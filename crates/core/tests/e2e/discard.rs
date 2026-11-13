@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use hs_m3u8_core::{CancellationToken, Error, Leftover, LeftoverKind, Unsettled, WorkDirProblem};
 
 use crate::server::Server;
-use crate::{OUTPUTS_FORMAT_VERSION, engine, fixture, request, run, test_dir};
+use crate::{RELEASED_OUTPUTS_FORMAT_VERSION, engine, fixture, request, run, test_dir};
 #[cfg(unix)]
 use crate::{Writable, is_root};
 
@@ -38,7 +38,7 @@ async fn failed_job(dir: &Path) -> PathBuf {
 /// 在任务目录 `work` 里记下 MP4 输出 `target` 换上没做完，返回它的临时名与挪开的名字。
 fn record_unfinished(work: &Path, target: &Path) -> (PathBuf, PathBuf) {
     let record = serde_json::json!({
-        "format_version": OUTPUTS_FORMAT_VERSION,
+        "format_version": RELEASED_OUTPUTS_FORMAT_VERSION,
         "swapped": false,
         "outputs": [{"kind": "mp4", "target": target, "fingerprint": FINGERPRINT}],
     });

@@ -5,7 +5,9 @@ use hs_m3u8_core::{Error, Target, WorkDirProblem};
 
 use super::{assert_hls_matches, both, names_in, request_to};
 use crate::server::Server;
-use crate::{OUTPUTS_FORMAT_VERSION, apple_double, engine, fixture, request, run, test_dir};
+use crate::{
+    RELEASED_OUTPUTS_FORMAT_VERSION, apple_double, engine, fixture, request, run, test_dir,
+};
 #[cfg(unix)]
 use crate::{Writable, is_root, make_writable};
 
@@ -249,7 +251,7 @@ async fn interrupted_swaps_are_recovered_before_anything_else() {
     std::fs::write(&temp, "写了一半").unwrap();
     std::fs::write(&aside, "旧").unwrap();
     let record = serde_json::json!({
-        "format_version": OUTPUTS_FORMAT_VERSION,
+        "format_version": RELEASED_OUTPUTS_FORMAT_VERSION,
         "swapped": false,
         "outputs": [{"kind": "mp4", "target": target, "fingerprint": "0123456789abcdef"}],
     });

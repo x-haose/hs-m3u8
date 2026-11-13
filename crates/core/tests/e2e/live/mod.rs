@@ -39,7 +39,7 @@ fn playlist_in(dir: &str, indices: &[u64], end: bool) -> String {
 const JUDGED_TARGET: &str = "1";
 
 /// 同 [`playlist_in`]，TARGETDURATION 为 [`JUDGED_TARGET`]。
-fn judged_in(dir: &str, indices: &[u64], end: bool) -> String {
+pub(crate) fn judged_in(dir: &str, indices: &[u64], end: bool) -> String {
     media_playlist(JUDGED_TARGET, dir, indices, end)
 }
 
@@ -72,7 +72,7 @@ fn put_long(server: &Server, dir: &str, indices: &[u64]) {
     }
 }
 
-fn live_request(url: Url, dir: &Path, stall_timeout: Duration) -> JobRequest {
+pub(crate) fn live_request(url: Url, dir: &Path, stall_timeout: Duration) -> JobRequest {
     let mut req = request(url, dir);
     req.live = Some(LiveOptions {
         max_duration: None,
@@ -81,7 +81,7 @@ fn live_request(url: Url, dir: &Path, stall_timeout: Duration) -> JobRequest {
     req
 }
 
-const STALL: Duration = Duration::from_secs(2);
+pub(crate) const STALL: Duration = Duration::from_secs(2);
 
 /// 每次退避 `delay`、最多 3 次尝试的重试：让一个先失败两次的请求持续一段已知的时间。
 fn slow_retry(delay: Duration) -> RetryPolicy {

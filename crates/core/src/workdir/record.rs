@@ -681,36 +681,6 @@ mod tests {
         );
     }
 
-    /// 已发布版本的 job.json 样本（tests/fixtures/workdir/job/<版本>/ 下的任务目录与单独的记录，发布后不再改动）都读得
-    /// 了；当前版本的按当前写法重新写出逐字节相同，改了写法而没升版本时在这里失败。
-    #[test]
-    fn released_samples_are_readable() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/workdir/job");
-        let mut checked = 0;
-        for dir in std::fs::read_dir(&root).unwrap() {
-            let dir = dir.unwrap().path();
-            let version: u32 = dir.file_name().unwrap().to_str().unwrap().parse().unwrap();
-            for sample in std::fs::read_dir(&dir).unwrap() {
-                let sample = sample.unwrap().path();
-                let path = if sample.is_dir() {
-                    sample.join("job.json")
-                } else {
-                    sample
-                };
-                let bytes = std::fs::read(&path).unwrap();
-                let written: Version = serde_json::from_slice(&bytes).unwrap();
-                assert_eq!(written.format_version, version, "{}", path.display());
-                let record = decode(&bytes).unwrap_or_else(|e| panic!("{}：{e}", path.display()));
-                if version == JOB_FORMAT_VERSION {
-                    assert_eq!(encode(&record), bytes, "{}", path.display());
-                }
-                checked += 1;
-            }
-        }
-        assert!(checked > 0, "{} 下没有样本", root.display());
-    }
-
     #[test]
     fn preference_digest_ignores_language_case_only() {
         let digest = |variant, audio| preference_digest(&Preference { variant, audio });
@@ -731,5 +701,49 @@ mod tests {
         ] {
             assert_ne!(base, other);
         }
+    }
+}
+
+/// 已发布版本的样本（tests/fixtures/workdir/job/<格式版本>/<名字>/work/，由 core 的端到端测试 `samples::write_samples`
+/// 生成，发布后不再改动）。
+#[cfg(test)]
+pub(super) mod released {
+    use std::path::Path;
+
+    use super::*;
+
+    /// 都读得了；当前版本的按当前写法重新写出逐字节相同，改了写法而没升版本时在这里失败。最新的样本须是当前版本的：
+    /// 升了版本而没生成新版本的样本时在这里失败。
+    #[test]
+    fn samples_are_readable() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/workdir/job");
+        let mut newest = 0;
+        for dir in visible_entries(&root) {
+            let version: u32 = dir.file_name().unwrap().to_str().unwrap().parse().unwrap();
+            newest = newest.max(version);
+            for sample in visible_entries(&dir) {
+                let path = sample.join("work/job.json");
+                let bytes = std::fs::read(&path).unwrap();
+                let written: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(written["format_version"], version, "{}", path.display());
+                let record = decode(&bytes).unwrap_or_else(|e| panic!("{}：{e}", path.display()));
+                if version == JOB_FORMAT_VERSION {
+                    assert_eq!(encode(&record), bytes, "{}", path.display());
+                }
+            }
+        }
+        assert_eq!(
+            newest, JOB_FORMAT_VERSION,
+            "缺少当前格式版本的样本，见 samples::write_samples"
+        );
+    }
+
+    /// 目录 `dir` 里名字不以 `.` 开头的项（`.DS_Store` 之类不算）。
+    pub(in crate::workdir) fn visible_entries(dir: &Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| !path.file_name().unwrap().to_str().unwrap().starts_with('.'))
+            .collect()
     }
 }

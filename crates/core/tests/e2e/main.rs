@@ -156,7 +156,7 @@ fn request(url: Url, dir: &Path) -> JobRequest {
 }
 
 /// 手写 outputs.json 用的格式版本：1.0 写的版本，此后的版本照样要读得了。
-const OUTPUTS_FORMAT_VERSION: u64 = 13;
+const RELEASED_OUTPUTS_FORMAT_VERSION: u64 = 13;
 
 fn engine() -> Engine {
     Engine::new(NonZeroUsize::new(8).unwrap())
