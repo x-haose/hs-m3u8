@@ -101,7 +101,7 @@ rustls 0.23.46  Apache-2.0 OR ISC OR MIT  https://github.com/rustls/rustls
 rustls-native-certs 0.8.4  Apache-2.0 OR ISC OR MIT  https://github.com/rustls/rustls-native-certs
 rustls-pki-types 1.15.1  MIT OR Apache-2.0  https://github.com/rustls/pki-types
 rustls-platform-verifier 0.7.1  MIT OR Apache-2.0  https://github.com/rustls/rustls-platform-verifier
-rustls-webpki 0.103.15  ISC  https://github.com/rustls/webpki
+rustls-webpki 0.103.16  ISC  https://github.com/rustls/webpki
 rustpython-ast 0.4.0  MIT  https://github.com/RustPython/Parser
 rustpython-parser 0.4.0  MIT  https://github.com/RustPython/Parser
 rustpython-parser-core 0.4.0  MIT  https://github.com/RustPython/Parser
@@ -129,7 +129,7 @@ thiserror 2.0.21  MIT OR Apache-2.0  https://github.com/dtolnay/thiserror
 time 0.3.55  MIT OR Apache-2.0  https://github.com/time-rs/time
 time-core 0.1.9  MIT OR Apache-2.0  https://github.com/time-rs/time
 tinystr 0.8.4  Unicode-3.0  https://github.com/unicode-org/icu4x
-tokio 1.53.2  MIT  https://github.com/tokio-rs/tokio
+tokio 1.54.1  MIT  https://github.com/tokio-rs/tokio
 tokio-rustls 0.26.6  MIT OR Apache-2.0  https://github.com/rustls/tokio-rustls
 tokio-util 0.7.20  MIT  https://github.com/tokio-rs/tokio
 toml 1.1.8+spec-1.1.0  MIT OR Apache-2.0  https://github.com/toml-rs/toml
@@ -6514,7 +6514,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-rustls-webpki 0.103.15：LICENSE
+rustls-webpki 0.103.16：LICENSE
 --------------------------------------------------------------------------------
 
 Except as otherwise noted, this project is licensed under the following
@@ -7158,7 +7158,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 --------------------------------------------------------------------------------
-tokio 1.53.2：LICENSE
+tokio 1.54.1：LICENSE
 tokio-util 0.7.20：LICENSE
 --------------------------------------------------------------------------------
 
