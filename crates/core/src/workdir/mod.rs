@@ -26,6 +26,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 pub(crate) use self::lock::Lock;
 use self::lock::acquire;
@@ -44,7 +45,7 @@ use self::removal::{remove_steps, remove_tracks};
 use crate::entries;
 use crate::error::io_error;
 use crate::ident::Fingerprint;
-use crate::{Error, Leftover, WorkDirProblem, blocking, busy, volume};
+use crate::{Error, Leftover, Saved, WorkDirProblem, blocking, busy, volume};
 
 const JOB_FILE: &str = "job.json";
 const LOCK_FILE: &str = "lock";
@@ -205,26 +206,7 @@ impl WorkDir {
     /// 直播录制目录中前 `tracks` 条轨已完成的分片与 init 段。
     pub(crate) async fn scan(&self, tracks: usize) -> Result<Stored, Error> {
         let layout = self.layout.clone();
-        blocking(move || {
-            let mut stored = Stored {
-                segments: Vec::with_capacity(tracks),
-                init_bytes: 0,
-            };
-            for track in 0..tracks {
-                let dir = layout.track(track);
-                let mut files: Vec<SegmentFile> = list(&dir, parse_segment_name)?
-                    .into_iter()
-                    .map(|(name, path, len)| SegmentFile { name, path, len })
-                    .collect();
-                files.sort_by_key(|f| (f.name.session, f.name.sequence));
-                stored.segments.push(files);
-                for (_, _, len) in list(&dir, parse_init_name)? {
-                    stored.init_bytes += len;
-                }
-            }
-            Ok(stored)
-        })
-        .await?
+        blocking(move || scan(&layout, tracks)).await?
     }
 
     /// 删除整个任务目录。只删本库写的文件（`job.json`、`outputs.json`、各轨的分片与 init 段，以及它们写到一半的
@@ -241,6 +223,52 @@ impl WorkDir {
             .await
             .expect("不取消时删除做完才返回")
     }
+}
+
+/// 前 `tracks` 条轨已完成的分片与 init 段。
+fn scan(layout: &Layout, tracks: usize) -> Result<Stored, Error> {
+    let mut stored = Stored {
+        segments: Vec::with_capacity(tracks),
+        init_bytes: 0,
+    };
+    for track in 0..tracks {
+        let dir = layout.track(track);
+        let mut files: Vec<SegmentFile> = list(&dir, parse_segment_name)?
+            .into_iter()
+            .map(|(name, path, len)| SegmentFile { name, path, len })
+            .collect();
+        files.sort_by_key(|f| (f.name.session, f.name.sequence));
+        stored.segments.push(files);
+        for (_, _, len) in list(&dir, parse_init_name)? {
+            stored.init_bytes += len;
+        }
+    }
+    Ok(stored)
+}
+
+/// 任务目录 `root`（绝对路径）里已完成的内容，不加锁、不改动；目录或 `job.json` 不存在时为 None（见
+/// [`crate::Engine::inspect`]）。
+pub(crate) async fn inspect(root: PathBuf) -> Result<Option<Saved>, Error> {
+    blocking(move || read_saved(&root)).await?
+}
+
+fn read_saved(root: &Path) -> Result<Option<Saved>, Error> {
+    if !exists(root)? {
+        return Ok(None);
+    }
+    let Some(record) = read_job(root)? else {
+        return Ok(None);
+    };
+    let layout = Layout {
+        root: root.to_path_buf(),
+    };
+    let stored = scan(&layout, record.streams().len())?;
+    Ok(Some(Saved {
+        live: matches!(record.kind, RecordKind::Live),
+        segments: stored.segments.iter().map(Vec::len).sum(),
+        bytes: stored.bytes(),
+        duration: Duration::from_micros(stored.duration_us(0)),
+    }))
 }
 
 /// 有可续的内容时读取任务目录的记录；目录或 `job.json` 不存在，或还没有已完成的分片时为 None（按当前请求
@@ -386,7 +414,12 @@ fn list<T>(dir: &Path, parse: fn(&str) -> Option<T>) -> Result<Vec<(T, PathBuf, 
         let Some(parsed) = path.file_name().and_then(|n| n.to_str()).and_then(parse) else {
             continue;
         };
-        let meta = entry.metadata().map_err(io_error("读取", &path))?;
+        let meta = match entry.metadata() {
+            Ok(meta) => meta,
+            // 列出之后、读属性之前被删掉（放弃任务、别的进程收拾目录时）：已不在，不算已完成的内容
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(cause) => return Err(io_error("读取", &path)(cause)),
+        };
         if meta.is_file() {
             files.push((parsed, path, meta.len()));
         }
@@ -491,6 +524,34 @@ mod released {
             .collect();
         versions.sort();
         versions
+    }
+
+    /// 各版本的样本都能查看：分片数为各轨里完整（不带 `.part`）的分片文件数，直播样本认作直播；不存在的目录为 None。
+    #[test]
+    fn released_samples_can_be_inspected() {
+        for (_, dir) in versions("job") {
+            for sample in visible_entries(&dir) {
+                let work = sample.join("work");
+                let complete = visible_entries(&work.join(TRACKS_DIR))
+                    .iter()
+                    .flat_map(|track| visible_entries(track))
+                    .filter(|file| {
+                        let name = file.file_name().unwrap().to_str().unwrap();
+                        parse_segment_name(name).is_some()
+                    })
+                    .count();
+                let saved = super::read_saved(&work).unwrap().unwrap();
+                assert_eq!(saved.segments, complete, "{}", work.display());
+                assert!(saved.segments > 0 && saved.bytes > 0, "{}", work.display());
+                let name = sample.file_name().unwrap().to_str().unwrap();
+                assert_eq!(saved.live, name.starts_with("live"), "{}", work.display());
+            }
+        }
+        assert_eq!(super::read_saved(&dir_missing()).unwrap(), None);
+    }
+
+    fn dir_missing() -> PathBuf {
+        std::env::temp_dir().join(format!("hs-m3u8-{}-no-such-work-dir", std::process::id()))
     }
 
     /// 目录 `dir` 里名字不以 `.` 开头的项（`.DS_Store` 之类不算）。

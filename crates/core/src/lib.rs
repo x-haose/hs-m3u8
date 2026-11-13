@@ -76,8 +76,8 @@ pub use probe::Probe;
 pub use proxy::{Bypass, ProxySource, SystemProxy, system_proxy};
 pub use report::{
     FileCount, Leftover, LeftoverKind, LiveEnd, LiveReport, MissReason, Missed, Mp4Output,
-    NewSession, Output, Progress, RefreshReason, Retrying, SegmentCounts, SourceBreak, Stage,
-    StallCause, Writing,
+    NewSession, Output, Progress, RefreshReason, Retrying, Saved, SegmentCounts, SourceBreak,
+    Stage, StallCause, Writing,
 };
 pub use request::{
     HttpOptions, JobRequest, KeyOverride, LiveOptions, Proxy, RetryPolicy, Source, Timeouts,
@@ -170,6 +170,21 @@ impl Engine {
         let cancel = CancellationToken::new();
         let task = tokio::spawn(job::merge_recorded(output, cancel.clone(), progress_tx));
         Ok(Job::new(task, cancel, CancellationToken::new(), progress))
+    }
+
+    /// 查看任务目录 `work_dir`（相对路径按当前目录补全）里已完成的内容，不联网、不加锁、不改动任何东西；任务正在运行时
+    /// 为读到的那一刻的。目录或其中的 `job.json` 不存在时为 None。用于任务没在运行时显示已下载了多少；点播的总片数要
+    /// 拉播放列表才知道，不在其中。
+    ///
+    /// 路径为空或不合要求（见 [`Target`]）时报参数错误；目录所在的盘读不到时报 [`Error::VolumeUnavailable`]，但 macOS
+    /// 上卷卸下后与目录被删分不出来，这时为 None；
+    /// `job.json` 是本库读不了的格式版本写的时报 [`WorkDirProblem::UnsupportedVersion`]、无法解析时报
+    /// [`WorkDirProblem::Corrupt`]。不在 tokio 运行时内调用会 panic。
+    pub async fn inspect(&self, work_dir: &Path) -> Result<Option<Saved>, Error> {
+        if work_dir.as_os_str().is_empty() {
+            return Err(Error::InvalidInput("任务目录路径为空".to_owned()));
+        }
+        workdir::inspect(output::absolute_path(work_dir)?).await
     }
 
     /// 放弃任务：删除任务目录 `work_dir`（相对路径按当前目录补全），只删本库写的文件。先按其中的记录收拾写到一半

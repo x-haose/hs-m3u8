@@ -8,6 +8,19 @@ use crate::info::Selected;
 use crate::remux::MediaReport;
 use crate::{FetchErrorKind, FetchFailure, HttpFailure, Mp4Unsupported, Purpose, hls};
 
+/// 任务目录里已完成的内容（[`crate::Engine::inspect`]）；各量的含义同 [`Progress`] 里同名的。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Saved {
+    /// 目录里是直播的录制
+    pub live: bool,
+    /// 已完成的分片数，各轨合计
+    pub segments: usize,
+    /// 已完成的分片与 init 段的字节数（解密后）
+    pub bytes: u64,
+    /// 第 0 条轨已完成分片的声明时长之和；直播即已录时长
+    pub duration: Duration,
+}
+
 /// 任务进度快照。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Progress {
