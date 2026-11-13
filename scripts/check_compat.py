@@ -4,13 +4,15 @@
   删除或往里添加文件；新的样本只能整个加，新版本的库须读得了全部样本（由 core 的测试核对）。
 - Python 接口：griffe 找出删掉或改了的公开类、函数、参数（种类、默认值、是否必填），另外比较它不比的：基类（只能
   加）、类型注解、`__match_args__`（只能在末尾加）。类型注解按存根里的文本比较，`typing.Optional[X]` 当作 `X | None`，
-  按顶层 `|` 拆成各项：参数的只能加项；返回值与属性的只能减项，只有本包枚举（取值是它的嵌套子类）新增的取值可以加。
-  存根换了写法（如 `builtins.int` 写成 `int`）也会报出，报错而不放过。主版本比发布时新则只列出、不算失败。
+  按顶层 `|` 拆成各项：参数的只能加项；返回值与属性的只能减项，只有原本列出了本包某个枚举（取值是它的嵌套子类）全部
+  取值的，可以加这个枚举新增的取值。存根换了写法（如 `builtins.int` 写成 `int`）也会报出，报错而不放过。主版本比发布
+  时新则只列出、不算失败。
 
 发布标签写作 `v<主>.<次>.<修订>`，取当前提交上溯可达、且不指向当前提交的最新一个（给要发布的提交打了标签后，仍与上一
 次发布比较）；还没有发布过时没有可比较的。要完整的提交历史与标签（CI 的 checkout 设 fetch-depth: 0）：浅克隆里分不清
 没发布过与没取到标签，一个标签也没有（克隆时没取标签）或版本已过 1.0.0 而找不到发布标签（标签过期的 fork）同样分不
-清，都直接失败。
+清，都直接失败。版本恰为 1.0.0 时不算（首次发布的提交还没有可比较的），所以版本停在 1.0.0 期间标签过期的 fork 仍会
+判为没发布过，这时本地的结论以 CI（取完整的标签）为准。
 """
 
 import ast
@@ -100,19 +102,27 @@ def union_members(annotation: object) -> set[str]:
     return members
 
 
-def is_variant(package: griffe.Module, name: str) -> bool:
-    """`name`（写作 `<类>.<取值>`）是本包的枚举新增的取值：类在包里，取值是它的嵌套子类。"""
-    owner, _, variant = name.rpartition(".")
-    if owner not in package.members:
-        return False
-    base = resolved(package.members[owner])
-    member = base.members.get(variant)
-    return (
-        isinstance(base, griffe.Class)
-        and member is not None
-        and isinstance(found := resolved(member), griffe.Class)
-        and owner in {str(b) for b in found.bases}
-    )
+def variants(package: griffe.Module, owner: str) -> set[str]:
+    """本包里枚举 `owner` 的各取值（它的嵌套子类、基类是它），写作 `<类>.<取值>`；`owner` 不是本包的类时为空集。"""
+    if owner not in package.members or not isinstance(base := resolved(package.members[owner]), griffe.Class):
+        return set()
+    return {
+        f"{owner}.{name}"
+        for name, member in base.members.items()
+        if isinstance(found := resolved(member), griffe.Class) and owner in {str(b) for b in found.bases}
+    }
+
+
+def allowed_addition(packages: tuple[griffe.Module, griffe.Module], old: set[str], name: str) -> bool:
+    """输出的类型注解里新增的一项 `name` 是否不算不兼容。
+
+    它须是本包枚举这次新增的取值（`packages` 为旧、新两个版本的包），且旧注解 `old` 原本就列出了这个枚举的全部取值，
+    即承诺的本来就是「这个枚举的任意取值」。
+    """
+    before, after = packages
+    owner = name.rpartition(".")[0]
+    existing = variants(before, owner)
+    return name in variants(after, owner) - existing and bool(existing) and existing <= old
 
 
 def narrowed(path: str, what: str, old: object, new: object) -> Iterator[str]:
@@ -121,10 +131,13 @@ def narrowed(path: str, what: str, old: object, new: object) -> Iterator[str]:
         yield f"{path}：{what}的类型注解去掉或改了 {' | '.join(sorted(missing))}（现为 {new}）"
 
 
-def widened(package: griffe.Module, path: str, what: str, old: object, new: object) -> Iterator[str]:
-    """输出（返回值、属性）的类型注解：`new` 里有 `old` 没有的项、且不是本包枚举新增的取值时报出。"""
-    added = union_members(new) - union_members(old)
-    if extra := {name for name in added if not is_variant(package, name)}:
+def widened(
+    packages: tuple[griffe.Module, griffe.Module], path: str, what: str, old: object, new: object
+) -> Iterator[str]:
+    """输出（返回值、属性）的类型注解：`new` 里有 `old` 没有的项、且不是可以加的（见 [`allowed_addition`]）时报出。"""
+    before = union_members(old)
+    added = union_members(new) - before
+    if extra := {name for name in added if not allowed_addition(packages, before, name)}:
         yield f"{path}：{what}的类型注解多了 {' | '.join(sorted(extra))}（原为 {old}）"
 
 
@@ -133,40 +146,46 @@ def is_public(name: str) -> bool:
     return not name.startswith("_") or name in {"__new__", "__init__", "__match_args__"}
 
 
-def function_breakages(package: griffe.Module, old: griffe.Function, new: griffe.Function) -> Iterator[str]:
+def function_breakages(
+    packages: tuple[griffe.Module, griffe.Module], old: griffe.Function, new: griffe.Function
+) -> Iterator[str]:
     """函数的返回值只能减项（本包枚举新增的取值除外），两边都有的参数只能加项。"""
-    yield from widened(package, new.path, "返回值", old.returns, new.returns)
+    yield from widened(packages, new.path, "返回值", old.returns, new.returns)
     for parameter in old.parameters:
         if parameter.name in new.parameters:
             current = new.parameters[parameter.name].annotation
             yield from narrowed(new.path, f"参数 {parameter.name}", parameter.annotation, current)
 
 
-def attribute_breakages(package: griffe.Module, old: griffe.Attribute, new: griffe.Attribute) -> Iterator[str]:
+def attribute_breakages(
+    packages: tuple[griffe.Module, griffe.Module], old: griffe.Attribute, new: griffe.Attribute
+) -> Iterator[str]:
     """属性只能减项（本包枚举新增的取值除外）；`__match_args__` 只能在末尾加。"""
     if old.name != "__match_args__":
-        yield from widened(package, new.path, "属性", old.annotation, new.annotation)
+        yield from widened(packages, new.path, "属性", old.annotation, new.annotation)
         return
     before, after = ast.literal_eval(str(old.value)), ast.literal_eval(str(new.value))
     if tuple(after[: len(before)]) != tuple(before):
         yield f"{new.path}：由 {before} 改为 {after}，只能在末尾加"
 
 
-def beyond_griffe(package: griffe.Module, old: griffe.Object, new: griffe.Object) -> Iterator[str]:
+def beyond_griffe(
+    packages: tuple[griffe.Module, griffe.Module], old: griffe.Object, new: griffe.Object
+) -> Iterator[str]:
     """Griffe 不比的不兼容改动：两边都有的对象的基类（只能加）、类型注解与 `__match_args__`。
 
-    逐层比较公开的成员；`package` 为新版本的包。
+    逐层比较公开的成员；`packages` 为旧、新两个版本的包。
     """
     if isinstance(old, griffe.Class) and isinstance(new, griffe.Class):
         missing = {str(b) for b in old.bases} - {str(b) for b in new.bases}
         yield from (f"{new.path}：去掉了基类 {base}" for base in sorted(missing))
     elif isinstance(old, griffe.Function) and isinstance(new, griffe.Function):
-        yield from function_breakages(package, old, new)
+        yield from function_breakages(packages, old, new)
     elif isinstance(old, griffe.Attribute) and isinstance(new, griffe.Attribute):
-        yield from attribute_breakages(package, old, new)
+        yield from attribute_breakages(packages, old, new)
     for name, member in old.members.items():
         if is_public(name) and name in new.members:
-            yield from beyond_griffe(package, resolved(member), resolved(new.members[name]))
+            yield from beyond_griffe(packages, resolved(member), resolved(new.members[name]))
 
 
 def api_breakages(tag: str) -> list[str]:
@@ -179,7 +198,7 @@ def api_breakages(tag: str) -> list[str]:
         msg = f"{PACKAGE} 应是模块"
         raise TypeError(msg)
     found = [breakage.explain() for breakage in griffe.find_breaking_changes(old, new)]
-    return found + list(beyond_griffe(new, old, new))
+    return found + list(beyond_griffe((old, new), old, new))
 
 
 def main() -> int:
