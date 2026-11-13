@@ -87,18 +87,11 @@ impl HttpOptions {
     /// 给了 Cookie 存储又在请求头里带 Cookie。
     pub fn validate(&self) -> Result<(), Error> {
         for (name, value) in &self.headers {
-            check_header(name, value).map_err(Error::InvalidInput)?;
-            if name.eq_ignore_ascii_case("cookie") {
-                if self.cookies.is_some() {
-                    return Err(Error::InvalidInput(
-                        "给了 Cookie 存储时 Cookie 经存储传，请求头里不能再带 Cookie".to_owned(),
-                    ));
-                }
-                if cookie_pairs(value).any(|pair| pair.is_none()) {
-                    return Err(Error::InvalidInput(
-                        "请求头 Cookie 应为 `名=值; 名=值` 的写法".to_owned(),
-                    ));
-                }
+            check_option_header(name, value).map_err(Error::InvalidInput)?;
+            if name.eq_ignore_ascii_case("cookie") && self.cookies.is_some() {
+                return Err(Error::InvalidInput(
+                    "给了 Cookie 存储时 Cookie 经存储传，请求头里不能再带 Cookie".to_owned(),
+                ));
             }
         }
         self.timeouts.validate()?;
@@ -225,7 +218,7 @@ pub(crate) fn check_scheme(url: &Url) -> Result<(), String> {
     Err(format!("只支持 http/https 地址：{}", bare_url(url)))
 }
 
-/// 请求头名与值能否放进 HTTP 请求、且不是本库控制的头；不能时返回原因。
+/// 请求头名与值能否放进 HTTP 请求、且不是本库控制的头（回调改出的请求头也按它查）；不能时返回原因。
 pub(crate) fn check_header(name: &str, value: &str) -> Result<(), String> {
     let parsed = reqwest::header::HeaderName::from_bytes(name.as_bytes())
         .map_err(|_| format!("请求头名不合法：{name:?}"))?;
@@ -234,6 +227,16 @@ pub(crate) fn check_header(name: &str, value: &str) -> Result<(), String> {
     }
     reqwest::header::HeaderValue::from_str(value)
         .map_err(|_| format!("请求头 {name} 的值不合法"))?;
+    Ok(())
+}
+
+/// 一条请求头能否放进 [`HttpOptions::headers`]：名与值要能放进 HTTP 请求、不能是本库控制的头（Range、
+/// Accept-Encoding 与条件请求头），Cookie 还要是 `名=值; 名=值` 的写法（它要记进 Cookie 存储）；不能时返回原因。
+pub fn check_option_header(name: &str, value: &str) -> Result<(), String> {
+    check_header(name, value)?;
+    if name.eq_ignore_ascii_case("cookie") && cookie_pairs(value).any(|pair| pair.is_none()) {
+        return Err("请求头 Cookie 应为 `名=值; 名=值` 的写法".to_owned());
+    }
     Ok(())
 }
 
@@ -366,8 +369,11 @@ mod tests {
             assert!(check_header(name, "x").is_err(), "{name}");
         }
         for name in ["Referer", "Cookie", "Authorization", "X-Token"] {
-            assert_eq!(check_header(name, "x"), Ok(()), "{name}");
+            assert_eq!(check_option_header(name, "x=1"), Ok(()), "{name}");
         }
+        // 选项里的 Cookie 要是 `名=值; 名=值` 的写法；回调改出的不查
+        assert!(check_option_header("cookie", "abc123").is_err());
+        assert_eq!(check_header("cookie", "abc123"), Ok(()));
     }
 
     #[test]

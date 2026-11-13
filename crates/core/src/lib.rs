@@ -81,6 +81,7 @@ pub use report::{
 };
 pub use request::{
     HttpOptions, JobRequest, KeyOverride, LiveOptions, Proxy, RetryPolicy, Source, Timeouts,
+    check_option_header,
 };
 pub use tokio_util::sync::CancellationToken;
 pub use url::Url;
