@@ -106,7 +106,7 @@ ignore = [
 "examples/**" = ["T201", "D103"]
 # 运行 PATH 里的 cargo（与 Makefile 一样），参数是写死的与 deny.toml 里的平台
 "scripts/licenses.py" = ["S603", "S607"]
-# 运行 PATH 里的 git 与 griffe，参数是写死的与 git 列出的标签
+# 运行 PATH 里的 git，参数是写死的与 git 列出的标签
 "scripts/check_compat.py" = ["S603", "S607"]
 
 [tool.mypy]
