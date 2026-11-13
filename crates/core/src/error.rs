@@ -562,7 +562,7 @@ pub enum WorkDirProblem {
     /// 记录 `file`（job.json 或 outputs.json）是本库读不了的格式版本写的：`found` 比本库写的 `supported` 新，用写下它
     /// 的或更新的版本续传、放弃（outputs.json 读不了时放弃也不动它，见 [`crate::Engine::discard`]）。1.0 起各发布版本
     /// 写的都读得了，比 `supported` 旧的只会是 1.0 之前开发中的版本写的
-    #[error("{file} 的格式版本 {found} 不受支持（支持 {supported}）")]
+    #[error("{file} 的格式版本 {found} 读不了（本库写的是 {supported}）")]
     UnsupportedVersion {
         file: &'static str,
         found: u32,

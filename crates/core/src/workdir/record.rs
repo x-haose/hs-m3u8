@@ -13,9 +13,10 @@ use crate::{JobType, WorkDirProblem};
 /// 编码，以及下载时对文件内容的改写（fMP4 长度写 0 的最后一个 box 改为实际长度）。任何一项改变都要升。outputs.json
 /// 另有自己的版本（见 [`super::outputs::OUTPUTS_FORMAT_VERSION`]）。
 ///
-/// 兼容约定（outputs.json 同）：1.0 写的是版本 13；此后的版本读得了所有已发布版本写的任务目录（按旧格式读取，或打开
-/// 时就地升级），各已发布版本的样本在 tests/fixtures/workdir 下，发布后不再改动。比本库新的版本与 1.0 之前开发中的
-/// 版本报 [`WorkDirProblem::UnsupportedVersion`]。
+/// 兼容约定（outputs.json 同）：本库 1.0 写的是格式版本 13，此后各版本的库读得了 1.0 起各发布版本写的任务目录，
+/// 按记录的格式版本解释其中的内容。要在打开时就地改写成新格式的，改写须能中途中断后重做：改写期间两种写法都认，
+/// job.json 的格式版本最后改。格式版本比本库写的新，或小于 13（1.0 之前开发中的版本写的）时报
+/// [`WorkDirProblem::UnsupportedVersion`]。各已发布版本的样本在 tests/fixtures/workdir 下，发布后不再改动。
 pub(super) const JOB_FORMAT_VERSION: u32 = 13;
 
 /// 任务目录记录的任务；续传、续录时须与当前请求相符。

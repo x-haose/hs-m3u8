@@ -15,8 +15,9 @@ use crate::{Error, WorkDirProblem, busy, volume};
 
 pub(super) const OUTPUTS_FILE: &str = "outputs.json";
 
-/// outputs.json 的格式版本，只管它自己的字段，与 job.json 的各自升；兼容约定同
-/// [`super::record::JOB_FORMAT_VERSION`]。放弃任务要先读懂它，读不懂时什么也不动。
+/// outputs.json 的格式版本，与 job.json 的各自升：管它的字段，以及由字段推出的东西——两个保留名的推导规则（见
+/// [`PendingOutput::new`]）与 `swapped` 的含义，任何一项改变都要升。兼容约定同 [`super::record::JOB_FORMAT_VERSION`]：
+/// 放弃任务与之后的运行要按旧版本的规则找到写到一半的输出与挪开的旧输出，读不懂时什么也不动。
 pub(super) const OUTPUTS_FORMAT_VERSION: u32 = 13;
 
 /// 输出的种类。
