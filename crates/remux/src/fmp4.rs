@@ -78,8 +78,16 @@ pub fn check(data: &[u8], trex: &HashMap<u32, u32>) -> Result<(), Problem> {
         .map(drop)
 }
 
-/// 同 [`check`]，从 `reader`（一个 init 段或分片）读，通过时返回顶层 box；读不了时为外层的 `Err`。只读各 box 的头与
-/// moof 的内容。
+/// 同 [`check`]，从 `reader`（一个 init 段或分片）读：只读各 box 的头与 moof 的内容，不读样本数据；读不了时为外层的
+/// `Err`。
+pub fn check_from(
+    reader: &mut (impl Read + Seek),
+    trex: &HashMap<u32, u32>,
+) -> io::Result<Result<(), Problem>> {
+    Ok(check_reader(reader, trex)?.map(drop))
+}
+
+/// 同 [`check_from`]，通过时返回顶层 box。
 pub(crate) fn check_reader(
     reader: &mut (impl Read + Seek),
     trex: &HashMap<u32, u32>,

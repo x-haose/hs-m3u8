@@ -16,13 +16,13 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::crypto::decrypt;
-use crate::error::io_error;
+use crate::error::{corrupt_fmp4, io_error};
 use crate::hooks::{HookKind, Hooks, Purpose, run_hook};
 use crate::http::{Http, Permit};
 use crate::request::KeyOverride;
 use crate::verify::{Container, ContentError, check, decrypt_failure};
 use crate::workdir::{self, SegmentName};
-use crate::{Error, Progress, WorkDirProblem};
+use crate::{Error, Progress};
 
 /// 一项下载：第 `track` 条轨的分片，`name` 为它在任务目录中的名字，`path` 为由名字得出的写入位置，`init` 为它所用的
 /// init 段在任务目录里的文件（排入下载之前已落盘；分片没有 init 段、不是 fMP4 时为 None）。
@@ -399,10 +399,7 @@ async fn stored_trex(work_dir: &Path, path: &Path) -> Result<HashMap<u32, u32>, 
     let init = tokio::fs::read(path)
         .await
         .map_err(io_error("读取", path))?;
-    fmp4::trex_sample_sizes(&init).map_err(|problem| Error::WorkDir {
-        path: work_dir.to_path_buf(),
-        problem: WorkDirProblem::Corrupt(format!("{} 的 fMP4 结构不对：{problem}", path.display())),
-    })
+    fmp4::trex_sample_sizes(&init).map_err(|problem| corrupt_fmp4(work_dir, path, problem))
 }
 
 /// 取 key：在缓存里的地址只拉取一次（见 [`Keys`]），同一地址正在拉取时等那次请求（它可能占着别的名额）。请求占

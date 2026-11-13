@@ -495,6 +495,24 @@ class HlsUnsupported:
         __match_args__ = ()
         def __new__(cls) -> HlsUnsupported.BandwidthUnknown: ...
     
+    @typing.final
+    class FormatChangedInGroup(HlsUnsupported):
+        r"""
+        不用 init 段的一条轨在这一组里换了分片格式（TS 与打包音频，或打包音频的格式之间），来源没在换格式处标不连续
+        """
+        __match_args__ = ("group", "track",)
+        @property
+        def group(self) -> builtins.int:
+            r"""
+            第几个不连续段组
+            """
+        @property
+        def track(self) -> builtins.int:
+            r"""
+            第几条轨
+            """
+        def __new__(cls, *, group: builtins.int, track: builtins.int) -> HlsUnsupported.FormatChangedInGroup: ...
+    
 
 @typing.final
 class HlsUnsupportedError(RequestError):
@@ -502,7 +520,7 @@ class HlsUnsupportedError(RequestError):
     本地 HLS 表示不了这些内容；可只输出 MP4（`Target.Mp4`）。
     """
     @property
-    def reason(self) -> HlsUnsupported.MixedInit | HlsUnsupported.BandwidthUnknown:
+    def reason(self) -> HlsUnsupported.MixedInit | HlsUnsupported.BandwidthUnknown | HlsUnsupported.FormatChangedInGroup:
         r"""
         表示不了的原因
         """

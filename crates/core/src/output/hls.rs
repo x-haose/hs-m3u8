@@ -23,10 +23,10 @@ use tokio_util::sync::CancellationToken;
 use super::GroupTrack;
 use super::commit::Occupant;
 use crate::entries::{self, is_canonical_number};
-use crate::error::io_error;
+use crate::error::{corrupt_fmp4, io_error};
 use crate::ident::Fingerprint;
 use crate::selection::SelectionRecord;
-use crate::{Error, HlsUnsupported, Unsupported, WorkDirProblem};
+use crate::{Error, HlsUnsupported, Unsupported};
 
 const INDEX: &str = "index.m3u8";
 
@@ -136,6 +136,7 @@ fn fill(
         tracks.push(fill_track(
             &dir,
             work_dir,
+            track,
             groups.iter().map(|g| &g[track]),
             cancel,
             placed,
@@ -173,10 +174,11 @@ struct TrackFiles {
     peak_bps: Option<u64>,
 }
 
-/// 放好一条轨各组的分片与 init 段；`placed` 见 [`stage`]。
+/// 放好第 `track` 条轨各组的分片与 init 段；`placed` 见 [`stage`]。
 fn fill_track<'a>(
     dir: &Path,
     work_dir: &Path,
+    track: usize,
     groups: impl Iterator<Item = &'a GroupTrack>,
     cancel: &CancellationToken,
     placed: &dyn Fn(usize),
@@ -193,28 +195,31 @@ fn fill_track<'a>(
         peak_bps: None,
     };
     let mut index = 0usize;
-    for group in groups {
-        let format = check_group(group, work_dir)?;
-        let init = match &group.init {
+    for (group_index, group) in groups.enumerate() {
+        let (init, mut content) = match &group.init {
             Some(path) => {
                 let name = path
                     .file_name()
                     .and_then(|n| n.to_str())
                     .expect("init 段文件名由本库按指纹生成")
                     .to_owned();
+                let trex = checked_init(path, work_dir)?;
                 if placed_inits.insert(name.clone()) {
                     cancellable_place(path, &dir.join(&name))?;
                 }
                 placed(1);
-                Some(name)
+                (Some(name), Content::Fmp4(trex))
             }
-            None => None,
+            None => (None, Content::Standalone(None)),
         };
-        let ext = format.map_or(FMP4, extension);
         let mut segments = Vec::with_capacity(group.segments.len());
         for segment in &group.segments {
+            if cancel.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let ext = content.check(&segment.path, work_dir, (group_index, track))?;
             let name = format!("{index}.{ext}");
-            let len = cancellable_place(&segment.path, &dir.join(&name))?;
+            let len = place(&segment.path, &dir.join(&name))?;
             placed(1);
             if let Some(bps) = bits_per_second(len, segment.duration_us) {
                 written.peak_bps = Some(written.peak_bps.map_or(bps, |peak| peak.max(bps)));
@@ -227,46 +232,60 @@ fn fill_track<'a>(
     Ok(written)
 }
 
+/// 一组里一条轨的分片放进本地 HLS 之前怎样核对。落盘前都核对过，认不出或结构不对即任务目录里的文件被改动过，报任务
+/// 目录损坏。
+enum Content {
+    /// 没有 init 段：各分片认得出格式（见 [`standalone::read_head`]）；为组里第一个分片的格式，还没核对过分片时为
+    /// None。之后的与它不同为来源在组内换了格式，报 [`HlsUnsupported::FormatChangedInGroup`]
+    Standalone(Option<Format>),
+    /// fMP4：分片结构完整（见 [`fmp4::check`]），值为组的 init 段里各轨的默认样本长度
+    Fmp4(HashMap<u32, u32>),
+}
+
+impl Content {
+    /// 核对分片 `path`（在第 `at.0` 组第 `at.1` 条轨），返回它在本地 HLS 里的扩展名（见 [`extension`]）。
+    fn check(
+        &mut self,
+        path: &Path,
+        work_dir: &Path,
+        at: (usize, usize),
+    ) -> Result<&'static str, Error> {
+        match self {
+            Content::Fmp4(trex) => {
+                let mut file = File::open(path).map_err(io_error("读取", path))?;
+                fmp4::check_from(&mut file, trex)
+                    .map_err(io_error("读取", path))?
+                    .map_err(|problem| corrupt_fmp4(work_dir, path, problem))?;
+                Ok(FMP4)
+            }
+            Content::Standalone(first) => {
+                let format = sniff(path, work_dir)?;
+                if *first.get_or_insert(format) != format {
+                    let (group, track) = at;
+                    return Err(Error::Unsupported(Unsupported::Hls(
+                        HlsUnsupported::FormatChangedInGroup { group, track },
+                    )));
+                }
+                Ok(extension(format))
+            }
+        }
+    }
+}
+
+/// 核对 fMP4 的 init 段 `path` 的结构（见 [`fmp4::check`]），返回其中各轨的默认样本长度。
+fn checked_init(path: &Path, work_dir: &Path) -> Result<HashMap<u32, u32>, Error> {
+    let init = fs::read(path).map_err(io_error("读取", path))?;
+    let corrupt = |problem| corrupt_fmp4(work_dir, path, problem);
+    let trex = fmp4::trex_sample_sizes(&init).map_err(corrupt)?;
+    fmp4::check(&init, &trex).map_err(corrupt)?;
+    Ok(trex)
+}
+
 /// `len` 字节、声明时长 `duration_us` 微秒的分片的码率，bit/s，向上取整；时长为 0 时为 None。
 fn bits_per_second(len: u64, duration_us: u64) -> Option<u64> {
     let bits = u128::from(len) * 8 * 1_000_000;
     let duration = u128::from(duration_us);
     (duration > 0).then(|| u64::try_from(bits.div_ceil(duration)).unwrap_or(u64::MAX))
-}
-
-/// 放进本地 HLS 之前核对一组里一条轨的文件，返回没有 init 段的分片的格式（有 init 段时为 None）。下载时都核对过，
-/// 通不过即任务目录里的文件被改动过，报任务目录损坏：没有 init 段的分片须认得出格式（见 [`standalone::read_head`]），
-/// 且与组里第一个相同（RFC 8216 6.2.1：格式变化处必须有 EXT-X-DISCONTINUITY）；fMP4 的 init 段与分片的结构须完整
-/// （见 [`fmp4::check`]）。
-fn check_group(group: &GroupTrack, work_dir: &Path) -> Result<Option<Format>, Error> {
-    let corrupt = |detail: String| Error::WorkDir {
-        path: work_dir.to_path_buf(),
-        problem: WorkDirProblem::Corrupt(detail),
-    };
-    let Some(init_path) = &group.init else {
-        let first = &group.segments.first().expect("每组每轨至少一个分片").path;
-        let format = sniff(first, work_dir)?;
-        for segment in &group.segments[1..] {
-            if sniff(&segment.path, work_dir)? != format {
-                let path = segment.path.display();
-                return Err(corrupt(format!("分片格式与同组的第一个分片不同：{path}")));
-            }
-        }
-        return Ok(Some(format));
-    };
-    let read = |path: &Path| fs::read(path).map_err(io_error("读取", path));
-    let broken = |path: &Path, problem: fmp4::Problem| {
-        corrupt(format!("{} 的 fMP4 结构不对：{problem}", path.display()))
-    };
-    let init = read(init_path)?;
-    let trex: HashMap<u32, u32> =
-        fmp4::trex_sample_sizes(&init).map_err(|problem| broken(init_path, problem))?;
-    fmp4::check(&init, &trex).map_err(|problem| broken(init_path, problem))?;
-    for segment in &group.segments {
-        fmp4::check(&read(&segment.path)?, &trex)
-            .map_err(|problem| broken(&segment.path, problem))?;
-    }
-    Ok(None)
 }
 
 /// 没有 init 段的分片的格式（见 [`standalone::read_head`]）。

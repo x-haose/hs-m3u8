@@ -183,6 +183,14 @@ variants! {
         },
         /// 音视频分离时主播放列表必须写码率，而某条轨的分片声明的时长都为 0 算不出，来源也没写
         BandwidthUnknown {},
+        /// 不用 init 段的一条轨在这一组里换了分片格式（TS 与打包音频，或打包音频的格式之间），来源没在换格式处标不连续
+        #[pyo3(constructor = (*, group, track))]
+        FormatChangedInGroup {
+            /// 第几个不连续段组
+            group: usize,
+            /// 第几条轨
+            track: usize,
+        },
     }
 }
 
@@ -285,6 +293,9 @@ impl From<core::HlsUnsupported> for HlsUnsupported {
         match unsupported {
             core::HlsUnsupported::MixedInit { track } => HlsUnsupported::MixedInit { track },
             core::HlsUnsupported::BandwidthUnknown => HlsUnsupported::BandwidthUnknown {},
+            core::HlsUnsupported::FormatChangedInGroup { group, track } => {
+                HlsUnsupported::FormatChangedInGroup { group, track }
+            }
         }
     }
 }

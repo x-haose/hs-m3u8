@@ -349,3 +349,27 @@ async fn hls_cannot_mix_fmp4_and_ts_in_one_track() {
     assert!(!dir.join("out.mp4").exists() && !dir.join("out").exists());
     assert!(dir.join("out.hsdl/job.json").exists());
 }
+
+/// 来源在同一组里从 TS 换成打包的 AAC、没标不连续（违反 RFC 8216 6.2.1）：下载时各分片都认得出、照常落盘，写本地 HLS
+/// 时报表示不了，不报任务目录损坏。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_format_change_within_a_group_is_unsupported_in_hls() {
+    let dir = test_dir("output_hls_format_change");
+    let server = Server::start().await;
+    server.put("seg0.ts", fixture("ts_a/seg0.ts"));
+    server.put("seg1.aac", fixture("packed/aac/seg1.aac"));
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.aac\n#EXT-X-ENDLIST\n",
+    );
+
+    let req = request_to(server.url("index.m3u8"), &dir, Target::Hls(dir.join("out")));
+    match run(req).await {
+        Err(Error::Unsupported(Unsupported::Hls(HlsUnsupported::FormatChangedInGroup {
+            group: 0,
+            track: 0,
+        }))) => {}
+        other => panic!("应报组内换了格式：{other:?}"),
+    }
+    assert_eq!(names_in(&dir), ["out.hsdl"]);
+}

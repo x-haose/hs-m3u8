@@ -219,6 +219,15 @@ pub(crate) fn io_error(action: &'static str, path: &Path) -> impl FnOnce(io::Err
     }
 }
 
+/// 任务目录 `work_dir` 里的 fMP4 init 段或分片 `path` 结构不对（`problem` 为 remux 报的问题）：落盘前都核对过，即目录里
+/// 的文件被改动过。
+pub(crate) fn corrupt_fmp4(work_dir: &Path, path: &Path, problem: impl fmt::Display) -> Error {
+    Error::WorkDir {
+        path: work_dir.to_path_buf(),
+        problem: WorkDirProblem::Corrupt(format!("{} 的 fMP4 结构不对：{problem}", path.display())),
+    }
+}
+
 impl From<hs_m3u8_hls::SelectError> for Error {
     fn from(error: hs_m3u8_hls::SelectError) -> Self {
         Error::Select(error)
@@ -346,6 +355,11 @@ pub enum HlsUnsupported {
     /// EXT-X-MAP，前面的 init 段会被用在后面的组上。直播续录时服务器从 fMP4 换成 TS 会这样
     #[error("第 {track} 条轨在 fMP4 的段之后又有不用 init 段的段，本地 HLS 无法表示")]
     MixedInit { track: usize },
+    /// 不用 init 段的第 `track` 条轨在第 `group` 个不连续段组里换了分片格式（TS 与打包音频，或打包音频的格式之间），
+    /// 来源没在换格式处标 EXT-X-DISCONTINUITY（RFC 8216 6.2.1 要求标）：本地 HLS 的分片扩展名须与格式相符，而一组共用
+    /// 一种格式
+    #[error("第 {group} 组第 {track} 条轨的分片格式在组内变了，本地 HLS 无法表示")]
+    FormatChangedInGroup { group: usize, track: usize },
     /// 音视频分离时主播放列表必须写码率（BANDWIDTH），而某条轨的分片声明的时长都为 0 算不出，来源也没写
     #[error(
         "某条轨的分片声明的时长都为 0、来源也没写 BANDWIDTH，算不出本地 HLS 主播放列表必填的码率"
