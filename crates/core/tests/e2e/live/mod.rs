@@ -39,7 +39,7 @@ fn playlist_in(dir: &str, indices: &[u64], end: bool) -> String {
 const JUDGED_TARGET: &str = "1";
 
 /// 同 [`playlist_in`]，TARGETDURATION 为 [`JUDGED_TARGET`]。
-pub(crate) fn judged_in(dir: &str, indices: &[u64], end: bool) -> String {
+fn judged_in(dir: &str, indices: &[u64], end: bool) -> String {
     media_playlist(JUDGED_TARGET, dir, indices, end)
 }
 

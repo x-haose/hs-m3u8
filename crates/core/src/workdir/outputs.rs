@@ -209,29 +209,24 @@ fn decode(bytes: &[u8]) -> Result<OutputsRecord, WorkDirProblem> {
     })
 }
 
-/// 已发布版本的样本（tests/fixtures/workdir/outputs/<格式版本>/<平台>/，手写，发布后不再改动）：`outputs.json` 为记录，
-/// `reserved.json` 为按那个版本的规则由它推出的各输出的两个保留名（临时输出、挪开的旧输出）。路径的写法随平台不同，
-/// 各平台读自己的。
+/// 已发布版本的样本（见 [`super::released`]），每个版本手写：`<平台>/outputs.json` 为记录，`<平台>/reserved.json` 为按那个
+/// 版本的规则由它推出的各输出的两个保留名（临时输出、挪开的旧输出）。路径的写法随平台不同，各平台读自己的。
 #[cfg(test)]
 mod released {
     use super::*;
-    use crate::workdir::record::released::visible_entries;
+    use crate::workdir::released::versions;
 
     /// 都读得了、推出的保留名与当时的相同；当前版本的按当前写法重新写出逐字节相同，改了写法而没升版本时在这里失败。
     /// 最新的样本须是当前版本的。
     #[test]
     fn samples_are_readable() {
-        let root =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/workdir/outputs");
         let platform = if cfg!(windows) { "windows" } else { "unix" };
-        let mut newest = 0;
-        for dir in visible_entries(&root) {
-            let version: u32 = dir.file_name().unwrap().to_str().unwrap().parse().unwrap();
-            newest = newest.max(version);
+        let versions = versions("outputs");
+        for (version, dir) in &versions {
             let path = dir.join(platform).join(OUTPUTS_FILE);
             let bytes = fs::read(&path).unwrap();
             let written: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(written["format_version"], version, "{}", path.display());
+            assert_eq!(written["format_version"], *version, "{}", path.display());
             let record = decode(&bytes).unwrap_or_else(|e| panic!("{}：{e}", path.display()));
             let reserved: Vec<[PathBuf; 2]> = serde_json::from_slice(
                 &fs::read(dir.join(platform).join("reserved.json")).unwrap(),
@@ -243,12 +238,16 @@ mod released {
                 .map(|o| [o.temp().to_path_buf(), o.aside().to_path_buf()])
                 .collect();
             assert_eq!(derived, reserved, "{}", path.display());
-            if version == OUTPUTS_FORMAT_VERSION {
+            if *version == OUTPUTS_FORMAT_VERSION {
                 let rewritten = encode(&record.outputs, record.swapped);
                 assert_eq!(rewritten, bytes, "{}", path.display());
             }
         }
-        assert_eq!(newest, OUTPUTS_FORMAT_VERSION, "缺少当前格式版本的样本");
+        assert_eq!(
+            versions.last().map(|(version, _)| *version),
+            Some(OUTPUTS_FORMAT_VERSION),
+            "缺少当前格式版本的样本"
+        );
     }
 }
 

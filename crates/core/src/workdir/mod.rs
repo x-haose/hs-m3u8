@@ -464,3 +464,114 @@ fn exists(path: &Path) -> Result<bool, Error> {
         Err(cause) => Err(io_error("检查", path)(cause)),
     }
 }
+
+/// 已发布版本的样本，在 tests/fixtures/workdir 下按 `<job|outputs>/<格式版本>/` 存放，发布后不再改动：job 的为 core 的端到端
+/// 测试 `samples::write_samples` 运行生成的任务目录（`<名字>/work/`），outputs 的为手写的记录（见各自的测试）。
+#[cfg(test)]
+mod released {
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+
+    use super::names::{SessionStart, parse_init_name, parse_segment_name};
+    use super::{JOB_FILE, TRACKS_DIR};
+
+    /// `kind`（`job` 或 `outputs`）下各格式版本与它的样本目录，按版本排列。
+    pub(super) fn versions(kind: &str) -> Vec<(u32, PathBuf)> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/workdir")
+            .join(kind);
+        let mut versions: Vec<(u32, PathBuf)> = visible_entries(&root)
+            .into_iter()
+            .map(|dir| {
+                (
+                    dir.file_name().unwrap().to_str().unwrap().parse().unwrap(),
+                    dir,
+                )
+            })
+            .collect();
+        versions.sort();
+        versions
+    }
+
+    /// 目录 `dir` 里名字不以 `.` 开头的项（`.DS_Store` 之类不算）。
+    pub(super) fn visible_entries(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| !path.file_name().unwrap().to_str().unwrap().starts_with('.'))
+            .collect()
+    }
+
+    /// 任务目录样本里都是本库写的文件（写到一半的带 `.part`），当前版本的样本覆盖了文件名的各种写法。续传与合并时认不
+    /// 出的文件被当作别人的而跳过，覆盖不全时，将来改了写法而漏了兼容旧写法测不出来；`SessionStart` 加了取值时这里编译
+    /// 不过，要为它生成样本。
+    #[test]
+    fn sample_file_names_are_recognized_and_cover_every_form() {
+        let versions = versions("job");
+        let (_, current) = versions.last().unwrap();
+        for (_, dir) in &versions {
+            let mut forms = BTreeSet::new();
+            for work in visible_entries(dir)
+                .iter()
+                .map(|sample| sample.join("work"))
+            {
+                for entry in visible_entries(&work) {
+                    let name = entry.file_name().unwrap().to_str().unwrap();
+                    let known = [JOB_FILE, TRACKS_DIR]
+                        .contains(&name.strip_suffix(".part").unwrap_or(name));
+                    assert!(known, "{}", entry.display());
+                    if name.ends_with(".part") {
+                        forms.insert("写到一半的 job.json");
+                    }
+                }
+                for track in visible_entries(&work.join(TRACKS_DIR)) {
+                    for file in visible_entries(&track) {
+                        let name = file.file_name().unwrap().to_str().unwrap();
+                        let (stem, partial) = match name.strip_suffix(".part") {
+                            Some(stem) => (stem, true),
+                            None => (name, false),
+                        };
+                        if partial {
+                            forms.insert("写到一半的分片或 init 段");
+                        }
+                        if parse_init_name(stem).is_some() {
+                            forms.insert("init 段");
+                            continue;
+                        }
+                        let segment = parse_segment_name(stem)
+                            .unwrap_or_else(|| panic!("认不出 {}", file.display()));
+                        forms.insert(match segment.start {
+                            SessionStart::Fresh => "起点 fresh",
+                            SessionStart::After(_) => "起点 after",
+                        });
+                        forms.insert(if segment.init.is_some() {
+                            "用 init 段"
+                        } else {
+                            "不用 init 段"
+                        });
+                        if segment.session > 0 {
+                            forms.insert("会话大于 0");
+                        }
+                        if segment.discontinuity > 0 {
+                            forms.insert("不连续段大于 0");
+                        }
+                    }
+                }
+            }
+            if dir == current {
+                let all = BTreeSet::from([
+                    "写到一半的 job.json",
+                    "写到一半的分片或 init 段",
+                    "init 段",
+                    "起点 fresh",
+                    "起点 after",
+                    "用 init 段",
+                    "不用 init 段",
+                    "会话大于 0",
+                    "不连续段大于 0",
+                ]);
+                assert_eq!(forms, all, "{}", dir.display());
+            }
+        }
+    }
+}

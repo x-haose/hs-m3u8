@@ -10,12 +10,11 @@ use crate::selection::{AudioRecord, SelectionRecord, VariantRecord, track_stream
 use crate::{JobType, WorkDirProblem};
 
 /// job.json 的格式版本，也是任务目录里其余内容的格式版本：job.json 的字段，分片与 init 段的文件名、其中指纹与摘要的
-/// 编码，以及下载时对文件内容的改写（fMP4 长度写 0 的最后一个 box 改为实际长度）。任何一项改变都要升。outputs.json
-/// 另有自己的版本（见 [`super::outputs::OUTPUTS_FORMAT_VERSION`]）。
+/// 编码，写到一半的文件的 `.part` 后缀，以及下载时对文件内容的改写（fMP4 长度写 0 的最后一个 box 改为实际长度）。
+/// 任何一项改变都要升。outputs.json 另有自己的版本（见 [`super::outputs::OUTPUTS_FORMAT_VERSION`]）。
 ///
 /// 兼容约定（outputs.json 同）：本库 1.0 写的是格式版本 13，此后各版本的库读得了 1.0 起各发布版本写的任务目录，
-/// 按记录的格式版本解释其中的内容。要在打开时就地改写成新格式的，改写须能中途中断后重做：改写期间两种写法都认，
-/// job.json 的格式版本最后改。格式版本比本库写的新，或小于 13（1.0 之前开发中的版本写的）时报
+/// 按记录的格式版本解释其中的内容。格式版本比本库写的新，或小于 13（1.0 之前开发中的版本写的）时报
 /// [`WorkDirProblem::UnsupportedVersion`]。各已发布版本的样本在 tests/fixtures/workdir 下，发布后不再改动。
 pub(super) const JOB_FORMAT_VERSION: u32 = 13;
 
@@ -704,46 +703,33 @@ mod tests {
     }
 }
 
-/// 已发布版本的样本（tests/fixtures/workdir/job/<格式版本>/<名字>/work/，由 core 的端到端测试 `samples::write_samples`
-/// 生成，发布后不再改动）。
+/// 已发布版本的样本（见 [`super::released`]）。
 #[cfg(test)]
-pub(super) mod released {
-    use std::path::Path;
-
+mod released {
     use super::*;
+    use crate::workdir::released::{versions, visible_entries};
 
     /// 都读得了；当前版本的按当前写法重新写出逐字节相同，改了写法而没升版本时在这里失败。最新的样本须是当前版本的：
     /// 升了版本而没生成新版本的样本时在这里失败。
     #[test]
     fn samples_are_readable() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/workdir/job");
-        let mut newest = 0;
-        for dir in visible_entries(&root) {
-            let version: u32 = dir.file_name().unwrap().to_str().unwrap().parse().unwrap();
-            newest = newest.max(version);
-            for sample in visible_entries(&dir) {
+        let versions = versions("job");
+        for (version, dir) in &versions {
+            for sample in visible_entries(dir) {
                 let path = sample.join("work/job.json");
                 let bytes = std::fs::read(&path).unwrap();
                 let written: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                assert_eq!(written["format_version"], version, "{}", path.display());
+                assert_eq!(written["format_version"], *version, "{}", path.display());
                 let record = decode(&bytes).unwrap_or_else(|e| panic!("{}：{e}", path.display()));
-                if version == JOB_FORMAT_VERSION {
+                if *version == JOB_FORMAT_VERSION {
                     assert_eq!(encode(&record), bytes, "{}", path.display());
                 }
             }
         }
         assert_eq!(
-            newest, JOB_FORMAT_VERSION,
+            versions.last().map(|(version, _)| *version),
+            Some(JOB_FORMAT_VERSION),
             "缺少当前格式版本的样本，见 samples::write_samples"
         );
-    }
-
-    /// 目录 `dir` 里名字不以 `.` 开头的项（`.DS_Store` 之类不算）。
-    pub(in crate::workdir) fn visible_entries(dir: &Path) -> Vec<std::path::PathBuf> {
-        std::fs::read_dir(dir)
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| !path.file_name().unwrap().to_str().unwrap().starts_with('.'))
-            .collect()
     }
 }
