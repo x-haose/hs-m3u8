@@ -8,8 +8,7 @@ rules=(
   "hs-m3u8-hls tokio reqwest ffmpeg-next ffmpeg-sys-next hs-m3u8-remux hs-m3u8-sysproxy hs-m3u8-core"
   "hs-m3u8-remux tokio reqwest hs-m3u8-hls hs-m3u8-sysproxy hs-m3u8-core"
   "hs-m3u8-sysproxy tokio reqwest hs-m3u8-hls hs-m3u8-remux hs-m3u8-core"
-  "hs-m3u8-core gpui-kit gpui-pre wry pyo3 hs-m3u8-app"
-  "hs-m3u8-app gpui-kit gpui-pre wry pyo3"
+  "hs-m3u8-core pyo3"
 )
 
 # 每行：<包> <不得直接依赖的包>...：只经由 core 的再导出（core::hls、core::remux）使用

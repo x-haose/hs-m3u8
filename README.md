@@ -144,7 +144,7 @@ Windows 上在已加载 MSVC 环境的 MSYS2 里运行 `build.sh`。已按 `buil
 | `crates/remux` | 转封装为 MP4（静态链接的精简 FFmpeg） |
 | `crates/py` | Python 绑定（`hs_m3u8`） |
 
-桌面应用（GPUI）未开始。
+桌面下载器在独立的仓库 [hs-dlx](https://github.com/x-haose/hs-dlx)，经 git 依赖使用这里的 `hs-m3u8-core`。
 
 需要：Rust（版本由 `rust-toolchain.toml` 固定）、[uv](https://docs.astral.sh/uv/)（版本见 `pyproject.toml` 的 `required-version`）、cargo-deny 与 cargo-llvm-cov（版本见 `.github/workflows/rust.yml`）；macOS 另需 Xcode 命令行工具，Linux 与 Windows 另需 libclang（bindgen 用）；编译 FFmpeg 还要 C 编译器、make、curl 与 xz。Python 开发工具由 uv 按 `uv.lock` 装进 `.venv`（默认 Python 3.12）。
 

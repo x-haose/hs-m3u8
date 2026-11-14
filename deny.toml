@@ -22,7 +22,7 @@ ignore = []
 # 识别依赖自带许可证文本时的置信度下限（默认 0.8）。调高后，近似匹配不算识别成功，按无法识别报错、交人核对，
 # 不让一份改动过的许可证文本被当成白名单里的某一种
 confidence-threshold = 0.93
-# 只允许宽松许可证：GUI 与 Python wheel 都是静态链接分发，copyleft 依赖会改变整个产物的许可义务
+# 只允许宽松许可证：Python wheel 是静态链接分发，copyleft 依赖会改变整个产物的许可义务
 allow = [
     "Apache-2.0",
     "BSD-3-Clause",
@@ -30,7 +30,6 @@ allow = [
     "MIT",
     "Unicode-3.0",
     "WTFPL", # ffmpeg-next、ffmpeg-sys-next
-    "Zlib", # foldhash（hashbrown 的默认哈希，经 rusqlite 引入）
 ]
 # 只对下列包放行白名单之外的宽松许可证
 exceptions = [
