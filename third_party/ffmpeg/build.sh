@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# 下载并编译本项目使用的精简 FFmpeg 静态库，安装到 third_party/ffmpeg/dist（可用第一个参数改安装目录，
-# 该目录会被整个删除重建，所以只接受不存在、为空或由本脚本装过的目录）。第一个参数为 --fetch 时只下载并核对源码包
-# （打 sdist 前用）；源码包已在 build/ 下且核对一致时不再下载。
+# 下载并编译本项目使用的精简 FFmpeg 静态库。用法：build.sh [--fetch] [安装目录 [工作目录]]
+# - 安装目录默认 third_party/ffmpeg/dist；它会被整个删除重建，所以只接受不存在、为空或由本脚本装过的目录。
+# - 工作目录放源码包、解开的源码与 configure.log，默认 third_party/ffmpeg/build；源码包已在其中且核对一致时不再下载，
+#   其中别的版本的 ffmpeg-*.tar.xz 会被删掉，这一版已解开的源码删掉重解。
+#   以 git 依赖使用本仓库的项目从 cargo 取下的副本运行本脚本时，两个目录都指到自己的仓库里。
+# - --fetch：只下载并核对源码包（打 sdist 前用）。
 # 组件只含转封装所需；configure 得出的许可证不是 LGPL 时失败。
 # Windows：在已加载 MSVC 环境的 MSYS2 bash 中运行，产物为 MSVC 静态库（*.lib）。
 set -euo pipefail
@@ -17,11 +20,12 @@ if [[ ${1:-} == --fetch ]]; then
   shift
 fi
 PREFIX=${1:-$ROOT/dist}
-# configure 在源码目录里运行，安装目录须为绝对路径
+WORK=${2:-$ROOT/build}
+# configure 在源码目录里运行，两个目录都须为绝对路径
 [[ "$PREFIX" == /* ]] || PREFIX=$PWD/$PREFIX
+[[ "$WORK" == /* ]] || WORK=$PWD/$WORK
 # 本脚本装好后在安装目录里放的标记，即本脚本的副本：Makefile 逐字节比对，发现本地装的是改动前的脚本构建的
 MARKER=.hs-m3u8-ffmpeg
-WORK=$ROOT/build
 TARBALL=$WORK/ffmpeg-$VERSION.tar.xz
 SRC=$WORK/ffmpeg-$VERSION
 
@@ -64,7 +68,7 @@ if [[ "$actual" != "$SHA256" ]]; then
   echo "ffmpeg-$VERSION.tar.xz 的 SHA-256 不符：期望 $SHA256，实际 $actual" >&2
   exit 1
 fi
-# build/ 下只留当前版本的源码包：sdist 收录这里的 ffmpeg-*.tar.xz
+# 工作目录里只留当前版本的源码包：sdist 收录 build/ 下的 ffmpeg-*.tar.xz
 find "$WORK" -maxdepth 1 -name 'ffmpeg-*.tar.xz' ! -name "ffmpeg-$VERSION.tar.xz" -delete
 if $FETCH_ONLY; then
   echo "已取得 $TARBALL"
