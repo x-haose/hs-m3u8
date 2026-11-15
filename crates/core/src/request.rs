@@ -68,9 +68,10 @@ impl Source {
 #[derive(Clone, Default)]
 pub struct HttpOptions {
     /// 附加到请求的请求头。其中的 Cookie（`名=值; 名=值`）记进本任务的 Cookie 存储，作为只属于来源地址的主机的 Cookie：
-    /// 只发往这个主机，服务器给这个主机下发同名的（不带 Domain 或 Domain 即这个主机）即被替换，给上级域下发的与它并存、
-    /// 一同发出；Authorization 只发往与来源地址协议、主机、端口都相同的地址；其余的发往所有地址。跟随重定向时照样带上，
-    /// 跳到别的主机（或端口、协议）时去掉 Authorization 与 Proxy-Authorization
+    /// 只发往这个主机（不论端口），来源是 https 时只发往它的 https 地址；服务器给这个主机下发同名的（不带 Domain 或
+    /// Domain 即这个主机）即被替换，给上级域下发的与它并存、一同发出。Authorization 只发往与来源地址协议、主机、端口都
+    /// 相同的地址。其余的发往所有地址。跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉 Authorization 与
+    /// Proxy-Authorization
     pub headers: Vec<(String, String)>,
     /// 调用方持有的 Cookie 存储，跨任务保存；None 时每个任务各用一个，任务结束即丢。给了它时 `headers` 里不能有 Cookie
     pub cookies: Option<Arc<dyn CookieStore>>,

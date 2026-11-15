@@ -1,6 +1,7 @@
 //! HTTP 请求：证书校验失败与重定向失败不重试，原因写在错误里；重定向后保留调用方给的 Referer；HTTP 库用不上的代理
 //! 报参数错误，拒绝 CONNECT 的代理报代理拒绝；Cookie 与 Authorization 的发送范围，调用方的 Cookie 存储；响应体的上限。
 
+use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -9,7 +10,8 @@ use std::time::Duration;
 use hs_m3u8_core::{
     CookieHeader, CookieStore, Error, HttpErrorKind, Proxy, Purpose, RetryPolicy, Source, Url,
 };
-use tokio::net::TcpListener;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, copy_bidirectional};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
@@ -17,9 +19,47 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use crate::server::Server;
 use crate::{engine, fixture, request, run, test_dir};
 
-/// 用 tests/fixtures/tls 的自签名证书握手的本地 TLS 服务，返回其上的播放列表地址。握手后不回 HTTP 响应：证书不受
-/// 信任时客户端在握手时就拒绝，握手失败在这里是预期的。
-async fn self_signed_server() -> Url {
+/// 读完一个 HTTP 请求的请求头，返回读到的字节；连接在此之前关闭或出错时返回 None。
+async fn read_request_head(stream: &mut (impl AsyncRead + Unpin)) -> Option<Vec<u8>> {
+    let mut head = Vec::new();
+    let mut buf = [0u8; 1024];
+    while !head.ends_with(b"\r\n\r\n") {
+        match stream.read(&mut buf).await {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => head.extend_from_slice(&buf[..n]),
+        }
+    }
+    Some(head)
+}
+
+/// 不看请求里的主机的 HTTP 代理：CONNECT 一律接到 `tunnel`，其余请求一律转给 `plain`。测试借它让任意主机名指向本地
+/// 的服务。
+async fn forwarding_proxy(tunnel: SocketAddr, plain: SocketAddr) -> Url {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let head = read_request_head(&mut client).await?;
+                let mut upstream;
+                if head.starts_with(b"CONNECT ") {
+                    upstream = TcpStream::connect(tunnel).await.ok()?;
+                    let established = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+                    client.write_all(established).await.ok()?;
+                } else {
+                    upstream = TcpStream::connect(plain).await.ok()?;
+                    upstream.write_all(&head).await.ok()?;
+                }
+                copy_bidirectional(&mut client, &mut upstream).await.ok()
+            });
+        }
+    });
+    url
+}
+
+/// 用 tests/fixtures/tls 的自签名证书握手的本地 TLS 服务，返回其上的播放列表地址。`redirect` 为 None 时握手后不回
+/// HTTP 响应：证书不受信任时客户端在握手时就拒绝，握手失败在这里是预期的；为 Some 时对每个请求回 302 跳到它。
+async fn self_signed_server(redirect: Option<Url>) -> Url {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tls");
     let cert = CertificateDer::from(std::fs::read(dir.join("cert.der")).unwrap());
     let key = PrivatePkcs8KeyDer::from(std::fs::read(dir.join("key.der")).unwrap());
@@ -30,9 +70,24 @@ async fn self_signed_server() -> Url {
     let acceptor = TlsAcceptor::from(Arc::new(config));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let response = redirect.map(|to| {
+        format!(
+            "HTTP/1.1 302 Found\r\nLocation: {to}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+    });
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
-            tokio::spawn(acceptor.accept(stream));
+            let accepting = acceptor.accept(stream);
+            let response = response.clone();
+            tokio::spawn(async move {
+                let (Ok(mut stream), Some(response)) = (accepting.await, response) else {
+                    return;
+                };
+                if read_request_head(&mut stream).await.is_some() {
+                    let _ = stream.write_all(response.as_bytes()).await;
+                    let _ = stream.shutdown().await;
+                }
+            });
         }
     });
     Url::parse(&format!("https://{addr}/index.m3u8")).unwrap()
@@ -41,7 +96,7 @@ async fn self_signed_server() -> Url {
 /// 证书不受信任：报证书校验失败、不可重试，原因里有 TLS 库给的说明；允许不受信任的证书后不再是这个错误。
 #[tokio::test(flavor = "multi_thread")]
 async fn untrusted_certificates_are_reported_without_retrying() {
-    let mut source = Source::new(self_signed_server().await);
+    let mut source = Source::new(self_signed_server(None).await);
 
     let err = engine().probe(&source).await.unwrap_err();
 
@@ -189,6 +244,36 @@ async fn cookies_and_authorization_go_only_to_the_source_host() {
     assert_eq!(server.received("seg1.ts", "authorization"), None);
 }
 
+/// 来源是 https 时调用方给的 Cookie 与 Authorization 不发往 http 地址：来源跳到同一主机的 http 地址，那里的播放列表
+/// 与分片两者都收不到。主机用经代理指向本地服务的 a.example：Cookie 存储把回环地址的 http 也当作安全的来源。
+#[tokio::test(flavor = "multi_thread")]
+async fn credentials_from_an_https_source_are_not_sent_over_http() {
+    let dir = test_dir("http_https_credentials");
+    let server = Server::start().await;
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n",
+    );
+    server.put("seg0.ts", fixture("ts_long/seg0.ts"));
+    let tls = self_signed_server(Some(Url::parse("http://a.example/index.m3u8").unwrap())).await;
+    let addr = |url: Url| url.socket_addrs(|| None).unwrap()[0];
+    let proxy = forwarding_proxy(addr(tls), addr(server.url(""))).await;
+    let mut req = request(Url::parse("https://a.example/index.m3u8").unwrap(), &dir);
+    req.source.http.proxy = Proxy::Url(proxy);
+    req.source.http.insecure = true;
+    req.source.http.headers = vec![
+        ("Cookie".into(), "sid=secret".into()),
+        ("Authorization".into(), "Bearer token".into()),
+    ];
+
+    run(req).await.unwrap();
+
+    for path in ["index.m3u8", "seg0.ts"] {
+        assert_eq!(server.received(path, "cookie"), None, "{path}");
+        assert_eq!(server.received(path, "authorization"), None, "{path}");
+    }
+}
+
 /// 调用方的 Cookie 存储：只给来源主机 Cookie，记下收到的 Set-Cookie。
 #[derive(Default)]
 struct Store {
@@ -278,7 +363,6 @@ async fn an_oversized_key_response_is_rejected_without_retrying() {
 /// 返回代理地址与收到的连接数。
 async fn refusing_proxy(status: &'static str) -> (Url, Arc<std::sync::atomic::AtomicUsize>) {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
@@ -289,13 +373,8 @@ async fn refusing_proxy(status: &'static str) -> (Url, Arc<std::sync::atomic::At
             let (mut stream, _) = listener.accept().await.unwrap();
             counted.fetch_add(1, Ordering::Relaxed);
             tokio::spawn(async move {
-                let mut request = Vec::new();
-                let mut buf = [0u8; 1024];
-                while !request.ends_with(b"\r\n\r\n") {
-                    match stream.read(&mut buf).await {
-                        Ok(0) | Err(_) => return,
-                        Ok(n) => request.extend_from_slice(&buf[..n]),
-                    }
+                if read_request_head(&mut stream).await.is_none() {
+                    return;
                 }
                 let response = format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\n\r\n");
                 let _ = stream.write_all(response.as_bytes()).await;

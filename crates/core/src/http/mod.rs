@@ -132,9 +132,14 @@ impl Http {
             Some(store) => Box::new(Provider(store.clone())),
             None => {
                 let jar = reqwest::cookie::Jar::default();
+                // 来源是 https 时标 Secure：从 https 会话带来的 Cookie 不经同一主机的 http 地址明文发出
+                let attributes = match source.url.scheme() {
+                    "https" => "Path=/; Secure",
+                    _ => "Path=/",
+                };
                 for (_, value) in options.headers.iter().filter(|(n, _)| is(n, "cookie")) {
                     for pair in cookie_pairs(value).flatten() {
-                        jar.add_cookie_str(&format!("{pair}; Path=/"), &source.url);
+                        jar.add_cookie_str(&format!("{pair}; {attributes}"), &source.url);
                     }
                 }
                 Box::new(jar)
