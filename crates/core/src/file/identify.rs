@@ -5,7 +5,7 @@ use url::Url;
 
 use super::{FileInfo, FromZero, Resource, headers, open_from_zero};
 use crate::hooks::Purpose;
-use crate::http::{Http, Permit, RangeRequest};
+use crate::http::{Http, Permit, RangeRequest, body_limit};
 use crate::request::Source;
 use crate::{Error, Probe, resolve};
 
@@ -80,7 +80,13 @@ async fn sniff(http: &Http, url: &Url, cancel: &CancellationToken) -> Result<Sni
             (stream, head)
         };
         let response = stream
-            .read_to_end(head, Purpose::Playlist, None, cancel)
+            .read_to_end(
+                head,
+                body_limit(Purpose::Playlist),
+                Purpose::Playlist,
+                None,
+                cancel,
+            )
             .await?;
         return Ok(Sniffed::Playlist {
             url: response.url,

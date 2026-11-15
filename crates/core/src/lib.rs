@@ -47,6 +47,7 @@ mod recheck;
 mod report;
 mod request;
 mod resolve;
+mod resource;
 #[cfg(test)]
 mod scratch;
 mod selection;
@@ -86,6 +87,7 @@ pub use request::{
     HttpOptions, JobRequest, KeyOverride, LiveOptions, Proxy, RetryPolicy, Source, Timeouts,
     check_option_header,
 };
+pub use resource::Fetched;
 pub use tokio_util::sync::CancellationToken;
 pub use url::Url;
 
@@ -147,6 +149,18 @@ impl Engine {
         source.validate()?;
         let http = Http::new(source, self.requests.clone(), None, Deadline::Request)?;
         file::identify(&http, source).await
+    }
+
+    /// 取回地址 `source.url` 上的一个小资源（如 BitTorrent 的公共 tracker 列表），不碰任务目录：一次 GET，请求头、
+    /// Cookie、代理、证书与超时按 `source.http`，跟随重定向，可重试的失败按 [`HttpOptions::retry`] 重试；请求的用途为
+    /// [`Purpose::File`]，[`Hooks::on_request`] 照常调用；不占引擎的请求名额（同 [`Engine::identify`]）。响应体原样给出
+    /// （带 `Accept-Encoding: identity`，不解压、不解码），超过 `limit` 字节时读到即停，报 [`Error::ResponseTooLarge`]
+    /// （不可重试）；非 2xx 报 [`Error::Http`]。参数错误时立即返回错误；丢弃返回的 future 即取消；不在 tokio 运行时内调
+    /// 用会 panic。
+    pub async fn fetch(&self, source: &Source, limit: u64) -> Result<Fetched, Error> {
+        source.validate()?;
+        let http = Http::new(source, self.requests.clone(), None, Deadline::Request)?;
+        resource::fetch(&http, source, limit).await
     }
 
     /// 校验文件任务的请求并在当前 tokio 运行时上启动，规则见 [`FileRequest`]；不在 tokio 运行时内调用会 panic。参数错误

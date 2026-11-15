@@ -279,13 +279,14 @@ impl Http {
         let response = self.send(&parts, &request, cancel).await?;
         check_status(&response, &parts.url, range)?;
         self.streaming(parts.url, response, held)
-            .read_to_end(Vec::new(), purpose, range, cancel)
+            .read_to_end(Vec::new(), body_limit(purpose), purpose, range, cancel)
             .await
     }
 
-    /// 发出 GET `url`、收到响应头即返回，响应体由调用方读（见 [`Streaming`]）；用于文件任务与认出地址是什么。`request`
-    /// 为要的范围与 If-Range。名额（`permit`）、`on_request` 回调与 [`Http::get_once`] 相同，名额一直占到返回的
-    /// [`Streaming`] 丢弃；不重试。非 2xx 为失败（同 [`check_status`]），2xx 的状态与 Content-Range 由调用方核对。
+    /// 发出 GET `url`、收到响应头即返回，响应体由调用方读（见 [`Streaming`]）；用于文件任务、认出地址是什么与取回小资
+    /// 源。`request` 为要的范围与 If-Range。名额（`permit`）、`on_request` 回调与 [`Http::get_once`] 相同，名额一直占到
+    /// 返回的 [`Streaming`] 丢弃；不重试。非 2xx 为失败（同 [`check_status`]），2xx 的状态与 Content-Range 由调用方核
+    /// 对。
     pub(crate) async fn open(
         &self,
         purpose: Purpose,
@@ -453,12 +454,13 @@ impl Streaming {
         content_range(self.headers().get(CONTENT_RANGE)?.to_str().ok()?)
     }
 
-    /// 读完响应体，追加在 `body`（已读到的开头）之后，返回它与最终地址；读到的每块计入进度。用途为 `purpose` 的响应体
-    /// 超过它的上限（见 [`body_limit`]）、字节范围请求 `range` 的响应体超过请求的长度时读到即停；字节范围请求的响应体须
-    /// 恰好是请求的长度。
+    /// 读完响应体，追加在 `body`（已读到的开头）之后，返回它与最终地址；读到的每块计入进度。响应体超过 `limit` 字节时读
+    /// 到即停，报用途为 `purpose` 的 [`Error::ResponseTooLarge`]；字节范围请求 `range` 的响应体超过请求的长度时同样读到
+    /// 即停，且须恰好是请求的长度。
     pub(crate) async fn read_to_end(
         mut self,
         mut body: Vec<u8>,
+        limit: Option<u64>,
         purpose: Purpose,
         range: Option<ByteRange>,
         cancel: &CancellationToken,
@@ -468,7 +470,6 @@ impl Streaming {
             url: Box::new(final_url.clone()),
             kind: IntegrityFailure::RangeLength { expected, found },
         };
-        let limit = body_limit(purpose);
         loop {
             let len = body.len() as u64;
             if let Some(r) = range

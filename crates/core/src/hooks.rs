@@ -18,7 +18,8 @@ pub enum Purpose {
     Key,
     Init,
     Segment,
-    /// 文件任务（[`crate::Engine::start_file`]）的请求，与认出地址是什么（[`crate::Engine::identify`]）的那一次请求
+    /// 文件任务（[`crate::Engine::start_file`]）的请求、认出地址是什么（[`crate::Engine::identify`]）的那一次请求，与取
+    /// 回小资源（[`crate::Engine::fetch`]）的请求
     File,
 }
 

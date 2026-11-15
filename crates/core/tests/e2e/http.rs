@@ -1,5 +1,6 @@
 //! HTTP 请求：证书校验失败与重定向失败不重试，原因写在错误里；重定向后保留调用方给的 Referer；HTTP 库用不上的代理
-//! 报参数错误，拒绝 CONNECT 的代理报代理拒绝；Cookie 与 Authorization 的发送范围，调用方的 Cookie 存储；响应体的上限。
+//! 报参数错误，拒绝 CONNECT 的代理报代理拒绝；Cookie 与 Authorization 的发送范围，调用方的 Cookie 存储；响应体的上限；
+//! 取回小资源。
 
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
@@ -428,4 +429,77 @@ async fn only_proxy_authentication_is_a_refusal_without_retrying() {
             "{status}"
         );
     }
+}
+
+/// 取回小资源时快速重试的来源。
+fn small_source(url: Url) -> Source {
+    let mut source = Source::new(url);
+    source.http.retry = RetryPolicy {
+        attempts: NonZeroU32::new(3).unwrap(),
+        base_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(1),
+    };
+    source
+}
+
+/// 取回小资源：原样给出响应体与跟随重定向之后的地址；临时故障按重试策略再试。
+#[tokio::test(flavor = "multi_thread")]
+async fn small_resources_are_fetched_whole() {
+    let server = Server::start().await;
+    let list = "udp://tracker.example:1337/announce\n\nhttp://tracker.example/announce\n";
+    server.put("trackers.txt", list);
+    server.redirect("best", "trackers.txt");
+    server.put("flaky.txt", list);
+    server.fail("flaky.txt", 1);
+
+    for path in ["trackers.txt", "best", "flaky.txt"] {
+        let fetched = engine()
+            .fetch(&small_source(server.url(path)), 1024)
+            .await
+            .unwrap();
+        assert_eq!(fetched.body, list.as_bytes(), "{path}");
+        let last = if path == "best" { "trackers.txt" } else { path };
+        assert_eq!(fetched.url, server.url(last), "{path}");
+    }
+    assert_eq!(server.hits("flaky.txt"), 2);
+}
+
+/// 取不到（404）报 HTTP 状态，超过上限读到即停、报响应体过大，都不重试。
+#[tokio::test(flavor = "multi_thread")]
+async fn small_resources_report_missing_and_oversized_bodies() {
+    let server = Server::start().await;
+    server.put("big.txt", vec![b'x'; 2000]);
+
+    let missing = engine()
+        .fetch(&small_source(server.url("gone.txt")), 1024)
+        .await
+        .unwrap_err();
+    let oversized = engine()
+        .fetch(&small_source(server.url("big.txt")), 1000)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(
+            missing,
+            Error::Http {
+                kind: HttpErrorKind::Status(404),
+                ..
+            }
+        ),
+        "{missing:?}"
+    );
+    assert!(
+        matches!(
+            oversized,
+            Error::ResponseTooLarge {
+                purpose: Purpose::File,
+                limit: 1000,
+                ..
+            }
+        ),
+        "{oversized:?}"
+    );
+    assert!(!oversized.retryable());
+    assert_eq!((server.hits("gone.txt"), server.hits("big.txt")), (1, 1));
 }
