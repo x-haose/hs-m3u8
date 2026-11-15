@@ -1,20 +1,8 @@
-//! 文件任务用到的响应头：Content-Range、Content-Disposition 的文件名、验证器（ETag、Last-Modified）与 Content-Type。
+//! 文件任务用到的响应头：Content-Length、Content-Disposition 的文件名、验证器（ETag、Last-Modified）与 Content-Type。
 
-use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE, ETAG, HeaderMap, LAST_MODIFIED};
-
-/// 206 响应的 Content-Range（RFC 9110 14.4）：`bytes 首-尾/总长`，尾含在内，总长为 `*` 时为 None。写法不对时整个为
-/// None。
-pub(super) fn content_range(value: &str) -> Option<(u64, u64, Option<u64>)> {
-    let (span, total) = value.trim().strip_prefix("bytes ")?.split_once('/')?;
-    let (first, last) = span.split_once('-')?;
-    let (first, last): (u64, u64) = (first.trim().parse().ok()?, last.trim().parse().ok()?);
-    let total = match total.trim() {
-        "*" => None,
-        total => Some(total.parse().ok()?),
-    };
-    let fits = first <= last && total.is_none_or(|t| last < t);
-    fits.then_some((first, last, total))
-}
+use reqwest::header::{
+    CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, ETAG, HeaderMap, LAST_MODIFIED,
+};
 
 /// 响应头 `name` 的值；没有或不是可见 ASCII 时为 None。
 fn text(headers: &HeaderMap, name: impl reqwest::header::AsHeaderName) -> Option<String> {
@@ -32,6 +20,21 @@ pub(super) fn last_modified(headers: &HeaderMap) -> Option<String> {
 
 pub(super) fn content_type(headers: &HeaderMap) -> Option<String> {
     text(headers, CONTENT_TYPE)
+}
+
+/// Content-Length；没有或写法不对时为 None。
+pub(super) fn content_length(headers: &HeaderMap) -> Option<u64> {
+    text(headers, CONTENT_LENGTH)?.parse().ok()
+}
+
+/// 响应头里的验证器与发出的 If-Range `sent` 矛盾：`sent` 是 ETag（以 `"` 起头）而响应带了不同的强 ETag，或 `sent` 是
+/// 日期而响应带了不同的 Last-Modified。服务器忽略 If-Range、照常回 206 时，据此认出来源换了内容。
+pub(super) fn contradicts(headers: &HeaderMap, sent: &str) -> bool {
+    if sent.starts_with('"') {
+        etag(headers).is_some_and(|e| is_strong(&e) && e != sent)
+    } else {
+        last_modified(headers).is_some_and(|d| d != sent)
+    }
 }
 
 /// ETag 是强验证器（不以 `W/` 起头）。If-Range 只能用强验证器（RFC 9110 13.1.5），弱的服务器一律当作不符、回整个
@@ -144,21 +147,6 @@ fn percent_decode(text: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn content_range_is_parsed_and_checked() {
-        assert_eq!(content_range("bytes 0-99/1000"), Some((0, 99, Some(1000))));
-        assert_eq!(content_range(" bytes 5-5/* "), Some((5, 5, None)));
-        for bad in [
-            "bytes 0-99",
-            "bytes 99-0/1000",
-            "bytes 0-1000/1000",
-            "bytes */1000",
-            "items 0-1/2",
-        ] {
-            assert_eq!(content_range(bad), None, "{bad}");
-        }
-    }
-
     /// RFC 6266 附录与 RFC 8187 的例子：filename* 优先，引号里的转义去掉，解不出的 filename* 不用。
     #[test]
     fn file_names_follow_rfc_6266() {
@@ -205,5 +193,25 @@ mod tests {
         );
         assert_eq!(validator(Some("W/\"a\""), None), None);
         assert!(is_html("Text/HTML; charset=utf-8") && !is_html("text/plain"));
+    }
+
+    /// 发出的 If-Range 是 ETag 时比强 ETag，是日期时比 Last-Modified；响应没带对应的头时不算矛盾。
+    #[test]
+    fn validators_in_responses_are_compared_with_what_was_sent() {
+        let headers = |pairs: &[(reqwest::header::HeaderName, &str)]| {
+            let mut map = HeaderMap::new();
+            for (name, value) in pairs {
+                map.insert(name, value.parse().unwrap());
+            }
+            map
+        };
+        let date = "Wed, 21 Oct 2015 07:28:00 GMT";
+        let both = headers(&[(ETAG, "\"b\""), (LAST_MODIFIED, date)]);
+        assert!(contradicts(&both, "\"a\""));
+        assert!(!contradicts(&both, "\"b\""));
+        assert!(!contradicts(&both, date));
+        assert!(contradicts(&both, "Thu, 22 Oct 2015 07:28:00 GMT"));
+        assert!(!contradicts(&headers(&[(ETAG, "W/\"b\"")]), "\"a\""));
+        assert!(!contradicts(&HeaderMap::new(), "\"a\""));
     }
 }

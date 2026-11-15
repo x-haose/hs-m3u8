@@ -16,7 +16,7 @@ use crate::request::JobRequest;
 use crate::resolve::{self, Resolved};
 use crate::vod::{self, Plan};
 use crate::workdir::{
-    self, JobRecord, Lock, OutputKind, RecordKind, Recorded, SelectionCheck, Stored, WorkDir,
+    self, HlsRecord, Lock, OutputKind, RecordKind, Recorded, SelectionCheck, Stored, WorkDir,
     preference_digest, read_resumable, url_digest,
 };
 use crate::{
@@ -54,9 +54,10 @@ pub(crate) async fn run(
     };
     let (request, root) = (&task.request, &task.output.work_dir);
     let preference = preference_digest(&request.source.preference);
-    // 任务目录里有可续的记录时，选轨偏好不符在联网之前就报（WorkDir::open 加锁后照样核对）；相符时按记录的选轨找回
-    // 同一条轨（重新选轨时两样都不做，按这次的偏好选）。记录的是直播且请求开启了直播时按直播继续，即使播放列表已出现
-    // ENDLIST（中断期间直播结束了）。没开启直播时按点播运行，由 WorkDir::open 报类型不符；记录的是文件任务时同样由它报
+    // 任务目录里有可续的记录时，选轨偏好不符在联网之前就报（WorkDir::open 加锁后照样核对）；相符时按记录的选轨找回同一
+    // 条轨（重新选轨时两样都不做，按这次的偏好选）。记录的是直播且请求开启了直播时按直播继续，即使播放列表已出现
+    // ENDLIST（中断期间直播结束了）。没开启直播时按点播运行，由 WorkDir::open 报类型不符；记录的是文件任务时同样由它
+    // 报：本次是点播还是直播要拉了播放列表才知道
     let recorded = match read_resumable(root.clone()).await? {
         Some(Recorded::Hls(record)) => Some(*record),
         Some(Recorded::File(_)) | None => None,
@@ -120,7 +121,7 @@ async fn run_live(
     for t in &resolved.tracks {
         resolve::require_key_uris(&t.url, &t.playlist.segments, custom_key)?;
     }
-    let record = JobRecord {
+    let record = HlsRecord {
         preference_digest,
         url_digest: url_digest(&task.request.source.url),
         selection: resolved.selection_record(),
@@ -164,7 +165,7 @@ async fn run_vod(
     let streams = resolved.streams();
     let selection = resolved.selection_record();
     let plan = Plan::new(resolved.tracks, task.request.key.is_some())?;
-    let record = JobRecord {
+    let record = HlsRecord {
         preference_digest,
         url_digest: url_digest(&task.request.source.url),
         selection,

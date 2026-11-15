@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use hs_m3u8_hls::ByteRange;
 use reqwest::StatusCode;
-use reqwest::header::{CONTENT_RANGE, HeaderMap, IF_RANGE, RANGE, RETRY_AFTER};
+use reqwest::header::{ACCEPT_ENCODING, CONTENT_RANGE, HeaderMap, IF_RANGE, RANGE, RETRY_AFTER};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -21,6 +21,15 @@ use crate::cookies::Provider;
 use crate::hooks::{HookKind, Hooks, Purpose, RequestParts, run_hook};
 use crate::request::{RetryPolicy, Source, check_header, check_scheme, cookie_pairs};
 use crate::{Error, FetchFailure, HttpErrorKind, IntegrityFailure};
+
+/// 一次尝试的时限，见 [`crate::Timeouts`]：都有连接超时与读空闲超时，`Request` 另限整次尝试的时长。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Deadline {
+    /// 从发出到读完不超过 [`crate::Timeouts::request`]：播放列表、key、init 段、分片与认出地址的请求
+    Request,
+    /// 不限整次尝试的时长，卡住靠读空闲超时判断：文件任务的请求，响应体大小由来源决定
+    Idle,
+}
 
 /// 请求占哪一份引擎名额（见 [`Permits`]）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,11 +129,12 @@ pub(crate) struct Response {
 }
 
 impl Http {
-    /// 访问 `source` 的客户端（`source.http` 已校验过，见 [`crate::HttpOptions::validate`]）。
+    /// 访问 `source` 的客户端（`source.http` 已校验过，见 [`crate::HttpOptions::validate`]），请求的时限见 `deadline`。
     pub(crate) fn new(
         source: &Source,
         requests: Arc<Permits>,
         observer: Option<Arc<dyn Observer>>,
+        deadline: Deadline,
     ) -> Result<Self, Error> {
         let options = &source.http;
         let is = |name: &str, wanted: &str| name.eq_ignore_ascii_case(wanted);
@@ -145,7 +155,7 @@ impl Http {
                 Box::new(jar)
             }
         };
-        let clients = Clients::new(options, Cookies(cookies))?;
+        let clients = Clients::new(options, Cookies(cookies), deadline)?;
         let (credentials, headers) = options
             .headers
             .iter()
@@ -256,44 +266,54 @@ impl Http {
         permit: Permit,
         cancel: &CancellationToken,
     ) -> Result<Response, Error> {
-        let _held = self.acquire(permit, cancel).await?;
+        let held = self.acquire(permit, cancel).await?;
         let parts = self.prepare(purpose, url).await?;
-        let range_header = range.map(|r| {
-            // hls 保证 offset + length 不溢出且 length ≥ 1
-            format!("bytes={}-{}", r.offset, r.offset + r.length - 1)
-        });
-        let conditions = Conditions {
-            range: range_header,
+        let request = RangeRequest {
+            // hls 保证 offset + length 不溢出
+            span: range.map(|r| (r.offset, Some(r.offset + r.length))),
             if_range: None,
         };
-        let response = self.send(&parts, &conditions, cancel).await?;
+        let response = self.send(&parts, &request, cancel).await?;
         check_status(&response, &parts.url, range)?;
-        self.read(response, &parts.url, purpose, range, cancel)
+        self.streaming(parts.url, response, held)
+            .read_to_end(Vec::new(), purpose, range, cancel)
             .await
     }
 
-    /// 发出 GET `url`、收到响应头即返回，响应体由调用方按块读（见 [`Streaming::read_into`]）；用于文件任务与认出地址是
-    /// 什么。`conditions` 为附加的 Range 与 If-Range。名额（`permit`）、`on_request` 回调与 [`Http::get_once`] 相同，名额
-    /// 一直占到返回的 [`Streaming`] 丢弃；不重试。非 2xx 为失败（同 [`check_status`]），2xx 的状态与 Content-Range 由
-    /// 调用方核对。
+    /// 发出 GET `url`、收到响应头即返回，响应体由调用方读（见 [`Streaming`]）；用于文件任务与认出地址是什么。`request`
+    /// 为要的范围与 If-Range；另带 `Accept-Encoding: identity`，要原样的字节。名额（`permit`）、`on_request` 回调与
+    /// [`Http::get_once`] 相同，名额一直占到返回的 [`Streaming`] 丢弃；不重试。非 2xx 为失败（同 [`check_status`]），
+    /// 2xx 的状态与 Content-Range 由调用方核对。
     pub(crate) async fn open(
         &self,
         purpose: Purpose,
         url: &Url,
-        conditions: &Conditions,
+        request: &RangeRequest,
         permit: Permit,
         cancel: &CancellationToken,
     ) -> Result<Streaming, Error> {
         let held = self.acquire(permit, cancel).await?;
-        let parts = self.prepare(purpose, url).await?;
-        let response = self.send(&parts, conditions, cancel).await?;
+        let mut parts = self.prepare(purpose, url).await?;
+        parts
+            .headers
+            .push((ACCEPT_ENCODING.as_str().to_owned(), "identity".to_owned()));
+        let response = self.send(&parts, request, cancel).await?;
         check_status(&response, &parts.url, None)?;
-        Ok(Streaming {
-            url: parts.url,
+        Ok(self.streaming(parts.url, response, held))
+    }
+
+    fn streaming(
+        &self,
+        url: Url,
+        response: reqwest::Response,
+        held: Option<OwnedSemaphorePermit>,
+    ) -> Streaming {
+        Streaming {
+            url,
             response,
             observer: self.observer.clone(),
             _held: held,
-        })
+        }
     }
 
     /// 等到 `permit` 那一份引擎名额；不占名额时为 None。
@@ -339,21 +359,25 @@ impl Http {
         Ok(parts)
     }
 
-    /// 发出请求，附加 `conditions` 里的请求头，收到响应头即返回；状态不在这里检查。
+    /// 发出请求，附加 `request` 的 Range 与 If-Range，收到响应头即返回；状态不在这里检查。
     async fn send(
         &self,
         parts: &RequestParts,
-        conditions: &Conditions,
+        request: &RangeRequest,
         cancel: &CancellationToken,
     ) -> Result<reqwest::Response, Error> {
         let mut builder = self.clients.get()?.get(parts.url.as_str());
         for (name, value) in &parts.headers {
             builder = builder.header(name, value);
         }
-        if let Some(range) = &conditions.range {
+        if let Some((start, end)) = request.span {
+            let range = match end {
+                Some(end) => format!("bytes={start}-{}", end - 1),
+                None => format!("bytes={start}-"),
+            };
             builder = builder.header(RANGE, range);
         }
-        if let Some(validator) = &conditions.if_range {
+        if let Some(validator) = &request.if_range {
             builder = builder.header(IF_RANGE, validator);
         }
         tokio::select! {
@@ -367,68 +391,13 @@ impl Http {
         let permille = 750 + (self.jitter.hash_one((url.as_str(), attempt)) % 500) as u32;
         backoff_delay(&self.retry, attempt, permille)
     }
-
-    /// 读完响应体，读到的每块计入进度；`url` 为发出请求的地址，用于错误信息。用途为 `purpose` 的响应体超过它的
-    /// 上限（见 [`body_limit`]）、字节范围请求的响应体超过请求的长度时读到即停；字节范围请求的响应体须恰好是请求
-    /// 的长度。
-    async fn read(
-        &self,
-        mut response: reqwest::Response,
-        url: &Url,
-        purpose: Purpose,
-        range: Option<ByteRange>,
-        cancel: &CancellationToken,
-    ) -> Result<Response, Error> {
-        let final_url = response.url().clone();
-        let wrong_range = |expected: u64, found: usize| Error::Integrity {
-            url: Box::new(final_url.clone()),
-            kind: IntegrityFailure::RangeLength { expected, found },
-        };
-        let limit = body_limit(purpose);
-        let mut body = Vec::new();
-        loop {
-            let chunk = tokio::select! {
-                _ = cancel.cancelled() => return Err(Error::Cancelled),
-                chunk = response.chunk() => chunk.map_err(|e| http_error(url, classify(e)))?,
-            };
-            let Some(chunk) = chunk else { break };
-            if let Some(observer) = &self.observer {
-                observer.received(chunk.len() as u64);
-            }
-            body.extend_from_slice(&chunk);
-            let len = body.len() as u64;
-            if let Some(r) = range
-                && len > r.length
-            {
-                return Err(wrong_range(r.length, body.len()));
-            }
-            if let Some(limit) = limit
-                && len > limit
-            {
-                return Err(Error::ResponseTooLarge {
-                    url: Box::new(final_url),
-                    purpose,
-                    limit,
-                });
-            }
-        }
-        if let Some(r) = range
-            && body.len() as u64 != r.length
-        {
-            return Err(wrong_range(r.length, body.len()));
-        }
-        Ok(Response {
-            url: final_url,
-            body,
-        })
-    }
 }
 
-/// 本库加在请求上的 Range 与 If-Range（调用方与回调不能给，见 [`crate::check_option_header`]）。
+/// 请求要的字节范围与 If-Range（调用方与回调不能给，见 [`crate::check_option_header`]）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct Conditions {
-    /// Range 的值，如 `bytes=0-` 或 `bytes=100-199`
-    pub range: Option<String>,
+pub(crate) struct RangeRequest {
+    /// 起点与终点（不含，须大于起点）；终点为 None 时到文件末尾；整个为 None 时不带 Range
+    pub span: Option<(u64, Option<u64>)>,
     /// If-Range 的值：强 ETag 或 HTTP 日期
     pub if_range: Option<String>,
 }
@@ -459,6 +428,58 @@ impl Streaming {
     /// 发出请求的地址（`on_request` 改写之后）
     pub(crate) fn url(&self) -> &Url {
         &self.url
+    }
+
+    /// Content-Range（见 [`content_range`]）；没有或写法不对时为 None。
+    pub(crate) fn content_range(&self) -> Option<(u64, u64, Option<u64>)> {
+        content_range(self.headers().get(CONTENT_RANGE)?.to_str().ok()?)
+    }
+
+    /// 读完响应体，追加在 `body`（已读到的开头）之后，返回它与最终地址；读到的每块计入进度。用途为 `purpose` 的响应体
+    /// 超过它的上限（见 [`body_limit`]）、字节范围请求 `range` 的响应体超过请求的长度时读到即停；字节范围请求的响应体须
+    /// 恰好是请求的长度。
+    pub(crate) async fn read_to_end(
+        mut self,
+        mut body: Vec<u8>,
+        purpose: Purpose,
+        range: Option<ByteRange>,
+        cancel: &CancellationToken,
+    ) -> Result<Response, Error> {
+        let final_url = self.final_url().clone();
+        let wrong_range = |expected: u64, found: usize| Error::Integrity {
+            url: Box::new(final_url.clone()),
+            kind: IntegrityFailure::RangeLength { expected, found },
+        };
+        let limit = body_limit(purpose);
+        loop {
+            let len = body.len() as u64;
+            if let Some(r) = range
+                && len > r.length
+            {
+                return Err(wrong_range(r.length, body.len()));
+            }
+            if let Some(limit) = limit
+                && len > limit
+            {
+                return Err(Error::ResponseTooLarge {
+                    url: Box::new(final_url),
+                    purpose,
+                    limit,
+                });
+            }
+            if self.read_into(&mut body, cancel).await? == 0 {
+                break;
+            }
+        }
+        if let Some(r) = range
+            && body.len() as u64 != r.length
+        {
+            return Err(wrong_range(r.length, body.len()));
+        }
+        Ok(Response {
+            url: final_url,
+            body,
+        })
     }
 
     /// 读下一块响应体追加到 `buf`，返回读到的字节数，读完时为 0；读到的计入进度（见 [`Observer::received`]）。
@@ -540,17 +561,25 @@ pub(crate) fn body_limit(purpose: Purpose) -> Option<u64> {
     }
 }
 
-/// 206 响应的 Content-Range `value` 是不是请求的那一段 `r`（RFC 9110 14.4：`bytes 首-尾/总长`，总长可为 `*`）。
+/// 206 响应的 Content-Range `value` 是不是请求的那一段 `r`。
 fn range_matches(value: &str, r: ByteRange) -> bool {
-    let span = value
-        .trim()
-        .strip_prefix("bytes ")
-        .and_then(|rest| rest.split_once('/'))
-        .and_then(|(span, _total)| span.split_once('-'));
     // hls 保证 offset + length 不溢出且 length ≥ 1
-    span.is_some_and(|(first, last)| {
-        first.trim().parse() == Ok(r.offset) && last.trim().parse() == Ok(r.offset + r.length - 1)
-    })
+    content_range(value)
+        .is_some_and(|(first, last, _)| first == r.offset && last == r.offset + r.length - 1)
+}
+
+/// 206 响应的 Content-Range（RFC 9110 14.4）：`bytes 首-尾/总长`，尾含在内，总长为 `*` 时为 None。写法不对（含首大于
+/// 尾、尾不小于总长）时整个为 None。
+pub(crate) fn content_range(value: &str) -> Option<(u64, u64, Option<u64>)> {
+    let (span, total) = value.trim().strip_prefix("bytes ")?.split_once('/')?;
+    let (first, last) = span.split_once('-')?;
+    let (first, last): (u64, u64) = (first.trim().parse().ok()?, last.trim().parse().ok()?);
+    let total = match total.trim() {
+        "*" => None,
+        total => Some(total.parse().ok()?),
+    };
+    let fits = first <= last && total.is_none_or(|t| last < t);
+    fits.then_some((first, last, total))
 }
 
 /// Retry-After 要求的等待：秒数，或 HTTP 日期离 `now` 还有多久（已经过去的为 0）；无法解析的值视为没有要求。
@@ -612,6 +641,21 @@ mod tests {
             "items 100-149/1000",
         ] {
             assert!(!range_matches(value, r), "{value}");
+        }
+    }
+
+    #[test]
+    fn content_range_is_parsed_and_checked() {
+        assert_eq!(content_range("bytes 0-99/1000"), Some((0, 99, Some(1000))));
+        assert_eq!(content_range(" bytes 5-5/* "), Some((5, 5, None)));
+        for bad in [
+            "bytes 0-99",
+            "bytes 99-0/1000",
+            "bytes 0-1000/1000",
+            "bytes */1000",
+            "items 0-1/2",
+        ] {
+            assert_eq!(content_range(bad), None, "{bad}");
         }
     }
 

@@ -29,11 +29,13 @@ pub struct HlsSaved {
     pub duration: Duration,
 }
 
-/// 文件任务目录里已完成的内容；各量的含义同 [`FileProgress`] 里同名的。
+/// 文件任务目录里已完成的内容。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileSaved {
-    /// 已落盘、续传时沿用的字节数；不知道总长度或不支持范围请求时恒为 0（续传从头下）
+    /// 已落盘、续传时沿用的字节数，比任务运行时的 [`FileProgress::bytes`]（已写入、不一定落盘）可能少最近一秒内写的；
+    /// 不知道总长度或不支持范围请求时恒为 0（续传从头下）
     pub bytes: u64,
+    /// 总字节数；第一个响应没给出时为 None
     pub total: Option<u64>,
 }
 
@@ -50,10 +52,10 @@ pub struct FileProgress {
     pub completed: Vec<Range<u64>>,
     /// 本次运行从网络读到的响应体字节数，读到即计：含重试前没读完的。按它的变化算下载速度
     pub received: u64,
-    /// 当前在途的连接数
+    /// 当前在途的连接数；收到第一个响应之前为 0
     pub connections: usize,
-    /// 当前的连接上限：开始时为 [`crate::FileRequest::connections`]，服务器限制连接数时降低（见 `throttled`）；不支持
-    /// 范围请求或不知道总长度时为 1
+    /// 当前的连接上限：收到第一个响应之前为 0，之后为 [`crate::FileRequest::connections`]，服务器限制连接数时降低（见
+    /// `throttled`）；不支持范围请求或不知道总长度时为 1
     pub limit: usize,
     /// 正在退避、等着重试的请求，同 [`Progress::retrying`]
     pub retrying: Vec<Retrying>,
@@ -62,7 +64,8 @@ pub struct FileProgress {
 }
 
 /// 一次降低连接上限（[`FileProgress::throttled`]）：同时有多个连接时，新的请求在收到响应之前失败或回了 429、503、403，
-/// 视为服务器限制了连接数，上限降一个（至少 1），这一段放回去等别的连接接着下，不算失败。
+/// 视为服务器只允许当时在途的其余连接，上限降到在途的连接数减一（不超过原来的上限减一，至少 1），这一段放回去等别的
+/// 连接接着下，不算失败。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Throttled {
     /// 降到的上限

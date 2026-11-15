@@ -5,7 +5,8 @@
 //!   [`Error::Select`]（选轨偏好与来源不符）；[`Error::LiveNotEnabled`]（开启直播录制）；[`Unsupported::Mp4`]、
 //!   [`Unsupported::Hls`]（改用另一种输出）；
 //! - 来源本身不行，同样的请求再试也不会成功：[`Error::Playlist`]、[`Error::NotMediaPlaylist`]、[`Error::Unsupported`]
-//!   的其余各项、[`Error::Integrity`]、[`Error::KeyLength`]、[`Error::ResponseTooLarge`]；
+//!   的其余各项、[`Error::Integrity`]、[`Error::KeyLength`]、[`Error::ResponseTooLarge`]；文件任务的来源换了：
+//!   [`Error::NotExpected`]（重新认地址）；
 //! - 网络：[`Error::Http`]，看 [`HttpErrorKind::retryable`]；
 //! - 源站给出没写完的内容：[`Error::Incomplete`]，可重试；
 //! - 说明出在哪里、看包着的原因：[`Error::Segment`]、[`Error::Key`]（哪个分片或 key）、[`Error::LiveStalled`]（直播
@@ -111,6 +112,10 @@ pub enum Error {
     /// 直播没有录到可合并的分片：任务目录不存在或没有已完成的分片，或录到的都合并不了（每组都缺某条轨的分片）
     #[error("直播没有录到可合并的分片")]
     NothingRecorded,
+    /// 文件任务第一次运行时，来源 `url` 与调用方看到的（[`crate::Expected`]）对不上：多为签名地址过期或会话失效后换成了
+    /// 错误页、登录页，或来源换了文件。重新认一次地址（[`crate::Engine::identify`]）再开始
+    #[error("{} 已不是之前看到的文件", bare_url(.url))]
+    NotExpected { url: Box<Url> },
     /// 文件任务开始前查的：任务目录 `path` 所在的卷放不下还没下载的 `needed` 字节，可用 `available` 字节。腾出空间或换
     /// 一个任务目录后再试
     #[error("{} 所在的卷空间不够：还要写 {needed} 字节，可用 {available} 字节", .path.display())]
@@ -620,16 +625,17 @@ pub enum WorkDirProblem {
     #[error("记录的变体或音频已不在主播放列表中")]
     SelectionGone,
     /// 核对不上这次取到的与已下载的是同一份内容：点播为核对的组里有已完成的分片重新下载后内容不同，或都已取不到（见
-    /// [`crate::Source::url`]），多为另一个视频、同一视频的另一档或同一地址换了内容，同一地址也核对不上的多为来源每次
-    /// 输出的字节不同（边转码边出），只能重新下载；直播为地址或重新选出的轨（[`crate::JobRequest::reselect`]）与记录
-    /// 的不同，且接不上之前录到的（有轨内容不同，或没有一条轨核对一致，或重新选出的轨这次核对不了，见
-    /// [`crate::LiveOptions`]）。记录不变：可用原来的地址与选轨续传、续录，直播还可用 [`crate::Engine::merge_recorded`]
-    /// 合并已录的部分；或换一个任务目录、放弃任务
+    /// [`crate::Source::url`]），多为另一个视频、同一视频的另一档或同一地址换了内容，同一地址也核对不上的多为来源每次输
+    /// 出的字节不同（边转码边出），只能重新下载；直播为地址或重新选出的轨（[`crate::JobRequest::reselect`]）与记录的不
+    /// 同，且接不上之前录到的（有轨内容不同，或没有一条轨核对一致，或重新选出的轨这次核对不了，见
+    /// [`crate::LiveOptions`]）；文件任务为地址与记录的不同，而记录里没有 ETag 与 Last-Modified，核对不了是不是同一个文
+    /// 件。记录不变：可用原来的地址与选轨续传、续录，直播还可用 [`crate::Engine::merge_recorded`] 合并已录的部分；或换
+    /// 一个任务目录、放弃任务
     #[error("核对不上这次取到的与已下载的是同一份内容")]
     SourceUnverified,
-    /// 文件任务：来源的文件与记录的不同，已下载的不能沿用：续传时按记录的 ETag 或 Last-Modified 发的条件请求
-    /// （If-Range）回了整个文件，或总长度与记录的不同。换一个任务目录，或放弃任务（[`crate::Engine::discard`]）后重新
-    /// 下载
+    /// 文件任务续传：来源的文件与记录的不同，已下载的不能沿用。按记录的 ETag 或 Last-Modified 发的条件请求（If-Range）
+    /// 回了整个文件或带回了不同的验证器，总长度与记录的不同，或请求的范围已超出文件（416）。换一个任务目录，或放弃任务
+    /// （[`crate::Engine::discard`]）后重新下载
     #[error("来源的文件与记录的不同，不能续传")]
     FileChanged,
     /// 直播续录：之前录到的接不上（要另起会话），而第 `track` 条轨这次不录（已录满 max_duration，或这次没有内容）：

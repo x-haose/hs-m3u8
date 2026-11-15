@@ -30,7 +30,7 @@ pub(super) const FILE_JOB_FORMAT_VERSION: u32 = 14;
 /// job.json 里记录的任务。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Recorded {
-    Hls(Box<JobRecord>),
+    Hls(Box<HlsRecord>),
     File(FileRecord),
 }
 
@@ -58,7 +58,7 @@ pub(crate) struct FileRecord {
 
 /// HLS 任务目录记录的任务；续传、续录时须与当前请求相符。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct JobRecord {
+pub(crate) struct HlsRecord {
     /// 见 [`preference_digest`]；来源是媒体播放列表（`selection` 为 None）时选轨偏好不起作用，不核对
     pub preference_digest: String,
     /// 见 [`url_digest`]。地址变了仍可沿用目录：核对过这次取到的与已下载的是同一份内容之后，用
@@ -88,7 +88,7 @@ pub(crate) enum RecordKind {
     Live,
 }
 
-impl JobRecord {
+impl HlsRecord {
     /// 各轨的取流方式，由选轨决定。
     pub(crate) fn streams(&self) -> Vec<Streams> {
         track_streams(self.selection.as_ref())
@@ -110,8 +110,8 @@ impl JobRecord {
 
     /// 与 `current` 相比，各轨所选的是否不是同一条，按轨道顺序：第 0 条比所选变体（来源本身是媒体播放列表时为没有，同一
     /// 条见 [`VariantRecord::same_as`]），第 1 条（若有）比独立的音频（见 [`AudioRecord::same_as`]）。两者轨道结构（见
-    /// [`JobRecord::streams`]）相同时才有意义。
-    pub(super) fn changed_tracks(&self, current: &JobRecord) -> Vec<bool> {
+    /// [`HlsRecord::streams`]）相同时才有意义。
+    pub(super) fn changed_tracks(&self, current: &HlsRecord) -> Vec<bool> {
         let (recorded, current) = (self.selection.as_ref(), current.selection.as_ref());
         let variant = match (recorded, current) {
             (Some(recorded), Some(current)) => !recorded.variant.same_as(&current.variant),
@@ -128,9 +128,9 @@ impl JobRecord {
         changed
     }
 
-    /// `self` 里与 `recorded` 是同一条（见 [`JobRecord::changed_tracks`]）的轨，属性换成 `recorded` 里的：同一条轨沿用
+    /// `self` 里与 `recorded` 是同一条（见 [`HlsRecord::changed_tracks`]）的轨，属性换成 `recorded` 里的：同一条轨沿用
     /// 首次记下的属性（见 [`SelectionRecord`]）。
-    pub(super) fn keeping_attributes_of(mut self, recorded: &JobRecord) -> JobRecord {
+    pub(super) fn keeping_attributes_of(mut self, recorded: &HlsRecord) -> HlsRecord {
         if let (Some(current), Some(recorded)) = (&mut self.selection, &recorded.selection) {
             if recorded.variant.same_as(&current.variant) {
                 current.variant = recorded.variant.clone();
@@ -147,7 +147,7 @@ impl JobRecord {
     /// 记录为 `self` 的目录不能用于当前请求 `current` 的原因；地址不比较（见 `url_digest`），所选的轨按 `check` 比较。
     pub(super) fn conflict(
         &self,
-        current: &JobRecord,
+        current: &HlsRecord,
         check: SelectionCheck,
     ) -> Option<WorkDirProblem> {
         if check == SelectionCheck::SameTracks
@@ -318,7 +318,7 @@ pub(super) fn check_version(
     Ok(version.format_version)
 }
 
-pub(super) fn encode(record: &JobRecord) -> Vec<u8> {
+pub(super) fn encode_hls(record: &HlsRecord) -> Vec<u8> {
     let format_version = JOB_FORMAT_VERSION;
     let preference_digest = record.preference_digest.clone();
     let url_digest = record.url_digest.clone();
@@ -401,7 +401,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Recorded, WorkDirProblem> {
                 }));
             }
         };
-    Ok(Recorded::Hls(Box::new(JobRecord {
+    Ok(Recorded::Hls(Box::new(HlsRecord {
         preference_digest,
         url_digest,
         selection: selection.map(SelectionRecord::from),
@@ -614,27 +614,27 @@ mod tests {
 
     #[test]
     fn job_file_round_trips_and_rejects_other_versions_and_fields() {
-        let live = JobRecord {
+        let live = HlsRecord {
             preference_digest: "ab".into(),
             url_digest: "cd".into(),
             selection: Some(selection(variant_key(), stable_audio_key())),
             kind: RecordKind::Live,
         };
-        let bytes = encode(&live);
+        let bytes = encode_hls(&live);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
             r#"{"kind":"live","format_version":14,"preference_digest":"ab","url_digest":"cd","selection":{"variant":{"key":{"attributes":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020","mp4a.40.2"],"audio_group":"aud","occurrence":1}},"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"]},"audio":{"key":{"stable":{"id":"Audio-37262","occurrence":0}},"name":"Eng\n\"lish\"","language":"en"}}}"#
         );
         assert_eq!(decode(&bytes), Ok(Recorded::Hls(Box::new(live.clone()))));
-        let stable = JobRecord {
+        let stable = HlsRecord {
             selection: Some(selection(stable_variant_key(), audio_key())),
             ..live
         };
         assert_eq!(
-            decode(&encode(&stable)),
+            decode(&encode_hls(&stable)),
             Ok(Recorded::Hls(Box::new(stable)))
         );
-        let vod = JobRecord {
+        let vod = HlsRecord {
             preference_digest: "ab".into(),
             url_digest: "cd".into(),
             selection: None,
@@ -642,7 +642,7 @@ mod tests {
                 plan_digest: "ef".into(),
             },
         };
-        assert_eq!(decode(&encode(&vod)), Ok(Recorded::Hls(Box::new(vod))));
+        assert_eq!(decode(&encode_hls(&vod)), Ok(Recorded::Hls(Box::new(vod))));
         let file = FileRecord {
             url_digest: "cd".into(),
             length: Some(1 << 40),
@@ -688,18 +688,18 @@ mod tests {
     /// 重新选轨时选轨偏好与所选的轨不比较，只比轨道结构（各轨的取流方式）；不重新选轨时各报各的不同。
     #[test]
     fn reselecting_compares_only_the_track_layout() {
-        let recorded = JobRecord {
+        let recorded = HlsRecord {
             preference_digest: "a".into(),
             url_digest: "u".into(),
             selection: Some(selection(variant_key(), audio_key())),
             kind: RecordKind::Live,
         };
-        let other = JobRecord {
+        let other = HlsRecord {
             preference_digest: "b".into(),
             selection: Some(selection(stable_variant_key(), stable_audio_key())),
             ..recorded.clone()
         };
-        let other_tracks = JobRecord {
+        let other_tracks = HlsRecord {
             preference_digest: "a".into(),
             ..other.clone()
         };
@@ -713,14 +713,14 @@ mod tests {
         );
         assert_eq!(recorded.conflict(&other, SelectionCheck::SameLayout), None);
 
-        let muxed_audio = JobRecord {
+        let muxed_audio = HlsRecord {
             selection: Some(SelectionRecord {
                 audio: None,
                 ..selection(variant_key(), audio_key())
             }),
             ..recorded.clone()
         };
-        let media = JobRecord {
+        let media = HlsRecord {
             selection: None,
             ..recorded.clone()
         };
@@ -827,7 +827,7 @@ mod released {
                 let record = decode(&bytes).unwrap_or_else(|e| panic!("{}：{e}", path.display()));
                 if *version == JOB_FORMAT_VERSION {
                     let rewritten = match &record {
-                        Recorded::Hls(record) => encode(record),
+                        Recorded::Hls(record) => encode_hls(record),
                         Recorded::File(record) => encode_file(record),
                     };
                     assert_eq!(rewritten, bytes, "{}", path.display());

@@ -105,7 +105,7 @@ pub mod hls {
 
 pub(crate) use blocking::blocking;
 
-use crate::http::{Http, Observer, Permits, RetryWaiting};
+use crate::http::{Deadline, Http, Observer, Permits, RetryWaiting};
 
 /// 下载引擎；持有跨任务共享的在途请求上限。
 #[derive(Clone)]
@@ -119,10 +119,11 @@ impl Engine {
     pub const DEFAULT_MAX_REQUESTS: NonZeroUsize =
         NonZeroUsize::new(JobRequest::DEFAULT_CONCURRENCY.get() * 4).unwrap();
 
-    /// `max_requests`：所有点播任务合计同时在途的 key、分片与 init 段请求数；所有直播任务的 key 与分片另有同样大小的一
-    /// 份，不与点播共用：直播的分片排在点播的大批下载（或挂住的请求）之后会滑出窗口、永久缺失。播放列表与刷新时拉的
-    /// init 段（连同它的 key）不占名额：每条轨同时最多一个，刷新不排在本任务的分片下载之后；同一个 key 正被分片的请求拉
-    /// 取时，等那次请求（它占着名额）。
+    /// `max_requests`：所有点播任务合计同时在途的 key、分片与 init 段请求数，文件任务（[`Engine::start_file`]）的每个
+    /// 连接也占一个；所有直播任务的 key 与分片另有同样大小的一份，不与点播共用：直播的分片排在点播的大批下载（或挂住的
+    /// 请求）之后会滑出窗口、永久缺失。播放列表、认出地址（[`Engine::identify`]）的请求与刷新时拉的 init 段（连同它的
+    /// key）不占名额：每条轨同时最多一个，刷新不排在本任务的分片下载之后；同一个 key 正被分片的请求拉取时，等那次请求
+    /// （它占着名额）。
     pub fn new(max_requests: NonZeroUsize) -> Self {
         Engine {
             requests: Permits::new(max_requests.get()),
@@ -133,7 +134,7 @@ impl Engine {
     /// 音轨、查看时长与是否直播。参数错误时立即返回错误；不在 tokio 运行时内调用会 panic。
     pub async fn probe(&self, source: &Source) -> Result<Probe, Error> {
         source.validate()?;
-        let http = Http::new(source, self.requests.clone(), None)?;
+        let http = Http::new(source, self.requests.clone(), None, Deadline::Request)?;
         probe::probe(&http, source).await
     }
 
@@ -143,12 +144,12 @@ impl Engine {
     /// [`Purpose::File`]，失败按 [`HttpOptions::retry`] 重试。参数错误时立即返回错误；不在 tokio 运行时内调用会 panic。
     pub async fn identify(&self, source: &Source) -> Result<Resource, Error> {
         source.validate()?;
-        let http = Http::new(source, self.requests.clone(), None)?;
+        let http = Http::new(source, self.requests.clone(), None, Deadline::Request)?;
         file::identify(&http, source).await
     }
 
     /// 校验文件任务的请求并在当前 tokio 运行时上启动，规则见 [`FileRequest`]；不在 tokio 运行时内调用会 panic。参数错误
-    /// 时立即返回错误，不访问文件系统；其余失败经 [`Job::wait`] 返回。没有直播，[`JobControl::stop`] 不适用。
+    /// 时立即返回错误，不访问文件系统；其余失败经 [`Job::wait`] 返回。
     pub fn start_file(&self, request: FileRequest) -> Result<Job<FileOutput, FileProgress>, Error> {
         let output = request.validate()?;
         let (progress_tx, progress) = watch::channel(FileProgress::default());
@@ -156,6 +157,7 @@ impl Engine {
             &request.source,
             self.requests.clone(),
             Some(Arc::new(ProgressObserver::new(progress_tx.clone()))),
+            Deadline::Idle,
         )?;
         let cancel = CancellationToken::new();
         let task = tokio::spawn(file::run(
@@ -165,7 +167,7 @@ impl Engine {
             cancel.clone(),
             progress_tx,
         ));
-        Ok(Job::new(task, cancel, CancellationToken::new(), progress))
+        Ok(Job::new(task, cancel, None, progress))
     }
 
     /// 校验请求并在当前 tokio 运行时上启动任务；不在 tokio 运行时内调用会 panic。参数错误时立即返回错误，
@@ -178,6 +180,7 @@ impl Engine {
             &request.source,
             self.requests.clone(),
             Some(Arc::new(ProgressObserver::new(progress_tx.clone()))),
+            Deadline::Request,
         )?;
         let cancel = CancellationToken::new();
         let stop = CancellationToken::new();
@@ -189,7 +192,7 @@ impl Engine {
             stop.clone(),
             progress_tx,
         ));
-        Ok(Job::new(task, cancel, stop, progress))
+        Ok(Job::new(task, cancel, Some(stop), progress))
     }
 
     /// 不联网，只把任务目录中已录到的直播分片写成输出；用于中断后不再续录、或来源已取不到的录制。与 [`Engine::start`]
@@ -204,11 +207,11 @@ impl Engine {
         let (progress_tx, progress) = watch::channel(Progress::default());
         let cancel = CancellationToken::new();
         let task = tokio::spawn(job::merge_recorded(output, cancel.clone(), progress_tx));
-        Ok(Job::new(task, cancel, CancellationToken::new(), progress))
+        Ok(Job::new(task, cancel, None, progress))
     }
 
-    /// 查看任务目录 `work_dir`（相对路径按当前目录补全）里已完成的内容，按目录里记录的任务种类给出（HLS 任务或文件
-    /// 任务）；不联网、不加锁、不改动任何东西，任务正在运行时为读到的那一刻的。目录或其中的 `job.json` 不存在时为 None。
+    /// 查看任务目录 `work_dir`（相对路径按当前目录补全）里已完成的内容，按目录里记录的任务种类给出（HLS 任务或文件任
+    /// 务）；不联网、不加锁、不改动任何东西，任务正在运行时为读到的那一刻的。目录或其中的 `job.json` 不存在时为 None。
     /// 用于任务没在运行时显示已下载了多少；点播的总片数要拉播放列表才知道，不在其中。
     ///
     /// 路径为空或不合要求（见 [`Target`]）时报参数错误；目录所在的盘读不到时报 [`Error::VolumeUnavailable`]，但 macOS
@@ -356,7 +359,7 @@ impl<O, P> Job<O, P> {
     fn new(
         task: JoinHandle<Result<O, Error>>,
         cancel: CancellationToken,
-        stop: CancellationToken,
+        stop: Option<CancellationToken>,
         progress: watch::Receiver<P>,
     ) -> Self {
         Job {
@@ -388,7 +391,8 @@ impl<O, P> Job<O, P> {
 /// 任务的控制句柄，可克隆。只持有它不会让任务继续运行（见 [`Job`]）；任务结束后调用不起作用。
 pub struct JobControl<P = Progress> {
     cancel: CancellationToken,
-    stop: CancellationToken,
+    /// 直播的停止；没有停止的任务（只合并）为 None
+    stop: Option<CancellationToken>,
     progress: watch::Receiver<P>,
 }
 
@@ -423,6 +427,8 @@ impl JobControl<Progress> {
     /// 会话还没定下就立即结束，不录新的分片。写出完成之前进程退出时，任务目录里不记停止：用同样的请求再次开始会接着
     /// 录，只写出已录到的用 [`Engine::merge_recorded`]。点播与只合并不受影响。
     pub fn stop(&self) {
-        self.stop.cancel();
+        if let Some(stop) = &self.stop {
+            stop.cancel();
+        }
     }
 }

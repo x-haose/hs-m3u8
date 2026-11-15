@@ -40,6 +40,12 @@ pub(crate) struct Served {
     pub delay: Duration,
     /// 声称的总长度（Content-Range 里的），不给时为内容的长度；只用于在下载之前就失败的测试
     pub claimed: Option<u64>,
+    /// 不看 If-Range，照常回范围
+    pub ignore_if_range: bool,
+    /// 每个 206 至多给这么多字节（Content-Range 照实写）
+    pub cap: Option<u64>,
+    /// Content-Range 的总长写成 `*`
+    pub hide_total: bool,
 }
 
 impl Served {
@@ -54,6 +60,9 @@ impl Served {
             max_concurrent: None,
             delay: Duration::ZERO,
             claimed: None,
+            ignore_if_range: false,
+            cap: None,
+            hide_total: false,
         }
     }
 }
@@ -168,9 +177,15 @@ async fn serve_file(State(state): State<Arc<FileState>>, uri: Uri, headers: Head
             response_headers.insert(name, value.parse().unwrap());
         }
     }
-    let validator_matches = if_range.as_ref().is_none_or(|v| {
-        Some(v) == served.etag.as_ref() || Some(v) == served.last_modified.as_ref()
-    });
+    // RFC 9110 13.1.5：值是 ETag 时与强 ETag 比，是日期时与 Last-Modified 比
+    let validator_matches = served.ignore_if_range
+        || if_range.as_ref().is_none_or(|v| {
+            if v.starts_with('"') {
+                Some(v) == served.etag.as_ref()
+            } else {
+                Some(v) == served.last_modified.as_ref()
+            }
+        });
     let span = range
         .filter(|_| served.ranges && validator_matches)
         .map(|range| {
@@ -184,6 +199,7 @@ async fn serve_file(State(state): State<Arc<FileState>>, uri: Uri, headers: Head
                 "" => total.saturating_sub(1),
                 last => last.parse::<u64>().unwrap().min(total.saturating_sub(1)),
             };
+            let last = served.cap.map_or(last, |cap| last.min(first + cap - 1));
             (first, last)
         });
     let Some((first, last)) = span else {
@@ -202,7 +218,12 @@ async fn serve_file(State(state): State<Arc<FileState>>, uri: Uri, headers: Head
     }
     response_headers.insert(
         header::CONTENT_RANGE,
-        format!("bytes {first}-{last}/{total}").parse().unwrap(),
+        match served.hide_total {
+            true => format!("bytes {first}-{last}/*"),
+            false => format!("bytes {first}-{last}/{total}"),
+        }
+        .parse()
+        .unwrap(),
     );
     let body_end = (last as usize + 1).min(served.body.len());
     let body = served.body[(first as usize).min(body_end)..body_end].to_vec();
@@ -255,14 +276,20 @@ pub(crate) async fn interrupt_at(request: FileRequest, bytes: u64) {
 }
 
 fn assert_downloaded(output: &FileOutput, body: &[u8]) {
-    assert_eq!(std::fs::read(&output.path).unwrap(), body);
+    let written = std::fs::read(&output.path).unwrap();
+    assert!(
+        written == body,
+        "内容不同：{} 字节，应为 {} 字节",
+        written.len(),
+        body.len()
+    );
     assert_eq!(output.bytes, body.len() as u64);
     assert_eq!(output.leftovers, []);
     assert!(!output.path.with_extension("hsdl").exists());
 }
 
 /// 范围请求的起点与长度；不带 Range 时为 None。
-fn span(seen: &Seen) -> Option<(u64, Option<u64>)> {
+pub(crate) fn span(seen: &Seen) -> Option<(u64, Option<u64>)> {
     let (first, last) = seen
         .range
         .as_ref()?
@@ -604,8 +631,8 @@ async fn insufficient_space_is_reported_before_downloading() {
     assert!(!dir.join("out.hsdl/data").exists());
 }
 
-/// 第一次运行按调用方看到的核对：ETag 变了（If-Range 换来整个文件）、长度不同、没有验证器与长度时换成了网页，都报来源
-/// 的文件变了；对得上时照常下完。
+/// 第一次运行按调用方看到的核对：ETag 变了（If-Range 换来整个文件；服务器忽略 If-Range 时看响应带的 ETag）、长度不同、
+/// 没有验证器与长度时换成了网页，都报已不是之前看到的文件；对得上时照常下完。
 #[tokio::test(flavor = "multi_thread")]
 async fn the_first_run_checks_what_the_caller_saw() {
     let dir = test_dir("file_expected");
@@ -613,7 +640,14 @@ async fn the_first_run_checks_what_the_caller_saw() {
     let body = content(1000);
     let mut served = Served::new(body.clone());
     served.etag = Some("\"v2\"".into());
-    server.put("a.bin", served);
+    server.put("a.bin", served.clone());
+    server.put(
+        "ignoring.bin",
+        Served {
+            ignore_if_range: true,
+            ..served
+        },
+    );
     let mut page = Served::new(b"<html>login</html>".to_vec());
     page.content_type = Some("text/html".into());
     server.put("login", page);
@@ -627,6 +661,13 @@ async fn the_first_run_checks_what_the_caller_saw() {
     let stale = [
         (
             "a.bin",
+            Expected {
+                etag: Some("\"v1\"".into()),
+                ..seen.clone()
+            },
+        ),
+        (
+            "ignoring.bin",
             Expected {
                 etag: Some("\"v1\"".into()),
                 ..seen.clone()
@@ -654,13 +695,7 @@ async fn the_first_run_checks_what_the_caller_saw() {
         request.expected = Some(expected);
         let (result, _) = run_file(request).await;
         assert!(
-            matches!(
-                result,
-                Err(Error::WorkDir {
-                    problem: WorkDirProblem::FileChanged,
-                    ..
-                })
-            ),
+            matches!(result, Err(Error::NotExpected { .. })),
             "{path}：{result:?}"
         );
     }
@@ -717,4 +752,285 @@ async fn file_task_dirs_are_kept_apart_and_can_be_discarded() {
         .unwrap();
     assert_eq!(leftovers, []);
     assert!(!dir.join("work").exists());
+}
+
+/// 不知道长度时中途断开、从头重下，这次的内容比上次读到的短：输出只有这次的内容，不留上次多出的字节。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restarted_whole_download_keeps_only_the_new_bytes() {
+    let dir = test_dir("file_whole_restart");
+    let (first, second) = (content(2 * MIB), content(MIB));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("http://{}/a.bin", listener.local_addr().unwrap())).unwrap();
+    let bodies = [first, second.clone()];
+    tokio::spawn(async move {
+        for (i, body) in bodies.into_iter().enumerate() {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.ends_with(b"\r\n\r\n") {
+                let n = stream.read(&mut buf).await.unwrap();
+                assert!(n > 0);
+                head.extend_from_slice(&buf[..n]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            stream.write_all(&body).await.unwrap();
+            if i == 0 {
+                // 第一次以 RST 断开：客户端读到连接被重置，而不是正常结束
+                stream.set_zero_linger().unwrap();
+                drop(stream);
+            } else {
+                stream.shutdown().await.unwrap();
+            }
+        }
+    });
+
+    let (output, _) = run_file(file_request(url, &dir)).await;
+
+    assert_downloaded(&output.unwrap(), &second);
+}
+
+/// 服务器每个 206 至多给 1 MiB：从它给到的地方接着请求，照常下完；认出地址时这样截短的播放列表不带 Range 重新取完整的。
+#[tokio::test(flavor = "multi_thread")]
+async fn capped_partial_responses_are_continued() {
+    let dir = test_dir("file_capped");
+    let server = FileServer::start().await;
+    let body = content(3 * MIB + 9);
+    server.put(
+        "a.bin",
+        Served {
+            cap: Some(MIB as u64),
+            ..Served::new(body.clone())
+        },
+    );
+    let mut playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n".to_owned();
+    for i in 0..20 {
+        playlist += &format!("#EXTINF:1,\nseg{i}.ts\n");
+    }
+    playlist += "#EXT-X-ENDLIST\n";
+    server.put(
+        "index.m3u8",
+        Served {
+            cap: Some(89),
+            ..Served::new(playlist.into_bytes())
+        },
+    );
+    let mut request = file_request(server.url("a.bin"), &dir);
+    request.connections = NonZeroUsize::new(2).unwrap();
+
+    let (output, _) = run_file(request).await;
+
+    assert_downloaded(&output.unwrap(), &body);
+    let identified = engine()
+        .identify(&Source::new(server.url("index.m3u8")))
+        .await
+        .unwrap();
+    let Resource::Playlist(probe) = identified else {
+        panic!("应为播放列表：{identified:?}");
+    };
+    assert_eq!((probe.tracks[0].segments, probe.live), (20, false));
+}
+
+/// 206 的 Content-Range 没有总长：放开它再不带 Range 请求，引擎只有一个名额也不卡住。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rejected_first_response_is_released_before_asking_again() {
+    let dir = test_dir("file_hidden_total");
+    let server = FileServer::start().await;
+    let body = content(MIB);
+    server.put(
+        "a.bin",
+        Served {
+            hide_total: true,
+            ..Served::new(body.clone())
+        },
+    );
+    let engine = hs_m3u8_core::Engine::new(NonZeroUsize::MIN);
+
+    let job = engine
+        .start_file(file_request(server.url("a.bin"), &dir))
+        .unwrap();
+    let output = tokio::time::timeout(Duration::from_secs(10), job.wait())
+        .await
+        .expect("不应卡住");
+
+    assert_downloaded(&output.unwrap(), &body);
+}
+
+/// 下完后保留任务目录，再下到同一处：地址没变时不再请求；地址变了时按 ETag 核对（一个字节的范围请求），同一个文件照常
+/// 装上，换了文件（ETag 不同）报来源的文件变了，不把旧内容装上去。
+#[tokio::test(flavor = "multi_thread")]
+async fn completed_dirs_are_checked_when_the_address_changes() {
+    let dir = test_dir("file_completed");
+    let server = FileServer::start().await;
+    let body = content(2 * MIB);
+    let mut served = Served::new(body.clone());
+    served.etag = Some("\"v1\"".into());
+    server.put("a.bin", served.clone());
+    server.put("mirror.bin", served.clone());
+    server.put(
+        "other.bin",
+        Served {
+            etag: Some("\"v2\"".into()),
+            ..Served::new(content(2 * MIB + 1)[1..].to_vec())
+        },
+    );
+    let request = |path: &str| {
+        let mut request = file_request(server.url(path), &dir);
+        request.output.keep_work_dir = true;
+        request.output.overwrite = true;
+        request
+    };
+    let (first, _) = run_file(request("a.bin")).await;
+    assert_downloaded_kept(&first.unwrap(), &body);
+    server.clear_seen();
+
+    let (same, _) = run_file(request("a.bin")).await;
+    assert_downloaded_kept(&same.unwrap(), &body);
+    assert_eq!(server.seen().len(), 0);
+
+    let (mirror, _) = run_file(request("mirror.bin")).await;
+    assert_downloaded_kept(&mirror.unwrap(), &body);
+    let seen = server.seen();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        (seen[0].range.as_deref(), seen[0].if_range.as_deref()),
+        (Some("bytes=0-0"), Some("\"v1\""))
+    );
+
+    let (other, _) = run_file(request("other.bin")).await;
+    assert!(
+        matches!(
+            other,
+            Err(Error::WorkDir {
+                problem: WorkDirProblem::FileChanged,
+                ..
+            })
+        ),
+        "{other:?}"
+    );
+    assert_eq!(std::fs::read(dir.join("out.bin")).unwrap(), body);
+}
+
+/// 同 [`assert_downloaded`]，任务目录保留着。
+fn assert_downloaded_kept(output: &FileOutput, body: &[u8]) {
+    assert!(std::fs::read(&output.path).unwrap() == body);
+    assert_eq!(output.leftovers, []);
+}
+
+/// 续传时服务器忽略 If-Range、照常回 206，而文件换了（ETag 不同、长度相同）：按响应带的 ETag 认出来，报来源的文件变了，
+/// 不把新旧内容拼在一起。
+#[tokio::test(flavor = "multi_thread")]
+async fn ignored_if_range_is_caught_by_the_returned_etag() {
+    let dir = test_dir("file_ignored_if_range");
+    let server = FileServer::start().await;
+    let mut served = Served::new(content(2 * MIB));
+    served.etag = Some("\"v1\"".into());
+    served.ignore_if_range = true;
+    server.put("a.bin", served);
+    let mut request = file_request(server.url("a.bin"), &dir);
+    request.chunk_size = NonZeroU64::new(MIB as u64);
+    server.hold_from(MIB as u64);
+    interrupt_at(request.clone(), MIB as u64).await;
+    server.release();
+    server.change("a.bin", |s| {
+        s.etag = Some("\"v2\"".into());
+        s.body = content(2 * MIB + 1)[1..].to_vec();
+    });
+
+    let (result, _) = run_file(request).await;
+
+    assert!(
+        matches!(
+            result,
+            Err(Error::WorkDir {
+                problem: WorkDirProblem::FileChanged,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+}
+
+/// 文件任务不沿用有已完成分片的 HLS 任务目录（报类型不符）；放弃那个目录时，里面不是本库写的、名为 data 的文件留下、
+/// 报出来。
+#[tokio::test(flavor = "multi_thread")]
+async fn hls_dirs_are_not_taken_over_by_file_tasks() {
+    let dir = test_dir("file_on_hls_dir");
+    let hls = crate::server::Server::start().await;
+    hls.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXTINF:1,\nseg1.ts\n#EXT-X-ENDLIST\n",
+    );
+    hls.put("seg0.ts", crate::fixture("ts_long/seg0.ts"));
+    let mut hls_request = request(hls.url("index.m3u8"), &dir);
+    hls_request.output.work_dir = Some(dir.join("work"));
+    assert!(run(hls_request).await.is_err(), "seg1 取不到，任务失败");
+    std::fs::write(dir.join("work/data"), b"user file").unwrap();
+    let server = FileServer::start().await;
+    server.put("a.bin", Served::new(content(1000)));
+    let mut file = file_request(server.url("a.bin"), &dir);
+    file.output.work_dir = Some(dir.join("work"));
+
+    let (result, _) = run_file(file).await;
+
+    assert!(
+        matches!(
+            result,
+            Err(Error::WorkDir {
+                problem: WorkDirProblem::KindMismatch {
+                    recorded: JobType::Vod,
+                    current: JobType::File
+                },
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    let leftovers = engine()
+        .discard(
+            &dir.join("work"),
+            Unsettled::Report,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(leftovers.len(), 1, "{leftovers:?}");
+    assert_eq!(std::fs::read(dir.join("work/data")).unwrap(), b"user file");
+}
+
+/// 不支持范围请求时，传得比 `Timeouts::request` 慢的文件照样下完：文件任务的请求只看读空闲超时。
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_whole_downloads_are_not_cut_by_the_request_timeout() {
+    let dir = test_dir("file_slow_whole");
+    let body = content(4000);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = Url::parse(&format!("http://{}/a.bin", listener.local_addr().unwrap())).unwrap();
+    let served = body.clone();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut head = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !head.ends_with(b"\r\n\r\n") {
+            let n = stream.read(&mut buf).await.unwrap();
+            assert!(n > 0);
+            head.extend_from_slice(&buf[..n]);
+        }
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4000\r\n\r\n")
+            .await
+            .unwrap();
+        // 模拟慢速网络：每 400 毫秒发 1000 字节，合计约 1.6 秒，超过下面的 request 时限
+        for chunk in served.chunks(1000) {
+            stream.write_all(chunk).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+    });
+    let mut request = file_request(url, &dir);
+    request.source.http.timeouts.request = Duration::from_secs(1);
+
+    let (output, _) = run_file(request).await;
+
+    assert_downloaded(&output.unwrap(), &body);
 }

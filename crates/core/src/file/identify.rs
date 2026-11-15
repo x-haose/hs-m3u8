@@ -1,14 +1,13 @@
 //! 认出地址是什么：播放列表、网页还是文件（见 [`crate::Engine::identify`]）。
 
-use reqwest::StatusCode;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::{FileInfo, Resource, content_length, headers, ranged_length};
+use super::{FileInfo, FromStart, Resource, headers, open_from_start};
 use crate::hooks::Purpose;
-use crate::http::{Conditions, Http, Permit, Streaming, body_limit};
+use crate::http::{Http, Permit, RangeRequest};
 use crate::request::Source;
-use crate::{Error, HttpErrorKind, Probe, resolve};
+use crate::{Error, Probe, resolve};
 
 /// 看内容开头的这么多字节，够认出 `#EXTM3U`（前面可以有 UTF-8 的 BOM 与空白）。
 const SNIFF: usize = 64;
@@ -47,50 +46,45 @@ pub(crate) async fn identify(http: &Http, source: &Source) -> Result<Resource, E
     }
 }
 
-/// 请求 `url`（先带 `Range: bytes=0-`，回 416 或 Content-Range 不对时不带），看响应头与内容开头；是播放列表时读完内容
-/// （超过播放列表的上限报 [`Error::ResponseTooLarge`]）。
+/// 从 0 起请求 `url`（见 [`open_from_start`]），看响应头与内容开头；是播放列表时读完内容（超过播放列表的上限报
+/// [`Error::ResponseTooLarge`]；206 只给了开头一部分时不带 Range 重新取）。
 async fn sniff(http: &Http, url: &Url, cancel: &CancellationToken) -> Result<Sniffed, Error> {
-    let open = |conditions: Conditions| async move {
-        http.open(Purpose::File, url, &conditions, Permit::Exempt, cancel)
-            .await
-    };
-    let ranged = open(Conditions {
-        range: Some("bytes=0-".to_owned()),
-        if_range: None,
-    })
-    .await;
-    let (mut stream, accepts_ranges, length) = match ranged {
-        Err(Error::Http {
-            kind: HttpErrorKind::Status(416),
-            ..
-        }) => whole(open(Conditions::default()).await?),
-        Err(error) => return Err(error),
-        Ok(stream) if stream.status() != StatusCode::PARTIAL_CONTENT => whole(stream),
-        Ok(stream) => match ranged_length(&stream) {
-            Some(length) => (stream, true, Some(length)),
-            None => {
-                drop(stream);
-                whole(open(Conditions::default()).await?)
+    let (mut stream, accepts_ranges, length, partial) =
+        match open_from_start(http, url, None, None, Permit::Exempt, cancel).await? {
+            FromStart::Ranged { length, first } => {
+                let partial = first.end < length;
+                (first.stream, true, Some(length), partial)
             }
-        },
-    };
+            FromStart::Ignored(stream) | FromStart::Plain(stream) => {
+                let length = headers::content_length(stream.headers());
+                (stream, false, length, false)
+            }
+        };
     let mut head = Vec::new();
     while head.len() < SNIFF && stream.read_into(&mut head, cancel).await? > 0 {}
     if is_playlist(&head) {
-        let mut body = head;
-        let limit = body_limit(Purpose::Playlist).expect("播放列表有上限");
-        while stream.read_into(&mut body, cancel).await? > 0 {
-            if body.len() as u64 > limit {
-                return Err(Error::ResponseTooLarge {
-                    url: Box::new(stream.final_url().clone()),
-                    purpose: Purpose::Playlist,
-                    limit,
-                });
-            }
-        }
+        let (stream, head) = if partial {
+            // 放开这个响应（与它占的连接）再取整个
+            drop(stream);
+            let whole = http
+                .open(
+                    Purpose::File,
+                    url,
+                    &RangeRequest::default(),
+                    Permit::Exempt,
+                    cancel,
+                )
+                .await?;
+            (whole, Vec::new())
+        } else {
+            (stream, head)
+        };
+        let response = stream
+            .read_to_end(head, Purpose::Playlist, None, cancel)
+            .await?;
         return Ok(Sniffed::Playlist {
-            url: stream.final_url().clone(),
-            body,
+            url: response.url,
+            body: response.body,
         });
     }
     let content_type = headers::content_type(stream.headers());
@@ -108,12 +102,6 @@ async fn sniff(http: &Http, url: &Url, cancel: &CancellationToken) -> Result<Sni
         content_type,
         file_name: headers::file_name(stream.headers()),
     }))
-}
-
-/// 不分段的响应：不支持范围请求，长度取 Content-Length。
-fn whole(stream: Streaming) -> (Streaming, bool, Option<u64>) {
-    let length = content_length(&stream);
-    (stream, false, length)
 }
 
 /// 内容开头（去掉 UTF-8 的 BOM 与空白）是 `#EXTM3U`。

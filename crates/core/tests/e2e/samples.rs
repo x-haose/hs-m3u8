@@ -6,15 +6,15 @@
 //! 核对；//! 其中的文件名都认得、覆盖了文件名的各种写法由 core 的单元测试核对。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
-use std::num::{NonZeroU64, NonZeroUsize};
 
 use hs_m3u8_core::{CancellationToken, Error, JobRequest, Unsettled};
 
-use crate::file::{FileServer, Served, content, file_request, interrupt_at};
+use crate::file::{FileServer, Served, content, file_request, interrupt_at, span};
 use crate::live::{STALL, live_request};
 use crate::server::Server;
 use crate::{engine, fixture, request, run, test_dir};
@@ -320,14 +320,14 @@ async fn file_samples_resume() {
             sample.display()
         );
         for seen in server.seen() {
-            let range = seen.range.unwrap();
-            let start: usize = range["bytes=".len()..]
-                .split('-')
-                .next()
-                .unwrap()
-                .parse()
-                .unwrap();
-            assert!(start >= FILE_STOP, "{}：{range}", sample.display());
+            let (start, _) = span(&seen).expect("续传只发范围请求");
+            assert!(start >= FILE_STOP as u64, "{}：{seen:?}", sample.display());
+            assert_eq!(
+                seen.if_range.as_deref(),
+                Some(FILE_ETAG),
+                "{}",
+                sample.display()
+            );
         }
     }
 }

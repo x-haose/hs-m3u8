@@ -146,7 +146,8 @@ impl FileOutputOptions {
     }
 }
 
-/// 任务目录，未补全：给了 `work_dir` 即它，否则与 `primary` 同级、名为它的主名 `stem` 加 `.hsdl`；没有主名时报参数错误。
+/// 任务目录，未补全：给了 `work_dir` 即它，否则与 `primary` 同级、名为它的主名 `stem` 加 `.hsdl`；没有主名时报参数错
+/// 误。
 fn work_dir_as_given(
     work_dir: Option<&Path>,
     primary: &Path,
@@ -184,11 +185,7 @@ fn resolve(
                 .to_string_lossy()
                 .ends_with(std::path::is_separator)
         {
-            let what = match kind {
-                OutputKind::Mp4 => "MP4 路径是文件，不能以路径分隔符结尾",
-                _ => "输出路径是文件，不能以路径分隔符结尾",
-            };
-            return invalid(what, path);
+            return invalid("输出的是文件，路径不能以路径分隔符结尾", path);
         }
     }
     let mut paths: Vec<&Path> = vec![&work_dir];

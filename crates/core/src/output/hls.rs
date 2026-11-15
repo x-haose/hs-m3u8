@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::Path;
 
 use hs_m3u8_remux::fmp4;
@@ -187,7 +187,7 @@ fn fill_track<'a>(
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
-        place(src, dst)
+        super::place(src, dst)
     };
     let mut placed_inits = HashSet::new();
     let mut written = TrackFiles {
@@ -219,7 +219,7 @@ fn fill_track<'a>(
             }
             let ext = content.check(&segment.path, work_dir, group_index, track)?;
             let name = format!("{index}.{ext}");
-            let len = place(&segment.path, &dir.join(&name))?;
+            let len = super::place(&segment.path, &dir.join(&name))?;
             placed(1);
             if let Some(bps) = bits_per_second(len, segment.duration_us) {
                 written.peak_bps = Some(written.peak_bps.map_or(bps, |peak| peak.max(bps)));
@@ -295,28 +295,6 @@ fn sniff(path: &Path, work_dir: &Path) -> Result<Format, Error> {
         .map_err(io_error("读取", path))?;
     head.map(|h| h.format)
         .ok_or_else(|| super::unrecognized_segment(work_dir, path))
-}
-
-/// 把 `src` 放到新文件 `dst`，返回字节数：能硬链接就硬链接，不占额外空间；做不了时（跨文件系统、文件系统不支持）
-/// 复制并落盘。`dst` 已存在时报错，不改写已有的文件：它可能是别处文件的硬链接。
-pub(super) fn place(src: &Path, dst: &Path) -> Result<u64, Error> {
-    match fs::hard_link(src, dst) {
-        Ok(()) => return Ok(fs::metadata(dst).map_err(io_error("读取", dst))?.len()),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            return Err(io_error("链接", dst)(e));
-        }
-        Err(_) => {}
-    }
-    let mut to = File::options()
-        .write(true)
-        .create_new(true)
-        .open(dst)
-        .map_err(io_error("创建", dst))?;
-    let len = File::open(src)
-        .and_then(|mut from| io::copy(&mut from, &mut to))
-        .map_err(io_error("复制", src))?;
-    to.sync_all().map_err(io_error("落盘", dst))?;
-    Ok(len)
 }
 
 fn write_file(path: &Path, text: &str) -> Result<(), Error> {

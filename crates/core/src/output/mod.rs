@@ -4,7 +4,8 @@ mod commit;
 mod hls;
 mod options;
 
-use std::fs;
+use std::fs::{self, File};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use hs_m3u8_remux::{
@@ -218,41 +219,73 @@ pub(crate) async fn write(
     })
 }
 
-/// 文件任务：把下载完的数据文件装到输出（`options` 里唯一的那个），按选项删除任务目录 `dir`，返回收尾没删掉的东西。
-/// 先放到输出旁的临时名（见 [`hls::place`]：能硬链接就链接，不然复制），再换上（见 [`commit`]）；任一步失败都撤回，
-/// 数据文件留在任务目录里。`cancel` 在换上之前生效，复制本身不中断。
+/// 文件任务：把下载完的数据文件装到输出（`options` 里唯一的那个，见 [`crate::FileOutputOptions`]），按选项删除任务目录
+/// `dir`；返回装好的输出路径与收尾没删掉的东西。先放到输出旁的临时名（见 [`place`]），再换上（见 [`commit_outputs`]）；
+/// 任一步失败都撤回，数据文件留在任务目录里。`cancel` 在换上之前生效，复制本身不中断。
 pub(crate) async fn install_file(
     dir: FileDir,
     options: &ResolvedOutput,
     cancel: &CancellationToken,
-) -> Result<Vec<Leftover>, Error> {
-    let data = dir.data();
-    let files = options.clone();
-    let cancel = cancel.clone();
-    let mut leftovers = blocking(move || {
-        check_all(&files)?;
-        create_dirs(&files)?;
-        let commit = Commit::begin(&files.work_dir, &files.outputs)?;
-        let [output] = files.outputs.as_slice() else {
-            unreachable!("文件任务只有一个输出");
-        };
-        let staged = hls::place(&data, output.temp()).and_then(|_| {
-            if cancel.is_cancelled() {
-                return Err(Error::Cancelled);
-            }
-            // 放好期间输出路径可能已被别人占用；开始时检查过，换上前再查一次，按这次的结果换
-            check_all(&files)
-        });
-        match staged {
-            Ok(existing) => commit.swap(&existing),
-            Err(failure) => Err(commit.abandon(failure)),
-        }
-    })
-    .await??;
+) -> Result<(PathBuf, Vec<Leftover>), Error> {
+    let [output] = options.outputs.as_slice() else {
+        unreachable!("文件任务的输出配置只有一个输出（见 FileOutputOptions::resolve）");
+    };
+    let (data, temp) = (dir.data(), output.temp().to_path_buf());
+    let target = output.target().to_path_buf();
+    let (files, cancel) = (options.clone(), cancel.clone());
+    let ((), mut leftovers) =
+        blocking(move || commit_outputs(&files, &cancel, || place(&data, &temp).map(drop)))
+            .await??;
     if !options.keep_work_dir {
         leftovers.extend(dir.remove().await);
     }
-    Ok(leftovers)
+    Ok((target, leftovers))
+}
+
+/// 换上输出：检查各输出能否写、建出所在目录、记进任务目录（见 [`Commit::begin`]），由 `stage` 写出各临时输出；成功且没
+/// 取消时再查一次各输出（写出期间输出路径可能已被别人占用，按这次的结果换），换上（见 [`commit`]）。任一步失败都撤回，
+/// 等于没有写过；取消时以 [`Error::Cancelled`] 撤回。返回 `stage` 的结果与收尾没删掉的东西。要读写文件系统，在阻塞线程
+/// 池中调用；换上的几步改名不中断。
+fn commit_outputs<T>(
+    options: &ResolvedOutput,
+    cancel: &CancellationToken,
+    stage: impl FnOnce() -> Result<T, Error>,
+) -> Result<(T, Vec<Leftover>), Error> {
+    check_all(options)?;
+    create_dirs(options)?;
+    let commit = Commit::begin(&options.work_dir, &options.outputs)?;
+    let staged = stage().and_then(|value| {
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        Ok((value, check_all(options)?))
+    });
+    match staged {
+        Ok((value, existing)) => Ok((value, commit.swap(&existing)?)),
+        Err(failure) => Err(commit.abandon(failure)),
+    }
+}
+
+/// 把 `src` 放到新文件 `dst`，返回字节数：能硬链接就硬链接，不占额外空间；做不了时（跨文件系统、文件系统不支持）
+/// 复制并落盘。`dst` 已存在时报错，不改写已有的文件：它可能是别处文件的硬链接。
+fn place(src: &Path, dst: &Path) -> Result<u64, Error> {
+    match fs::hard_link(src, dst) {
+        Ok(()) => return Ok(fs::metadata(dst).map_err(io_error("读取", dst))?.len()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            return Err(io_error("链接", dst)(e));
+        }
+        Err(_) => {}
+    }
+    let mut to = File::options()
+        .write(true)
+        .create_new(true)
+        .open(dst)
+        .map_err(io_error("创建", dst))?;
+    let len = File::open(src)
+        .and_then(|mut from| io::copy(&mut from, &mut to))
+        .map_err(io_error("复制", src))?;
+    to.sync_all().map_err(io_error("落盘", dst))?;
+    Ok(len)
 }
 
 /// 写出开始时的进度：每种要写的输出都是各组各轨的分片与 init 段合计。
@@ -274,9 +307,9 @@ fn writing(groups: &[Vec<GroupTrack>], options: &ResolvedOutput) -> Writing {
     }
 }
 
-/// 先把 MP4 合并到临时名、HLS 备齐到准备目录，都成功后再换上（见 [`commit`]）。合并 MP4 失败时还没有动到输出；
-/// 任一步失败都撤回，等于没有写过。成功时另返回收尾没删掉的东西。`cancel` 取消时以 [`Error::Cancelled`] 撤回：合并
-/// MP4（见 [`hs_m3u8_remux::Cancel`]）与备齐 HLS 的每个文件之间检查，换上之前最后检查一次；换上的几步改名不中断。
+/// 先把 MP4 合并到临时名、HLS 备齐到准备目录，都成功后再换上（见 [`commit_outputs`]）。合并 MP4 失败时还没有动到
+/// 输出。成功时另返回收尾没删掉的东西。`cancel` 在合并 MP4（见 [`hs_m3u8_remux::Cancel`]）与备齐 HLS 的每个文件之间也
+/// 检查。
 fn write_files(
     streams: &[Streams],
     groups: &[Vec<GroupTrack>],
@@ -285,25 +318,12 @@ fn write_files(
     cancel: &CancellationToken,
     advance: &Advance,
 ) -> Result<(Option<Mp4Output>, Vec<Leftover>), Error> {
-    check_all(options)?;
-    create_dirs(options)?;
     if options.get(OutputKind::Hls).is_some() {
         hls::check_content(groups, selection)?;
     }
-    let commit = Commit::begin(&options.work_dir, &options.outputs)?;
-    let written =
-        write_temps(streams, groups, selection, options, cancel, advance).and_then(|report| {
-            if cancel.is_cancelled() {
-                return Err(Error::Cancelled);
-            }
-            // 写出期间输出路径可能已被别人占用；开始时检查过，换上前再查一次，按这次的结果换
-            Ok((report, check_all(options)?))
-        });
-    let (report, existing) = match written {
-        Ok(written) => written,
-        Err(failure) => return Err(commit.abandon(failure)),
-    };
-    let leftovers = commit.swap(&existing)?;
+    let (report, leftovers) = commit_outputs(options, cancel, || {
+        write_temps(streams, groups, selection, options, cancel, advance)
+    })?;
     let mp4 = options
         .get(OutputKind::Mp4)
         .zip(report)

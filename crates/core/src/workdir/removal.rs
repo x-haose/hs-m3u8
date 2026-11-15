@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 use super::names::{parse_init_name, parse_segment_name};
 use super::outputs::OUTPUTS_FILE;
 use super::ranges::RANGES_FILE;
-use super::{DATA_FILE, JOB_FILE, LOCK_FILE, Lock, TRACKS_DIR};
+use super::{DATA_FILE, JOB_FILE, LOCK_FILE, Lock, Recorded, TRACKS_DIR};
 use crate::entries::{self, is_canonical_number};
 use crate::error::io_error;
 use crate::{Error, Leftover, LeftoverKind, blocking, busy};
@@ -79,14 +79,18 @@ fn remove_tracks_of(root: &Path) -> Result<Vec<PathBuf>, Error> {
 fn remove_locked(root: &Path, lock: Lock, mut kept: Vec<PathBuf>) -> Result<Vec<PathBuf>, Error> {
     let mut system = Vec::new();
     let mut job = None;
+    // 文件任务的数据文件与范围记录只在 job.json 记的是文件任务时才是本库写的；job.json 读不了（如更新的版本写的）时不
+    // 认，留下报出来
+    let file_task = matches!(super::read_job(root), Ok(Some(Recorded::File(_))));
     for entry in entries::list(root)? {
         let (path, kind) = (&entry.path, entry.kind);
-        // job.json 写到一半的；正在写的输出的记录、文件任务的范围记录（含写到一半的）；文件任务的数据文件
+        // job.json 写到一半的；正在写的输出的记录（含写到一半的）；文件任务的范围记录（含写到一半的）与数据文件
         let ours = kind.is_file()
             && entry.name.to_str().is_some_and(|n| {
+                let whole = n.strip_suffix(".part").unwrap_or(n);
                 n.strip_suffix(".part") == Some(JOB_FILE)
-                    || [OUTPUTS_FILE, RANGES_FILE].contains(&n.strip_suffix(".part").unwrap_or(n))
-                    || n == DATA_FILE
+                    || whole == OUTPUTS_FILE
+                    || file_task && (whole == RANGES_FILE || n == DATA_FILE)
             });
         match entry.name.to_str() {
             Some(LOCK_FILE) => {}

@@ -18,7 +18,7 @@ struct RangesFile {
     ranges: Vec<[u64; 2]>,
 }
 
-/// `ranges` 须升序、不重叠、不为空（[`crate::file::RangeSet`] 给出的）。
+/// `ranges` 须升序、不重叠、不相接、不为空。
 pub(super) fn encode(ranges: &[Range<u64>]) -> Vec<u8> {
     let file = RangesFile {
         format_version: JOB_FORMAT_VERSION,
@@ -27,8 +27,8 @@ pub(super) fn encode(ranges: &[Range<u64>]) -> Vec<u8> {
     serde_json::to_vec(&file).expect("RangesFile 只含整数与数组，序列化不会失败")
 }
 
-/// 解析 `ranges.json`；各范围须升序、不重叠、不相接、不为空，且不超过总长度 `length`。
-pub(super) fn decode(bytes: &[u8], length: u64) -> Result<Vec<Range<u64>>, WorkDirProblem> {
+/// 解析 `ranges.json`；各范围须升序、不重叠、不相接、不为空。
+pub(super) fn decode(bytes: &[u8]) -> Result<Vec<Range<u64>>, WorkDirProblem> {
     check_version(
         bytes,
         RANGES_FILE,
@@ -41,9 +41,9 @@ pub(super) fn decode(bytes: &[u8], length: u64) -> Result<Vec<Range<u64>>, WorkD
     let mut ranges = Vec::with_capacity(file.ranges.len());
     for [start, end] in file.ranges {
         let ordered = previous_end.is_none_or(|p| p < start);
-        if !(ordered && start < end && end <= length) {
+        if !(ordered && start < end) {
             return Err(WorkDirProblem::Corrupt(format!(
-                "{RANGES_FILE} 里的范围 [{start}, {end}) 不合法（总长 {length}）"
+                "{RANGES_FILE} 里的范围 [{start}, {end}) 与前面的重叠、相接或为空"
             )));
         }
         previous_end = Some(end);
@@ -64,20 +64,16 @@ mod tests {
             String::from_utf8(bytes.clone()).unwrap(),
             r#"{"format_version":14,"ranges":[[0,10],[20,30]]}"#
         );
-        assert_eq!(decode(&bytes, 30), Ok(ranges));
-        assert_eq!(
-            decode(br#"{"format_version":14,"ranges":[]}"#, 0),
-            Ok(vec![])
-        );
+        assert_eq!(decode(&bytes), Ok(ranges));
+        assert_eq!(decode(br#"{"format_version":14,"ranges":[]}"#), Ok(vec![]));
         for rejected in [
             r#"{"format_version":14,"ranges":[[0,10],[10,20]]}"#,
             r#"{"format_version":14,"ranges":[[20,30],[0,10]]}"#,
             r#"{"format_version":14,"ranges":[[5,5]]}"#,
-            r#"{"format_version":14,"ranges":[[0,31]]}"#,
             r#"{"format_version":13,"ranges":[]}"#,
             r#"{"format_version":14,"ranges":[],"extra":1}"#,
         ] {
-            assert!(decode(rejected.as_bytes(), 30).is_err(), "{rejected}");
+            assert!(decode(rejected.as_bytes()).is_err(), "{rejected}");
         }
     }
 }

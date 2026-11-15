@@ -13,6 +13,8 @@ use crate::ident::bare_url;
 use crate::proxy::{self, SystemProxy};
 use crate::request::{HttpOptions, Proxy, Timeouts};
 
+use super::Deadline;
+
 /// 系统代理多久重读一次：设置改了（如代理软件换了端口）几秒内新的请求就照新设置走，又不必每个请求都读。
 const SYSTEM_PROXY_TTL: Duration = Duration::from_secs(5);
 
@@ -32,6 +34,7 @@ impl reqwest::cookie::CookieStore for Cookies {
 /// 建客户端要的设置（代理除外）。
 struct Config {
     timeouts: Timeouts,
+    deadline: Deadline,
     insecure: bool,
     cookies: Arc<Cookies>,
 }
@@ -69,9 +72,14 @@ struct Current {
 
 impl Clients {
     /// 按 `options`（已校验过）建；跟系统代理时读一次系统代理，读不出或值用不了时报 [`Error::SystemProxy`]。
-    pub(super) fn new(options: &HttpOptions, cookies: Cookies) -> Result<Self, Error> {
+    pub(super) fn new(
+        options: &HttpOptions,
+        cookies: Cookies,
+        deadline: Deadline,
+    ) -> Result<Self, Error> {
         let config = Config {
             timeouts: options.timeouts,
+            deadline,
             insecure: options.insecure,
             cookies: Arc::new(cookies),
         };
@@ -131,8 +139,11 @@ fn build(config: &Config, route: Route<'_>) -> Result<reqwest::Client, Error> {
         .cookie_provider(config.cookies.clone())
         .connect_timeout(t.connect)
         .read_timeout(t.read_idle)
-        .timeout(t.request)
         .tls_danger_accept_invalid_certs(config.insecure);
+    let builder = match config.deadline {
+        Deadline::Request => builder.timeout(t.request),
+        Deadline::Idle => builder,
+    };
     let builder = match route {
         Route::Direct => builder.no_proxy(),
         Route::Fixed(url) => {
