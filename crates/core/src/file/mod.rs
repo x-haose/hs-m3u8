@@ -6,31 +6,28 @@
 mod download;
 mod headers;
 mod identify;
+mod open;
 mod range_set;
 mod schedule;
 
 use std::num::{NonZeroU64, NonZeroUsize};
-use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 
-use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, HeaderValue};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use self::download::{Download, Start};
+use self::download::{Download, Mode};
 pub(crate) use self::identify::identify;
+use self::open::{FromZero, open_from_zero, open_range, request_end};
 use self::range_set::RangeSet;
 use crate::hooks::Purpose;
-use crate::http::{Http, Permit, RangeRequest, Streaming, http_error};
+use crate::http::{Http, Permit};
 use crate::output::{self, FileOutputOptions, ResolvedOutput};
 use crate::workdir::{self, FileDir, FileRecord, FileResume, url_digest};
-use crate::{
-    Error, FileOutput, FileProgress, HttpErrorKind, Probe, Source, Stage, WorkDirProblem, blocking,
-    job,
-};
+use crate::{Error, FileOutput, FileProgress, Probe, Source, Stage, WorkDirProblem, blocking, job};
 
 /// 认出的地址（[`crate::Engine::identify`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,30 +173,31 @@ pub(crate) async fn run(
     let lock = job::prepare(&output).await?;
     let root = output.work_dir.clone();
     let resume = workdir::read_file_resume(root.clone()).await?;
-    let http = Arc::new(http);
-    let url = request.source.url.clone();
-    let (start, record) = http
-        .retrying(Purpose::File, &url, &cancel, || {
-            first_response(&http, &request, resume.as_ref(), &root, &cancel)
-        })
-        .await?;
     let done = match &resume {
         Some(resume) => RangeSet::from_sorted(resume.ranges.clone()),
         None => RangeSet::default(),
     };
+    let http = Arc::new(http);
+    let url = request.source.url.clone();
+    let (mode, record) = http
+        .retrying(Purpose::File, &url, &cancel, || {
+            let resumed = resume.as_ref().map(|r| (r, &done));
+            first_response(&http, &request, resumed, &root, &cancel)
+        })
+        .await?;
     let validator = headers::validator(record.etag.as_deref(), record.last_modified.as_deref());
-    let dir = FileDir::open(root, lock, record, !done.ranges().is_empty()).await?;
-    if let Some(length) = start.length() {
+    let dir = FileDir::open(root, lock, record, resume.is_some()).await?;
+    if let Some(length) = mode.length() {
         check_space(dir.root(), length - done.len()).await?;
     }
     progress.send_modify(|p| {
         p.stage = Stage::Downloading;
-        p.total = start.length();
+        p.total = mode.length();
         p.bytes = done.len();
         p.completed = done.ranges().to_vec();
-        p.limit = match start {
-            Start::Ranged { .. } => request.connections.get(),
-            Start::Whole { .. } => 1,
+        p.limit = match mode {
+            Mode::Ranged { .. } => request.connections.get(),
+            Mode::Whole { .. } => 1,
         };
     });
     let download = Download {
@@ -211,7 +209,7 @@ pub(crate) async fn run(
         progress: progress.clone(),
         cancel: cancel.clone(),
     };
-    let bytes = download.run(&dir, start, done).await?;
+    let bytes = download.run(&dir, mode, done).await?;
     if cancel.is_cancelled() {
         return Err(Error::Cancelled);
     }
@@ -225,17 +223,18 @@ pub(crate) async fn run(
     })
 }
 
-/// 发第一个请求并核对（规则见 [`FileRequest`]），返回下载方式与写进 job.json 的记录。续传（`resume`）时见 [`resumed`]；
-/// 否则从 0 起请求（见 [`open_from_start`]），按 `expected` 核对。`root` 为任务目录，用于报错。
+/// 发第一个请求并核对（规则见 [`FileRequest`]），返回下载方式与写进 job.json 的记录。续传（`resume` 为可续的内容与它
+/// 已落盘的范围）时见 [`resumed`]；
+/// 否则从 0 起请求（见 [`open_from_zero`]），按 `expected` 核对。`root` 为任务目录，用于报错。
 async fn first_response(
     http: &Http,
     request: &FileRequest,
-    resume: Option<&FileResume>,
+    resume: Option<(&FileResume, &RangeSet)>,
     root: &Path,
     cancel: &CancellationToken,
-) -> Result<(Start, FileRecord), Error> {
-    if let Some(resume) = resume {
-        return resumed(http, request, resume, root, cancel).await;
+) -> Result<(Mode, FileRecord), Error> {
+    if let Some((resume, done)) = resume {
+        return resumed(http, request, resume, done, root, cancel).await;
     }
     let url = &request.source.url;
     let expected = request.expected.as_ref();
@@ -244,7 +243,7 @@ async fn first_response(
     let not_expected = || Error::NotExpected {
         url: Box::new(url.clone()),
     };
-    let opened = open_from_start(
+    let opened = open_from_zero(
         http,
         url,
         first_end,
@@ -253,31 +252,32 @@ async fn first_response(
         cancel,
     )
     .await?;
-    let (start, headers) = match opened {
-        FromStart::Ranged { length, first } => {
-            if if_range
-                .as_deref()
-                .is_some_and(|sent| headers::contradicts(first.stream.headers(), sent))
-            {
-                return Err(not_expected());
-            }
+    let (mode, headers) = match opened {
+        FromZero::Ranged { length, first } => {
             let headers = first.stream.headers().clone();
-            let start = Start::Ranged {
+            let mode = Mode::Ranged {
                 length,
                 first: Some(first),
             };
-            (start, headers)
+            (mode, headers)
         }
         // 带了 If-Range 而回了整个文件：来源变了；没带时即不支持范围请求
-        FromStart::Ignored(_) if if_range.is_some() => return Err(not_expected()),
-        FromStart::Ignored(stream) | FromStart::Plain(stream) => {
+        FromZero::Ignored(_) if if_range.is_some() => return Err(not_expected()),
+        FromZero::Ignored(stream) | FromZero::Plain(stream) => {
             let headers = stream.headers().clone();
             let length = headers::content_length(&headers);
-            (Start::Whole { length, stream }, headers)
+            (Mode::Whole { length, stream }, headers)
         }
     };
+    // 服务器忽略 If-Range 照常回了 206，或认不出范围、不带 Range 重新取的：响应带的验证器与调用方看到的不同即换了文件
+    if if_range
+        .as_deref()
+        .is_some_and(|sent| headers::contradicts(&headers, sent))
+    {
+        return Err(not_expected());
+    }
     if let Some(expected) = expected {
-        let length_differs = expected.length.is_some_and(|l| start.length() != Some(l));
+        let length_differs = expected.length.is_some_and(|l| mode.length() != Some(l));
         let turned_html = if_range.is_none()
             && expected.length.is_none()
             && !expected
@@ -289,8 +289,8 @@ async fn first_response(
             return Err(not_expected());
         }
     }
-    let record = file_record(url, start.length(), &headers, None);
-    Ok((start, record))
+    let record = file_record(url, mode.length(), &headers, None);
+    Ok((mode, record))
 }
 
 /// 续传：地址与记录的不同而记录里没有验证器时报 [`WorkDirProblem::SourceUnverified`]；请求第一段没下的（带记录的验证
@@ -299,9 +299,10 @@ async fn resumed(
     http: &Http,
     request: &FileRequest,
     resume: &FileResume,
+    done: &RangeSet,
     root: &Path,
     cancel: &CancellationToken,
-) -> Result<(Start, FileRecord), Error> {
+) -> Result<(Mode, FileRecord), Error> {
     let url = &request.source.url;
     let recorded = &resume.record;
     let validator = headers::validator(recorded.etag.as_deref(), recorded.last_modified.as_deref());
@@ -313,28 +314,25 @@ async fn resumed(
         });
     }
     let length = resume.length;
-    let gap = RangeSet::from_sorted(resume.ranges.clone())
-        .missing(length)
-        .first()
-        .cloned();
+    let gap = done.missing(length).first().cloned();
     let span = match &gap {
         Some(gap) => gap.start..request_end(gap, request.chunk_size.map(NonZeroU64::get)),
         None if moved => 0..1,
         None => {
-            let start = Start::Ranged {
+            let mode = Mode::Ranged {
                 length,
                 first: None,
             };
-            return Ok((start, recorded.clone()));
+            return Ok((mode, recorded.clone()));
         }
     };
     let opened = open_range(http, url, span, validator.as_deref(), length, root, cancel).await?;
     let record = file_record(url, Some(length), opened.stream.headers(), Some(recorded));
-    let start = Start::Ranged {
+    let mode = Mode::Ranged {
         length,
         first: gap.map(|_| opened),
     };
-    Ok((start, record))
+    Ok((mode, record))
 }
 
 /// 写进 job.json 的记录：地址 `url` 的摘要、总长度 `length`，与响应头 `headers` 里的强 ETag、Last-Modified（响应没带的
@@ -354,144 +352,6 @@ fn file_record(
         last_modified: headers::last_modified(headers)
             .or_else(|| previous.and_then(|p| p.last_modified.clone())),
     }
-}
-
-/// 一段剩下的 `remaining` 这次请求到哪里（不含）：给了块大小 `chunk` 时至多一块。
-fn request_end(remaining: &Range<u64>, chunk: Option<u64>) -> u64 {
-    chunk.map_or(remaining.end, |c| {
-        remaining.end.min(remaining.start.saturating_add(c))
-    })
-}
-
-/// 收到了响应头的范围请求：从 `start` 起，到 `end`（不含）为止。服务器可能给得比请求的少，`end` 为它给到的。
-pub(super) struct Opened {
-    pub stream: Streaming,
-    pub start: u64,
-    pub end: u64,
-}
-
-/// 请求 `span`（带 If-Range `validator`），核对响应：须是 206、从请求的起点起、总长度为 `length`。终点比请求的早（服务
-/// 器一次只给这么多）时照收，比请求的晚时只取到请求的终点。来源的文件变了报 [`WorkDirProblem::FileChanged`]（`root` 为
-/// 任务目录）：回 416（文件变短了）、总长度不同、响应带的验证器与 `validator` 不同、带了 If-Range 而回了整个文件。没带
-/// If-Range 而回了整个文件（服务器这次忽略了范围请求）报 [`HttpErrorKind::RangeIgnored`]，起点不对报
-/// [`HttpErrorKind::RangeMismatch`]。
-pub(super) async fn open_range(
-    http: &Http,
-    url: &Url,
-    span: Range<u64>,
-    validator: Option<&str>,
-    length: u64,
-    root: &Path,
-    cancel: &CancellationToken,
-) -> Result<Opened, Error> {
-    let changed = || Error::WorkDir {
-        path: root.to_path_buf(),
-        problem: WorkDirProblem::FileChanged,
-    };
-    let request = RangeRequest {
-        span: Some((span.start, Some(span.end))),
-        if_range: validator.map(str::to_owned),
-    };
-    let stream = match http
-        .open(Purpose::File, url, &request, Permit::Vod, cancel)
-        .await
-    {
-        Err(Error::Http {
-            kind: HttpErrorKind::Status(416),
-            ..
-        }) => return Err(changed()),
-        other => other?,
-    };
-    let status = stream.status();
-    if status != StatusCode::PARTIAL_CONTENT {
-        return match validator {
-            Some(_) => Err(changed()),
-            None => Err(http_error(
-                stream.url(),
-                HttpErrorKind::RangeIgnored(status.as_u16()),
-            )),
-        };
-    }
-    if validator.is_some_and(|sent| headers::contradicts(stream.headers(), sent)) {
-        return Err(changed());
-    }
-    match stream.content_range() {
-        Some((_, _, Some(total))) if total != length => Err(changed()),
-        Some((first, last, Some(_))) if first == span.start => {
-            let end = (last + 1).min(span.end);
-            Ok(Opened {
-                stream,
-                start: span.start,
-                end,
-            })
-        }
-        _ => {
-            let value = stream
-                .headers()
-                .get(reqwest::header::CONTENT_RANGE)
-                .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned());
-            Err(http_error(
-                stream.url(),
-                HttpErrorKind::RangeMismatch(value),
-            ))
-        }
-    }
-}
-
-/// 从 0 起请求的结果（见 [`open_from_start`]）。
-pub(super) enum FromStart {
-    /// 206，Content-Range 从 0 起、给出了总长度 `length`
-    Ranged { length: u64, first: Opened },
-    /// 对范围请求回了整个文件
-    Ignored(Streaming),
-    /// 回 416（多为空文件），或 206 而 Content-Range 不对（没有总长度、不从 0 起）：不带 Range 重新请求得到的
-    Plain(Streaming),
-}
-
-/// 请求 `url` 从 0 起到 `end`（不含；None 时到文件末尾），带 If-Range `if_range`；回 416 或 Content-Range 不对时放开这
-/// 个响应，不带 Range 再请求一次。
-pub(super) async fn open_from_start(
-    http: &Http,
-    url: &Url,
-    end: Option<u64>,
-    if_range: Option<&str>,
-    permit: Permit,
-    cancel: &CancellationToken,
-) -> Result<FromStart, Error> {
-    let request = RangeRequest {
-        span: Some((0, end)),
-        if_range: if_range.map(str::to_owned),
-    };
-    match http
-        .open(Purpose::File, url, &request, permit, cancel)
-        .await
-    {
-        Err(Error::Http {
-            kind: HttpErrorKind::Status(416),
-            ..
-        }) => {}
-        Err(error) => return Err(error),
-        Ok(stream) if stream.status() != StatusCode::PARTIAL_CONTENT => {
-            return Ok(FromStart::Ignored(stream));
-        }
-        Ok(stream) => {
-            if let Some((0, last, Some(length))) = stream.content_range() {
-                let end = end.map_or(last + 1, |e| e.min(last + 1));
-                let first = Opened {
-                    stream,
-                    start: 0,
-                    end,
-                };
-                return Ok(FromStart::Ranged { length, first });
-            }
-            // 放开这个响应（与它占的名额、连接）再重新请求
-            drop(stream);
-        }
-    }
-    let plain = http
-        .open(Purpose::File, url, &RangeRequest::default(), permit, cancel)
-        .await?;
-    Ok(FromStart::Plain(plain))
 }
 
 /// 任务目录 `root` 所在卷的可用空间放得下 `needed` 字节，否则报 [`Error::NoSpace`]。

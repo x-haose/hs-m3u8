@@ -1,9 +1,9 @@
 //! 任务目录格式的兼容：已发布版本写的任务目录样本，当前版本照样续传、只合并与放弃。
 //!
-//! 样本在 tests/fixtures/workdir/job/<job.json 的格式版本>/<名字>/ 下：`work/` 为当时的版本运行留下的任务目录（vod 另加的
-//! `.part` 除外），`source/` 为接着它续传、续录时的来源（入口为 `index.m3u8`，连同 init 段与分片；直播的播放列表已结束），
-//! 原样提供。各样本由 [`write_samples`] 生成，名字与覆盖的形态见 [`SAMPLES`]。发布后不再改动，`make compat` 对照发布标签
-//! 核对；//! 其中的文件名都认得、覆盖了文件名的各种写法由 core 的单元测试核对。
+//! 样本在 tests/fixtures/workdir/job/<job.json 的格式版本>/<名字>/ 下：`work/` 为当时的版本运行留下的任务目录（vod 另加
+//! 的 `.part` 除外），`source/` 为接着它续传、续录时的来源（入口为 `index.m3u8`，连同 init 段与分片；直播的播放列表已结
+//! 束），原样提供。各样本由 [`write_samples`] 生成，名字与覆盖的形态见 [`SAMPLES`]。发布后不再改动，`make compat` 对照
+//! 发布标签核对；其中的文件名都认得、覆盖了文件名的各种写法由 core 的单元测试核对。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::{NonZeroU64, NonZeroUsize};

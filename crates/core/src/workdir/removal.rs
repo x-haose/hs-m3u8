@@ -79,9 +79,13 @@ fn remove_tracks_of(root: &Path) -> Result<Vec<PathBuf>, Error> {
 fn remove_locked(root: &Path, lock: Lock, mut kept: Vec<PathBuf>) -> Result<Vec<PathBuf>, Error> {
     let mut system = Vec::new();
     let mut job = None;
-    // 文件任务的数据文件与范围记录只在 job.json 记的是文件任务时才是本库写的；job.json 读不了（如更新的版本写的）时不
-    // 认，留下报出来
-    let file_task = matches!(super::read_job(root), Ok(Some(Recorded::File(_))));
+    // 文件任务的数据文件与范围记录只在 job.json 记的是文件任务时才是本库写的；job.json 读不懂（如更新的版本写的、无法解
+    // 析）时不认，留下报出来
+    let file_task = match super::read_job(root) {
+        Ok(recorded) => matches!(recorded, Some(Recorded::File(_))),
+        Err(Error::WorkDir { .. }) => false,
+        Err(failure) => return Err(failure),
+    };
     for entry in entries::list(root)? {
         let (path, kind) = (&entry.path, entry.kind);
         // job.json 写到一半的；正在写的输出的记录（含写到一半的）；文件任务的范围记录（含写到一半的）与数据文件

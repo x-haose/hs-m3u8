@@ -140,8 +140,9 @@ impl Engine {
 
     /// 认出地址 `source.url` 是什么（见 [`Resource`]），不碰任务目录：发一次带 `Range: bytes=0-` 的请求（回 416 或
     /// Content-Range 不对时不带 Range 再发一次），看响应头与内容开头。是播放列表时接着照 [`Engine::probe`] 解析选轨（主
-    /// 播放列表还要拉所选轨的媒体播放列表）；是文件时读到开头几个字节即断开，不下载其余内容。请求的用途为
-    /// [`Purpose::File`]，失败按 [`HttpOptions::retry`] 重试。参数错误时立即返回错误；不在 tokio 运行时内调用会 panic。
+    /// 播放列表还要拉所选轨的媒体播放列表；206 只给了开头一部分时不带 Range 再取一次完整的）；是文件时读到开头几个字节
+    /// 即断开，不下载其余内容。请求的用途为 [`Purpose::File`]，失败按 [`HttpOptions::retry`] 重试。参数错误时立即返回错
+    /// 误；不在 tokio 运行时内调用会 panic。
     pub async fn identify(&self, source: &Source) -> Result<Resource, Error> {
         source.validate()?;
         let http = Http::new(source, self.requests.clone(), None, Deadline::Request)?;
@@ -215,9 +216,9 @@ impl Engine {
     /// 用于任务没在运行时显示已下载了多少；点播的总片数要拉播放列表才知道，不在其中。
     ///
     /// 路径为空或不合要求（见 [`Target`]）时报参数错误；目录所在的盘读不到时报 [`Error::VolumeUnavailable`]，但 macOS
-    /// 上卷卸下后与目录被删分不出来，这时为 None；
-    /// `job.json`（或文件任务的 `ranges.json`）是本库读不了的格式版本写的时报 [`WorkDirProblem::UnsupportedVersion`]、
-    /// 无法解析时报 [`WorkDirProblem::Corrupt`]。不在 tokio 运行时内调用会 panic。
+    /// 上卷卸下后与目录被删分不出来，这时为 None；`job.json`（或文件任务的 `ranges.json`）是本库读不了的格式版本写的时
+    /// 报 [`WorkDirProblem::UnsupportedVersion`]、无法解析时报 [`WorkDirProblem::Corrupt`]。不在 tokio 运行时内调用会
+    /// panic。
     pub async fn inspect(&self, work_dir: &Path) -> Result<Option<Saved>, Error> {
         if work_dir.as_os_str().is_empty() {
             return Err(Error::InvalidInput("任务目录路径为空".to_owned()));
@@ -230,12 +231,13 @@ impl Engine {
     /// 处理：原处是别的东西而没放回的旧输出各一项；收拾不了而按 `unsettled` 记下的；任务目录没删干净（里面有不是本库
     /// 写的文件，或删除出错）时一项 [`LeftoverKind::WorkDir`]。目录不存在时什么也不做。
     ///
-    /// 路径为空或不合要求（见 [`Target`]）时报参数错误。任务目录正被任务使用时报 [`WorkDirProblem::Locked`]，不是
-    /// 本库的任务目录（没有 `job.json` 且不为空）时报 [`WorkDirProblem::NotEmpty`]。记录（`outputs.json`）是本库读不
-    /// 了的格式版本写的时报 [`WorkDirProblem::UnsupportedVersion`]、无法解析时报 [`WorkDirProblem::Corrupt`]，什么也不
-    /// 动：不知道它记着什么就不收拾，可用写下它的版本放弃，或由用户删掉记录（写了一半的临时输出与没能放回的旧输出以
-    /// `hsdl-` 开头，留在输出旁）后再放弃。`job.json` 不读：它是本库读不了的版本写的也照常删除。不在 tokio 运行时内调用会
-    /// panic。
+    /// 路径为空或不合要求（见 [`Target`]）时报参数错误。任务目录正被任务使用时报 [`WorkDirProblem::Locked`]，不是本库的
+    /// 任务目录（没有 `job.json` 且不为空）时报 [`WorkDirProblem::NotEmpty`]。记录（`outputs.json`）是本库读不了的格式
+    /// 版本写的时报 [`WorkDirProblem::UnsupportedVersion`]、无法解析时报 [`WorkDirProblem::Corrupt`]，什么也不动：不知
+    /// 道它记着什么就不收拾，可用写下它的版本放弃，或由用户删掉记录（写了一半的临时输出与没能放回的旧输出以 `hsdl-` 开
+    /// 头，留在输出旁）后再放弃。`job.json` 只用来认出文件任务的数据文件与范围记录（`data`、`ranges.json`）：它是本库读
+    /// 不懂的版本写的或无法解析时照常删除其余的，这两个当作不是本库写的留下（[`LeftoverKind::WorkDir`]）。不在 tokio 运
+    /// 行时内调用会 panic。
     ///
     /// 分几步做：收拾输出、删各轨的分片、删记录与目录本身。`cancel` 取消时做完进行中的一步就停下、放开锁，报
     /// [`Error::Cancelled`]：记录还在，再放弃即可接着做、照样报出留下的东西；取消落在最后一步进行中时照常做完、返回结
@@ -391,7 +393,7 @@ impl<O, P> Job<O, P> {
 /// 任务的控制句柄，可克隆。只持有它不会让任务继续运行（见 [`Job`]）；任务结束后调用不起作用。
 pub struct JobControl<P = Progress> {
     cancel: CancellationToken,
-    /// 直播的停止；没有停止的任务（只合并）为 None
+    /// 直播的停止；没有停止的任务（只合并、文件任务）为 None
     stop: Option<CancellationToken>,
     progress: watch::Receiver<P>,
 }

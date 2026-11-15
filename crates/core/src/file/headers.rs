@@ -192,7 +192,12 @@ mod tests {
             Some("date")
         );
         assert_eq!(validator(Some("W/\"a\""), None), None);
-        assert!(is_html("Text/HTML; charset=utf-8") && !is_html("text/plain"));
+    }
+
+    #[test]
+    fn html_is_recognized_by_its_media_type() {
+        assert!(is_html("Text/HTML; charset=utf-8") && is_html("text/html"));
+        assert!(!is_html("text/plain") && !is_html("application/xhtml+xml"));
     }
 
     /// 发出的 If-Range 是 ETag 时比强 ETag，是日期时比 Last-Modified；响应没带对应的头时不算矛盾。

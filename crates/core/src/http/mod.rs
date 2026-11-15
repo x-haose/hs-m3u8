@@ -269,8 +269,11 @@ impl Http {
         let held = self.acquire(permit, cancel).await?;
         let parts = self.prepare(purpose, url).await?;
         let request = RangeRequest {
-            // hls 保证 offset + length 不溢出
-            span: range.map(|r| (r.offset, Some(r.offset + r.length))),
+            // hls 保证 offset + length 不溢出且 length ≥ 1
+            span: range.map(|r| Span {
+                start: r.offset,
+                end: Some(r.offset + r.length),
+            }),
             if_range: None,
         };
         let response = self.send(&parts, &request, cancel).await?;
@@ -281,7 +284,7 @@ impl Http {
     }
 
     /// 发出 GET `url`、收到响应头即返回，响应体由调用方读（见 [`Streaming`]）；用于文件任务与认出地址是什么。`request`
-    /// 为要的范围与 If-Range；另带 `Accept-Encoding: identity`，要原样的字节。名额（`permit`）、`on_request` 回调与
+    /// 为要的范围与 If-Range。名额（`permit`）、`on_request` 回调与
     /// [`Http::get_once`] 相同，名额一直占到返回的 [`Streaming`] 丢弃；不重试。非 2xx 为失败（同 [`check_status`]），
     /// 2xx 的状态与 Content-Range 由调用方核对。
     pub(crate) async fn open(
@@ -293,10 +296,7 @@ impl Http {
         cancel: &CancellationToken,
     ) -> Result<Streaming, Error> {
         let held = self.acquire(permit, cancel).await?;
-        let mut parts = self.prepare(purpose, url).await?;
-        parts
-            .headers
-            .push((ACCEPT_ENCODING.as_str().to_owned(), "identity".to_owned()));
+        let parts = self.prepare(purpose, url).await?;
         let response = self.send(&parts, request, cancel).await?;
         check_status(&response, &parts.url, None)?;
         Ok(self.streaming(parts.url, response, held))
@@ -359,7 +359,8 @@ impl Http {
         Ok(parts)
     }
 
-    /// 发出请求，附加 `request` 的 Range 与 If-Range，收到响应头即返回；状态不在这里检查。
+    /// 发出请求，附加 `request` 的 Range 与 If-Range，收到响应头即返回；状态不在这里检查。都带
+    /// `Accept-Encoding: identity`：本库不解压，要原样的字节（不带这个头即表示什么编码都接受，RFC 9110 12.5.3）。
     async fn send(
         &self,
         parts: &RequestParts,
@@ -370,7 +371,8 @@ impl Http {
         for (name, value) in &parts.headers {
             builder = builder.header(name, value);
         }
-        if let Some((start, end)) = request.span {
+        builder = builder.header(ACCEPT_ENCODING, "identity");
+        if let Some(Span { start, end }) = request.span {
             let range = match end {
                 Some(end) => format!("bytes={start}-{}", end - 1),
                 None => format!("bytes={start}-"),
@@ -394,12 +396,29 @@ impl Http {
 }
 
 /// 请求要的字节范围与 If-Range（调用方与回调不能给，见 [`crate::check_option_header`]）。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RangeRequest {
-    /// 起点与终点（不含，须大于起点）；终点为 None 时到文件末尾；整个为 None 时不带 Range
-    pub span: Option<(u64, Option<u64>)>,
+    /// None 时不带 Range，要整个
+    pub span: Option<Span>,
     /// If-Range 的值：强 ETag 或 HTTP 日期
     pub if_range: Option<String>,
+}
+
+impl RangeRequest {
+    /// 不带 Range 与 If-Range，要整个。
+    pub(crate) fn whole() -> Self {
+        RangeRequest {
+            span: None,
+            if_range: None,
+        }
+    }
+}
+
+/// 要的字节：从 `start` 起，到 `end`（不含，须大于 `start`）为止；`end` 为 None 时到末尾。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Span {
+    pub start: u64,
+    pub end: Option<u64>,
 }
 
 /// 收到了响应头的请求（见 [`Http::open`]）；丢弃即断开连接、放开名额。
@@ -561,19 +580,28 @@ pub(crate) fn body_limit(purpose: Purpose) -> Option<u64> {
     }
 }
 
-/// 206 响应的 Content-Range `value` 是不是请求的那一段 `r`。
+/// 206 响应的 Content-Range `value` 是不是请求的那一段 `r`：只看首尾，总长不看（HLS 的字节范围不需要它，有的服务器
+/// 写得不对）。
 fn range_matches(value: &str, r: ByteRange) -> bool {
     // hls 保证 offset + length 不溢出且 length ≥ 1
-    content_range(value)
-        .is_some_and(|(first, last, _)| first == r.offset && last == r.offset + r.length - 1)
+    content_span(value)
+        .is_some_and(|((first, last), _)| first == r.offset && last == r.offset + r.length - 1)
 }
 
-/// 206 响应的 Content-Range（RFC 9110 14.4）：`bytes 首-尾/总长`，尾含在内，总长为 `*` 时为 None。写法不对（含首大于
-/// 尾、尾不小于总长）时整个为 None。
-pub(crate) fn content_range(value: &str) -> Option<(u64, u64, Option<u64>)> {
+/// Content-Range（RFC 9110 14.4：`bytes 首-尾/总长`）的首尾（尾含在内）与没解析的总长部分；首尾写法不对时为 None。
+fn content_span(value: &str) -> Option<((u64, u64), &str)> {
     let (span, total) = value.trim().strip_prefix("bytes ")?.split_once('/')?;
     let (first, last) = span.split_once('-')?;
-    let (first, last): (u64, u64) = (first.trim().parse().ok()?, last.trim().parse().ok()?);
+    Some((
+        (first.trim().parse().ok()?, last.trim().parse().ok()?),
+        total,
+    ))
+}
+
+/// 206 响应的 Content-Range：首、尾（含在内）与总长，总长为 `*` 时为 None。写法不对（含首大于尾、尾不小于总长）时整个
+/// 为 None。
+fn content_range(value: &str) -> Option<(u64, u64, Option<u64>)> {
+    let ((first, last), total) = content_span(value)?;
     let total = match total.trim() {
         "*" => None,
         total => Some(total.parse().ok()?),
@@ -620,6 +648,7 @@ mod tests {
 
     use super::*;
 
+    /// HLS 的字节范围只核对首尾：总长写错的照样接受。
     #[test]
     fn content_range_must_be_the_requested_span() {
         let r = ByteRange {
@@ -630,6 +659,8 @@ mod tests {
             "bytes 100-149/1000",
             "bytes 100-149/*",
             " bytes 100-149/1000 ",
+            "bytes 100-149/120",
+            "bytes 100-149/abc",
         ] {
             assert!(range_matches(value, r), "{value}");
         }

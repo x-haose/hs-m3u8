@@ -52,7 +52,7 @@ pub struct FileProgress {
     pub completed: Vec<Range<u64>>,
     /// 本次运行从网络读到的响应体字节数，读到即计：含重试前没读完的。按它的变化算下载速度
     pub received: u64,
-    /// 当前在途的连接数；收到第一个响应之前为 0
+    /// 分到了段的连接数，含等着引擎名额、还没发出请求的；收到第一个响应之前为 0
     pub connections: usize,
     /// 当前的连接上限：收到第一个响应之前为 0，之后为 [`crate::FileRequest::connections`]，服务器限制连接数时降低（见
     /// `throttled`）；不支持范围请求或不知道总长度时为 1

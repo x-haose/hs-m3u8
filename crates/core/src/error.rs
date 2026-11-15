@@ -112,8 +112,8 @@ pub enum Error {
     /// 直播没有录到可合并的分片：任务目录不存在或没有已完成的分片，或录到的都合并不了（每组都缺某条轨的分片）
     #[error("直播没有录到可合并的分片")]
     NothingRecorded,
-    /// 文件任务第一次运行时，来源 `url` 与调用方看到的（[`crate::Expected`]）对不上：多为签名地址过期或会话失效后换成了
-    /// 错误页、登录页，或来源换了文件。重新认一次地址（[`crate::Engine::identify`]）再开始
+    /// 文件任务目录里没有可续的内容时，来源 `url` 与调用方看到的（[`crate::Expected`]）对不上：多为签名地址过期或会话失
+    /// 效后换成了错误页、登录页，或来源换了文件。重新认一次地址（[`crate::Engine::identify`]）再开始
     #[error("{} 已不是之前看到的文件", bare_url(.url))]
     NotExpected { url: Box<Url> },
     /// 文件任务开始前查的：任务目录 `path` 所在的卷放不下还没下载的 `needed` 字节，可用 `available` 字节。腾出空间或换
@@ -580,9 +580,11 @@ fn stopped_text(cause: StallCause) -> String {
 /// 任务目录不能使用的原因。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WorkDirProblem {
-    /// 不是本库建立的任务目录，不会去动它
-    #[error("目录不为空，且没有 job.json")]
+    /// 目录里有不是本库写的文件，不会去动它：没有 job.json 而目录不为空（不是本库建立的任务目录），或文件任务要用的
+    /// `data`、`ranges.json` 已被不是文件任务的东西占用
+    #[error("目录里有不是本库写的文件")]
     NotEmpty,
+    /// 正被另一个任务使用；文件任务开头目录还不存在、加锁时已有了另一个文件任务的内容（两个任务同时用它建了目录）也是
     #[error("正被另一个任务使用")]
     Locked,
     /// job.json、outputs.json 或分片文件无法识别；是本库读不了的格式版本写的为 [`WorkDirProblem::UnsupportedVersion`]

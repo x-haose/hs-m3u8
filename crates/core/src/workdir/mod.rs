@@ -288,7 +288,7 @@ fn read_saved(root: &Path) -> Result<Option<Saved>, Error> {
         Some(Recorded::Hls(record)) => record,
         Some(Recorded::File(record)) => {
             let ranges = match record.length {
-                Some(length) => within(root, read_ranges(root)?, length)?,
+                Some(length) => read_ranges_within(root, length)?,
                 None => Vec::new(),
             };
             return Ok(Some(Saved::File(FileSaved {
@@ -440,8 +440,7 @@ fn has_completed(root: &Path, recorded: &Recorded) -> Result<bool, Error> {
     }
 }
 
-/// 文件任务目录 `root` 里已落盘的范围（见 [`ranges`]）；没有记录时为空。不超过总长度由知道总长度的调用方核对（见
-/// [`within`]）。
+/// 文件任务目录 `root` 里已落盘的范围（见 [`ranges`]）；没有记录时为空。不核对总长度，见 [`read_ranges_within`]。
 fn read_ranges(root: &Path) -> Result<Vec<Range<u64>>, Error> {
     let path = root.join(RANGES_FILE);
     match fs::read(&path) {
@@ -454,8 +453,9 @@ fn read_ranges(root: &Path) -> Result<Vec<Range<u64>>, Error> {
     }
 }
 
-/// 任务目录 `root` 里的范围记录 `ranges` 不超过记录的总长度 `length`；超过时为目录损坏。
-fn within(root: &Path, ranges: Vec<Range<u64>>, length: u64) -> Result<Vec<Range<u64>>, Error> {
+/// 文件任务目录 `root` 里已落盘的范围（见 [`read_ranges`]），核对过不超过记录的总长度 `length`：超过时为目录损坏。
+fn read_ranges_within(root: &Path, length: u64) -> Result<Vec<Range<u64>>, Error> {
+    let ranges = read_ranges(root)?;
     match ranges.last() {
         Some(last) if last.end > length => Err(Error::WorkDir {
             path: root.to_path_buf(),
@@ -508,7 +508,7 @@ pub(crate) async fn read_file_resume(root: PathBuf) -> Result<Option<FileResume>
             None => return Ok(None),
             Some(Recorded::File(record)) => record,
             Some(hls @ Recorded::Hls(_)) => {
-                if !has_completed_segments(&root)? {
+                if !has_completed(&root, &hls)? {
                     return Ok(None);
                 }
                 return Err(Error::WorkDir {
@@ -523,7 +523,7 @@ pub(crate) async fn read_file_resume(root: PathBuf) -> Result<Option<FileResume>
         let Some(length) = record.length else {
             return Ok(None);
         };
-        let ranges = within(&root, read_ranges(&root)?, length)?;
+        let ranges = read_ranges_within(&root, length)?;
         Ok((!ranges.is_empty()).then_some(FileResume {
             record,
             length,
@@ -542,8 +542,10 @@ pub(crate) struct FileDir {
 impl FileDir {
     /// 打开或新建文件任务的任务目录并加锁，`job.json` 写为 `record`；`lock` 为 [`WorkDir::lock_existing`] 已加上的锁。
     /// `resumed` 为任务开头读到的可续内容（见 [`read_file_resume`]，调用方已核对过来源）：有时保留数据文件与范围记录，
-    /// 没有时删掉之前的内容（见 [`clear_content`]），从头开始。没有 `job.json` 时目录须为空，同 [`WorkDir::open`]；任务
-    /// 开头目录还不存在、加锁时已有了可续的内容（别的任务同时用它建了目录）时报 [`WorkDirProblem::Locked`]。
+    /// 没有时删掉之前的内容（见 [`clear_content`]），从头开始。没有 `job.json` 时目录须为空，同 [`WorkDir::open`]；
+    /// `job.json` 记的不是文件任务而目录里有名为 `data`、`ranges.json` 的文件（不是本库写的）时报
+    /// [`WorkDirProblem::NotEmpty`]，不改记录。任务开头目录还不存在、加锁时已有了别的任务的内容（同时用它建了目录）时，
+    /// 是 HLS 任务的报 [`WorkDirProblem::KindMismatch`]，是文件任务的报 [`WorkDirProblem::Locked`]。
     pub(crate) async fn open(
         root: PathBuf,
         lock: Option<Lock>,
@@ -554,14 +556,28 @@ impl FileDir {
             let created = lock.is_none();
             let lock = lock_or_create(&root, lock)?;
             let recorded = read_job(&root)?;
+            let problem = |problem| Error::WorkDir {
+                path: root.clone(),
+                problem,
+            };
             if created
                 && let Some(recorded) = &recorded
                 && has_completed(&root, recorded)?
             {
-                return Err(Error::WorkDir {
-                    path: root,
-                    problem: WorkDirProblem::Locked,
-                });
+                return Err(problem(match recorded {
+                    Recorded::Hls(hls) => WorkDirProblem::KindMismatch {
+                        recorded: hls.job_type(),
+                        current: JobType::File,
+                    },
+                    Recorded::File(_) => WorkDirProblem::Locked,
+                }));
+            }
+            if !matches!(recorded, Some(Recorded::File(_))) {
+                for name in [DATA_FILE, RANGES_FILE] {
+                    if exists(&root.join(name))? {
+                        return Err(problem(WorkDirProblem::NotEmpty));
+                    }
+                }
             }
             if !resumed {
                 clear_content(&root, recorded.as_ref())?;

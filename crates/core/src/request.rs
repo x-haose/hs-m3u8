@@ -221,8 +221,7 @@ pub(crate) fn check_scheme(url: &Url) -> Result<(), String> {
     Err(format!("只支持 http/https 地址：{}", bare_url(url)))
 }
 
-/// 请求头名与值能否放进 HTTP 请求、且不是不能另给的头（见 [`check_option_header`]，回调改出的请求头也按它查）；不能
-/// 时返回原因。
+/// 请求头名与值能否放进 HTTP 请求、且不在 [`forbidden`] 列出的头里（回调改出的请求头也按它查）；不能时返回原因。
 pub(crate) fn check_header(name: &str, value: &str) -> Result<(), String> {
     let parsed = reqwest::header::HeaderName::from_bytes(name.as_bytes())
         .map_err(|_| format!("请求头名不合法：{name:?}"))?;

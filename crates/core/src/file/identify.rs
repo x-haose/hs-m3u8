@@ -3,7 +3,7 @@
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::{FileInfo, FromStart, Resource, headers, open_from_start};
+use super::{FileInfo, FromZero, Resource, headers, open_from_zero};
 use crate::hooks::Purpose;
 use crate::http::{Http, Permit, RangeRequest};
 use crate::request::Source;
@@ -46,16 +46,16 @@ pub(crate) async fn identify(http: &Http, source: &Source) -> Result<Resource, E
     }
 }
 
-/// 从 0 起请求 `url`（见 [`open_from_start`]），看响应头与内容开头；是播放列表时读完内容（超过播放列表的上限报
+/// 从 0 起请求 `url`（见 [`open_from_zero`]），看响应头与内容开头；是播放列表时读完内容（超过播放列表的上限报
 /// [`Error::ResponseTooLarge`]；206 只给了开头一部分时不带 Range 重新取）。
 async fn sniff(http: &Http, url: &Url, cancel: &CancellationToken) -> Result<Sniffed, Error> {
     let (mut stream, accepts_ranges, length, partial) =
-        match open_from_start(http, url, None, None, Permit::Exempt, cancel).await? {
-            FromStart::Ranged { length, first } => {
+        match open_from_zero(http, url, None, None, Permit::Exempt, cancel).await? {
+            FromZero::Ranged { length, first } => {
                 let partial = first.end < length;
                 (first.stream, true, Some(length), partial)
             }
-            FromStart::Ignored(stream) | FromStart::Plain(stream) => {
+            FromZero::Ignored(stream) | FromZero::Plain(stream) => {
                 let length = headers::content_length(stream.headers());
                 (stream, false, length, false)
             }
@@ -70,7 +70,7 @@ async fn sniff(http: &Http, url: &Url, cancel: &CancellationToken) -> Result<Sni
                 .open(
                     Purpose::File,
                     url,
-                    &RangeRequest::default(),
+                    &RangeRequest::whole(),
                     Permit::Exempt,
                     cancel,
                 )

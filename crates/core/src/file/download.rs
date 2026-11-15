@@ -12,9 +12,9 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+use super::open::{Opened, open_range, request_end};
 use super::range_set::RangeSet;
 use super::schedule::Schedule;
-use super::{Opened, open_range};
 use crate::error::io_error;
 use crate::hooks::Purpose;
 use crate::http::{Http, Permit, RangeRequest, Streaming};
@@ -31,7 +31,7 @@ const RECORD_BYTES: u64 = 8 << 20;
 const RECORD_INTERVAL: Duration = Duration::from_secs(1);
 
 /// 下载方式与第一个请求，由第一个响应定下。
-pub(super) enum Start {
+pub(super) enum Mode {
     /// 支持范围请求、知道总长度：分段下载，记已完成的范围，可续传。`first` 为已收到响应头的第一个请求（从第一段没下的
     /// 起点起），都已落盘时为 None
     Ranged { length: u64, first: Option<Opened> },
@@ -42,16 +42,16 @@ pub(super) enum Start {
     },
 }
 
-impl Start {
+impl Mode {
     pub(super) fn length(&self) -> Option<u64> {
         match self {
-            Start::Ranged { length, .. } => Some(*length),
-            Start::Whole { length, .. } => *length,
+            Mode::Ranged { length, .. } => Some(*length),
+            Mode::Whole { length, .. } => *length,
         }
     }
 }
 
-/// 下载用到的。
+/// 下载的配置：由 [`super::run`] 建出，按 [`Mode`] 分派。
 pub(super) struct Download {
     pub http: Arc<Http>,
     /// 来源地址；各请求都发往它（重定向由客户端跟随）
@@ -68,117 +68,119 @@ pub(super) struct Download {
 }
 
 impl Download {
-    /// 按 `start` 把文件下进 `dir` 的数据文件，返回文件的字节数；`done` 为续传前已落盘的范围（分段下载才有，为空即新
+    /// 按 `mode` 把文件下进 `dir` 的数据文件，返回文件的字节数；`done` 为续传前已落盘的范围（分段下载才有，为空即新
     /// 开始）。
-    pub(super) async fn run(
-        self,
-        dir: &FileDir,
-        start: Start,
-        done: RangeSet,
-    ) -> Result<u64, Error> {
-        match start {
-            Start::Ranged { length, first } => ranged(self, dir, length, first, done).await,
-            Start::Whole { length, stream } => self.whole(dir, length, stream).await,
+    pub(super) async fn run(self, dir: &FileDir, mode: Mode, done: RangeSet) -> Result<u64, Error> {
+        match mode {
+            Mode::Ranged { length, first } => ranged(self, dir, length, first, done).await,
+            Mode::Whole { length, stream } => whole(self, dir, length, stream).await,
         }
     }
+}
 
-    /// 一个连接从头读到尾：失败按重试策略从头再来（数据文件清空重写）；`length` 为 Content-Length，有时核对读到的字节
-    /// 数。
-    async fn whole(
-        self,
-        dir: &FileDir,
-        length: Option<u64>,
-        first: Streaming,
-    ) -> Result<u64, Error> {
-        let data = dir.data();
-        let file = {
-            let data = data.clone();
-            blocking(move || create_data(&data)).await??
-        };
-        let file = Arc::new(file);
-        self.progress.send_modify(|p| p.connections = 1);
-        let mut first = Some(first);
-        let mut tried = 1;
-        let result = loop {
-            let attempt = async {
-                let stream = match first.take() {
-                    Some(stream) => stream,
-                    None => {
-                        let request = RangeRequest::default();
-                        self.http
-                            .open(
-                                Purpose::File,
-                                &self.url,
-                                &request,
-                                Permit::Vod,
-                                &self.cancel,
-                            )
-                            .await?
-                    }
-                };
-                // 从头再来：上次写的可能比这次的长，先清掉
-                let (cleared, path) = (file.clone(), data.clone());
-                blocking(move || cleared.set_len(0).map_err(io_error("写入", &path))).await??;
-                self.read_whole(stream, &file, &data, length).await
-            };
-            match attempt.await {
-                Ok(bytes) => break Ok(bytes),
-                Err(error) => {
-                    self.progress.send_modify(|p| {
-                        p.bytes = 0;
-                        p.completed.clear();
-                    });
-                    if let Err(error) = self
+/// 一个连接从头读到尾：失败按重试策略从头再来（数据文件清空重写）；`length` 为 Content-Length，有时核对读到的字节
+/// 数。
+async fn whole(
+    download: Download,
+    dir: &FileDir,
+    length: Option<u64>,
+    first: Streaming,
+) -> Result<u64, Error> {
+    let data = dir.data();
+    let file = {
+        let data = data.clone();
+        blocking(move || create_data(&data)).await??
+    };
+    let file = Arc::new(file);
+    download.progress.send_modify(|p| p.connections = 1);
+    let mut first = Some(first);
+    let mut tried = 1;
+    let result = loop {
+        let attempt = async {
+            let stream = match first.take() {
+                Some(stream) => stream,
+                None => {
+                    let request = RangeRequest::whole();
+                    download
                         .http
-                        .wait_to_retry(Purpose::File, &self.url, error, &mut tried, &self.cancel)
-                        .await
-                    {
-                        break Err(error);
-                    }
+                        .open(
+                            Purpose::File,
+                            &download.url,
+                            &request,
+                            Permit::Vod,
+                            &download.cancel,
+                        )
+                        .await?
+                }
+            };
+            // 从头再来：上次写的可能比这次的长，先清掉
+            let (cleared, path) = (file.clone(), data.clone());
+            blocking(move || cleared.set_len(0).map_err(io_error("写入", &path))).await??;
+            read_whole(&download, stream, &file, &data, length).await
+        };
+        match attempt.await {
+            Ok(bytes) => break Ok(bytes),
+            Err(error) => {
+                download.progress.send_modify(|p| {
+                    p.bytes = 0;
+                    p.completed.clear();
+                });
+                if let Err(error) = download
+                    .http
+                    .wait_to_retry(
+                        Purpose::File,
+                        &download.url,
+                        error,
+                        &mut tried,
+                        &download.cancel,
+                    )
+                    .await
+                {
+                    break Err(error);
                 }
             }
-        };
-        self.progress.send_modify(|p| p.connections = 0);
-        let bytes = result?;
-        blocking(move || file.sync_data().map_err(io_error("落盘", &data))).await??;
-        Ok(bytes)
-    }
-
-    /// 把 `stream` 的响应体从数据文件开头写起，返回字节数；`length` 有值而读到的不同时报 [`Error::Incomplete`]。
-    async fn read_whole(
-        &self,
-        mut stream: Streaming,
-        file: &Arc<File>,
-        data: &Path,
-        length: Option<u64>,
-    ) -> Result<u64, Error> {
-        let mut buf = Vec::new();
-        let mut written = 0u64;
-        loop {
-            let n = stream.read_into(&mut buf, &self.cancel).await?;
-            let end = n == 0;
-            if end || buf.len() >= WRITE_BUFFER {
-                let len = buf.len() as u64;
-                buf = write_at(file, data, buf, written).await?;
-                written += len;
-                self.progress.send_modify(|p| {
-                    p.bytes = written;
-                    p.completed = std::iter::once(0..written)
-                        .filter(|r| !r.is_empty())
-                        .collect();
-                });
-            }
-            if end {
-                break;
-            }
         }
-        if length.is_some_and(|l| l != written) {
-            return Err(Error::Incomplete {
-                url: Box::new(stream.url().clone()),
+    };
+    download.progress.send_modify(|p| p.connections = 0);
+    let bytes = result?;
+    blocking(move || file.sync_data().map_err(io_error("落盘", &data))).await??;
+    Ok(bytes)
+}
+
+/// 把 `stream` 的响应体从数据文件开头写起，返回字节数；`length` 有值而读到的不同时报 [`Error::Incomplete`]。
+async fn read_whole(
+    download: &Download,
+    mut stream: Streaming,
+    file: &Arc<File>,
+    data: &Path,
+    length: Option<u64>,
+) -> Result<u64, Error> {
+    let mut buf = Vec::new();
+    let mut written = 0u64;
+    loop {
+        let n = stream.read_into(&mut buf, &download.cancel).await?;
+        let end = n == 0;
+        if end || buf.len() >= WRITE_BUFFER {
+            let len = buf.len() as u64;
+            buf = write_at(file, data, buf, written).await?;
+            written += len;
+            download.progress.send_modify(|p| {
+                p.bytes = written;
+                p.completed = std::iter::once(0..written)
+                    .filter(|r| !r.is_empty())
+                    .collect();
             });
         }
-        Ok(written)
+        if end {
+            break;
+        }
     }
+    if length.is_some_and(|l| l != written) {
+        return Err(Error::Incomplete {
+            url: Box::new(stream.url().clone()),
+        });
+    }
+    Ok(written)
 }
 
 /// 分段下载：各连接写同一个数据文件，主循环等它们结束，定时落盘、记已完成的范围；失败或取消时同样记下已写的再返回。
@@ -191,18 +193,32 @@ async fn ranged(
 ) -> Result<u64, Error> {
     let data = dir.data();
     let file = {
-        let (data, resumed) = (data.clone(), !done.ranges().is_empty());
-        blocking(move || open_data(&data, length, resumed)).await??
+        let (data, root) = (data.clone(), dir.root().to_path_buf());
+        let resumed = !done.ranges().is_empty();
+        blocking(move || open_data(&root, &data, length, resumed)).await??
     };
     let missing = done.missing(length);
+    let Download {
+        http,
+        url,
+        chunk,
+        connections,
+        validator,
+        progress,
+        cancel,
+    } = download;
     let ctx = Arc::new(Ctx {
-        cancel: download.cancel.child_token(),
+        cancel: cancel.child_token(),
+        http,
+        url,
+        chunk,
+        validator,
+        progress,
         shared: Mutex::new(Shared {
-            schedule: Schedule::new(missing, download.connections),
+            schedule: Schedule::new(missing, connections),
             written: done,
             unrecorded: 0,
         }),
-        download,
         file: Arc::new(file),
         data,
         root: dir.root().to_path_buf(),
@@ -271,9 +287,9 @@ fn create_data(data: &Path) -> Result<File, Error> {
         .map_err(io_error("创建", data))
 }
 
-/// 打开分段下载的数据文件：续传（`resumed`）时须已存在、长度为 `length`，否则为任务目录损坏；新开始时建出长度为
-/// `length` 的文件（多为稀疏文件，不先占空间）。
-fn open_data(data: &Path, length: u64, resumed: bool) -> Result<File, Error> {
+/// 打开任务目录 `root` 里分段下载的数据文件 `data`：续传（`resumed`）时须已存在、长度为 `length`，否则为任务目录损坏；
+/// 新开始时建出长度为 `length` 的文件（多为稀疏文件，不先占空间）。
+fn open_data(root: &Path, data: &Path, length: u64, resumed: bool) -> Result<File, Error> {
     if !resumed {
         let file = create_data(data)?;
         file.set_len(length).map_err(io_error("写入", data))?;
@@ -284,12 +300,13 @@ fn open_data(data: &Path, length: u64, resumed: bool) -> Result<File, Error> {
         .write(true)
         .open(data)
         .map_err(|cause| match cause.kind() {
-            io::ErrorKind::NotFound => corrupt(data, "范围记录在，数据文件却不在".to_owned()),
+            io::ErrorKind::NotFound => corrupt(root, data, "范围记录在，数据文件却不在".to_owned()),
             _ => io_error("打开", data)(cause),
         })?;
     let len = file.metadata().map_err(io_error("读取", data))?.len();
     if len != length {
         return Err(corrupt(
+            root,
             data,
             format!("数据文件长 {len} 字节，应为 {length}"),
         ));
@@ -297,9 +314,8 @@ fn open_data(data: &Path, length: u64, resumed: bool) -> Result<File, Error> {
     Ok(file)
 }
 
-/// 任务目录里的数据文件 `data` 与记录对不上。
-fn corrupt(data: &Path, detail: String) -> Error {
-    let root = data.parent().expect("数据文件在任务目录里");
+/// 任务目录 `root` 里的数据文件 `data` 与记录对不上。
+fn corrupt(root: &Path, data: &Path, detail: String) -> Error {
     Error::WorkDir {
         path: root.to_path_buf(),
         problem: WorkDirProblem::Corrupt(format!("{}：{detail}", data.display())),
@@ -350,7 +366,11 @@ fn write_all_at(file: &File, mut bytes: &[u8], mut offset: u64) -> io::Result<()
 
 /// 分段下载各连接共用的。
 struct Ctx {
-    download: Download,
+    http: Arc<Http>,
+    url: Url,
+    chunk: Option<u64>,
+    validator: Option<String>,
+    progress: watch::Sender<FileProgress>,
     file: Arc<File>,
     /// 数据文件
     data: PathBuf,
@@ -372,8 +392,8 @@ struct Shared {
     unrecorded: u64,
 }
 
-/// 一个连接上一段的结局。
-enum Piece {
+/// 一个连接下一段的结局。
+enum Outcome {
     /// 这一段下完了（或被劈得只剩已下的）
     Done,
     /// 服务器限制了连接数：这一段没下完的已放回（见 [`Ctx::throttled`]）
@@ -389,21 +409,25 @@ struct Buffer {
 /// 一个连接：下完分到的段 `id` 就要下一段，直到没有可分的；`first` 为已收到响应头的请求。
 async fn worker(ctx: Arc<Ctx>, mut id: u64, mut first: Option<Opened>) -> Result<(), Error> {
     loop {
-        let end = ctx.piece(id, &mut first).await;
-        let mut shared = ctx.lock();
-        let next = match end {
-            Ok(Piece::Throttled) => None,
-            Ok(Piece::Done) => {
-                shared.schedule.release(id);
-                shared.schedule.assign()
-            }
-            Err(error) => {
-                shared.schedule.release(id);
-                ctx.report_connections(&shared);
-                return Err(error);
-            }
+        let outcome = ctx.piece(id, &mut first).await;
+        let next = {
+            let mut shared = ctx.lock();
+            let next = match &outcome {
+                // 已在 Ctx::throttled 里放回、报过
+                Ok(Outcome::Throttled) => return Ok(()),
+                Ok(Outcome::Done) => {
+                    shared.schedule.release(id);
+                    shared.schedule.assign()
+                }
+                Err(_) => {
+                    shared.schedule.release(id);
+                    None
+                }
+            };
+            ctx.report_connections(&shared);
+            next
         };
-        ctx.report_connections(&shared);
+        outcome?;
         match next {
             Some(next) => id = next,
             None => return Ok(()),
@@ -416,7 +440,7 @@ async fn worker(ctx: Arc<Ctx>, mut id: u64, mut first: Option<Opened>) -> Result
 /// 简化：上限降了不再升，网络短暂中断时也会降下来，本次运行之后只用剩下的连接；限连的判定只看本任务在途的连接，几个
 /// 任务同时下同一个按连接数限制的主机时，降到一个之后再被限按普通失败处理。要分清这些时，按同时有没有请求成功来判、
 /// 并在一段时间没再被限后回升。
-fn throttling(error: &Error) -> Option<HttpFailure> {
+fn throttle_failure(error: &Error) -> Option<HttpFailure> {
     match error {
         Error::Http {
             kind:
@@ -443,15 +467,14 @@ impl Ctx {
     /// 进度里的连接数：分到了段的连接（含等着引擎名额、还没发出请求的）。
     fn report_connections(&self, shared: &Shared) {
         let active = shared.schedule.active();
-        self.download
-            .progress
-            .send_modify(|p| p.connections = active);
+        self.progress.send_modify(|p| p.connections = active);
     }
 
-    /// 连接 `id` 的新请求以 `error` 失败：是限连的样子（见 [`throttling`]）且还有别的连接在途时，降低上限、把这一段放回
-    /// （同一次加锁里：放回的段总有在途的连接下完自己的之后接手），报进进度，返回 true；否则为 false，按普通失败处理。
+    /// 连接 `id` 的新请求以 `error` 失败：是限连的样子（见 [`throttle_failure`]）且还有别的连接在途时，降低上限、把这一
+    /// 段放回（同一次加锁里：放回的段总有在途的连接下完自己的之后接手），报进进度，返回 true；否则为 false，按普通失败
+    /// 处理。
     fn throttled(&self, id: u64, error: &Error) -> bool {
-        let Some(failure) = throttling(error) else {
+        let Some(failure) = throttle_failure(error) else {
             return false;
         };
         let mut shared = self.lock();
@@ -461,7 +484,7 @@ impl Ctx {
         let limit = shared.schedule.lower_limit();
         shared.schedule.release(id);
         let active = shared.schedule.active();
-        self.download.progress.send_modify(|p| {
+        self.progress.send_modify(|p| {
             p.limit = limit;
             p.connections = active;
             p.throttled = Some(Throttled { limit, failure });
@@ -470,7 +493,7 @@ impl Ctx {
     }
 
     /// 下连接 `id` 分到的段，失败按重试策略再试（从已写到的地方接着下；有进展就重新计次）。
-    async fn piece(&self, id: u64, first: &mut Option<Opened>) -> Result<Piece, Error> {
+    async fn piece(&self, id: u64, first: &mut Option<Opened>) -> Result<Outcome, Error> {
         let mut tried = 1;
         loop {
             let start = self.lock().schedule.remaining(id).start;
@@ -480,15 +503,8 @@ impl Ctx {
                     if self.lock().schedule.remaining(id).start > start {
                         tried = 1;
                     }
-                    self.download
-                        .http
-                        .wait_to_retry(
-                            Purpose::File,
-                            &self.download.url,
-                            error,
-                            &mut tried,
-                            &self.cancel,
-                        )
+                    self.http
+                        .wait_to_retry(Purpose::File, &self.url, error, &mut tried, &self.cancel)
                         .await?;
                 }
             }
@@ -497,21 +513,21 @@ impl Ctx {
 
     /// 一次尝试：逐个请求下这一段剩下的，每个请求取到这一段的终点（给了块大小时至多一块；服务器给得少时到它给的为止）；
     /// 读到的都写进数据文件后才返回，失败也是。
-    async fn attempt(&self, id: u64, first: &mut Option<Opened>) -> Result<Piece, Error> {
+    async fn attempt(&self, id: u64, first: &mut Option<Opened>) -> Result<Outcome, Error> {
         loop {
             let remaining = self.lock().schedule.remaining(id);
             if remaining.is_empty() {
-                return Ok(Piece::Done);
+                return Ok(Outcome::Done);
             }
             let opened = match first.take() {
                 Some(opened) => opened,
                 None => {
-                    let end = super::request_end(&remaining, self.download.chunk);
+                    let end = request_end(&remaining, self.chunk);
                     let opened = open_range(
-                        &self.download.http,
-                        &self.download.url,
+                        &self.http,
+                        &self.url,
                         remaining.start..end,
-                        self.download.validator.as_deref(),
+                        self.validator.as_deref(),
                         self.length,
                         &self.root,
                         &self.cancel,
@@ -519,7 +535,7 @@ impl Ctx {
                     .await;
                     match opened {
                         Ok(opened) => opened,
-                        Err(error) if self.throttled(id, &error) => return Ok(Piece::Throttled),
+                        Err(error) if self.throttled(id, &error) => return Ok(Outcome::Throttled),
                         Err(error) => return Err(error),
                     }
                 }
@@ -542,10 +558,15 @@ impl Ctx {
             bytes: Vec::new(),
         };
         loop {
+            // 劈开处按已写入的位置算，写盘期间被劈时它可能落在正写的数据中间：写完后位置已越过终点（越过的部分内容相
+            // 同，接手的连接会再写一遍），不用再读
+            let limit = end.min(self.lock().schedule.remaining(id).end);
+            if buf.start >= limit {
+                return Ok(());
+            }
             let read = stream.read_into(&mut buf.bytes, &self.cancel).await;
             let limit = end.min(self.lock().schedule.remaining(id).end);
-            // 被劈之后多收到的属于别的连接。劈开处按已写入的位置算，写盘期间被劈时它可能落在正写的数据中间：写完后位置
-            // 已越过终点（越过的部分内容相同，接手的连接会再写一遍），没有可留的
+            // 被劈之后多收到的属于别的连接
             let kept = limit.saturating_sub(buf.start).min(buf.bytes.len() as u64);
             buf.bytes.truncate(kept as usize);
             let reached = buf.start + kept >= limit;
@@ -588,7 +609,7 @@ impl Ctx {
             shared.written.insert(range);
             shared.unrecorded += len;
             let (bytes, completed) = (shared.written.len(), shared.written.ranges().to_vec());
-            self.download.progress.send_modify(|p| {
+            self.progress.send_modify(|p| {
                 p.bytes = bytes;
                 p.completed = completed;
             });
