@@ -661,10 +661,12 @@ async fn the_first_run_checks_what_the_caller_saw() {
             ..served.clone()
         },
     );
+    // 忽略 If-Range 照常回范围、Content-Range 的总长写成 *：客户端退回不带 Range 重新取
     server.put(
         "hidden.bin",
         Served {
             hide_total: true,
+            ignore_if_range: true,
             ..served
         },
     );
@@ -1065,11 +1067,18 @@ async fn slow_whole_downloads_are_not_cut_by_the_request_timeout() {
 #[tokio::test(flavor = "multi_thread")]
 async fn file_tasks_do_not_take_over_foreign_data_files() {
     for name in ["data", "ranges.json"] {
-        foreign_file_is_left_alone(name).await;
+        foreign_file_is_left_alone(name, |path| std::fs::write(path, b"user file").unwrap()).await;
     }
+    // 悬空的符号链接：按目录项判断，不跟随
+    #[cfg(unix)]
+    foreign_file_is_left_alone("data", |path| {
+        std::os::unix::fs::symlink(path.with_file_name("gone"), path).unwrap()
+    })
+    .await;
 }
 
-async fn foreign_file_is_left_alone(name: &str) {
+/// 在没有已完成分片的 HLS 任务目录里用 `put` 放下名为 `name` 的东西，文件任务两次都不接手、不动它。
+async fn foreign_file_is_left_alone(name: &str, put: impl Fn(&Path)) {
     let dir = test_dir(&format!("file_foreign_{name}"));
     let hls = crate::server::Server::start().await;
     hls.put(
@@ -1081,7 +1090,8 @@ async fn foreign_file_is_left_alone(name: &str) {
     assert!(run(hls_request).await.is_err(), "seg0 取不到，任务失败");
     let job = std::fs::read(dir.join("work/job.json")).unwrap();
     let foreign = dir.join("work").join(name);
-    std::fs::write(&foreign, b"user file").unwrap();
+    put(&foreign);
+    let before = std::fs::symlink_metadata(&foreign).unwrap();
     let server = FileServer::start().await;
     server.put("a.bin", Served::new(content(1000)));
     let mut file = file_request(server.url("a.bin"), &dir);
@@ -1100,6 +1110,11 @@ async fn foreign_file_is_left_alone(name: &str) {
             "{name}：{result:?}"
         );
         assert_eq!(std::fs::read(dir.join("work/job.json")).unwrap(), job);
-        assert_eq!(std::fs::read(&foreign).unwrap(), b"user file");
+        let after = std::fs::symlink_metadata(&foreign).unwrap();
+        assert_eq!(
+            (after.file_type(), after.len()),
+            (before.file_type(), before.len()),
+            "{name}"
+        );
     }
 }

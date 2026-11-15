@@ -223,9 +223,9 @@ pub(crate) async fn run(
     })
 }
 
-/// 发第一个请求并核对（规则见 [`FileRequest`]），返回下载方式与写进 job.json 的记录。续传（`resume` 为可续的内容与它
-/// 已落盘的范围）时见 [`resumed`]；
-/// 否则从 0 起请求（见 [`open_from_zero`]），按 `expected` 核对。`root` 为任务目录，用于报错。
+/// 发第一个请求并核对（规则见 [`FileRequest`]），返回下载方式与写进 job.json 的记录。续传（`resume` 为可续的内容与它已
+/// 落盘的范围）时见 [`resumed`]；否则从 0 起请求（见 [`open_from_zero`]），按 `expected` 核对。`root` 为任务目录，用于
+/// 报错。
 async fn first_response(
     http: &Http,
     request: &FileRequest,

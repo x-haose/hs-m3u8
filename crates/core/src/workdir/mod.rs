@@ -574,7 +574,7 @@ impl FileDir {
             }
             if !matches!(recorded, Some(Recorded::File(_))) {
                 for name in [DATA_FILE, RANGES_FILE] {
-                    if exists(&root.join(name))? {
+                    if has_entry(&root.join(name))? {
                         return Err(problem(WorkDirProblem::NotEmpty));
                     }
                 }
@@ -696,6 +696,15 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<(), Error> {
     file.sync_all().map_err(io_error("落盘", &part))?;
     drop(file);
     busy::retrying(|| fs::rename(&part, path)).map_err(io_error("重命名", &part))
+}
+
+/// 目录里有名为 `path` 的这一项，不跟随符号链接（悬空的链接也算）；没有时根读不到即报错（见 [`volume::reachable`]）。
+fn has_entry(path: &Path) -> Result<bool, Error> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => volume::reachable(path).map(|()| false),
+        Err(cause) => Err(io_error("检查", path)(cause)),
+    }
 }
 
 /// 跟随符号链接；不存在时根读不到即报错（见 [`volume::reachable`]）。

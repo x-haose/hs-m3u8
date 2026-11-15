@@ -284,9 +284,8 @@ impl Http {
     }
 
     /// 发出 GET `url`、收到响应头即返回，响应体由调用方读（见 [`Streaming`]）；用于文件任务与认出地址是什么。`request`
-    /// 为要的范围与 If-Range。名额（`permit`）、`on_request` 回调与
-    /// [`Http::get_once`] 相同，名额一直占到返回的 [`Streaming`] 丢弃；不重试。非 2xx 为失败（同 [`check_status`]），
-    /// 2xx 的状态与 Content-Range 由调用方核对。
+    /// 为要的范围与 If-Range。名额（`permit`）、`on_request` 回调与 [`Http::get_once`] 相同，名额一直占到返回的
+    /// [`Streaming`] 丢弃；不重试。非 2xx 为失败（同 [`check_status`]），2xx 的状态与 Content-Range 由调用方核对。
     pub(crate) async fn open(
         &self,
         purpose: Purpose,
