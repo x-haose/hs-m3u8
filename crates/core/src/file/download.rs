@@ -295,14 +295,20 @@ fn open_data(root: &Path, data: &Path, length: u64, resumed: bool) -> Result<Fil
         file.set_len(length).map_err(io_error("写入", data))?;
         return Ok(file);
     }
+    // 数据文件须是普通文件：同名的符号链接不跟随，不写到它指向的地方
+    match std::fs::symlink_metadata(data) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return Err(corrupt(root, data, "不是普通文件".to_owned())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(corrupt(root, data, "范围记录在，数据文件却不在".to_owned()));
+        }
+        Err(cause) => return Err(io_error("检查", data)(cause)),
+    }
     let file = File::options()
         .read(true)
         .write(true)
         .open(data)
-        .map_err(|cause| match cause.kind() {
-            io::ErrorKind::NotFound => corrupt(root, data, "范围记录在，数据文件却不在".to_owned()),
-            _ => io_error("打开", data)(cause),
-        })?;
+        .map_err(io_error("打开", data))?;
     let len = file.metadata().map_err(io_error("读取", data))?.len();
     if len != length {
         return Err(corrupt(

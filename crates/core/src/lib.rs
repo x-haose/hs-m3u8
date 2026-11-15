@@ -1,6 +1,7 @@
-//! HLS 下载引擎：选轨、并发拉取分片、AES-128 解密与校验、可续传的任务目录、直播录制，输出为 MP4、可直接播放的
-//! 本地 HLS 目录，或两者都要。另有单个文件的分段下载（[`Engine::start_file`]），与 HLS 共用客户端、引擎的请求名额、
-//! 重试与任务目录；先认出地址是播放列表、网页还是文件用 [`Engine::identify`]。
+//! HLS 下载引擎：选轨、并发拉取分片、AES-128 解密与校验、可续传的任务目录、直播录制，输出为 MP4、可直接播放的本地 HLS
+//! 目录，或两者都要。另有单个文件的分段下载（[`Engine::start_file`]），与 HLS 共用客户端、引擎的请求名额、重试与任务目
+//! 录；先认出地址是播放列表、网页还是文件用 [`Engine::identify`]，按同样的请求设置取回一个小资源（如 tracker 列表）用
+//! [`Engine::fetch`]。
 //!
 //! 一个任务把一个播放列表地址变成它的输出（[`Target`]）。任务目录（默认与输出同级、名为输出的主名加 `.hsdl`）保存
 //! `job.json` 与已完成的分片；分片先写 `.part`、落盘后原子改名，因此「最终文件存在」即「该分片完整」。中断后用同样的请
@@ -26,6 +27,7 @@ mod crypto;
 mod entries;
 mod error;
 mod fetch;
+mod fetched;
 mod file;
 mod hooks;
 /// fork 前后要调用的：fork 出的子进程关掉继承来的任务目录锁，否则父进程的任务结束后锁仍被子进程占着。只给会在
@@ -47,7 +49,6 @@ mod recheck;
 mod report;
 mod request;
 mod resolve;
-mod resource;
 #[cfg(test)]
 mod scratch;
 mod selection;
@@ -69,6 +70,7 @@ pub use error::{
     Error, FetchErrorKind, FetchFailure, HlsUnsupported, HttpErrorKind, HttpFailure,
     IntegrityFailure, JobType, StallReason, Unsupported, WorkDirProblem,
 };
+pub use fetched::Fetched;
 pub use file::{Expected, FileInfo, FileRequest, Resource};
 pub use hooks::{HookError, HookKind, Hooks, NoHooks, Purpose, RequestParts};
 /// 内容放不进 MP4 的原因（[`Unsupported::Mp4`]）；本地 HLS 表示不了的见 [`HlsUnsupported`]。
@@ -87,7 +89,6 @@ pub use request::{
     HttpOptions, JobRequest, KeyOverride, LiveOptions, Proxy, RetryPolicy, Source, Timeouts,
     check_option_header,
 };
-pub use resource::Fetched;
 pub use tokio_util::sync::CancellationToken;
 pub use url::Url;
 
@@ -121,11 +122,11 @@ impl Engine {
     pub const DEFAULT_MAX_REQUESTS: NonZeroUsize =
         NonZeroUsize::new(JobRequest::DEFAULT_CONCURRENCY.get() * 4).unwrap();
 
-    /// `max_requests`：所有点播任务合计同时在途的 key、分片与 init 段请求数，文件任务（[`Engine::start_file`]）的每个
-    /// 连接也占一个；所有直播任务的 key 与分片另有同样大小的一份，不与点播共用：直播的分片排在点播的大批下载（或挂住的
-    /// 请求）之后会滑出窗口、永久缺失。播放列表、认出地址（[`Engine::identify`]）的请求与刷新时拉的 init 段（连同它的
-    /// key）不占名额：每条轨同时最多一个，刷新不排在本任务的分片下载之后；同一个 key 正被分片的请求拉取时，等那次请求
-    /// （它占着名额）。
+    /// `max_requests`：所有点播任务合计同时在途的 key、分片与 init 段请求数，文件任务（[`Engine::start_file`]）的每个连
+    /// 接也占一个；所有直播任务的 key 与分片另有同样大小的一份，不与点播共用：直播的分片排在点播的大批下载（或挂住的请
+    /// 求）之后会滑出窗口、永久缺失。播放列表、认出地址（[`Engine::identify`]）与取回小资源（[`Engine::fetch`]）的请求
+    /// 与刷新时拉的 init 段（连同它的 key）不占名额：每条轨同时最多一个，刷新不排在本任务的分片下载之后；同一个 key 正
+    /// 被分片的请求拉取时，等那次请求（它占着名额）。
     pub fn new(max_requests: NonZeroUsize) -> Self {
         Engine {
             requests: Permits::new(max_requests.get()),
@@ -158,9 +159,10 @@ impl Engine {
     /// （不可重试）；非 2xx 报 [`Error::Http`]。参数错误时立即返回错误；丢弃返回的 future 即取消；不在 tokio 运行时内调
     /// 用会 panic。
     pub async fn fetch(&self, source: &Source, limit: u64) -> Result<Fetched, Error> {
-        source.validate()?;
+        Source::check_url(&source.url)?;
+        source.http.validate()?;
         let http = Http::new(source, self.requests.clone(), None, Deadline::Request)?;
-        resource::fetch(&http, source, limit).await
+        fetched::fetch(&http, source, limit).await
     }
 
     /// 校验文件任务的请求并在当前 tokio 运行时上启动，规则见 [`FileRequest`]；不在 tokio 运行时内调用会 panic。参数错误

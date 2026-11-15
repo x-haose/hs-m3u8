@@ -139,6 +139,11 @@ fn build(config: &Config, route: Route<'_>) -> Result<reqwest::Client, Error> {
         .cookie_provider(config.cookies.clone())
         .connect_timeout(t.connect)
         .read_timeout(t.read_idle)
+        // 本库要原样的字节：别的依赖打开 reqwest 的压缩特性时也不自动解压
+        .no_gzip()
+        .no_brotli()
+        .no_zstd()
+        .no_deflate()
         .tls_danger_accept_invalid_certs(config.insecure);
     let builder = match config.deadline {
         Deadline::Request => builder.timeout(t.request),

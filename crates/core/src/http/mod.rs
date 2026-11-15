@@ -25,7 +25,7 @@ use crate::{Error, FetchFailure, HttpErrorKind, IntegrityFailure};
 /// 一次尝试的时限，见 [`crate::Timeouts`]：都有连接超时与读空闲超时，`Request` 另限整次尝试的时长。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Deadline {
-    /// 从发出到读完不超过 [`crate::Timeouts::request`]：播放列表、key、init 段、分片与认出地址的请求
+    /// 从发出到读完不超过 [`crate::Timeouts::request`]：播放列表、key、init 段、分片、认出地址与取回小资源的请求
     Request,
     /// 不限整次尝试的时长，卡住靠读空闲超时判断：文件任务的请求，响应体大小由来源决定
     Idle,
@@ -71,7 +71,7 @@ pub(crate) struct Http {
     hooks: Arc<dyn Hooks>,
     /// 引擎内所有任务共享；占名额的每次尝试从调用 `on_request` 回调到读完响应体占用一个
     requests: Arc<Permits>,
-    /// 请求的进展报给它；探测时为 None
+    /// 请求的进展报给它（任务的进度）；探测、认出地址与取回小资源时为 None
     observer: Option<Arc<dyn Observer>>,
     /// 下一次退避的 [`RetryWaiting::id`]
     next_wait: AtomicU64,

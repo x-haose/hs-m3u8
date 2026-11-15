@@ -453,8 +453,9 @@ async fn small_resources_are_fetched_whole() {
     server.fail("flaky.txt", 1);
 
     for path in ["trackers.txt", "best", "flaky.txt"] {
+        // 上限正好是响应体的长度：没超过，照常取回
         let fetched = engine()
-            .fetch(&small_source(server.url(path)), 1024)
+            .fetch(&small_source(server.url(path)), list.len() as u64)
             .await
             .unwrap();
         assert_eq!(fetched.body, list.as_bytes(), "{path}");
@@ -502,4 +503,32 @@ async fn small_resources_report_missing_and_oversized_bodies() {
     );
     assert!(!oversized.retryable());
     assert_eq!((server.hits("gone.txt"), server.hits("big.txt")), (1, 1));
+}
+
+/// 取回小资源按 `source.http` 发请求：主机名解析不了的地址经调用方给的代理取得到、带着调用方给的请求头；直连时取不到。
+#[tokio::test(flavor = "multi_thread")]
+async fn small_resources_follow_the_callers_proxy() {
+    let server = Server::start().await;
+    server.put("trackers.txt", "udp://tracker.example:1337/announce\n");
+    server.require_header("x-token", "secret");
+    let plain = server.url("").socket_addrs(|| None).unwrap()[0];
+    let mut source = small_source(Url::parse("http://tracker.invalid/trackers.txt").unwrap());
+    source.http.headers = vec![("X-Token".into(), "secret".into())];
+    source.http.proxy = Proxy::Url(forwarding_proxy(plain).await);
+
+    let fetched = engine().fetch(&source, 1024).await.unwrap();
+    source.http.proxy = Proxy::Direct;
+    let direct = engine().fetch(&source, 1024).await.unwrap_err();
+
+    assert_eq!(fetched.body, b"udp://tracker.example:1337/announce\n");
+    assert!(
+        matches!(
+            direct,
+            Error::Http {
+                kind: HttpErrorKind::Connect(_),
+                ..
+            }
+        ),
+        "{direct:?}"
+    );
 }

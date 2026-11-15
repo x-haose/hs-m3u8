@@ -404,24 +404,30 @@ fn clear_content(root: &Path, recorded: Option<&Recorded>) -> Result<(), Error> 
     if !matches!(recorded, Some(Recorded::File(_))) {
         return Ok(());
     }
+    // 只删普通文件：同名的符号链接、目录不是本库写的（同 removal）
     for name in [RANGES_FILE, DATA_FILE] {
         let path = root.join(name);
-        match busy::retrying(|| fs::remove_file(&path)) {
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.is_file() => {
+                busy::retrying(|| fs::remove_file(&path)).map_err(io_error("删除", &path))?;
+            }
+            Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            other => other.map_err(io_error("删除", &path))?,
+            Err(cause) => return Err(io_error("检查", &path)(cause)),
         }
     }
     Ok(())
 }
 
-/// 没有 `job.json` 的目录只能是空的（`.part` 残留与锁文件除外），否则不是本库建立的任务目录。
+/// 没有 `job.json` 的目录只能是空的（是普通文件的 `.part` 残留与锁文件除外），否则不是本库建立的任务目录。
 fn ensure_empty(root: &Path) -> Result<(), Error> {
     for entry in entries::list(root)? {
         if entry.is_system_file() {
             continue;
         }
         let name = entry.name.to_string_lossy();
-        if name != LOCK_FILE && !name.ends_with(".part") {
+        let partial = name.ends_with(".part") && entry.kind.is_file();
+        if name != LOCK_FILE && !partial {
             return Err(Error::WorkDir {
                 path: root.to_path_buf(),
                 problem: WorkDirProblem::NotEmpty,
@@ -687,11 +693,20 @@ fn parent(path: &Path) -> &Path {
     path.parent().expect("任务目录内的文件都有上级目录")
 }
 
+/// 先写 `<path>.part`（之前留下的先删掉，同名的符号链接只删链接本身，不写到它指向的地方）并落盘，再改名为 `path`。
 fn write_atomic(path: &Path, data: &[u8]) -> Result<(), Error> {
     let mut part = path.as_os_str().to_owned();
     part.push(".part");
     let part = PathBuf::from(part);
-    let mut file = File::create(&part).map_err(io_error("创建", &part))?;
+    match busy::retrying(|| fs::remove_file(&part)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(io_error("删除", &part)(e)),
+        _ => {}
+    }
+    let mut file = File::options()
+        .write(true)
+        .create_new(true)
+        .open(&part)
+        .map_err(io_error("创建", &part))?;
     file.write_all(data).map_err(io_error("写入", &part))?;
     file.sync_all().map_err(io_error("落盘", &part))?;
     drop(file);
@@ -876,5 +891,45 @@ mod released {
                 assert_eq!(forms, all, "{}", dir.display());
             }
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::scratch::Scratch;
+
+    /// `.part` 是指向别处的符号链接（如之前留下的，或别人放的）：只删链接本身，不写到它指向的文件。
+    #[test]
+    fn partial_files_never_write_through_symlinks() {
+        let dir = Scratch::new("write-atomic-symlink");
+        let victim = dir.join("victim.txt");
+        fs::write(&victim, "user file").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("job.json.part")).unwrap();
+
+        write_atomic(&dir.join("job.json"), b"{}").unwrap();
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "user file");
+        let written = fs::symlink_metadata(dir.join("job.json")).unwrap();
+        assert!(written.is_file());
+        assert_eq!(fs::read(dir.join("job.json")).unwrap(), b"{}");
+    }
+
+    /// 没有 job.json 的目录里，是符号链接的 `.part` 不算本库写的残留：报目录不为空，不当成任务目录。
+    #[test]
+    fn symlinked_partial_files_are_not_ours() {
+        let dir = Scratch::new("ensure-empty-symlink");
+        fs::write(dir.join("job.json.part"), "{").unwrap();
+        ensure_empty(&dir).unwrap();
+        fs::remove_file(dir.join("job.json.part")).unwrap();
+        std::os::unix::fs::symlink(dir.join("gone"), dir.join("job.json.part")).unwrap();
+
+        assert!(matches!(
+            ensure_empty(&dir),
+            Err(Error::WorkDir {
+                problem: WorkDirProblem::NotEmpty,
+                ..
+            })
+        ));
     }
 }

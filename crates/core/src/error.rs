@@ -86,8 +86,8 @@ pub enum Error {
     /// 拉到的 key 不是 16 字节（`on_key` 回调没有改它）
     #[error("key {} 应为 16 字节，实际 {length} 字节", bare_url(.url))]
     KeyLength { url: Box<Url>, length: usize },
-    /// 用途为 `purpose` 的请求 `url` 的响应体超过这类请求的上限 `limit` 字节，读到即停：地址多半指向了视频文件或直播
-    /// 流，不是播放列表、init 段或 key。分片与文件任务不设上限；取回小资源（[`crate::Engine::fetch`]）的上限由调用方给
+    /// 用途为 `purpose` 的请求 `url` 的响应体超过上限 `limit` 字节，读到即停。播放列表、init 段与 key 各有固定的上限，超过
+    /// 多为地址指向了视频文件或直播流；取回小资源（[`crate::Engine::fetch`]）的上限由调用方给；分片与文件任务不设上限
     #[error("{}{} 的响应体超过 {limit} 字节", purpose_text(*.purpose), bare_url(.url))]
     ResponseTooLarge {
         url: Box<Url>,
