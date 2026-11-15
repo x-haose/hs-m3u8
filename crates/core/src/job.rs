@@ -16,12 +16,12 @@ use crate::request::JobRequest;
 use crate::resolve::{self, Resolved};
 use crate::vod::{self, Plan};
 use crate::workdir::{
-    self, JobRecord, Lock, OutputKind, RecordKind, SelectionCheck, Stored, WorkDir,
+    self, JobRecord, Lock, OutputKind, RecordKind, Recorded, SelectionCheck, Stored, WorkDir,
     preference_digest, read_resumable, url_digest,
 };
 use crate::{
-    Error, Leftover, LeftoverKind, LiveReport, Output, Progress, Stage, Unsettled, WorkDirProblem,
-    blocking,
+    Error, JobType, Leftover, LeftoverKind, LiveReport, Output, Progress, Stage, Unsettled,
+    WorkDirProblem, blocking,
 };
 
 /// 一次运行用到的共享对象。
@@ -56,8 +56,11 @@ pub(crate) async fn run(
     let preference = preference_digest(&request.source.preference);
     // 任务目录里有可续的记录时，选轨偏好不符在联网之前就报（WorkDir::open 加锁后照样核对）；相符时按记录的选轨找回
     // 同一条轨（重新选轨时两样都不做，按这次的偏好选）。记录的是直播且请求开启了直播时按直播继续，即使播放列表已出现
-    // ENDLIST（中断期间直播结束了）。没开启直播时按点播运行，由 WorkDir::open 报类型不符
-    let recorded = read_resumable(root.clone()).await?;
+    // ENDLIST（中断期间直播结束了）。没开启直播时按点播运行，由 WorkDir::open 报类型不符；记录的是文件任务时同样由它报
+    let recorded = match read_resumable(root.clone()).await? {
+        Some(Recorded::Hls(record)) => Some(*record),
+        Some(Recorded::File(_)) | None => None,
+    };
     if !request.reselect
         && let Some(problem) = recorded
             .as_ref()
@@ -95,8 +98,8 @@ pub(crate) async fn run(
 
 /// 任务开头、联网之前：先查各输出的路径建不建得出来（见 [`output::check_creatable`]），任务目录已存在时加锁（挡住
 /// 同时使用它的任务），收拾上次写输出留下的，再检查各输出能否写（见 [`output::prepare`]）。返回的锁交给
-/// [`WorkDir::open`]。
-async fn prepare(output: &ResolvedOutput) -> Result<Option<Lock>, Error> {
+/// [`WorkDir::open`]（文件任务为 [`workdir::FileDir::open`]）。
+pub(crate) async fn prepare(output: &ResolvedOutput) -> Result<Option<Lock>, Error> {
     let options = output.clone();
     blocking(move || output::check_creatable(&options)).await??;
     let lock = WorkDir::lock_existing(output.work_dir.clone()).await?;
@@ -199,8 +202,18 @@ pub(crate) async fn merge_recorded(
 ) -> Result<Output, Error> {
     let lock = prepare(&output).await?;
     let root = output.work_dir.clone();
-    let Some(record) = read_resumable(root.clone()).await? else {
-        return Err(Error::NothingRecorded);
+    let record = match read_resumable(root.clone()).await? {
+        None => return Err(Error::NothingRecorded),
+        Some(Recorded::Hls(record)) => *record,
+        Some(Recorded::File(_)) => {
+            return Err(Error::WorkDir {
+                path: root,
+                problem: WorkDirProblem::KindMismatch {
+                    recorded: JobType::File,
+                    current: JobType::Live,
+                },
+            });
+        }
     };
     if let RecordKind::Vod { .. } = record.kind {
         return Err(Error::WorkDir {

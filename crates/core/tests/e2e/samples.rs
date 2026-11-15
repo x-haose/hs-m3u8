@@ -10,8 +10,11 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
+use std::num::{NonZeroU64, NonZeroUsize};
+
 use hs_m3u8_core::{CancellationToken, Error, JobRequest, Unsettled};
 
+use crate::file::{FileServer, Served, content, file_request, interrupt_at};
 use crate::live::{STALL, live_request};
 use crate::server::Server;
 use crate::{engine, fixture, request, run, test_dir};
@@ -24,7 +27,28 @@ use crate::{engine, fixture, request, run, test_dir};
 /// - `live`：写了稳定 ID 的视频加独立音频 fMP4 直播，录完各轨列出的分片后中断
 /// - `live-sessions`：视频加独立音频 TS 直播，会话 0 里有不连续段；中断后音频窗口已前移、续录另起会话 1（视频跳过会话
 ///   0 录过的序号，起点写作 `after<序号>`），再中断。续录的来源里视频多出一个没录过的分片（见 [`NEW_ON_CONTINUE`]）
-const SAMPLES: [&str; 5] = ["vod", "vod-ts", "vod-muxed", "live", "live-sessions"];
+/// - `file`：文件任务（格式版本 14 起），一个连接按块下了一半后中断；来源 `source/file.bin` 的 ETag 与 Last-Modified 见
+///   [`FILE_ETAG`]、[`FILE_LAST_MODIFIED`]
+const SAMPLES: [&str; 6] = [
+    "vod",
+    "vod-ts",
+    "vod-muxed",
+    "live",
+    "live-sessions",
+    "file",
+];
+
+/// 只在这个格式版本起才有的样本。
+const SINCE: [(&str, u64); 1] = [("file", 14)];
+
+/// 文件任务样本的来源给的 ETag 与 Last-Modified：续传时照样给，核对得上。
+const FILE_ETAG: &str = "\"sample\"";
+const FILE_LAST_MODIFIED: &str = "Wed, 21 Oct 2015 07:28:00 GMT";
+
+/// 文件任务样本的大小与中断处、块大小。
+const FILE_LEN: usize = 64 << 10;
+const FILE_STOP: usize = 32 << 10;
+const FILE_CHUNK: u64 = 16 << 10;
 
 /// 直播样本续录的来源里没录过的分片数：续录时都要录进来。
 const NEW_ON_CONTINUE: [(&str, usize); 2] = [("live", 0), ("live-sessions", 1)];
@@ -43,8 +67,17 @@ fn samples() -> Vec<PathBuf> {
         })
         .collect();
     versions.sort();
-    let (_, newest) = versions.last().expect("至少有一个版本的样本");
-    for name in SAMPLES {
+    let (version, newest) = versions.last().expect("至少有一个版本的样本");
+    let since = |name| {
+        SINCE
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map_or(0, |(_, v)| *v)
+    };
+    for name in SAMPLES
+        .into_iter()
+        .filter(|&name| since(name) <= u64::from(*version))
+    {
         assert!(
             newest.join(name).is_dir(),
             "缺少样本 {}",
@@ -264,6 +297,49 @@ async fn live_samples_continue() {
     }
 }
 
+/// 文件任务的样本照当时的来源续传（本地服务的端口每次不同，即换了地址，按 ETag 核对）：只请求没下的部分，结果与来源
+/// 相同。
+#[tokio::test(flavor = "multi_thread")]
+async fn file_samples_resume() {
+    for sample in samples().into_iter().filter(|s| kind_of(s) == "file") {
+        let dir = test_dir(&format!("samples_file_{}", label(&sample)));
+        copy_dir(&sample.join("work"), &dir.join("out.hsdl"));
+        let body = std::fs::read(sample.join("source/file.bin")).unwrap();
+        let server = FileServer::start().await;
+        server.put("file.bin", sample_file(body.clone()));
+
+        let job = engine()
+            .start_file(file_request(server.url("file.bin"), &dir))
+            .unwrap();
+        let output = job.wait().await.unwrap();
+
+        assert_eq!(
+            std::fs::read(&output.path).unwrap(),
+            body,
+            "{}",
+            sample.display()
+        );
+        for seen in server.seen() {
+            let range = seen.range.unwrap();
+            let start: usize = range["bytes=".len()..]
+                .split('-')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!(start >= FILE_STOP, "{}：{range}", sample.display());
+        }
+    }
+}
+
+/// 文件任务样本的来源。
+fn sample_file(body: Vec<u8>) -> Served {
+    let mut served = Served::new(body);
+    served.etag = Some(FILE_ETAG.into());
+    served.last_modified = Some(FILE_LAST_MODIFIED.into());
+    served
+}
+
 /// 放弃样本：认得其中全是本库写的文件，整个删掉。
 #[tokio::test(flavor = "multi_thread")]
 async fn samples_are_discarded() {
@@ -347,6 +423,18 @@ async fn write_samples() {
     source.put("v.m3u8", ts_playlist("v/", 0..4, 0, &[1], true));
     source.put("a.m3u8", ts_playlist("a/", 2..4, 1, &[], true));
     save(&req, "live-sessions", &source.files);
+
+    let server = FileServer::start().await;
+    let body = content(FILE_LEN);
+    server.put("file.bin", sample_file(body.clone()));
+    let mut req = file_request(server.url("file.bin"), &dir.join("file"));
+    req.connections = NonZeroUsize::MIN;
+    req.chunk_size = NonZeroU64::new(FILE_CHUNK);
+    server.hold_from(FILE_STOP as u64);
+    interrupt_at(req.clone(), FILE_STOP as u64).await;
+    server.release();
+    let source = BTreeMap::from([("file.bin".to_owned(), body)]);
+    save_dir(&req.output.resolved_work_dir().unwrap(), "file", &source);
 }
 
 /// 生成样本时的来源：放进本地服务，同时记下各路径最后放进的内容，连同任务目录存下。
@@ -487,14 +575,18 @@ async fn interrupt(req: &JobRequest, done: usize) {
 
 /// 把 `req` 的任务目录（锁文件除外）与来源 `source` 存为它的格式版本的样本 `name`。
 fn save(req: &JobRequest, name: &str, source: &BTreeMap<String, Vec<u8>>) {
-    let work = req.output.resolved_work_dir().unwrap();
+    save_dir(&req.output.resolved_work_dir().unwrap(), name, source);
+}
+
+/// 把任务目录 `work`（锁文件除外）与来源 `source` 存为它的格式版本的样本 `name`。
+fn save_dir(work: &Path, name: &str, source: &BTreeMap<String, Vec<u8>>) {
     let job: serde_json::Value =
         serde_json::from_slice(&std::fs::read(work.join("job.json")).unwrap()).unwrap();
     let version = job["format_version"].as_u64().unwrap();
     let target = samples_root().join(version.to_string()).join(name);
     assert!(!target.exists(), "{} 已存在", target.display());
     std::fs::create_dir_all(&target).unwrap();
-    copy_dir(&work, &target.join("work"));
+    copy_dir(work, &target.join("work"));
     std::fs::remove_file(target.join("work/lock")).unwrap();
     for (path, body) in source {
         let file = target.join("source").join(path);

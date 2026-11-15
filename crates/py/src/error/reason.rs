@@ -285,6 +285,8 @@ variants! {
         Vod {},
         /// 直播
         Live {},
+        /// 单个文件的下载：由本库的 Rust 接口建立，Python 接口不提供这种任务
+        File {},
     }
 }
 
@@ -460,11 +462,15 @@ impl From<core::StallReason> for StallReason {
     }
 }
 
+/// core 里只由文件任务（`Engine::identify`、`Engine::start_file`）产生的取值：Python 接口不提供文件任务，翻译时遇不到。
+pub(crate) const FILE_TASKS_ONLY: &str = "只由文件任务产生，Python 接口不提供文件任务";
+
 impl From<core::JobType> for JobType {
     fn from(kind: core::JobType) -> Self {
         match kind {
             core::JobType::Vod => JobType::Vod {},
             core::JobType::Live => JobType::Live {},
+            core::JobType::File => JobType::File {},
         }
     }
 }
@@ -496,6 +502,7 @@ impl From<core::WorkDirProblem> for WorkDirProblem {
             W::SelectionGone => WorkDirProblem::SelectionGone {},
             W::SourceUnverified => WorkDirProblem::SourceUnverified {},
             W::Unaligned { track } => WorkDirProblem::Unaligned { track },
+            W::FileChanged => unreachable!("{FILE_TASKS_ONLY}"),
         }
     }
 }

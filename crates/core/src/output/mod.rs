@@ -15,13 +15,13 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use self::commit::recover_recorded;
-pub use self::options::{OutputOptions, Target};
+pub use self::options::{FileOutputOptions, OutputOptions, Target};
 pub(crate) use self::options::{ResolvedOutput, absolute_path};
 
 use self::commit::{Commit, Occupant};
 use crate::error::io_error;
 use crate::selection::SelectionRecord;
-use crate::workdir::{Layout, OutputKind, SegmentName, WorkDir};
+use crate::workdir::{FileDir, Layout, OutputKind, SegmentName, WorkDir};
 use crate::{
     Error, FileCount, Leftover, LeftoverKind, LiveReport, Missed, Mp4Output, Output, Progress,
     WorkDirProblem, Writing, blocking,
@@ -216,6 +216,43 @@ pub(crate) async fn write(
         missed,
         live,
     })
+}
+
+/// 文件任务：把下载完的数据文件装到输出（`options` 里唯一的那个），按选项删除任务目录 `dir`，返回收尾没删掉的东西。
+/// 先放到输出旁的临时名（见 [`hls::place`]：能硬链接就链接，不然复制），再换上（见 [`commit`]）；任一步失败都撤回，
+/// 数据文件留在任务目录里。`cancel` 在换上之前生效，复制本身不中断。
+pub(crate) async fn install_file(
+    dir: FileDir,
+    options: &ResolvedOutput,
+    cancel: &CancellationToken,
+) -> Result<Vec<Leftover>, Error> {
+    let data = dir.data();
+    let files = options.clone();
+    let cancel = cancel.clone();
+    let mut leftovers = blocking(move || {
+        check_all(&files)?;
+        create_dirs(&files)?;
+        let commit = Commit::begin(&files.work_dir, &files.outputs)?;
+        let [output] = files.outputs.as_slice() else {
+            unreachable!("文件任务只有一个输出");
+        };
+        let staged = hls::place(&data, output.temp()).and_then(|_| {
+            if cancel.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            // 放好期间输出路径可能已被别人占用；开始时检查过，换上前再查一次，按这次的结果换
+            check_all(&files)
+        });
+        match staged {
+            Ok(existing) => commit.swap(&existing),
+            Err(failure) => Err(commit.abandon(failure)),
+        }
+    })
+    .await??;
+    if !options.keep_work_dir {
+        leftovers.extend(dir.remove().await);
+    }
+    Ok(leftovers)
 }
 
 /// 写出开始时的进度：每种要写的输出都是各组各轨的分片与 init 段合计。

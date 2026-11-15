@@ -11,6 +11,7 @@ publish = false
 [dependencies]
 aes.workspace = true
 cbc.workspace = true
+fs4.workspace = true
 hs-m3u8-hls = { path = "../hls" }
 hs-m3u8-remux = { path = "../remux" }
 hs-m3u8-sysproxy = { path = "../sysproxy" }

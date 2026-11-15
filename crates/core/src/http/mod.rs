@@ -10,8 +10,8 @@ use std::time::{Duration, SystemTime};
 
 use hs_m3u8_hls::ByteRange;
 use reqwest::StatusCode;
-use reqwest::header::{CONTENT_RANGE, RANGE, RETRY_AFTER};
-use tokio::sync::Semaphore;
+use reqwest::header::{CONTENT_RANGE, HeaderMap, IF_RANGE, RANGE, RETRY_AFTER};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -35,8 +35,8 @@ pub(crate) enum Permit {
 
 /// 引擎的请求名额：点播与直播各一份同样大小的，所有任务共享（用途见 [`crate::Engine::new`]）。
 pub(crate) struct Permits {
-    vod: Semaphore,
-    live: Semaphore,
+    vod: Arc<Semaphore>,
+    live: Arc<Semaphore>,
 }
 
 impl Permits {
@@ -44,8 +44,8 @@ impl Permits {
     pub(crate) fn new(limit: usize) -> Arc<Permits> {
         let limit = limit.min(Semaphore::MAX_PERMITS);
         Arc::new(Permits {
-            vod: Semaphore::new(limit),
-            live: Semaphore::new(limit),
+            vod: Arc::new(Semaphore::new(limit)),
+            live: Arc::new(Semaphore::new(limit)),
         })
     }
 }
@@ -196,38 +196,54 @@ impl Http {
     {
         let mut tried = 1;
         loop {
-            let error = match attempt().await {
+            match attempt().await {
                 Ok(value) => return Ok(value),
-                Err(error) => error,
-            };
-            let asked = error.retry_after().unwrap_or_default();
-            if !error.retryable()
-                || tried >= self.retry.attempts.get()
-                || asked > self.retry.max_delay
-            {
-                return Err(error);
+                Err(error) => {
+                    self.wait_to_retry(purpose, url, error, &mut tried, cancel)
+                        .await?;
+                }
             }
-            let delay = self.backoff(url, tried).max(asked);
-            let failure = error
-                .missable()
-                .expect("可重试的失败都是取不到或没写完（见 Error::retryable）");
-            let wait = RetryWaiting {
-                id: self.next_wait.fetch_add(1, Ordering::Relaxed),
-                purpose,
-                failure,
-                retry: tried,
-                delay,
-            };
-            let _waiting = self
-                .observer
-                .as_deref()
-                .map(|observer| RetryWait::new(observer, wait));
-            tokio::select! {
-                _ = cancel.cancelled() => return Err(Error::Cancelled),
-                _ = tokio::time::sleep(delay) => {}
-            }
-            tried += 1;
         }
+    }
+
+    /// 用途为 `purpose` 的请求 `url` 第 `tried` 次尝试以 `error` 失败之后：可重试（[`Error::retryable`]）、次数没用完
+    /// （[`RetryPolicy::attempts`]）且服务器要求的等待不超过 `max_delay` 时，按 [`RetryPolicy`] 退避（报给观察者，见
+    /// [`Observer::retry_waiting`]）、`tried` 加一，返回 Ok 让调用方再试；否则返回 `error`。退避中取消报
+    /// [`Error::Cancelled`]。
+    pub(crate) async fn wait_to_retry(
+        &self,
+        purpose: Purpose,
+        url: &Url,
+        error: Error,
+        tried: &mut u32,
+        cancel: &CancellationToken,
+    ) -> Result<(), Error> {
+        let asked = error.retry_after().unwrap_or_default();
+        if !error.retryable() || *tried >= self.retry.attempts.get() || asked > self.retry.max_delay
+        {
+            return Err(error);
+        }
+        let delay = self.backoff(url, *tried).max(asked);
+        let failure = error
+            .missable()
+            .expect("可重试的失败都是取不到或没写完（见 Error::retryable）");
+        let wait = RetryWaiting {
+            id: self.next_wait.fetch_add(1, Ordering::Relaxed),
+            purpose,
+            failure,
+            retry: *tried,
+            delay,
+        };
+        let _waiting = self
+            .observer
+            .as_deref()
+            .map(|observer| RetryWait::new(observer, wait));
+        tokio::select! {
+            _ = cancel.cancelled() => return Err(Error::Cancelled),
+            _ = tokio::time::sleep(delay) => {}
+        }
+        *tried += 1;
+        Ok(())
     }
 
     /// GET `url` 一次，不重试（要重试的连同对内容的处理一起交给 [`Http::retrying`]）。先拿到名额，再经 `on_request`
@@ -240,22 +256,61 @@ impl Http {
         permit: Permit,
         cancel: &CancellationToken,
     ) -> Result<Response, Error> {
-        let semaphore = match permit {
-            Permit::Exempt => None,
-            Permit::Vod => Some(&self.requests.vod),
-            Permit::Live => Some(&self.requests.live),
-        };
-        let _held = match semaphore {
-            None => None,
-            Some(semaphore) => Some(tokio::select! {
-                _ = cancel.cancelled() => return Err(Error::Cancelled),
-                held = semaphore.acquire() => held.expect("引擎的信号量从不关闭"),
-            }),
-        };
+        let _held = self.acquire(permit, cancel).await?;
         let parts = self.prepare(purpose, url).await?;
-        let response = self.send(&parts, range, cancel).await?;
+        let range_header = range.map(|r| {
+            // hls 保证 offset + length 不溢出且 length ≥ 1
+            format!("bytes={}-{}", r.offset, r.offset + r.length - 1)
+        });
+        let conditions = Conditions {
+            range: range_header,
+            if_range: None,
+        };
+        let response = self.send(&parts, &conditions, cancel).await?;
+        check_status(&response, &parts.url, range)?;
         self.read(response, &parts.url, purpose, range, cancel)
             .await
+    }
+
+    /// 发出 GET `url`、收到响应头即返回，响应体由调用方按块读（见 [`Streaming::read_into`]）；用于文件任务与认出地址是
+    /// 什么。`conditions` 为附加的 Range 与 If-Range。名额（`permit`）、`on_request` 回调与 [`Http::get_once`] 相同，名额
+    /// 一直占到返回的 [`Streaming`] 丢弃；不重试。非 2xx 为失败（同 [`check_status`]），2xx 的状态与 Content-Range 由
+    /// 调用方核对。
+    pub(crate) async fn open(
+        &self,
+        purpose: Purpose,
+        url: &Url,
+        conditions: &Conditions,
+        permit: Permit,
+        cancel: &CancellationToken,
+    ) -> Result<Streaming, Error> {
+        let held = self.acquire(permit, cancel).await?;
+        let parts = self.prepare(purpose, url).await?;
+        let response = self.send(&parts, conditions, cancel).await?;
+        check_status(&response, &parts.url, None)?;
+        Ok(Streaming {
+            url: parts.url,
+            response,
+            observer: self.observer.clone(),
+            _held: held,
+        })
+    }
+
+    /// 等到 `permit` 那一份引擎名额；不占名额时为 None。
+    async fn acquire(
+        &self,
+        permit: Permit,
+        cancel: &CancellationToken,
+    ) -> Result<Option<OwnedSemaphorePermit>, Error> {
+        let semaphore = match permit {
+            Permit::Exempt => return Ok(None),
+            Permit::Vod => &self.requests.vod,
+            Permit::Live => &self.requests.live,
+        };
+        tokio::select! {
+            _ = cancel.cancelled() => Err(Error::Cancelled),
+            held = semaphore.clone().acquire_owned() => Ok(Some(held.expect("引擎的信号量从不关闭"))),
+        }
     }
 
     /// 本次尝试的地址与请求头：经 `on_request` 回调修改，改后不合法时报回调错误（不重试）。
@@ -284,30 +339,27 @@ impl Http {
         Ok(parts)
     }
 
-    /// 发出请求并检查状态（见 [`check_status`]）。
+    /// 发出请求，附加 `conditions` 里的请求头，收到响应头即返回；状态不在这里检查。
     async fn send(
         &self,
         parts: &RequestParts,
-        range: Option<ByteRange>,
+        conditions: &Conditions,
         cancel: &CancellationToken,
     ) -> Result<reqwest::Response, Error> {
         let mut builder = self.clients.get()?.get(parts.url.as_str());
         for (name, value) in &parts.headers {
             builder = builder.header(name, value);
         }
-        if let Some(r) = range {
-            // hls 保证 offset + length 不溢出且 length ≥ 1
-            builder = builder.header(
-                RANGE,
-                format!("bytes={}-{}", r.offset, r.offset + r.length - 1),
-            );
+        if let Some(range) = &conditions.range {
+            builder = builder.header(RANGE, range);
         }
-        let response = tokio::select! {
-            _ = cancel.cancelled() => return Err(Error::Cancelled),
-            sent = builder.send() => sent.map_err(|e| http_error(&parts.url, classify(e)))?,
-        };
-        check_status(&response, &parts.url, range)?;
-        Ok(response)
+        if let Some(validator) = &conditions.if_range {
+            builder = builder.header(IF_RANGE, validator);
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => Err(Error::Cancelled),
+            sent = builder.send() => sent.map_err(|e| http_error(&parts.url, classify(e))),
+        }
     }
 
     /// 第 `attempt` 次失败后的等待，抖动由地址与次数的哈希决定。
@@ -372,6 +424,62 @@ impl Http {
     }
 }
 
+/// 本库加在请求上的 Range 与 If-Range（调用方与回调不能给，见 [`crate::check_option_header`]）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Conditions {
+    /// Range 的值，如 `bytes=0-` 或 `bytes=100-199`
+    pub range: Option<String>,
+    /// If-Range 的值：强 ETag 或 HTTP 日期
+    pub if_range: Option<String>,
+}
+
+/// 收到了响应头的请求（见 [`Http::open`]）；丢弃即断开连接、放开名额。
+pub(crate) struct Streaming {
+    /// 发出请求的地址（`on_request` 改写之后），用于错误信息
+    url: Url,
+    response: reqwest::Response,
+    observer: Option<Arc<dyn Observer>>,
+    _held: Option<OwnedSemaphorePermit>,
+}
+
+impl Streaming {
+    pub(crate) fn status(&self) -> StatusCode {
+        self.response.status()
+    }
+
+    pub(crate) fn headers(&self) -> &HeaderMap {
+        self.response.headers()
+    }
+
+    /// 跟随重定向之后的最终地址
+    pub(crate) fn final_url(&self) -> &Url {
+        self.response.url()
+    }
+
+    /// 发出请求的地址（`on_request` 改写之后）
+    pub(crate) fn url(&self) -> &Url {
+        &self.url
+    }
+
+    /// 读下一块响应体追加到 `buf`，返回读到的字节数，读完时为 0；读到的计入进度（见 [`Observer::received`]）。
+    pub(crate) async fn read_into(
+        &mut self,
+        buf: &mut Vec<u8>,
+        cancel: &CancellationToken,
+    ) -> Result<usize, Error> {
+        let chunk = tokio::select! {
+            _ = cancel.cancelled() => return Err(Error::Cancelled),
+            chunk = self.response.chunk() => chunk.map_err(|e| http_error(&self.url, classify(e)))?,
+        };
+        let Some(chunk) = chunk else { return Ok(0) };
+        if let Some(observer) = &self.observer {
+            observer.received(chunk.len() as u64);
+        }
+        buf.extend_from_slice(&chunk);
+        Ok(chunk.len())
+    }
+}
+
 /// 检查响应 `response` 的状态：非 2xx 为失败（429/503 时带上 Retry-After），字节范围请求 `range` 须返回 206 且
 /// Content-Range 与请求的相符。`url` 为发出请求的地址，用于错误信息。
 fn check_status(
@@ -419,7 +527,7 @@ fn check_status(
 
 /// 用途为 `purpose` 的响应体的上限，字节（见 [`Error::ResponseTooLarge`]）。分片不设：合法的分片随码率与时长相差
 /// 很大，由请求的超时限住。
-fn body_limit(purpose: Purpose) -> Option<u64> {
+pub(crate) fn body_limit(purpose: Purpose) -> Option<u64> {
     match purpose {
         // 十万个分片、每个带几百字节签名地址的点播播放列表也在这之内
         Purpose::Playlist => Some(64 << 20),
@@ -427,7 +535,8 @@ fn body_limit(purpose: Purpose) -> Option<u64> {
         Purpose::Init => Some(16 << 20),
         // key 本身 16 字节；交给 on_key 回调换算的原始内容（如 JSON、加了密的）也不会大
         Purpose::Key => Some(1 << 20),
-        Purpose::Segment => None,
+        // 文件的大小由来源决定；认出是播放列表之后按播放列表的上限读
+        Purpose::Segment | Purpose::File => None,
     }
 }
 
@@ -454,7 +563,7 @@ fn requested_wait(value: &str, now: SystemTime) -> Option<Duration> {
     Some(at.duration_since(now).unwrap_or(Duration::ZERO))
 }
 
-fn http_error(url: &Url, kind: HttpErrorKind) -> Error {
+pub(crate) fn http_error(url: &Url, kind: HttpErrorKind) -> Error {
     Error::Http {
         url: Box::new(url.clone()),
         kind,

@@ -1,5 +1,6 @@
 //! HLS 下载引擎：选轨、并发拉取分片、AES-128 解密与校验、可续传的任务目录、直播录制，输出为 MP4、可直接播放的
-//! 本地 HLS 目录，或两者都要。
+//! 本地 HLS 目录，或两者都要。另有单个文件的分段下载（[`Engine::start_file`]），与 HLS 共用客户端、引擎的请求名额、
+//! 重试与任务目录；先认出地址是播放列表、网页还是文件用 [`Engine::identify`]。
 //!
 //! 一个任务把一个播放列表地址变成它的输出（[`Target`]）。任务目录（默认与输出同级、名为输出的主名加 `.hsdl`）保存
 //! `job.json` 与已完成的分片；分片先写 `.part`、落盘后原子改名，因此「最终文件存在」即「该分片完整」。中断后用同样的请
@@ -25,6 +26,7 @@ mod crypto;
 mod entries;
 mod error;
 mod fetch;
+mod file;
 mod hooks;
 /// fork 前后要调用的：fork 出的子进程关掉继承来的任务目录锁，否则父进程的任务结束后锁仍被子进程占着。只给会在
 /// 任务运行期间 fork 的嵌入方用。
@@ -66,18 +68,19 @@ pub use error::{
     Error, FetchErrorKind, FetchFailure, HlsUnsupported, HttpErrorKind, HttpFailure,
     IntegrityFailure, JobType, StallReason, Unsupported, WorkDirProblem,
 };
+pub use file::{Expected, FileInfo, FileRequest, Resource};
 pub use hooks::{HookError, HookKind, Hooks, NoHooks, Purpose, RequestParts};
 /// 内容放不进 MP4 的原因（[`Unsupported::Mp4`]）；本地 HLS 表示不了的见 [`HlsUnsupported`]。
 pub use hs_m3u8_remux::Unsupported as Mp4Unsupported;
 pub use ident::bare_url;
 pub use info::{AudioInfo, MasterInfo, Selected, TrackInfo, VariantInfo};
-pub use output::{OutputOptions, Target};
+pub use output::{FileOutputOptions, OutputOptions, Target};
 pub use probe::Probe;
 pub use proxy::{Bypass, ProxySource, SystemProxy, system_proxy};
 pub use report::{
-    FileCount, Leftover, LeftoverKind, LiveEnd, LiveReport, MissReason, Missed, Mp4Output,
-    NewSession, Output, Progress, RefreshReason, Retrying, Saved, SegmentCounts, SourceBreak,
-    Stage, StallCause, Writing,
+    FileCount, FileOutput, FileProgress, FileSaved, HlsSaved, Leftover, LeftoverKind, LiveEnd,
+    LiveReport, MissReason, Missed, Mp4Output, NewSession, Output, Progress, RefreshReason,
+    Retrying, Saved, SegmentCounts, SourceBreak, Stage, StallCause, Throttled, Writing,
 };
 pub use request::{
     HttpOptions, JobRequest, KeyOverride, LiveOptions, Proxy, RetryPolicy, Source, Timeouts,
@@ -134,6 +137,37 @@ impl Engine {
         probe::probe(&http, source).await
     }
 
+    /// 认出地址 `source.url` 是什么（见 [`Resource`]），不碰任务目录：发一次带 `Range: bytes=0-` 的请求（回 416 或
+    /// Content-Range 不对时不带 Range 再发一次），看响应头与内容开头。是播放列表时接着照 [`Engine::probe`] 解析选轨（主
+    /// 播放列表还要拉所选轨的媒体播放列表）；是文件时读到开头几个字节即断开，不下载其余内容。请求的用途为
+    /// [`Purpose::File`]，失败按 [`HttpOptions::retry`] 重试。参数错误时立即返回错误；不在 tokio 运行时内调用会 panic。
+    pub async fn identify(&self, source: &Source) -> Result<Resource, Error> {
+        source.validate()?;
+        let http = Http::new(source, self.requests.clone(), None)?;
+        file::identify(&http, source).await
+    }
+
+    /// 校验文件任务的请求并在当前 tokio 运行时上启动，规则见 [`FileRequest`]；不在 tokio 运行时内调用会 panic。参数错误
+    /// 时立即返回错误，不访问文件系统；其余失败经 [`Job::wait`] 返回。没有直播，[`JobControl::stop`] 不适用。
+    pub fn start_file(&self, request: FileRequest) -> Result<Job<FileOutput, FileProgress>, Error> {
+        let output = request.validate()?;
+        let (progress_tx, progress) = watch::channel(FileProgress::default());
+        let http = Http::new(
+            &request.source,
+            self.requests.clone(),
+            Some(Arc::new(ProgressObserver::new(progress_tx.clone()))),
+        )?;
+        let cancel = CancellationToken::new();
+        let task = tokio::spawn(file::run(
+            request,
+            output,
+            http,
+            cancel.clone(),
+            progress_tx,
+        ));
+        Ok(Job::new(task, cancel, CancellationToken::new(), progress))
+    }
+
     /// 校验请求并在当前 tokio 运行时上启动任务；不在 tokio 运行时内调用会 panic。参数错误时立即返回错误，
     /// 不访问文件系统；输出已存在等要读文件系统的检查、建出输出所在的目录在任务开头、任何下载之前进行，结果经
     /// [`Job::wait`] 返回。
@@ -173,14 +207,14 @@ impl Engine {
         Ok(Job::new(task, cancel, CancellationToken::new(), progress))
     }
 
-    /// 查看任务目录 `work_dir`（相对路径按当前目录补全）里已完成的内容，不联网、不加锁、不改动任何东西；任务正在运行时
-    /// 为读到的那一刻的。目录或其中的 `job.json` 不存在时为 None。用于任务没在运行时显示已下载了多少；点播的总片数要
-    /// 拉播放列表才知道，不在其中。
+    /// 查看任务目录 `work_dir`（相对路径按当前目录补全）里已完成的内容，按目录里记录的任务种类给出（HLS 任务或文件
+    /// 任务）；不联网、不加锁、不改动任何东西，任务正在运行时为读到的那一刻的。目录或其中的 `job.json` 不存在时为 None。
+    /// 用于任务没在运行时显示已下载了多少；点播的总片数要拉播放列表才知道，不在其中。
     ///
     /// 路径为空或不合要求（见 [`Target`]）时报参数错误；目录所在的盘读不到时报 [`Error::VolumeUnavailable`]，但 macOS
     /// 上卷卸下后与目录被删分不出来，这时为 None；
-    /// `job.json` 是本库读不了的格式版本写的时报 [`WorkDirProblem::UnsupportedVersion`]、无法解析时报
-    /// [`WorkDirProblem::Corrupt`]。不在 tokio 运行时内调用会 panic。
+    /// `job.json`（或文件任务的 `ranges.json`）是本库读不了的格式版本写的时报 [`WorkDirProblem::UnsupportedVersion`]、
+    /// 无法解析时报 [`WorkDirProblem::Corrupt`]。不在 tokio 运行时内调用会 panic。
     pub async fn inspect(&self, work_dir: &Path) -> Result<Option<Saved>, Error> {
         if work_dir.as_os_str().is_empty() {
             return Err(Error::InvalidInput("任务目录路径为空".to_owned()));
@@ -237,15 +271,43 @@ fn retrying(wait: &RetryWaiting) -> Retrying {
     }
 }
 
-/// 请求的进展计入任务的进度：读到的字节计入 [`Progress::received`]，退避计入 [`Progress::retrying`]。
-struct ProgressObserver {
-    progress: watch::Sender<Progress>,
-    /// [`Progress::retrying`] 各项的 [`RetryWaiting::id`]，一一对应；在改进度时一并改
+/// 记着请求进展的进度（[`Progress`]、[`FileProgress`]）。
+trait RequestProgress: Send + Sync + 'static {
+    /// 本次运行从网络读到的响应体字节数
+    fn received(&mut self) -> &mut u64;
+    /// 正在退避、等着重试的请求
+    fn retrying(&mut self) -> &mut Vec<Retrying>;
+}
+
+impl RequestProgress for Progress {
+    fn received(&mut self) -> &mut u64 {
+        &mut self.received
+    }
+
+    fn retrying(&mut self) -> &mut Vec<Retrying> {
+        &mut self.retrying
+    }
+}
+
+impl RequestProgress for FileProgress {
+    fn received(&mut self) -> &mut u64 {
+        &mut self.received
+    }
+
+    fn retrying(&mut self) -> &mut Vec<Retrying> {
+        &mut self.retrying
+    }
+}
+
+/// 请求的进展计入任务的进度：读到的字节计入 `received`，退避计入 `retrying`（见 [`RequestProgress`]）。
+struct ProgressObserver<P> {
+    progress: watch::Sender<P>,
+    /// 进度里 `retrying` 各项的 [`RetryWaiting::id`]，一一对应；在改进度时一并改
     waiting: std::sync::Mutex<Vec<u64>>,
 }
 
-impl ProgressObserver {
-    fn new(progress: watch::Sender<Progress>) -> Self {
+impl<P> ProgressObserver<P> {
+    fn new(progress: watch::Sender<P>) -> Self {
         ProgressObserver {
             progress,
             waiting: std::sync::Mutex::new(Vec::new()),
@@ -257,15 +319,15 @@ impl ProgressObserver {
     }
 }
 
-impl Observer for ProgressObserver {
+impl<P: RequestProgress> Observer for ProgressObserver<P> {
     fn received(&self, len: u64) {
-        self.progress.send_modify(|p| p.received += len);
+        self.progress.send_modify(|p| *p.received() += len);
     }
 
     fn retry_waiting(&self, wait: &RetryWaiting) {
         self.progress.send_modify(|p| {
             self.waiting().push(wait.id);
-            p.retrying.push(retrying(wait));
+            p.retrying().push(retrying(wait));
         });
     }
 
@@ -277,24 +339,25 @@ impl Observer for ProgressObserver {
                 .position(|&id| id == wait.id)
                 .expect("退避结束之前报过开始");
             waiting.remove(at);
-            p.retrying.remove(at);
+            p.retrying().remove(at);
         });
     }
 }
 
-/// 运行中的任务：等结果用 [`Job::wait`]，取消、停止与读进度用 [`Job::control`]。丢弃句柄即取消任务。
-pub struct Job {
-    control: JobControl,
-    task: JoinHandle<Result<Output, Error>>,
+/// 运行中的任务：等结果用 [`Job::wait`]，取消、停止与读进度用 [`Job::control`]。丢弃句柄即取消任务。`O` 为结果，`P` 为
+/// 进度：HLS 任务为 [`Output`] 与 [`Progress`]，文件任务为 [`FileOutput`] 与 [`FileProgress`]。
+pub struct Job<O = Output, P = Progress> {
+    control: JobControl<P>,
+    task: JoinHandle<Result<O, Error>>,
     _guard: DropGuard,
 }
 
-impl Job {
+impl<O, P> Job<O, P> {
     fn new(
-        task: JoinHandle<Result<Output, Error>>,
+        task: JoinHandle<Result<O, Error>>,
         cancel: CancellationToken,
         stop: CancellationToken,
-        progress: watch::Receiver<Progress>,
+        progress: watch::Receiver<P>,
     ) -> Self {
         Job {
             control: JobControl {
@@ -308,12 +371,12 @@ impl Job {
     }
 
     /// 控制句柄；与本句柄分开持有，等结果期间也能取消、停止。
-    pub fn control(&self) -> JobControl {
+    pub fn control(&self) -> JobControl<P> {
         self.control.clone()
     }
 
     /// 等待任务结束。任务内部 panic（不变量被违反）原样传播；运行时关闭导致任务被取消时返回 [`Error::Cancelled`]。
-    pub async fn wait(self) -> Result<Output, Error> {
+    pub async fn wait(self) -> Result<O, Error> {
         match self.task.await {
             Ok(result) => result,
             Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
@@ -323,27 +386,39 @@ impl Job {
 }
 
 /// 任务的控制句柄，可克隆。只持有它不会让任务继续运行（见 [`Job`]）；任务结束后调用不起作用。
-#[derive(Clone)]
-pub struct JobControl {
+pub struct JobControl<P = Progress> {
     cancel: CancellationToken,
     stop: CancellationToken,
-    progress: watch::Receiver<Progress>,
+    progress: watch::Receiver<P>,
 }
 
-impl JobControl {
+impl<P> Clone for JobControl<P> {
+    fn clone(&self) -> Self {
+        JobControl {
+            cancel: self.cancel.clone(),
+            stop: self.stop.clone(),
+            progress: self.progress.clone(),
+        }
+    }
+}
+
+impl<P> JobControl<P> {
     /// 进度快照的接收端。每读到一块数据就更新一次，按时间显示的消费者应定时采样，不要长时间持有
     /// `borrow()` 的结果（会挡住下载）。任务结束（成功、失败或取消）后发送端关闭，最后一份快照仍读得到；
     /// [`Stage`] 没有失败状态，失败时停在原来的阶段，结果只能从 [`Job::wait`] 取得。
-    pub fn progress(&self) -> watch::Receiver<Progress> {
+    pub fn progress(&self) -> watch::Receiver<P> {
         self.progress.clone()
     }
 
-    /// 请求取消；[`Job::wait`] 随后返回 [`Error::Cancelled`]，已完成的分片保留在任务目录中。写出（[`Stage::Writing`]）
-    /// 中取消时删掉写了一半的输出，已有的输出不受影响；换上输出的几步改名不中断，取消晚于它们时任务照常成功。
+    /// 请求取消；[`Job::wait`] 随后返回 [`Error::Cancelled`]，已完成的分片（文件任务为已落盘的范围）保留在任务目录中。
+    /// 写出（[`Stage::Writing`]）中取消时删掉写了一半的输出，已有的输出不受影响；换上输出的几步改名不中断，取消晚于它们
+    /// 时任务照常成功。
     pub fn cancel(&self) {
         self.cancel.cancel();
     }
+}
 
+impl JobControl<Progress> {
     /// 直播：停止刷新，把已拉到的播放列表处理完、已列出的分片下完后写出，[`Job::wait`] 返回录到的部分；续录时
     /// 会话还没定下就立即结束，不录新的分片。写出完成之前进程退出时，任务目录里不记停止：用同样的请求再次开始会接着
     /// 录，只写出已录到的用 [`Engine::merge_recorded`]。点播与只合并不受影响。

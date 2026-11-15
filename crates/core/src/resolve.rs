@@ -60,50 +60,60 @@ pub(crate) async fn resolve(
     recorded: Option<&SelectionRecord>,
     cancel: &CancellationToken,
 ) -> Result<Option<Resolved>, Error> {
+    let first = load_playlist(http, &source.hooks, &source.url, Attempts::Retrying, cancel).await?;
+    resolve_playlist(http, source, first, recorded, cancel).await
+}
+
+/// 同 [`resolve`]，来源的播放列表已拉到并解析为 `first`。
+pub(crate) async fn resolve_playlist(
+    http: &Http,
+    source: &Source,
+    first: Playlist,
+    recorded: Option<&SelectionRecord>,
+    cancel: &CancellationToken,
+) -> Result<Option<Resolved>, Error> {
     let hooks = &source.hooks;
-    Ok(Some(
-        match load_playlist(http, hooks, &source.url, Attempts::Retrying, cancel).await? {
-            Playlist::Media(playlist) => Resolved {
-                tracks: vec![ResolvedTrack {
-                    url: source.url.clone(),
-                    playlist,
-                }],
-                master: None,
-            },
-            Playlist::Master(master) => {
-                let (selection, record) = match recorded {
-                    Some(record) => match record.find(&master) {
-                        Some(selection) => (selection, record.clone()),
-                        None => return Ok(None),
-                    },
-                    None => {
-                        let selection = hls::select(&master, &source.preference)?;
-                        let record = SelectionRecord::of(&selection, &master);
-                        (selection, record)
-                    }
-                };
-                let url = selection.variant.uri.clone();
-                let playlist = fetch_media(http, hooks, &url, Attempts::Retrying, cancel).await?;
-                let mut tracks = vec![ResolvedTrack { url, playlist }];
-                if let Some(audio) = &selection.audio {
-                    let playlist =
-                        fetch_media(http, hooks, &audio.uri, Attempts::Retrying, cancel).await?;
-                    tracks.push(ResolvedTrack {
-                        url: audio.uri.clone(),
-                        playlist,
-                    });
-                }
-                Resolved {
-                    tracks,
-                    master: Some(Chosen {
-                        playlist: master,
-                        selection,
-                        record,
-                    }),
-                }
-            }
+    Ok(Some(match first {
+        Playlist::Media(playlist) => Resolved {
+            tracks: vec![ResolvedTrack {
+                url: source.url.clone(),
+                playlist,
+            }],
+            master: None,
         },
-    ))
+        Playlist::Master(master) => {
+            let (selection, record) = match recorded {
+                Some(record) => match record.find(&master) {
+                    Some(selection) => (selection, record.clone()),
+                    None => return Ok(None),
+                },
+                None => {
+                    let selection = hls::select(&master, &source.preference)?;
+                    let record = SelectionRecord::of(&selection, &master);
+                    (selection, record)
+                }
+            };
+            let url = selection.variant.uri.clone();
+            let playlist = fetch_media(http, hooks, &url, Attempts::Retrying, cancel).await?;
+            let mut tracks = vec![ResolvedTrack { url, playlist }];
+            if let Some(audio) = &selection.audio {
+                let playlist =
+                    fetch_media(http, hooks, &audio.uri, Attempts::Retrying, cancel).await?;
+                tracks.push(ResolvedTrack {
+                    url: audio.uri.clone(),
+                    playlist,
+                });
+            }
+            Resolved {
+                tracks,
+                master: Some(Chosen {
+                    playlist: master,
+                    selection,
+                    record,
+                }),
+            }
+        }
+    }))
 }
 
 /// 拉取播放列表的请求失败时再不再试。
@@ -144,9 +154,16 @@ async fn load_playlist(
         Attempts::Retrying => http.get(purpose, url, None, permit, cancel).await?,
         Attempts::Once => http.get_once(purpose, url, None, permit, cancel).await?,
     };
-    let final_url = response.url;
+    parse_playlist(hooks, response.url, response.body).await
+}
+
+/// 解析拉到的播放列表 `body`，先经 `on_playlist` 回调；`final_url` 为重定向之后的地址，相对地址按它解析。
+pub(crate) async fn parse_playlist(
+    hooks: &Arc<dyn Hooks>,
+    final_url: Url,
+    body: Vec<u8>,
+) -> Result<Playlist, Error> {
     let hook_url = final_url.clone();
-    let body = response.body;
     let (body, rewritten) = run_hook(hooks, HookKind::Playlist, move |hooks| {
         let rewritten = hooks.on_playlist(&hook_url, &body)?;
         Ok((body, rewritten))

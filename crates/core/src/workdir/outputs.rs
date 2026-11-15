@@ -18,7 +18,15 @@ pub(super) const OUTPUTS_FILE: &str = "outputs.json";
 /// outputs.json 的格式版本，与 job.json 的各自升：管它的字段，以及由字段推出的东西——两个保留名的推导规则（见
 /// [`PendingOutput::new`]）与 `swapped` 的含义，任何一项改变都要升。兼容约定同 [`super::record::JOB_FORMAT_VERSION`]：
 /// 放弃任务与之后的运行要按旧版本的规则找到写到一半的输出与挪开的旧输出，读不懂时什么也不动。
-pub(super) const OUTPUTS_FORMAT_VERSION: u32 = 13;
+///
+/// 各版本：13 为 1.0 写的；14 加了文件任务的输出（`file` 一种）。
+pub(super) const OUTPUTS_FORMAT_VERSION: u32 = 14;
+
+/// 读得了的最旧的 outputs.json 格式版本：1.0 写的。
+const OLDEST_OUTPUTS_FORMAT_VERSION: u32 = 13;
+
+/// 加了文件任务的输出的 outputs.json 格式版本。
+const FILE_OUTPUTS_FORMAT_VERSION: u32 = 14;
 
 /// 输出的种类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +35,8 @@ pub(crate) enum OutputKind {
     Mp4,
     /// 本地 HLS 目录
     Hls,
+    /// 文件任务下载的文件
+    File,
 }
 
 /// 正在写的一个输出：输出路径（绝对路径，与当前目录无关），以及由它与任务目录指纹定下的两个与它同级的保留名。
@@ -41,12 +51,13 @@ pub(crate) struct PendingOutput {
 
 impl PendingOutput {
     /// `target` 须是以文件名结尾的绝对路径；`fingerprint` 为任务目录的指纹。两个保留名为
-    /// `hsdl-<fingerprint>.<mp4|hls>.part` 与 `.old`：定长，不随输出名变长；几个任务（任务目录不同）输出到同一处时
+    /// `hsdl-<fingerprint>.<mp4|hls|file>.part` 与 `.old`：定长，不随输出名变长；几个任务（任务目录不同）输出到同一处时
     /// 各写各的。
     pub(crate) fn new(kind: OutputKind, target: PathBuf, fingerprint: Fingerprint) -> Self {
         let ext = match kind {
             OutputKind::Mp4 => "mp4",
             OutputKind::Hls => "hls",
+            OutputKind::File => "file",
         };
         let dir = target
             .parent()
@@ -151,6 +162,8 @@ struct OutputFile {
 enum KindFile {
     Mp4,
     Hls,
+    /// 格式版本 14 起
+    File,
 }
 
 fn encode(outputs: &[PendingOutput], swapped: bool) -> Vec<u8> {
@@ -163,6 +176,7 @@ fn encode(outputs: &[PendingOutput], swapped: bool) -> Vec<u8> {
                 kind: match o.kind {
                     OutputKind::Mp4 => KindFile::Mp4,
                     OutputKind::Hls => KindFile::Hls,
+                    OutputKind::File => KindFile::File,
                 },
                 target: o
                     .target
@@ -179,7 +193,12 @@ fn encode(outputs: &[PendingOutput], swapped: bool) -> Vec<u8> {
 
 /// 解析 `outputs.json`。
 fn decode(bytes: &[u8]) -> Result<OutputsRecord, WorkDirProblem> {
-    check_version(bytes, OUTPUTS_FILE, OUTPUTS_FORMAT_VERSION)?;
+    let version = check_version(
+        bytes,
+        OUTPUTS_FILE,
+        OLDEST_OUTPUTS_FORMAT_VERSION,
+        OUTPUTS_FORMAT_VERSION,
+    )?;
     let file: OutputsFile = serde_json::from_slice(bytes)
         .map_err(|e| WorkDirProblem::Corrupt(format!("{OUTPUTS_FILE} 无法解析：{e}")))?;
     let outputs = file
@@ -198,6 +217,12 @@ fn decode(bytes: &[u8]) -> Result<OutputsRecord, WorkDirProblem> {
             let kind = match o.kind {
                 KindFile::Mp4 => OutputKind::Mp4,
                 KindFile::Hls => OutputKind::Hls,
+                KindFile::File if version < FILE_OUTPUTS_FORMAT_VERSION => {
+                    return Err(format!(
+                        "{OUTPUTS_FILE} 是格式版本 {version}，那时还没有文件任务的输出"
+                    ));
+                }
+                KindFile::File => OutputKind::File,
             };
             Ok(PendingOutput::new(kind, target, fingerprint))
         })
@@ -261,6 +286,8 @@ mod tests {
         let fingerprint = Fingerprint::parse("0123456789abcdef").unwrap();
         let mp4 = PendingOutput::new(OutputKind::Mp4, "/d/a.mp4".into(), fingerprint);
         let hls = PendingOutput::new(OutputKind::Hls, "/d/a/".into(), fingerprint);
+        let file = PendingOutput::new(OutputKind::File, "/d/a.zip".into(), fingerprint);
+        assert_eq!(file.aside(), Path::new("/d/hsdl-0123456789abcdef.file.old"));
         assert_eq!(
             (mp4.temp(), mp4.aside()),
             (
@@ -269,11 +296,11 @@ mod tests {
             )
         );
         assert_eq!(hls.temp(), Path::new("/d/hsdl-0123456789abcdef.hls.part"));
-        let outputs = vec![mp4, hls];
+        let outputs = vec![mp4, hls, file];
         let bytes = encode(&outputs, true);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"format_version":13,"swapped":true,"outputs":[{"kind":"mp4","target":"/d/a.mp4","fingerprint":"0123456789abcdef"},{"kind":"hls","target":"/d/a/","fingerprint":"0123456789abcdef"}]}"#
+            r#"{"format_version":14,"swapped":true,"outputs":[{"kind":"mp4","target":"/d/a.mp4","fingerprint":"0123456789abcdef"},{"kind":"hls","target":"/d/a/","fingerprint":"0123456789abcdef"},{"kind":"file","target":"/d/a.zip","fingerprint":"0123456789abcdef"}]}"#
         );
         assert_eq!(
             decode(&bytes),
@@ -285,12 +312,14 @@ mod tests {
 
         let entry = |kind: &str, target: &str, fingerprint: &str| {
             format!(
-                r#"{{"format_version":13,"swapped":false,"outputs":[{{"kind":"{kind}","target":"{target}","fingerprint":"{fingerprint}"}}]}}"#
+                r#"{{"format_version":14,"swapped":false,"outputs":[{{"kind":"{kind}","target":"{target}","fingerprint":"{fingerprint}"}}]}}"#
             )
         };
         for rejected in [
             r#"{"format_version":12,"outputs":[]}"#.to_owned(),
             r#"{"format_version":13,"swapped":false,"outputs":[],"extra":1}"#.to_owned(),
+            r#"{"format_version":15,"swapped":false,"outputs":[]}"#.to_owned(),
+            r#"{"format_version":13,"swapped":false,"outputs":[{"kind":"file","target":"/d/a","fingerprint":"0123456789abcdef"}]}"#.to_owned(),
             r#"{"format_version":13,"outputs":[]}"#.to_owned(),
             entry("mkv", "/d/a", "0123456789abcdef"),
             entry("mp4", "d/a.mp4", "0123456789abcdef"),

@@ -1257,6 +1257,14 @@ class JobType:
         __match_args__ = ()
         def __new__(cls) -> JobType.Live: ...
     
+    @typing.final
+    class File(JobType):
+        r"""
+        单个文件的下载：由本库的 Rust 接口建立，Python 接口不提供这种任务
+        """
+        __match_args__ = ()
+        def __new__(cls) -> JobType.File: ...
+    
 
 @typing.final
 class KeyLengthError(SourceError):
@@ -4064,12 +4072,12 @@ class WorkDirProblem:
         """
         __match_args__ = ("recorded", "current",)
         @property
-        def recorded(self) -> JobType.Vod | JobType.Live:
+        def recorded(self) -> JobType.Vod | JobType.Live | JobType.File:
             r"""
             记录的
             """
         @property
-        def current(self) -> JobType.Vod | JobType.Live:
+        def current(self) -> JobType.Vod | JobType.Live | JobType.File:
             r"""
             本次的
             """

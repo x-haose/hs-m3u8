@@ -1,6 +1,7 @@
 //! 任务的进度与结果。
 
 use std::fmt;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -8,9 +9,16 @@ use crate::info::Selected;
 use crate::remux::MediaReport;
 use crate::{FetchErrorKind, FetchFailure, HttpFailure, Mp4Unsupported, Purpose, hls};
 
-/// 任务目录里已完成的内容（[`crate::Engine::inspect`]）；各量的含义同 [`Progress`] 里同名的。
+/// 任务目录里已完成的内容（[`crate::Engine::inspect`]），按目录里记录的任务种类。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Saved {
+pub enum Saved {
+    Hls(HlsSaved),
+    File(FileSaved),
+}
+
+/// HLS 任务目录里已完成的内容；各量的含义同 [`Progress`] 里同名的。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HlsSaved {
     /// 目录里是直播的录制
     pub live: bool,
     /// 已完成的分片数，各轨合计
@@ -19,6 +27,59 @@ pub struct Saved {
     pub bytes: u64,
     /// 第 0 条轨已完成分片的声明时长之和；直播即已录时长
     pub duration: Duration,
+}
+
+/// 文件任务目录里已完成的内容；各量的含义同 [`FileProgress`] 里同名的。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileSaved {
+    /// 已落盘、续传时沿用的字节数；不知道总长度或不支持范围请求时恒为 0（续传从头下）
+    pub bytes: u64,
+    pub total: Option<u64>,
+}
+
+/// 文件任务的进度快照（[`crate::Engine::start_file`]）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FileProgress {
+    /// 只经过 [`Stage::Preparing`]、[`Stage::Downloading`]、[`Stage::Writing`]（装上输出）、[`Stage::Done`]
+    pub stage: Stage,
+    /// 总字节数；收到第一个响应之前，或服务器没给出时为 None
+    pub total: Option<u64>,
+    /// 已写入数据文件的字节数，含续传前的；等于 `completed` 各段之和
+    pub bytes: u64,
+    /// 已写入数据文件的范围（字节偏移，不含终点），升序、不重叠、相接的已合并；含续传前的
+    pub completed: Vec<Range<u64>>,
+    /// 本次运行从网络读到的响应体字节数，读到即计：含重试前没读完的。按它的变化算下载速度
+    pub received: u64,
+    /// 当前在途的连接数
+    pub connections: usize,
+    /// 当前的连接上限：开始时为 [`crate::FileRequest::connections`]，服务器限制连接数时降低（见 `throttled`）；不支持
+    /// 范围请求或不知道总长度时为 1
+    pub limit: usize,
+    /// 正在退避、等着重试的请求，同 [`Progress::retrying`]
+    pub retrying: Vec<Retrying>,
+    /// 最近一次因服务器限制连接数而降低上限；没有降过时为 None
+    pub throttled: Option<Throttled>,
+}
+
+/// 一次降低连接上限（[`FileProgress::throttled`]）：同时有多个连接时，新的请求在收到响应之前失败或回了 429、503、403，
+/// 视为服务器限制了连接数，上限降一个（至少 1），这一段放回去等别的连接接着下，不算失败。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Throttled {
+    /// 降到的上限
+    pub limit: usize,
+    /// 引起这次降低的失败
+    pub failure: HttpFailure,
+}
+
+/// 文件任务的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileOutput {
+    /// 下载的文件（绝对路径，相对路径按开始任务时的当前目录补全）
+    pub path: PathBuf,
+    /// 文件的字节数
+    pub bytes: u64,
+    /// 收尾没删掉的东西，同 [`Output::leftovers`]
+    pub leftovers: Vec<Leftover>,
 }
 
 /// 任务进度快照。

@@ -5,6 +5,7 @@ use tokio_util::sync::CancellationToken;
 use crate::http::Http;
 use crate::info::{MasterInfo, TrackInfo};
 use crate::request::Source;
+use crate::resolve::Resolved;
 use crate::{Error, resolve};
 
 /// 探测结果。
@@ -27,16 +28,23 @@ pub(crate) async fn probe(http: &Http, source: &Source) -> Result<Probe, Error> 
     let resolved = resolve::resolve(http, source, None, &cancel)
         .await?
         .expect("没有记录的选轨时按偏好选，选不出即报错，不会是找不到记录");
-    Ok(Probe {
-        live: resolved.is_live(),
-        master: resolved
-            .master
-            .as_ref()
-            .map(|m| MasterInfo::of(&m.playlist, &m.selection)),
-        tracks: resolved
-            .tracks
-            .iter()
-            .map(|t| TrackInfo::of(&t.playlist))
-            .collect(),
-    })
+    Ok(Probe::of(&resolved))
+}
+
+impl Probe {
+    /// 没有记录的选轨、按偏好选出的 `resolved` 的概况。
+    pub(crate) fn of(resolved: &Resolved) -> Probe {
+        Probe {
+            live: resolved.is_live(),
+            master: resolved
+                .master
+                .as_ref()
+                .map(|m| MasterInfo::of(&m.playlist, &m.selection)),
+            tracks: resolved
+                .tracks
+                .iter()
+                .map(|t| TrackInfo::of(&t.playlist))
+                .collect(),
+        }
+    }
 }

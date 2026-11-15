@@ -1,4 +1,4 @@
-//! `job.json`：任务目录记录的任务，及其序列化格式与其中摘要的编码（契约）。
+//! `job.json`：任务目录记录的任务（HLS 下载、录制或单个文件），及其序列化格式与其中摘要的编码（契约）。
 
 use hs_m3u8_hls::{AudioChoice, AudioKey, Preference, Resolution, VariantChoice, VariantKey};
 use hs_m3u8_remux::Streams;
@@ -10,15 +10,53 @@ use crate::selection::{AudioRecord, SelectionRecord, VariantRecord, track_stream
 use crate::{JobType, WorkDirProblem};
 
 /// job.json 的格式版本，也是任务目录里其余内容的格式版本：job.json 的字段，分片与 init 段的文件名、其中指纹与摘要的
-/// 编码，写到一半的文件的 `.part` 后缀，以及下载时对文件内容的改写（fMP4 长度写 0 的最后一个 box 改为实际长度）。
-/// 任何一项改变都要升。outputs.json 另有自己的版本（见 [`super::outputs::OUTPUTS_FORMAT_VERSION`]）。
+/// 编码，文件任务的数据文件与已完成范围的记录（`ranges.json`），写到一半的文件的 `.part` 后缀，以及下载时对文件内容
+/// 的改写（fMP4 长度写 0 的最后一个 box 改为实际长度）。任何一项改变都要升。outputs.json 另有自己的版本（见
+/// [`super::outputs::OUTPUTS_FORMAT_VERSION`]）。
 ///
-/// 兼容约定（outputs.json 同）：本库 1.0 写的是格式版本 13，此后各版本的库读得了 1.0 起各发布版本写的任务目录，
-/// 按记录的格式版本解释其中的内容。格式版本比本库写的新，或小于 13（1.0 之前开发中的版本写的）时报
+/// 各版本：13 为 1.0 写的；14 加了文件任务（job.json 的 `file` 一种与 `ranges.json`），HLS 任务的内容与 13 相同。
+///
+/// 兼容约定（outputs.json 同）：此后各版本的库读得了 1.0 起各发布版本写的任务目录（[`OLDEST_JOB_FORMAT_VERSION`] 起），
+/// 按记录的格式版本解释其中的内容。格式版本比本库写的新，或比它旧（1.0 之前开发中的版本写的）时报
 /// [`WorkDirProblem::UnsupportedVersion`]。各已发布版本的样本在 tests/fixtures/workdir 下，发布后不再改动。
-pub(super) const JOB_FORMAT_VERSION: u32 = 13;
+pub(super) const JOB_FORMAT_VERSION: u32 = 14;
 
-/// 任务目录记录的任务；续传、续录时须与当前请求相符。
+/// 读得了的最旧的 job.json 格式版本：1.0 写的。
+const OLDEST_JOB_FORMAT_VERSION: u32 = 13;
+
+/// 加了文件任务的 job.json 格式版本。
+pub(super) const FILE_JOB_FORMAT_VERSION: u32 = 14;
+
+/// job.json 里记录的任务。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Recorded {
+    Hls(Box<JobRecord>),
+    File(FileRecord),
+}
+
+impl Recorded {
+    pub(crate) fn job_type(&self) -> JobType {
+        match self {
+            Recorded::Hls(record) => record.job_type(),
+            Recorded::File(_) => JobType::File,
+        }
+    }
+}
+
+/// 文件任务记录的来源：续传时据此核对是不是同一个文件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileRecord {
+    /// 见 [`url_digest`]
+    pub url_digest: String,
+    /// 总字节数；不知道时为 None，这时没有已完成范围的记录，不续传
+    pub length: Option<u64>,
+    /// 强 ETag（带引号，原样）；服务器没给或给的是弱 ETag 时为 None
+    pub etag: Option<String>,
+    /// Last-Modified 的值，原样
+    pub last_modified: Option<String>,
+}
+
+/// HLS 任务目录记录的任务；续传、续录时须与当前请求相符。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct JobRecord {
     /// 见 [`preference_digest`]；来源是媒体播放列表（`selection` 为 None）时选轨偏好不起作用，不核对
@@ -56,7 +94,7 @@ impl JobRecord {
         track_streams(self.selection.as_ref())
     }
 
-    fn job_type(&self) -> JobType {
+    pub(crate) fn job_type(&self) -> JobType {
         match self.kind {
             RecordKind::Vod { .. } => JobType::Vod,
             RecordKind::Live => JobType::Live,
@@ -183,6 +221,14 @@ enum JobFile {
         url_digest: String,
         selection: Option<SelectionFile>,
     },
+    /// 格式版本 14 起
+    File {
+        format_version: u32,
+        url_digest: String,
+        length: Option<u64>,
+        etag: Option<String>,
+        last_modified: Option<String>,
+    },
 }
 
 /// [`SelectionRecord`] 在 job.json 中的写法。
@@ -252,23 +298,24 @@ struct Version {
     format_version: u32,
 }
 
-/// 任务目录里名为 `file` 的 JSON 文件的格式版本是不是 `supported`：读不出版本号为内容无法识别，是别的版本为版本不
-/// 受支持。
+/// 任务目录里名为 `file` 的 JSON 文件的格式版本在不在 `oldest..=supported` 之内，在时返回它：读不出版本号为内容无法
+/// 识别，不在为版本不受支持。
 pub(super) fn check_version(
     bytes: &[u8],
     file: &'static str,
+    oldest: u32,
     supported: u32,
-) -> Result<(), WorkDirProblem> {
+) -> Result<u32, WorkDirProblem> {
     let version: Version = serde_json::from_slice(bytes)
         .map_err(|e| WorkDirProblem::Corrupt(format!("{file} 无法解析：{e}")))?;
-    if version.format_version != supported {
+    if !(oldest..=supported).contains(&version.format_version) {
         return Err(WorkDirProblem::UnsupportedVersion {
             file,
             found: version.format_version,
             supported,
         });
     }
-    Ok(())
+    Ok(version.format_version)
 }
 
 pub(super) fn encode(record: &JobRecord) -> Vec<u8> {
@@ -294,10 +341,26 @@ pub(super) fn encode(record: &JobRecord) -> Vec<u8> {
     serde_json::to_vec(&file).expect("JobFile 只含字符串、整数、数组与枚举，序列化不会失败")
 }
 
+pub(super) fn encode_file(record: &FileRecord) -> Vec<u8> {
+    let file = JobFile::File {
+        format_version: JOB_FORMAT_VERSION,
+        url_digest: record.url_digest.clone(),
+        length: record.length,
+        etag: record.etag.clone(),
+        last_modified: record.last_modified.clone(),
+    };
+    serde_json::to_vec(&file).expect("JobFile 只含字符串、整数、数组与枚举，序列化不会失败")
+}
+
 /// 解析 `job.json`。
-pub(super) fn decode(bytes: &[u8]) -> Result<JobRecord, WorkDirProblem> {
+pub(super) fn decode(bytes: &[u8]) -> Result<Recorded, WorkDirProblem> {
     let unreadable = |e| WorkDirProblem::Corrupt(format!("job.json 无法解析：{e}"));
-    check_version(bytes, "job.json", JOB_FORMAT_VERSION)?;
+    let version = check_version(
+        bytes,
+        "job.json",
+        OLDEST_JOB_FORMAT_VERSION,
+        JOB_FORMAT_VERSION,
+    )?;
     let (preference_digest, url_digest, selection, kind) =
         match serde_json::from_slice(bytes).map_err(unreadable)? {
             JobFile::Vod {
@@ -318,13 +381,32 @@ pub(super) fn decode(bytes: &[u8]) -> Result<JobRecord, WorkDirProblem> {
                 selection,
                 ..
             } => (preference_digest, url_digest, selection, RecordKind::Live),
+            JobFile::File { .. } if version < FILE_JOB_FORMAT_VERSION => {
+                return Err(WorkDirProblem::Corrupt(format!(
+                    "job.json 是格式版本 {version}，那时还没有文件任务"
+                )));
+            }
+            JobFile::File {
+                url_digest,
+                length,
+                etag,
+                last_modified,
+                ..
+            } => {
+                return Ok(Recorded::File(FileRecord {
+                    url_digest,
+                    length,
+                    etag,
+                    last_modified,
+                }));
+            }
         };
-    Ok(JobRecord {
+    Ok(Recorded::Hls(Box::new(JobRecord {
         preference_digest,
         url_digest,
         selection: selection.map(SelectionRecord::from),
         kind,
-    })
+    })))
 }
 
 impl From<&SelectionRecord> for SelectionFile {
@@ -541,14 +623,17 @@ mod tests {
         let bytes = encode(&live);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"kind":"live","format_version":13,"preference_digest":"ab","url_digest":"cd","selection":{"variant":{"key":{"attributes":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020","mp4a.40.2"],"audio_group":"aud","occurrence":1}},"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"]},"audio":{"key":{"stable":{"id":"Audio-37262","occurrence":0}},"name":"Eng\n\"lish\"","language":"en"}}}"#
+            r#"{"kind":"live","format_version":14,"preference_digest":"ab","url_digest":"cd","selection":{"variant":{"key":{"attributes":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020","mp4a.40.2"],"audio_group":"aud","occurrence":1}},"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"]},"audio":{"key":{"stable":{"id":"Audio-37262","occurrence":0}},"name":"Eng\n\"lish\"","language":"en"}}}"#
         );
-        assert_eq!(decode(&bytes), Ok(live));
+        assert_eq!(decode(&bytes), Ok(Recorded::Hls(Box::new(live.clone()))));
         let stable = JobRecord {
             selection: Some(selection(stable_variant_key(), audio_key())),
-            ..decode(&bytes).unwrap()
+            ..live
         };
-        assert_eq!(decode(&encode(&stable)), Ok(stable));
+        assert_eq!(
+            decode(&encode(&stable)),
+            Ok(Recorded::Hls(Box::new(stable)))
+        );
         let vod = JobRecord {
             preference_digest: "ab".into(),
             url_digest: "cd".into(),
@@ -557,20 +642,39 @@ mod tests {
                 plan_digest: "ef".into(),
             },
         };
-        assert_eq!(decode(&encode(&vod)), Ok(vod));
-
+        assert_eq!(decode(&encode(&vod)), Ok(Recorded::Hls(Box::new(vod))));
+        let file = FileRecord {
+            url_digest: "cd".into(),
+            length: Some(1 << 40),
+            etag: Some("\"x\"".into()),
+            last_modified: None,
+        };
+        let bytes = encode_file(&file);
         assert_eq!(
-            decode(br#"{"kind":"vod","format_version":12}"#),
-            Err(WorkDirProblem::UnsupportedVersion {
-                file: "job.json",
-                found: 12,
-                supported: 13
-            })
+            String::from_utf8(bytes.clone()).unwrap(),
+            r#"{"kind":"file","format_version":14,"url_digest":"cd","length":1099511627776,"etag":"\"x\"","last_modified":null}"#
         );
+        assert_eq!(decode(&bytes), Ok(Recorded::File(file)));
+        // 1.0 写的格式版本 13 照样读
+        let v13 = r#"{"kind":"vod","format_version":13,"preference_digest":"a","url_digest":"u","selection":null,"plan_digest":"p"}"#;
+        assert!(matches!(decode(v13.as_bytes()), Ok(Recorded::Hls(_))));
+
+        for found in [12, 15] {
+            assert_eq!(
+                decode(format!(r#"{{"kind":"vod","format_version":{found}}}"#).as_bytes()),
+                Err(WorkDirProblem::UnsupportedVersion {
+                    file: "job.json",
+                    found,
+                    supported: 14
+                })
+            );
+        }
         for rejected in [
             r#"{"kind":"vod","format_version":1,"plan_digest":"cd"}"#,
             r#"{"kind":"vod","format_version":9,"address_digest":"a","preference_digest":"b","selection":null,"plan_digest":"p"}"#,
             r#"{"kind":"vod","format_version":13,"preference_digest":"a","url_digest":"u","selection":null,"plan_digest":"p","extra":1}"#,
+            r#"{"kind":"file","format_version":13,"url_digest":"u","length":1,"etag":null,"last_modified":null}"#,
+            r#"{"kind":"file","format_version":14,"url_digest":"u","length":-1,"etag":null,"last_modified":null}"#,
             r#"{"format_version":13,"preference_digest":"a","url_digest":"u","selection":null,"plan_digest":"p"}"#,
             r#"{"kind":"vod","format_version":13,"preference_digest":"a","url_digest":"u","selection":null}"#,
             r#"{"kind":"vod","format_version":13,"preference_digest":"a","selection":null,"plan_digest":"p"}"#,
@@ -722,7 +826,11 @@ mod released {
                 assert_eq!(written["format_version"], *version, "{}", path.display());
                 let record = decode(&bytes).unwrap_or_else(|e| panic!("{}：{e}", path.display()));
                 if *version == JOB_FORMAT_VERSION {
-                    assert_eq!(encode(&record), bytes, "{}", path.display());
+                    let rewritten = match &record {
+                        Recorded::Hls(record) => encode(record),
+                        Recorded::File(record) => encode_file(record),
+                    };
+                    assert_eq!(rewritten, bytes, "{}", path.display());
                 }
             }
         }

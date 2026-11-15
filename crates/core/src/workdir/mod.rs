@@ -1,11 +1,13 @@
-//! 任务目录：任务记录、独占锁、已完成的分片与 init 段。
+//! 任务目录：任务记录、独占锁，HLS 任务已完成的分片与 init 段，文件任务的数据文件与已完成的范围。
 //!
 //! ```text
 //! job.json                                                          任务记录，见 JobFile
 //! lock                                                              运行期间持有排他锁
 //! outputs.json                                                      正在写的输出，见 PendingOutput
-//! tracks/<轨道>/<会话>-<起点>-<序号>-<不连续段>-<init>-<时长>-<身份>.seg  已解密、通过校验的分片
-//! tracks/<轨道>/init-<指纹>.mp4                                      init 段，按内容命名
+//! tracks/<轨道>/<会话>-<起点>-<序号>-<不连续段>-<init>-<时长>-<身份>.seg  HLS：已解密、通过校验的分片
+//! tracks/<轨道>/init-<指纹>.mp4                                      HLS：init 段，按内容命名
+//! data                                                              文件任务：下载中的文件，按偏移写入
+//! ranges.json                                                       文件任务：data 里已落盘的范围，见 RangesFile
 //! ```
 //!
 //! 分片文件名中：会话为第几个录制会话（点播恒为 0），起点为这条轨在这个会话从哪里开始录（见 [`SessionStart`]，
@@ -13,17 +15,19 @@
 //! 声明的微秒数，身份见 [`Fingerprint::of_segment`]。合并与续录要用的都在分片自己的文件名里，只凭目录内容
 //! 即可合并或续录。
 //!
-//! 文件先写 `<名字>.part`，fsync 后改名，因此最终文件名存在即内容完整（断电也成立）。
-//! 请求配置（请求头、Cookie 等）不写入目录：续传时由调用方再次提供。
+//! 文件先写 `<名字>.part`，fsync 后改名，因此最终文件名存在即内容完整（断电也成立）；`data` 例外，它就地写入，哪些
+//! 部分完整由 `ranges.json` 记（data 先落盘、再写它）。请求配置（请求头、Cookie 等）不写入目录：续传时由调用方再次提供。
 
 mod lock;
 mod names;
 mod outputs;
+mod ranges;
 mod record;
 mod removal;
 
 use std::fs::{self, File};
 use std::io::{self, Write};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -36,20 +40,24 @@ use self::names::{init_file_name, parse_init_name, parse_segment_name, segment_f
 pub(crate) use self::outputs::{
     OutputKind, PendingOutput, clear_outputs, outputs_file, read_outputs, record_outputs,
 };
+use self::ranges::RANGES_FILE;
 pub(crate) use self::record::{
-    JobRecord, RecordKind, SelectionCheck, preference_digest, url_digest,
+    FileRecord, JobRecord, RecordKind, Recorded, SelectionCheck, preference_digest, url_digest,
 };
-use self::record::{decode, encode};
+use self::record::{decode, encode, encode_file};
 pub(crate) use self::removal::remove;
 use self::removal::{remove_steps, remove_tracks};
 use crate::entries;
 use crate::error::io_error;
 use crate::ident::Fingerprint;
-use crate::{Error, Leftover, Saved, WorkDirProblem, blocking, busy, volume};
+use crate::{
+    Error, FileSaved, HlsSaved, JobType, Leftover, Saved, WorkDirProblem, blocking, busy, volume,
+};
 
 const JOB_FILE: &str = "job.json";
 const LOCK_FILE: &str = "lock";
 const TRACKS_DIR: &str = "tracks";
+const DATA_FILE: &str = "data";
 
 /// 任务目录中各文件的路径。
 #[derive(Debug, Clone)]
@@ -209,8 +217,8 @@ impl WorkDir {
         blocking(move || scan(&layout, tracks)).await?
     }
 
-    /// 删除整个任务目录。只删本库写的文件（`job.json`、`outputs.json`、各轨的分片与 init 段，以及它们写到一半的
-    /// `.part`）、系统自动生成的元数据文件（见 [`entries::Entry::is_system_file`]）与因此变空的目录；其他文件（例如经符
+    /// 删除整个任务目录。只删本库写的文件（`job.json`、`outputs.json`、各轨的分片与 init 段、文件任务的 `data` 与
+    /// `ranges.json`，以及它们写到一半的 `.part`）、系统自动生成的元数据文件（见 [`entries::Entry::is_system_file`]）与因此变空的目录；其他文件（例如经符
     /// 号链接或只差大小写的路径写进来的输出）原样留下。有东西留下时 `job.json` 也留下：目录仍是可识别的任务目录，下次运
     /// 行照常使用（没有已完成的分片，按当前任务重新开始）。没删干净时返回留下的原因。
     ///
@@ -256,35 +264,46 @@ fn read_saved(root: &Path) -> Result<Option<Saved>, Error> {
     if !exists(root)? {
         return Ok(None);
     }
-    let Some(record) = read_job(root)? else {
-        return Ok(None);
+    let record = match read_job(root)? {
+        None => return Ok(None),
+        Some(Recorded::Hls(record)) => record,
+        Some(Recorded::File(record)) => {
+            let ranges = match record.length {
+                Some(length) => read_ranges(root, length)?,
+                None => Vec::new(),
+            };
+            return Ok(Some(Saved::File(FileSaved {
+                bytes: ranges.iter().map(|r| r.end - r.start).sum(),
+                total: record.length,
+            })));
+        }
     };
     let layout = Layout {
         root: root.to_path_buf(),
     };
     let stored = scan(&layout, record.streams().len())?;
-    Ok(Some(Saved {
+    Ok(Some(Saved::Hls(HlsSaved {
         live: matches!(record.kind, RecordKind::Live),
         segments: stored.segments.iter().map(Vec::len).sum(),
         bytes: stored.bytes(),
         duration: Duration::from_micros(stored.duration_us(0)),
-    }))
+    })))
 }
 
-/// 有可续的内容时读取任务目录的记录；目录或 `job.json` 不存在，或还没有已完成的分片时为 None（按当前请求
-/// 从头开始，见 [`WorkDir::open`]）。用于决定走哪条流程、按什么选轨；目录在任务开头已存在时调用方已加锁，
+/// 有可续的内容时读取任务目录的记录；目录或 `job.json` 不存在，或还没有已完成的内容（见 [`has_completed`]）时为 None
+/// （按当前请求从头开始，见 [`WorkDir::open`]）。用于决定走哪条流程、按什么选轨；目录在任务开头已存在时调用方已加锁，
 /// 之后才建立的目录由 [`WorkDir::open`] 加锁后再核对。
-pub(crate) async fn read_resumable(root: PathBuf) -> Result<Option<JobRecord>, Error> {
+pub(crate) async fn read_resumable(root: PathBuf) -> Result<Option<Recorded>, Error> {
     blocking(move || {
         let Some(record) = read_job(&root)? else {
             return Ok(None);
         };
-        Ok(has_completed_segments(&Layout { root })?.then_some(record))
+        Ok(has_completed(&root)?.then_some(record))
     })
     .await?
 }
 
-fn read_job(root: &Path) -> Result<Option<JobRecord>, Error> {
+fn read_job(root: &Path) -> Result<Option<Recorded>, Error> {
     let job_path = root.join(JOB_FILE);
     match fs::read(&job_path) {
         Ok(bytes) => decode(&bytes).map(Some).map_err(|problem| Error::WorkDir {
@@ -314,26 +333,28 @@ fn open(
         }
     };
     let layout = Layout { root: root.clone() };
+    let conflict = |problem| Error::WorkDir {
+        path: root.clone(),
+        problem,
+    };
     let previous = match read_job(&root)? {
         None => None,
-        Some(recorded) => match recorded.conflict(&record, check) {
-            None => Some(recorded),
-            Some(_) if !has_completed_segments(&layout)? => None,
-            Some(problem) => {
-                return Err(Error::WorkDir {
-                    path: root,
-                    problem,
-                });
-            }
+        Some(Recorded::Hls(recorded)) => match recorded.conflict(&record, check) {
+            None => Some(*recorded),
+            Some(_) if !has_completed(&root)? => None,
+            Some(problem) => return Err(conflict(problem)),
         },
+        Some(Recorded::File(_)) if !has_completed(&root)? => None,
+        Some(Recorded::File(_)) => {
+            return Err(conflict(WorkDirProblem::KindMismatch {
+                recorded: JobType::File,
+                current: record.job_type(),
+            }));
+        }
     };
     let (record, pending) = match previous {
         None => {
-            // 不是本库写的文件（如删除任务目录时留下的）不影响读写，删除任务目录时照常指出
-            let tracks = root.join(TRACKS_DIR);
-            if exists(&tracks)? {
-                remove_tracks(&tracks, &mut Vec::new())?;
-            }
+            clear_content(&root)?;
             write_atomic(&job_path, &encode(&record))?;
             (record, None)
         }
@@ -362,6 +383,23 @@ fn open(
     })
 }
 
+/// 删掉任务目录里之前的任务留下的内容（HLS 的分片与 init 段、文件任务的数据文件与范围记录），换成当前任务。不是本库
+/// 写的文件（如删除任务目录时留下的）不影响读写，删除任务目录时照常指出。
+fn clear_content(root: &Path) -> Result<(), Error> {
+    let tracks = root.join(TRACKS_DIR);
+    if exists(&tracks)? {
+        remove_tracks(&tracks, &mut Vec::new())?;
+    }
+    for name in [RANGES_FILE, DATA_FILE] {
+        let path = root.join(name);
+        match busy::retrying(|| fs::remove_file(&path)) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            other => other.map_err(io_error("删除", &path))?,
+        }
+    }
+    Ok(())
+}
+
 /// 没有 `job.json` 的目录只能是空的（`.part` 残留与锁文件除外），否则不是本库建立的任务目录。
 fn ensure_empty(root: &Path) -> Result<(), Error> {
     for entry in entries::list(root)? {
@@ -379,9 +417,28 @@ fn ensure_empty(root: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// 目录里有没有已完成的分片。只有 init 段时不算：它们随时可以重新拉取，没有可丢的内容。
-fn has_completed_segments(layout: &Layout) -> Result<bool, Error> {
-    let tracks = layout.root.join(TRACKS_DIR);
+/// 目录里有没有丢了可惜的内容：HLS 任务已完成的分片，或文件任务记了已完成范围（不论 job.json 记的是哪种任务）。只有
+/// init 段时不算：它们随时可以重新拉取。
+fn has_completed(root: &Path) -> Result<bool, Error> {
+    Ok(has_completed_segments(root)? || !read_ranges(root, u64::MAX)?.is_empty())
+}
+
+/// 文件任务目录 `root` 里已落盘的范围（见 [`ranges`]）；没有记录时为空。`length` 为记录的总长度。
+fn read_ranges(root: &Path, length: u64) -> Result<Vec<Range<u64>>, Error> {
+    let path = root.join(RANGES_FILE);
+    match fs::read(&path) {
+        Ok(bytes) => ranges::decode(&bytes, length).map_err(|problem| Error::WorkDir {
+            path: root.to_path_buf(),
+            problem,
+        }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(cause) => Err(io_error("读取", &path)(cause)),
+    }
+}
+
+/// 目录里有没有已完成的分片。
+fn has_completed_segments(root: &Path) -> Result<bool, Error> {
+    let tracks = root.join(TRACKS_DIR);
     let entries = match fs::read_dir(&tracks) {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -398,6 +455,119 @@ fn has_completed_segments(layout: &Layout) -> Result<bool, Error> {
         }
     }
     Ok(false)
+}
+
+/// 文件任务任务目录里可续的内容。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FileResume {
+    pub record: FileRecord,
+    /// 总长度（记录里有它才可续）
+    pub length: u64,
+    /// 已落盘的范围，升序、不重叠，至少一个
+    pub ranges: Vec<Range<u64>>,
+}
+
+/// 文件任务的续传要用的：`job.json` 记的是文件任务、知道总长度、且有已落盘的范围时为它们；目录或 `job.json` 不存在、
+/// 没有已完成的内容时为 None（从头开始）。记的是有已完成分片的 HLS 任务时报 [`WorkDirProblem::KindMismatch`]。
+/// 目录在任务开头已存在时调用方已加锁。
+pub(crate) async fn read_file_resume(root: PathBuf) -> Result<Option<FileResume>, Error> {
+    blocking(move || {
+        let record = match read_job(&root)? {
+            None => return Ok(None),
+            Some(Recorded::File(record)) => record,
+            Some(hls @ Recorded::Hls(_)) => {
+                if !has_completed_segments(&root)? {
+                    return Ok(None);
+                }
+                return Err(Error::WorkDir {
+                    path: root,
+                    problem: WorkDirProblem::KindMismatch {
+                        recorded: hls.job_type(),
+                        current: JobType::File,
+                    },
+                });
+            }
+        };
+        let Some(length) = record.length else {
+            return Ok(None);
+        };
+        let ranges = read_ranges(&root, length)?;
+        Ok((!ranges.is_empty()).then_some(FileResume {
+            record,
+            length,
+            ranges,
+        }))
+    })
+    .await?
+}
+
+/// 加了锁的文件任务的任务目录；锁在 drop 时释放。
+pub(crate) struct FileDir {
+    root: PathBuf,
+    lock: Lock,
+}
+
+impl FileDir {
+    /// 打开或新建文件任务的任务目录并加锁，`job.json` 写为 `record`；`lock` 为 [`WorkDir::lock_existing`] 已加上的锁。
+    /// `resumed` 为任务开头读到的可续内容（见 [`read_file_resume`]，调用方已核对过来源）：有时保留数据文件与范围记录，
+    /// 没有时删掉之前的内容（见 [`clear_content`]），从头开始。没有 `job.json` 时目录须为空，同 [`WorkDir::open`]；任务
+    /// 开头目录还不存在、加锁时已有了可续的内容（别的任务同时用它建了目录）时报 [`WorkDirProblem::Locked`]。
+    pub(crate) async fn open(
+        root: PathBuf,
+        lock: Option<Lock>,
+        record: FileRecord,
+        resumed: bool,
+    ) -> Result<FileDir, Error> {
+        blocking(move || {
+            let job_path = root.join(JOB_FILE);
+            let lock = match lock {
+                Some(lock) => lock,
+                None => {
+                    fs::create_dir_all(&root).map_err(io_error("创建", &root))?;
+                    if !exists(&job_path)? {
+                        ensure_empty(&root)?;
+                    }
+                    let lock = acquire(&root)?;
+                    if read_job(&root)?.is_some() && has_completed(&root)? {
+                        return Err(Error::WorkDir {
+                            path: root,
+                            problem: WorkDirProblem::Locked,
+                        });
+                    }
+                    lock
+                }
+            };
+            if !resumed {
+                clear_content(&root)?;
+            }
+            write_atomic(&job_path, &encode_file(&record))?;
+            Ok(FileDir { root, lock })
+        })
+        .await?
+    }
+
+    /// 数据文件：下载中的内容按偏移写入
+    pub(crate) fn data(&self) -> PathBuf {
+        self.root.join(DATA_FILE)
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// 记下数据文件里已落盘的范围 `ranges`（升序、不重叠、不相接、不为空）；调用方须已让这些范围落盘。
+    pub(crate) async fn record_ranges(&self, ranges: Vec<Range<u64>>) -> Result<(), Error> {
+        let path = self.root.join(RANGES_FILE);
+        blocking(move || write_atomic(&path, &ranges::encode(&ranges))).await?
+    }
+
+    /// 删除整个任务目录，同 [`WorkDir::remove`]。
+    pub(crate) async fn remove(self) -> Option<Leftover> {
+        let FileDir { root, lock } = self;
+        remove_steps(root, lock, None)
+            .await
+            .expect("不取消时删除做完才返回")
+    }
 }
 
 /// 一条轨目录中按 `parse` 能识别的文件；目录不存在时为空。
@@ -506,7 +676,9 @@ mod released {
     use std::path::{Path, PathBuf};
 
     use super::names::{SessionStart, parse_init_name, parse_segment_name};
-    use super::{JOB_FILE, TRACKS_DIR};
+    use super::ranges::RANGES_FILE;
+    use super::{DATA_FILE, JOB_FILE, TRACKS_DIR};
+    use crate::Saved;
 
     /// `kind`（`job` 或 `outputs`）下各格式版本与它的样本目录，按版本排列。
     pub(super) fn versions(kind: &str) -> Vec<(u32, PathBuf)> {
@@ -526,12 +698,23 @@ mod released {
         versions
     }
 
-    /// 各版本的样本都能查看：分片数为各轨里完整（不带 `.part`）的分片文件数，直播样本认作直播；不存在的目录为 None。
+    /// 各版本的样本都能查看：HLS 样本的分片数为各轨里完整（不带 `.part`）的分片文件数，直播样本认作直播；文件任务的样本
+    /// 有已落盘的字节与总长度。不存在的目录为 None。
     #[test]
     fn released_samples_can_be_inspected() {
         for (_, dir) in versions("job") {
             for sample in visible_entries(&dir) {
                 let work = sample.join("work");
+                let name = sample.file_name().unwrap().to_str().unwrap();
+                if name.starts_with("file") {
+                    let Some(Saved::File(saved)) = super::read_saved(&work).unwrap() else {
+                        panic!("{} 应为文件任务", work.display());
+                    };
+                    let total = std::fs::metadata(work.join(DATA_FILE)).unwrap().len();
+                    assert_eq!(saved.total, Some(total), "{}", work.display());
+                    assert!(saved.bytes > 0 && saved.bytes < total, "{}", work.display());
+                    continue;
+                }
                 let complete = visible_entries(&work.join(TRACKS_DIR))
                     .iter()
                     .flat_map(|track| visible_entries(track))
@@ -540,10 +723,11 @@ mod released {
                         parse_segment_name(name).is_some()
                     })
                     .count();
-                let saved = super::read_saved(&work).unwrap().unwrap();
+                let Some(Saved::Hls(saved)) = super::read_saved(&work).unwrap() else {
+                    panic!("{} 应为 HLS 任务", work.display());
+                };
                 assert_eq!(saved.segments, complete, "{}", work.display());
                 assert!(saved.segments > 0 && saved.bytes > 0, "{}", work.display());
-                let name = sample.file_name().unwrap().to_str().unwrap();
                 assert_eq!(saved.live, name.starts_with("live"), "{}", work.display());
             }
         }
@@ -563,7 +747,7 @@ mod released {
             .collect()
     }
 
-    /// 任务目录样本里都是本库写的文件（写到一半的带 `.part`），当前版本的样本覆盖了文件名的各种写法。续传与合并时认不
+    /// 任务目录样本里都是本库写的文件（写到一半的带 `.part`），当前版本的样本覆盖了文件名的各种写法与文件任务的内容。续传与合并时认不
     /// 出的文件被当作别人的而跳过，覆盖不全时，将来改了写法而漏了兼容旧写法测不出来；`SessionStart` 加了取值时这里编译
     /// 不过，要为它生成样本。
     #[test]
@@ -578,14 +762,23 @@ mod released {
             {
                 for entry in visible_entries(&work) {
                     let name = entry.file_name().unwrap().to_str().unwrap();
-                    let known = [JOB_FILE, TRACKS_DIR]
+                    let known = [JOB_FILE, TRACKS_DIR, DATA_FILE, RANGES_FILE]
                         .contains(&name.strip_suffix(".part").unwrap_or(name));
                     assert!(known, "{}", entry.display());
                     if name.ends_with(".part") {
                         forms.insert("写到一半的 job.json");
                     }
+                    if name == RANGES_FILE {
+                        forms.insert("文件任务的范围记录");
+                    }
                 }
-                for track in visible_entries(&work.join(TRACKS_DIR)) {
+                let tracks = work.join(TRACKS_DIR);
+                let tracks = if tracks.exists() {
+                    visible_entries(&tracks)
+                } else {
+                    Vec::new()
+                };
+                for track in tracks {
                     for file in visible_entries(&track) {
                         let name = file.file_name().unwrap().to_str().unwrap();
                         let (stem, partial) = match name.strip_suffix(".part") {
@@ -630,6 +823,7 @@ mod released {
                     "不用 init 段",
                     "会话大于 0",
                     "不连续段大于 0",
+                    "文件任务的范围记录",
                 ]);
                 assert_eq!(forms, all, "{}", dir.display());
             }

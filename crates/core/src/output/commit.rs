@@ -35,9 +35,9 @@ pub(super) enum Occupant {
     Nothing,
     /// 没有内容的目录（系统自动生成的元数据文件不算）
     EmptyDir,
-    /// 输出：MP4 路径上的文件，或全是本库写出的文件的 HLS 目录
+    /// 输出：MP4 或文件任务的输出路径上的文件，或全是本库写出的文件的 HLS 目录
     Output,
-    /// 别的东西：MP4 路径上的目录，HLS 路径上的文件或有别的文件的目录
+    /// 别的东西：MP4 或文件任务的输出路径上的目录，HLS 路径上的文件或有别的文件的目录
     Other,
     /// 什么也没有，但建不出来：最近的已存在的上级不是目录（是文件，或悬空的符号链接）
     Blocked { ancestor: PathBuf },
@@ -52,7 +52,7 @@ fn occupant(o: &PendingOutput) -> Result<Occupant, Error> {
         Err(cause) => return Err(io_error("检查", target)(cause)),
     };
     match (o.kind(), meta.is_dir()) {
-        (OutputKind::Mp4, false) => Ok(Occupant::Output),
+        (OutputKind::Mp4 | OutputKind::File, false) => Ok(Occupant::Output),
         (OutputKind::Hls, true) => hls::occupant(target),
         _ => Ok(Occupant::Other),
     }
@@ -397,7 +397,7 @@ fn move_aside(o: &PendingOutput) -> Result<bool, Error> {
 /// 的。目录改名到非空目录失败；改名到空目录时替换它，没有可丢的。
 fn install(from: &Path, to: &Path, kind: OutputKind, action: &'static str) -> Result<bool, Error> {
     let renamed = match kind {
-        OutputKind::Mp4 => match fs::hard_link(from, to) {
+        OutputKind::Mp4 | OutputKind::File => match fs::hard_link(from, to) {
             Ok(()) => return Ok(true),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
             Err(_) => busy::retrying(|| fs::rename(from, to)),
@@ -414,7 +414,7 @@ fn install(from: &Path, to: &Path, kind: OutputKind, action: &'static str) -> Re
 /// 删掉文件或目录；已不存在的不算失败，根读不到时报错（见 [`volume::reachable`]）。
 fn remove(path: &Path, kind: OutputKind) -> Result<(), Error> {
     let removed = busy::retrying(|| match kind {
-        OutputKind::Mp4 => fs::remove_file(path),
+        OutputKind::Mp4 | OutputKind::File => fs::remove_file(path),
         OutputKind::Hls => fs::remove_dir_all(path),
     });
     match removed {
@@ -470,7 +470,7 @@ mod tests {
     /// 在 `o` 的 `path`（输出路径或某个保留名）上放内容为 `text` 的输出，HLS 放在目录里的 `index.m3u8`。
     fn put(o: &PendingOutput, path: &Path, text: &str) {
         match o.kind() {
-            OutputKind::Mp4 => fs::write(path, text).unwrap(),
+            OutputKind::Mp4 | OutputKind::File => fs::write(path, text).unwrap(),
             OutputKind::Hls => {
                 fs::create_dir_all(path).unwrap();
                 fs::write(path.join("index.m3u8"), text).unwrap();
@@ -480,7 +480,7 @@ mod tests {
 
     fn read(o: &PendingOutput, path: &Path) -> Option<String> {
         let file = match o.kind() {
-            OutputKind::Mp4 => path.to_path_buf(),
+            OutputKind::Mp4 | OutputKind::File => path.to_path_buf(),
             OutputKind::Hls => path.join("index.m3u8"),
         };
         fs::read_to_string(file).ok()

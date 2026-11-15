@@ -8,7 +8,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::names::{parse_init_name, parse_segment_name};
 use super::outputs::OUTPUTS_FILE;
-use super::{JOB_FILE, LOCK_FILE, Lock, TRACKS_DIR};
+use super::ranges::RANGES_FILE;
+use super::{DATA_FILE, JOB_FILE, LOCK_FILE, Lock, TRACKS_DIR};
 use crate::entries::{self, is_canonical_number};
 use crate::error::io_error;
 use crate::{Error, Leftover, LeftoverKind, blocking, busy};
@@ -80,11 +81,12 @@ fn remove_locked(root: &Path, lock: Lock, mut kept: Vec<PathBuf>) -> Result<Vec<
     let mut job = None;
     for entry in entries::list(root)? {
         let (path, kind) = (&entry.path, entry.kind);
-        // job.json 写到一半的、正在写的输出的记录（含写到一半的）
+        // job.json 写到一半的；正在写的输出的记录、文件任务的范围记录（含写到一半的）；文件任务的数据文件
         let ours = kind.is_file()
             && entry.name.to_str().is_some_and(|n| {
                 n.strip_suffix(".part") == Some(JOB_FILE)
-                    || n.strip_suffix(".part").unwrap_or(n) == OUTPUTS_FILE
+                    || [OUTPUTS_FILE, RANGES_FILE].contains(&n.strip_suffix(".part").unwrap_or(n))
+                    || n == DATA_FILE
             });
         match entry.name.to_str() {
             Some(LOCK_FILE) => {}

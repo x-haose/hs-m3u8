@@ -13,7 +13,8 @@
 //! - 读写文件：[`Error::Io`]（Windows 上别的进程一直开着文件时可重试，其余不可）、[`Error::VolumeUnavailable`]（盘
 //!   不在、共享连不上，接上后再试）；合并 MP4：[`Error::Remux`]；系统代理用不了：[`Error::SystemProxy`]（改用直连或
 //!   指定代理地址）；本机建不出 HTTP 客户端：[`Error::HttpClientInit`]（修好系统环境）。除注明的外都不可重试；
-//! - 任务目录：[`Error::WorkDir`]（按 [`WorkDirProblem`] 处理）、[`Error::NothingRecorded`]；
+//! - 任务目录：[`Error::WorkDir`]（按 [`WorkDirProblem`] 处理）、[`Error::NothingRecorded`]、[`Error::NoSpace`]（腾出
+//!   空间再试）；
 //! - 调用方的回调出错：[`Error::Hook`]；[`Error::Cancelled`]。
 //!
 //! 可否重试看 [`Error::retryable`]，服务器要求的等待看 [`Error::retry_after`]，两者都看包着的原因。
@@ -110,6 +111,14 @@ pub enum Error {
     /// 直播没有录到可合并的分片：任务目录不存在或没有已完成的分片，或录到的都合并不了（每组都缺某条轨的分片）
     #[error("直播没有录到可合并的分片")]
     NothingRecorded,
+    /// 文件任务开始前查的：任务目录 `path` 所在的卷放不下还没下载的 `needed` 字节，可用 `available` 字节。腾出空间或换
+    /// 一个任务目录后再试
+    #[error("{} 所在的卷空间不够：还要写 {needed} 字节，可用 {available} 字节", .path.display())]
+    NoSpace {
+        path: PathBuf,
+        needed: u64,
+        available: u64,
+    },
     /// 第 `track` 条轨长时间没有录到新分片，且不是直播正常结束（见 [`crate::StallCause`]）
     #[error("直播第 {track} 条轨停滞：{cause}")]
     LiveStalled { track: usize, cause: StallReason },
@@ -552,6 +561,7 @@ fn purpose_text(purpose: Purpose) -> &'static str {
         Purpose::Key => "key ",
         Purpose::Init => "init 段 ",
         Purpose::Segment => "分片 ",
+        Purpose::File => "文件 ",
     }
 }
 
@@ -617,6 +627,11 @@ pub enum WorkDirProblem {
     /// 合并已录的部分；或换一个任务目录、放弃任务
     #[error("核对不上这次取到的与已下载的是同一份内容")]
     SourceUnverified,
+    /// 文件任务：来源的文件与记录的不同，已下载的不能沿用：续传时按记录的 ETag 或 Last-Modified 发的条件请求
+    /// （If-Range）回了整个文件，或总长度与记录的不同。换一个任务目录，或放弃任务（[`crate::Engine::discard`]）后重新
+    /// 下载
+    #[error("来源的文件与记录的不同，不能续传")]
+    FileChanged,
     /// 直播续录：之前录到的接不上（要另起会话），而第 `track` 条轨这次不录（已录满 max_duration，或这次没有内容）：
     /// 另起的会话里它没有分片，各轨都有的组才合并得了，录到的合并不进去。可调大 max_duration 后续录、用
     /// [`crate::Engine::merge_recorded`] 合并已录的部分，或换一个任务目录重新录
@@ -628,6 +643,8 @@ pub enum WorkDirProblem {
 pub enum JobType {
     Vod,
     Live,
+    /// 单个文件的下载（[`crate::Engine::start_file`]）
+    File,
 }
 
 impl fmt::Display for JobType {
@@ -635,6 +652,7 @@ impl fmt::Display for JobType {
         f.write_str(match self {
             JobType::Vod => "点播",
             JobType::Live => "直播",
+            JobType::File => "文件",
         })
     }
 }
