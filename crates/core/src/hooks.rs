@@ -24,7 +24,8 @@ pub enum Purpose {
 #[derive(Clone, PartialEq, Eq)]
 pub struct RequestParts {
     pub url: Url,
-    /// 本次请求的请求头（已含 [`crate::HttpOptions::headers`]）
+    /// 本次请求的请求头：[`crate::HttpOptions::headers`] 里除 Cookie 外的，其中 Authorization 只在地址与来源同源时
+    /// 有（见该字段）。Cookie 由 Cookie 存储按改后的地址另加，不在其中
     pub headers: Vec<(String, String)>,
 }
 

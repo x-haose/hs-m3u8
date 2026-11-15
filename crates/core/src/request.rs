@@ -67,11 +67,12 @@ impl Source {
 /// 发请求的方式。不实现 `Debug`：请求头常带 Cookie 与令牌，代理地址可能带口令（[`Proxy`] 同理）。
 #[derive(Clone, Default)]
 pub struct HttpOptions {
-    /// 附加到请求的请求头。其中的 Cookie（`名=值; 名=值`）记进本任务的 Cookie 存储，作为只属于来源地址的主机的 Cookie：
-    /// 只发往这个主机（不论端口），来源是 https 时只发往它的 https 地址；服务器给这个主机下发同名的（不带 Domain 或
-    /// Domain 即这个主机）即被替换，给上级域下发的与它并存、一同发出。Authorization 只发往与来源地址协议、主机、端口都
-    /// 相同的地址。其余的发往所有地址。跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉 Authorization 与
-    /// Proxy-Authorization
+    /// 附加到请求的请求头。其中的 Cookie（`名=值; 名=值`）记进本任务的 Cookie 存储，作为只属于来源地址的主机、路径为 `/`
+    /// 的 Cookie：只发往这个主机（不论端口），来源是 https 时只发往它的 https 地址（主机是 localhost 或回环地址时 http
+    /// 地址也算）；服务器给这个主机下发同名、路径为 `/` 的（不带 Domain 或 Domain 即这个主机）即被替换，路径或域不同的
+    /// 与它并存、一同发出（不带 Path 的路径为请求地址所在的目录）。Authorization 只附加到与来源地址协议、主机、端口都相
+    /// 同的请求，按 [`crate::Hooks::on_request`] 改写之前的地址判断：回调把地址改到别的源时由它去掉。其余的发往所有地址。
+    /// 跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉 Authorization
     pub headers: Vec<(String, String)>,
     /// 调用方持有的 Cookie 存储，跨任务保存；None 时每个任务各用一个，任务结束即丢。给了它时 `headers` 里不能有 Cookie
     pub cookies: Option<Arc<dyn CookieStore>>,
@@ -84,7 +85,7 @@ pub struct HttpOptions {
 
 impl HttpOptions {
     /// 校验请求头、超时（[`Timeouts::validate`]）与代理，不合要求时报 [`Error::InvalidInput`]：请求头的名或值放不进
-    /// HTTP 请求，是本库控制的头（Accept-Encoding、Range 与条件请求的 If-*），Cookie 不是 `名=值; 名=值` 的写法，或
+    /// HTTP 请求，是本库控制的头（Accept-Encoding、Range、条件请求的 If-* 与 Proxy-Authorization），Cookie 不是 `名=值; 名=值` 的写法，或
     /// 给了 Cookie 存储又在请求头里带 Cookie。
     pub fn validate(&self) -> Result<(), Error> {
         for (name, value) in &self.headers {
@@ -186,9 +187,11 @@ impl JobRequest {
     }
 }
 
-/// 本库控制的请求头（`name` 为小写）及不能另给的原因：它们决定响应体是什么、怎么编码。从浏览器复制的请求头常带着。
+/// 本库控制的请求头（`name` 为小写）及不能另给的原因：它们决定响应体是什么、怎么编码，或（Proxy-Authorization）
+/// 经代理地址给。从浏览器复制的请求头常带着前几种。
 fn controlled(name: &str) -> Option<&'static str> {
     match name {
+        "proxy-authorization" => Some("代理的认证写在代理地址里，放在请求头里会发给源站"),
         "accept-encoding" => Some("本库不解压，服务器按它压缩的内容读不了"),
         "range" => Some("要取的字节范围由播放列表决定"),
         "if-none-match" | "if-modified-since" | "if-match" | "if-unmodified-since" | "if-range" => {
@@ -232,7 +235,7 @@ pub(crate) fn check_header(name: &str, value: &str) -> Result<(), String> {
 }
 
 /// 一条请求头能否放进 [`HttpOptions::headers`]：名与值要能放进 HTTP 请求、不能是本库控制的头（Range、
-/// Accept-Encoding 与条件请求头），Cookie 还要是 `名=值; 名=值` 的写法（它要记进 Cookie 存储）；不能时返回原因。
+/// Accept-Encoding、条件请求头与 Proxy-Authorization），Cookie 还要是 `名=值; 名=值` 的写法（它要记进 Cookie 存储）；不能时返回原因。
 pub fn check_option_header(name: &str, value: &str) -> Result<(), String> {
     check_header(name, value)?;
     if name.eq_ignore_ascii_case("cookie") && cookie_pairs(value).any(|pair| pair.is_none()) {
@@ -366,6 +369,7 @@ mod tests {
             "range",
             "If-None-Match",
             "IF-MODIFIED-SINCE",
+            "Proxy-Authorization",
         ] {
             assert!(check_header(name, "x").is_err(), "{name}");
         }

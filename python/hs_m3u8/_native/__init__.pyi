@@ -903,10 +903,11 @@ class HttpOptions:
     def headers(self) -> builtins.tuple[tuple[builtins.str, builtins.str], ...]:
         r"""
         附加到请求的请求头，按顺序，同名的可以有多个。其中的 Cookie（`名=值; 名=值`）记进本任务的 Cookie 存储，作为只属
-        于来源地址的主机的 Cookie：只发往这个主机（不论端口），来源是 https 时只发往它的 https 地址；服务器给这个主机下
-        发同名的（不带 Domain 或 Domain 即这个主机）即被替换，给上级域下发的与它并存、一同发出。Authorization 只发往与
-        来源地址协议、主机、端口都相同的地址。其余的发往所有地址。跟随重定向时照样带上，跳到别的主机（或端口、协议）时
-        去掉 Authorization 与 Proxy-Authorization
+        于来源地址的主机、路径为 `/` 的 Cookie：只发往这个主机（不论端口），来源是 https 时只发往它的 https 地址（主机是
+        localhost 或回环地址时 http 地址也算）；服务器给这个主机下发同名、路径为 `/` 的（不带 Domain 或 Domain 即这个主
+        机）即被替换，路径或域不同的与它并存、一同发出（不带 Path 的路径为请求地址所在的目录）。Authorization 只附加到与
+        来源地址协议、主机、端口都相同的请求，按 `Hooks.on_request` 改写之前的地址判断：回调把地址改到别的源时由它去掉。
+        其余的发往所有地址。跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉 Authorization
         """
     @property
     def proxy(self) -> Proxy.System | Proxy.Direct | Proxy.Url:
@@ -934,7 +935,7 @@ class HttpOptions:
         r"""
         `headers` 为 None 时没有附加的请求头；`proxy`、`timeouts`、`retry` 默认取 `Proxy.System()`、`Timeouts()`、
         `RetryPolicy()`。请求头的名或值放不进 HTTP 请求、是本库控制的头（Accept-Encoding、Range 与条件请求的
-        If-*：它们决定响应体是什么、怎么编码）、Cookie 不是 `名=值; 名=值` 的写法、代理的协议不支持或主机名不合法时抛
+        If-*：它们决定响应体是什么、怎么编码；Proxy-Authorization：代理的认证写在代理地址里）、Cookie 不是 `名=值; 名=值` 的写法、代理的协议不支持或主机名不合法时抛
         `InvalidInputError`。
         """
     def __repr__(self) -> builtins.str: ...
@@ -2738,7 +2739,8 @@ class RequestParts:
     @property
     def headers(self) -> builtins.tuple[tuple[builtins.str, builtins.str], ...]:
         r"""
-        本次请求的请求头（已含 `HttpOptions.headers`），按顺序，同名的可以有多个
+        本次请求的请求头，按顺序，同名的可以有多个：`HttpOptions.headers` 里除 Cookie 外的，其中 Authorization 只在地址
+        与来源同源时有（见该字段）。Cookie 由 Cookie 存储按改后的地址另加，不在其中
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...

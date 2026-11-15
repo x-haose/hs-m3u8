@@ -14,7 +14,7 @@ enum Entry {
     Body(Vec<u8>),
     /// 放入后的第 n 次请求返回第 n 个，之后一直返回最后一个
     Sequence(Vec<Vec<u8>>),
-    /// 放入后的第 n 次请求重定向到第 n 个地址，之后一直是最后一个
+    /// 放入后的第 n 次请求重定向到第 n 个地址，之后一直是最后一个；地址为相对服务根的路径，或带协议的完整地址
     Redirect(Vec<String>),
     Status(StatusCode),
     /// 返回该状态并带 Retry-After 头
@@ -225,7 +225,12 @@ async fn serve(State(state): State<Arc<ServerState>>, uri: Uri, headers: HeaderM
         }
         Some(Entry::Redirect(targets)) => {
             let to = &targets[nth(targets.len())];
-            return (StatusCode::FOUND, [(header::LOCATION, format!("/{to}"))]).into_response();
+            let location = if to.contains("://") {
+                to.clone()
+            } else {
+                format!("/{to}")
+            };
+            return (StatusCode::FOUND, [(header::LOCATION, location)]).into_response();
         }
         Some(Entry::Body(body)) => body.clone(),
         Some(Entry::Sequence(bodies)) => bodies[nth(bodies.len())].clone(),

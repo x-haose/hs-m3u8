@@ -37,7 +37,8 @@ variants! {
 pub struct RequestParts {
     /// 请求的地址；读到的是解析后的规范写法（主机名小写、补上路径 `/`、百分号编码等），可能与传入的不同
     pub url: Address,
-    /// 本次请求的请求头（已含 `HttpOptions.headers`），按顺序，同名的可以有多个
+    /// 本次请求的请求头，按顺序，同名的可以有多个：`HttpOptions.headers` 里除 Cookie 外的，其中 Authorization 只在地址
+    /// 与来源同源时有（见该字段）。Cookie 由 Cookie 存储按改后的地址另加，不在其中
     pub headers: Headers,
 }
 
