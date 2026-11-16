@@ -1,0 +1,10 @@
+#EXTM3U
+#EXT-X-TARGETDURATION:1
+#EXT-X-MAP:URI="audio/init.mp4"
+#EXTINF:1,
+audio/seg0.m4s
+#EXTINF:1,
+audio/seg1.m4s
+#EXTINF:1,
+audio/seg2.m4s
+#EXT-X-ENDLIST

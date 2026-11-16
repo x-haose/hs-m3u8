@@ -26,7 +26,7 @@ use self::range_set::RangeSet;
 use crate::hooks::Purpose;
 use crate::http::{Http, Permit};
 use crate::output::{self, FileOutputOptions, ResolvedOutput};
-use crate::workdir::{self, FileDir, FileRecord, FileResume, url_digest};
+use crate::workdir::{self, FileDir, FileRecord, FileResume, identity_digest, url_digest};
 use crate::{Error, FileOutput, FileProgress, Probe, Source, Stage, WorkDirProblem, blocking, job};
 
 /// 认出的地址（[`crate::Engine::identify`]）。
@@ -109,8 +109,9 @@ impl Expected {
 /// 429、503、403，视为服务器限制了连接数：上限降到在途的连接数减一（至少 1），这一段放回去，不算失败（见
 /// [`crate::Throttled`]）。数据先落盘、再记已完成的范围，约每秒或每 8 MiB 一次；再次运行时只补没完成的，请求带 If-Range
 /// （强 ETag，没有时 Last-Modified），来源的文件变了（回了整个文件、响应带的验证器不同、总长度不同）报
-/// [`WorkDirProblem::FileChanged`]；地址与记录的不同而记录里没有验证器时报 [`WorkDirProblem::SourceUnverified`]。已全部
-/// 下完、装上输出之前中断的，地址没变时不再请求；变了时照样核对（发一个字节的范围请求）。
+/// [`WorkDirProblem::FileChanged`]；地址与记录的不同而记录里没有验证器时报 [`WorkDirProblem::SourceUnverified`]（调用方
+/// 担保了内容身份时另有规则，见 `identity`）。已全部下完、装上输出之前中断的，地址没变时不再请求；变了时照样核对（发一
+/// 个字节的范围请求）。
 ///
 /// 不支持范围请求或不知道总长度时只用一个连接，从头读到尾，中断后从头下。请求带 `Accept-Encoding: identity`，服务器仍
 /// 回了编码过的内容时原样保存；下完核对字节数与总长度。请求不受 [`crate::Timeouts::request`] 限制（文件可能很大），卡住
@@ -130,6 +131,12 @@ pub struct FileRequest {
     pub chunk_size: Option<NonZeroU64>,
     /// 见 [`Expected`]；None 时不核对
     pub expected: Option<Expected>,
+    /// 调用方确知的内容身份（如网盘的文件编号加内容哈希），不能为空串。给了即由调用方担保身份相同的内容逐字节相同，内容
+    /// 对不对由调用方在下完后核对；任务目录只记它的摘要。续传时这次与记录的都有：不同报
+    /// [`WorkDirProblem::FileChanged`]；相同则地址变了也沿用已下的范围、不报 [`WorkDirProblem::SourceUnverified`]，新地址
+    /// 的请求不带记录的验证器（ETag、Last-Modified 只对给出它的地址有意义，签名地址换了主机时可能不同），改带新地址这次
+    /// 给的；总长度照常核对。一方没有时同两方都没有，按地址与验证器核对
+    pub identity: Option<String>,
 }
 
 impl FileRequest {
@@ -143,13 +150,17 @@ impl FileRequest {
             connections: Self::DEFAULT_CONNECTIONS,
             chunk_size: None,
             expected: None,
+            identity: None,
         }
     }
 
     /// 校验请求，返回补全为绝对路径的输出配置：来源同 [`Source::validate`]，输出见 [`FileOutputOptions`]，`expected` 里
-    /// 的验证器要能放进请求头。
+    /// 的验证器要能放进请求头，`identity` 不能为空串。
     pub(crate) fn validate(&self) -> Result<ResolvedOutput, Error> {
         self.source.validate()?;
+        if self.identity.as_deref() == Some("") {
+            return Err(Error::InvalidInput("identity 不能为空串".into()));
+        }
         if let Some(validator) = self.expected.as_ref().and_then(Expected::validator) {
             HeaderValue::from_str(&validator).map_err(|_| {
                 Error::InvalidInput(format!(
@@ -289,12 +300,15 @@ async fn first_response(
             return Err(not_expected());
         }
     }
-    let record = file_record(url, mode.length(), &headers, None);
+    let identity = request.identity.as_deref().map(identity_digest);
+    let record = file_record(url, mode.length(), &headers, None, identity);
     Ok((mode, record))
 }
 
-/// 续传：地址与记录的不同而记录里没有验证器时报 [`WorkDirProblem::SourceUnverified`]；请求第一段没下的（带记录的验证
-/// 器，见 [`open_range`]）。都已落盘时，地址没变就不请求，变了发一个字节的范围请求核对。
+/// 续传：这次与记录的内容身份（[`FileRequest::identity`]）都有而不同时报 [`WorkDirProblem::FileChanged`]；地址与记录
+/// 的不同时，身份相同即沿用，否则要有记录的验证器，没有报 [`WorkDirProblem::SourceUnverified`]。请求第一段没下的（带
+/// 记录的验证器，地址变了而身份相同时不带，见 [`open_range`]）。都已落盘时，地址没变就不请求，变了发一个字节的范围请
+/// 求核对。
 async fn resumed(
     http: &Http,
     request: &FileRequest,
@@ -305,13 +319,25 @@ async fn resumed(
 ) -> Result<(Mode, FileRecord), Error> {
     let url = &request.source.url;
     let recorded = &resume.record;
-    let validator = headers::validator(recorded.etag.as_deref(), recorded.last_modified.as_deref());
+    let problem = |problem| Error::WorkDir {
+        path: root.to_path_buf(),
+        problem,
+    };
+    let identity = request.identity.as_deref().map(identity_digest);
+    let vouched = match (&recorded.identity_digest, &identity) {
+        (Some(recorded), Some(current)) if recorded != current => {
+            return Err(problem(WorkDirProblem::FileChanged));
+        }
+        (Some(_), Some(_)) => true,
+        _ => false,
+    };
     let moved = recorded.url_digest != url_digest(url);
-    if moved && validator.is_none() {
-        return Err(Error::WorkDir {
-            path: root.to_path_buf(),
-            problem: WorkDirProblem::SourceUnverified,
-        });
+    // 记录的验证器是旧地址给的：身份相同时不拿它去问新地址，这次的记录也不沿用它
+    let previous = (!(moved && vouched)).then_some(recorded);
+    let validator =
+        previous.and_then(|r| headers::validator(r.etag.as_deref(), r.last_modified.as_deref()));
+    if moved && !vouched && validator.is_none() {
+        return Err(problem(WorkDirProblem::SourceUnverified));
     }
     let length = resume.length;
     let gap = done.missing(length).first().cloned();
@@ -323,11 +349,16 @@ async fn resumed(
                 length,
                 first: None,
             };
-            return Ok((mode, recorded.clone()));
+            let record = FileRecord {
+                identity_digest: identity,
+                ..recorded.clone()
+            };
+            return Ok((mode, record));
         }
     };
     let opened = open_range(http, url, span, validator.as_deref(), length, root, cancel).await?;
-    let record = file_record(url, Some(length), opened.stream.headers(), Some(recorded));
+    let headers = opened.stream.headers();
+    let record = file_record(url, Some(length), headers, previous, identity);
     let mode = Mode::Ranged {
         length,
         first: gap.map(|_| opened),
@@ -335,13 +366,14 @@ async fn resumed(
     Ok((mode, record))
 }
 
-/// 写进 job.json 的记录：地址 `url` 的摘要、总长度 `length`，与响应头 `headers` 里的强 ETag、Last-Modified（响应没带的
-/// 沿用之前的记录 `previous`；弱 ETag 不记）。
+/// 写进 job.json 的记录：地址 `url` 的摘要、总长度 `length`，响应头 `headers` 里的强 ETag、Last-Modified（响应没带的
+/// 沿用之前的记录 `previous`；弱 ETag 不记），与这次给的内容身份的摘要 `identity_digest`。
 fn file_record(
     url: &Url,
     length: Option<u64>,
     headers: &HeaderMap,
     previous: Option<&FileRecord>,
+    identity_digest: Option<String>,
 ) -> FileRecord {
     FileRecord {
         url_digest: url_digest(url),
@@ -351,6 +383,7 @@ fn file_record(
             .or_else(|| previous.and_then(|p| p.etag.clone())),
         last_modified: headers::last_modified(headers)
             .or_else(|| previous.and_then(|p| p.last_modified.clone())),
+        identity_digest,
     }
 }
 

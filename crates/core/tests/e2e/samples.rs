@@ -28,7 +28,7 @@ use crate::{engine, fixture, request, run, test_dir};
 /// - `live-sessions`：视频加独立音频 TS 直播，会话 0 里有不连续段；中断后音频窗口已前移、续录另起会话 1（视频跳过会话
 ///   0 录过的序号，起点写作 `after<序号>`），再中断。续录的来源里视频多出一个没录过的分片（见 [`NEW_ON_CONTINUE`]）
 /// - `file`：文件任务（格式版本 14 起），一个连接按块下了一半后中断；来源 `source/file.bin` 的 ETag 与 Last-Modified 见
-///   [`FILE_ETAG`]、[`FILE_LAST_MODIFIED`]
+///   [`FILE_ETAG`]、[`FILE_LAST_MODIFIED`]；格式版本 15 起给了内容身份 [`FILE_IDENTITY`]
 const SAMPLES: [&str; 6] = [
     "vod",
     "vod-ts",
@@ -44,6 +44,9 @@ const SINCE: [(&str, u64); 1] = [("file", 14)];
 /// 文件任务样本的来源给的 ETag 与 Last-Modified：续传时照样给，核对得上。
 const FILE_ETAG: &str = "\"sample\"";
 const FILE_LAST_MODIFIED: &str = "Wed, 21 Oct 2015 07:28:00 GMT";
+
+/// 文件任务样本（格式版本 15 起）给的内容身份。
+const FILE_IDENTITY: &str = "sample:file.bin";
 
 /// 文件任务样本的大小与中断处、块大小。
 const FILE_LEN: usize = 64 << 10;
@@ -133,6 +136,13 @@ fn kind_of(sample: &Path) -> String {
     let job: serde_json::Value =
         serde_json::from_slice(&std::fs::read(sample.join("work/job.json")).unwrap()).unwrap();
     job["kind"].as_str().unwrap().to_owned()
+}
+
+/// 文件任务样本的 job.json 记了内容身份。
+fn recorded_identity(sample: &Path) -> bool {
+    let job: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(sample.join("work/job.json")).unwrap()).unwrap();
+    job["identity_digest"].is_string()
 }
 
 /// 测试目录名：样本的版本与名字。
@@ -297,8 +307,8 @@ async fn live_samples_continue() {
     }
 }
 
-/// 文件任务的样本照当时的来源续传（本地服务的端口每次不同，即换了地址，按 ETag 核对）：只请求没下的部分，结果与来源
-/// 相同。
+/// 文件任务的样本照当时的来源续传（本地服务的端口每次不同，即换了地址）：只请求没下的部分，结果与来源相同。记了内容
+/// 身份的给同样的身份，第一个请求不带记录的验证器，之后带这次给的（与样本的相同）；没记的按 ETag 核对。
 #[tokio::test(flavor = "multi_thread")]
 async fn file_samples_resume() {
     for sample in samples().into_iter().filter(|s| kind_of(s) == "file") {
@@ -308,9 +318,11 @@ async fn file_samples_resume() {
         let server = FileServer::start().await;
         server.put("file.bin", sample_file(body.clone()));
 
-        let job = engine()
-            .start_file(file_request(server.url("file.bin"), &dir))
-            .unwrap();
+        let vouched = recorded_identity(&sample);
+        let mut request = file_request(server.url("file.bin"), &dir);
+        request.identity = vouched.then(|| FILE_IDENTITY.to_owned());
+
+        let job = engine().start_file(request).unwrap();
         let output = job.wait().await.unwrap();
 
         assert_eq!(
@@ -319,12 +331,12 @@ async fn file_samples_resume() {
             "{}",
             sample.display()
         );
-        for seen in server.seen() {
+        for (i, seen) in server.seen().into_iter().enumerate() {
             let (start, _) = span(&seen).expect("续传只发范围请求");
             assert!(start >= FILE_STOP as u64, "{}：{seen:?}", sample.display());
             assert_eq!(
                 seen.if_range.as_deref(),
-                Some(FILE_ETAG),
+                (!vouched || i > 0).then_some(FILE_ETAG),
                 "{}",
                 sample.display()
             );
@@ -430,6 +442,7 @@ async fn write_samples() {
     let mut req = file_request(server.url("file.bin"), &dir.join("file"));
     req.connections = NonZeroUsize::MIN;
     req.chunk_size = NonZeroU64::new(FILE_CHUNK);
+    req.identity = Some(FILE_IDENTITY.into());
     server.hold_from(FILE_STOP as u64);
     interrupt_at(req.clone(), FILE_STOP as u64).await;
     server.release();

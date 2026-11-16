@@ -676,14 +676,15 @@ pub enum WorkDirProblem {
     /// [`crate::Source::url`]），多为另一个视频、同一视频的另一档或同一地址换了内容，同一地址也核对不上的多为来源每次输
     /// 出的字节不同（边转码边出），只能重新下载；直播为地址或重新选出的轨（[`crate::JobRequest::reselect`]）与记录的不
     /// 同，且接不上之前录到的（有轨内容不同，或没有一条轨核对一致，或重新选出的轨这次核对不了，见
-    /// [`crate::LiveOptions`]）；文件任务为地址与记录的不同，而记录里没有 ETag 与 Last-Modified，核对不了是不是同一个文
-    /// 件。记录不变：可用原来的地址与选轨续传、续录，直播还可用 [`crate::Engine::merge_recorded`] 合并已录的部分；或换
-    /// 一个任务目录、放弃任务
+    /// [`crate::LiveOptions`]）；文件任务为地址与记录的不同，而记录里没有 ETag 与 Last-Modified、调用方也没有给与记录相
+    /// 同的内容身份（[`crate::FileRequest::identity`]），核对不了是不是同一个文件。记录不变：可用原来的地址与选轨续传、
+    /// 续录，直播还可用 [`crate::Engine::merge_recorded`] 合并已录的部分；或换一个任务目录、放弃任务
     #[error("核对不上这次取到的与已下载的是同一份内容")]
     SourceUnverified,
     /// 文件任务续传：来源的文件与记录的不同，已下载的不能沿用。按记录的 ETag 或 Last-Modified 发的条件请求（If-Range）
-    /// 回了整个文件或带回了不同的验证器，总长度与记录的不同，或请求的范围已超出文件（416）。换一个任务目录，或放弃任务
-    /// （[`crate::Engine::discard`]）后重新下载
+    /// 回了整个文件或带回了不同的验证器，总长度与记录的不同，请求的范围已超出文件（416），或调用方给的内容身份
+    /// （[`crate::FileRequest::identity`]）与记录的不同。换一个任务目录，或放弃任务（[`crate::Engine::discard`]）后重新
+    /// 下载
     #[error("来源的文件与记录的不同，不能续传")]
     FileChanged,
     /// 直播续录：之前录到的接不上（要另起会话），而第 `track` 条轨这次不录（已录满 max_duration，或这次没有内容）：

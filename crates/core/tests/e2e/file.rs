@@ -1,5 +1,6 @@
-//! 文件任务：认出地址是什么；分段与劈段、按块请求、续传（含来源变了、地址变了核对不了）、不支持范围请求、不知道长度、
-//! 服务器限制连接数、可用空间不够、第一次运行按调用方看到的核对；文件任务的目录与 HLS 任务互不沿用，可查看、可放弃。
+//! 文件任务：认出地址是什么；分段与劈段、按块请求、续传（含来源变了、地址变了核对不了、调用方担保了内容身份）、不支
+//! 持范围请求、不知道长度、服务器限制连接数、可用空间不够、第一次运行按调用方看到的核对；文件任务的目录与 HLS 任务互不
+//! 沿用，可查看、可放弃。
 
 use std::collections::HashMap;
 use std::num::{NonZeroU32, NonZeroU64, NonZeroUsize};
@@ -528,6 +529,82 @@ async fn changed_sources_are_not_resumed() {
         ),
         "{result:?}"
     );
+}
+
+/// 调用方担保了内容身份：地址变了也沿用已下的范围，记录里没有验证器、或新地址给的 ETag 与旧地址的不同都一样；新地址的
+/// 第一个请求不带记录的验证器，之后带新地址给的。身份不同（地址没变、验证器对得上也是）、总长度不同报来源的文件变了；
+/// 只有一方给了身份时同没给，核对不了报核对不上。身份不能为空串。
+#[tokio::test(flavor = "multi_thread")]
+async fn vouched_identities_resume_at_new_addresses() {
+    let dir = test_dir("file_identity");
+    let server = FileServer::start().await;
+    let body = content(2 * MIB);
+    let tagged = |etag: &str| Served {
+        etag: Some(etag.into()),
+        ..Served::new(body.clone())
+    };
+    server.put("plain.bin", Served::new(body.clone()));
+    server.put("tagged.bin", tagged("\"node-a\""));
+    server.put("new.bin", tagged("\"node-b\""));
+    server.put("longer.bin", Served::new(content(2 * MIB + 1)));
+    let interrupted = async |name: &str, path: &str, identity: Option<&str>| {
+        let mut request = file_request(server.url(path), &dir.join(name));
+        request.chunk_size = NonZeroU64::new(MIB as u64 / 2);
+        request.identity = identity.map(str::to_owned);
+        server.hold_from(MIB as u64);
+        interrupt_at(request.clone(), MIB as u64).await;
+        server.release();
+        request
+    };
+    let moved = |mut request: FileRequest, path: &str, identity: Option<&str>| {
+        request.source.url = server.url(path);
+        request.identity = identity.map(str::to_owned);
+        request
+    };
+    let problem = |result: Result<FileOutput, Error>| match result {
+        Err(Error::WorkDir { problem, .. }) => problem,
+        other => panic!("{other:?}"),
+    };
+
+    for from in ["plain.bin", "tagged.bin"] {
+        let request = interrupted(from, from, Some("pikpak:a")).await;
+        server.clear_seen();
+        let (output, _) = run_file(moved(request, "new.bin", Some("pikpak:a"))).await;
+        assert_downloaded(&output.unwrap(), &body);
+        let seen = server.seen();
+        let if_ranges: Vec<_> = seen.iter().map(|s| s.if_range.as_deref()).collect();
+        assert_eq!(if_ranges, [None, Some("\"node-b\"")], "{from}：{seen:?}");
+        assert!(
+            seen.iter().all(|s| span(s).unwrap().0 >= MIB as u64),
+            "{from}：{seen:?}"
+        );
+    }
+
+    let request = interrupted("other", "tagged.bin", Some("pikpak:a")).await;
+    let (result, _) = run_file(moved(request, "tagged.bin", Some("pikpak:b"))).await;
+    assert_eq!(problem(result), WorkDirProblem::FileChanged);
+    let saved = engine().inspect(&dir.join("other/out.hsdl")).await.unwrap();
+    assert!(matches!(saved, Some(Saved::File(FileSaved { bytes, .. })) if bytes == MIB as u64));
+
+    let request = interrupted("longer", "plain.bin", Some("pikpak:a")).await;
+    let (result, _) = run_file(moved(request, "longer.bin", Some("pikpak:a"))).await;
+    assert_eq!(problem(result), WorkDirProblem::FileChanged);
+
+    for (name, recorded, given) in [
+        ("given", None, Some("pikpak:a")),
+        ("recorded", Some("pikpak:a"), None),
+    ] {
+        let request = interrupted(name, "plain.bin", recorded).await;
+        let (result, _) = run_file(moved(request, "plain.bin?moved", given)).await;
+        assert_eq!(problem(result), WorkDirProblem::SourceUnverified, "{name}");
+    }
+
+    let mut request = file_request(server.url("plain.bin"), &dir.join("empty"));
+    request.identity = Some(String::new());
+    assert!(matches!(
+        engine().start_file(request),
+        Err(Error::InvalidInput(_))
+    ));
 }
 
 /// 不支持范围请求：一个连接从头读到尾。

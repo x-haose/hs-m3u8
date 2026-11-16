@@ -14,12 +14,13 @@ use crate::{JobType, WorkDirProblem};
 /// 的改写（fMP4 长度写 0 的最后一个 box 改为实际长度）。任何一项改变都要升。outputs.json 另有自己的版本（见
 /// [`super::outputs::OUTPUTS_FORMAT_VERSION`]）。
 ///
-/// 各版本：13 为 1.0 写的；14 加了文件任务（job.json 的 `file` 一种与 `ranges.json`），HLS 任务的内容与 13 相同。
+/// 各版本：13 为 1.0 写的；14 加了文件任务（job.json 的 `file` 一种与 `ranges.json`），HLS 任务的内容与 13 相同；15 的
+/// 文件任务记录加了 `identity_digest`（14 的读作没有），其余与 14 相同。
 ///
 /// 兼容约定（outputs.json 同）：此后各版本的库读得了 1.0 起各发布版本写的任务目录（[`OLDEST_JOB_FORMAT_VERSION`] 起），
 /// 按记录的格式版本解释其中的内容。格式版本比本库写的新，或比它旧（1.0 之前开发中的版本写的）时报
 /// [`WorkDirProblem::UnsupportedVersion`]。各已发布版本的样本在 tests/fixtures/workdir 下，发布后不再改动。
-pub(super) const JOB_FORMAT_VERSION: u32 = 14;
+pub(super) const JOB_FORMAT_VERSION: u32 = 15;
 
 /// 读得了的最旧的 job.json 格式版本：1.0 写的。
 const OLDEST_JOB_FORMAT_VERSION: u32 = 13;
@@ -54,6 +55,9 @@ pub(crate) struct FileRecord {
     pub etag: Option<String>,
     /// Last-Modified 的值，原样
     pub last_modified: Option<String>,
+    /// 写下记录的那次运行调用方给的内容身份（[`crate::FileRequest::identity`]）的摘要，见 [`identity_digest`]；没给时为
+    /// None
+    pub identity_digest: Option<String>,
 }
 
 /// HLS 任务目录记录的任务；续传、续录时须与当前请求相符。
@@ -204,6 +208,11 @@ pub(crate) fn url_digest(url: &Url) -> String {
     digest_hex(url.as_str())
 }
 
+/// 调用方给的内容身份（UTF-8 字节原样）的摘要（SHA-256 十六进制）：记录里只存摘要，不存调用方的原文。
+pub(crate) fn identity_digest(identity: &str) -> String {
+    digest_hex(identity)
+}
+
 /// `job.json` 的写法。`format_version` 不等于 [`JOB_FORMAT_VERSION`] 时拒绝。
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
@@ -228,6 +237,9 @@ enum JobFile {
         length: Option<u64>,
         etag: Option<String>,
         last_modified: Option<String>,
+        /// 格式版本 15 起；14 的没有，读作 None
+        #[serde(default)]
+        identity_digest: Option<String>,
     },
 }
 
@@ -348,6 +360,7 @@ pub(super) fn encode_file(record: &FileRecord) -> Vec<u8> {
         length: record.length,
         etag: record.etag.clone(),
         last_modified: record.last_modified.clone(),
+        identity_digest: record.identity_digest.clone(),
     };
     serde_json::to_vec(&file).expect("JobFile 只含字符串、整数、数组与枚举，序列化不会失败")
 }
@@ -391,6 +404,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Recorded, WorkDirProblem> {
                 length,
                 etag,
                 last_modified,
+                identity_digest,
                 ..
             } => {
                 return Ok(Recorded::File(FileRecord {
@@ -398,6 +412,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Recorded, WorkDirProblem> {
                     length,
                     etag,
                     last_modified,
+                    identity_digest,
                 }));
             }
         };
@@ -623,7 +638,7 @@ mod tests {
         let bytes = encode_hls(&live);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"kind":"live","format_version":14,"preference_digest":"ab","url_digest":"cd","selection":{"variant":{"key":{"attributes":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020","mp4a.40.2"],"audio_group":"aud","occurrence":1}},"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"]},"audio":{"key":{"stable":{"id":"Audio-37262","occurrence":0}},"name":"Eng\n\"lish\"","language":"en"}}}"#
+            r#"{"kind":"live","format_version":15,"preference_digest":"ab","url_digest":"cd","selection":{"variant":{"key":{"attributes":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020","mp4a.40.2"],"audio_group":"aud","occurrence":1}},"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"]},"audio":{"key":{"stable":{"id":"Audio-37262","occurrence":0}},"name":"Eng\n\"lish\"","language":"en"}}}"#
         );
         assert_eq!(decode(&bytes), Ok(Recorded::Hls(Box::new(live.clone()))));
         let stable = HlsRecord {
@@ -648,24 +663,34 @@ mod tests {
             length: Some(1 << 40),
             etag: Some("\"x\"".into()),
             last_modified: None,
+            identity_digest: Some("ef".into()),
         };
         let bytes = encode_file(&file);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"kind":"file","format_version":14,"url_digest":"cd","length":1099511627776,"etag":"\"x\"","last_modified":null}"#
+            r#"{"kind":"file","format_version":15,"url_digest":"cd","length":1099511627776,"etag":"\"x\"","last_modified":null,"identity_digest":"ef"}"#
         );
         assert_eq!(decode(&bytes), Ok(Recorded::File(file)));
+        // 14 的文件任务记录没有内容身份
+        let v14 = r#"{"kind":"file","format_version":14,"url_digest":"u","length":1,"etag":null,"last_modified":null}"#;
+        assert!(matches!(
+            decode(v14.as_bytes()),
+            Ok(Recorded::File(FileRecord {
+                identity_digest: None,
+                ..
+            }))
+        ));
         // 1.0 写的格式版本 13 照样读
         let v13 = r#"{"kind":"vod","format_version":13,"preference_digest":"a","url_digest":"u","selection":null,"plan_digest":"p"}"#;
         assert!(matches!(decode(v13.as_bytes()), Ok(Recorded::Hls(_))));
 
-        for found in [12, 15] {
+        for found in [12, 16] {
             assert_eq!(
                 decode(format!(r#"{{"kind":"vod","format_version":{found}}}"#).as_bytes()),
                 Err(WorkDirProblem::UnsupportedVersion {
                     file: "job.json",
                     found,
-                    supported: 14
+                    supported: 15
                 })
             );
         }
@@ -781,6 +806,10 @@ mod tests {
         assert_eq!(
             url_digest(&url),
             "afd3a584486c3d8f1240bf03a547070da7f147f4a8dd68e49a419956c1b2e743"
+        );
+        assert_eq!(
+            identity_digest("pikpak:VNabc:0123ABCD"),
+            "5ed30cc633b640f77bbd303622d2dd733c832d3dca0a774003e1e4993f3a82c4"
         );
     }
 

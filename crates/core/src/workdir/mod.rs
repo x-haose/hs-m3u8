@@ -42,7 +42,8 @@ pub(crate) use self::outputs::{
 };
 use self::ranges::RANGES_FILE;
 pub(crate) use self::record::{
-    FileRecord, HlsRecord, RecordKind, Recorded, SelectionCheck, preference_digest, url_digest,
+    FileRecord, HlsRecord, RecordKind, Recorded, SelectionCheck, identity_digest,
+    preference_digest, url_digest,
 };
 use self::record::{decode, encode_file, encode_hls};
 pub(crate) use self::removal::remove;
