@@ -52,12 +52,13 @@ pub(crate) async fn call(http: &Http, source: &Source, request: &Call) -> Result
             sent,
             cause: Box::new(cause),
         };
-        if !(sent == Sent::No || method.safe()) {
-            return Err(failed(error));
-        }
-        http.wait_to_retry(Purpose::Call, url, error, &mut tried, &cancel)
+        // 可否重发由 Error::retryable 按走到的那一步判断；退避中取消报的 Cancelled 同样包上
+        http.wait_to_retry(Purpose::Call, url, failed(error), &mut tried, &cancel)
             .await
-            .map_err(failed)?;
+            .map_err(|error| match error {
+                Error::Call { .. } => error,
+                other => failed(other),
+            })?;
     }
 }
 

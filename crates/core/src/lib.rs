@@ -188,7 +188,8 @@ impl Engine {
     /// 调用地址 `source.url` 上的接口（如网盘的 JSON 接口），不碰任务目录：发出 `request`，任何 HTTP 状态都作为结果返回
     /// （见 [`Reply`]），由调用方看状态与响应体里的错误码决定怎么办。请求头、Cookie、代理、证书与超时按 `source.http`，
     /// 请求的用途为 [`Purpose::Call`]，[`Hooks::on_request`] 照常调用；不占引擎的请求名额（同 [`Engine::identify`]）。
-    /// 带 `Accept-Encoding: identity`，响应体原样给出。
+    /// 带 `Accept-Encoding: identity`，响应体原样给出。没给 Cookie 存储（[`HttpOptions::cookies`]）时，响应下发的
+    /// Cookie 只在这次调用（含重定向与重试）里有效，不留到下一次调用。
     ///
     /// 只有 GET 跟随重定向；POST、PATCH、DELETE 不跟随，3xx 作为结果返回（不把 POST 改成 GET 重发）。状态一律不重试。
     /// 可重试的传输失败（[`Error::retryable`]）按 [`HttpOptions::retry`] 重试：GET 都重试；其余方法只在确定请求没有发出
@@ -196,9 +197,9 @@ impl Engine {
     /// 果）。
     ///
     /// 参数错误（见 [`Source::check_url`]、[`HttpOptions::validate`]；GET 带请求体，或带了请求体而请求头里另有
-    /// Content-Type）、系统代理用不了与建不出 HTTP 客户端时立即返回那个错误；之后的失败（没拿到完整的响应、回调出错、响
-    /// 应体超过 `request.limit`、取消）报 [`Error::Call`]，其中的 [`Sent`] 说明服务器是否可能已处理。丢弃返回的 future
-    /// 即取消；不在 tokio 运行时内调用会 panic。
+    /// Content-Type）、开始时系统代理用不了与建不出 HTTP 客户端时立即返回那个错误；之后的失败（没拿到完整的响应、回调出
+    /// 错、重试时重读系统代理失败、响应体超过 `request.limit`、取消）报 [`Error::Call`]，其中的 [`Sent`] 说明服务器是否
+    /// 可能已处理。丢弃返回的 future 即取消；不在 tokio 运行时内调用会 panic。
     pub async fn call(&self, source: &Source, request: &Call) -> Result<Reply, Error> {
         Source::check_url(&source.url)?;
         source.http.validate()?;
@@ -208,8 +209,7 @@ impl Engine {
         } else {
             Redirects::Return
         };
-        // 简化：每次调用新建客户端，不复用连接，`source.http.cookies` 为 None 时服务器下发的 Cookie 随之丢掉；调用频繁
-        // 到握手成为瓶颈时改为按来源建一次、可反复调用的对象
+        // 简化：每次调用新建客户端，不复用连接；调用频繁到握手成为瓶颈时改为按来源建一次、可反复调用的对象
         let http = Http::new(
             source,
             self.requests.clone(),

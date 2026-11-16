@@ -19,7 +19,8 @@
 //! - 调用方的回调出错：[`Error::Hook`]；[`Error::Cancelled`]；
 //! - 调用接口没拿到完整的响应：[`Error::Call`]，看它的 `sent` 判断服务器是否可能已处理。
 //!
-//! 可否重试看 [`Error::retryable`]，服务器要求的等待看 [`Error::retry_after`]，两者都看包着的原因。
+//! 可否重试看 [`Error::retryable`]，服务器要求的等待看 [`Error::retry_after`]，两者都看包着的原因；[`Error::Call`] 的可
+//! 否重试还看请求走到了哪一步。
 //!
 //! 错误信息已包含原因，不经 `source()` 重复给出；地址只显示到路径，不含用户名、密码与查询串（常带凭据或令牌）。
 
@@ -127,9 +128,10 @@ pub enum Error {
         needed: u64,
         available: u64,
     },
-    /// 调用接口（[`crate::Engine::call`]）用 `method` 发出请求之后没拿到完整的响应：`cause` 为原因（请求、回调的错误，
-    /// [`Error::ResponseTooLarge`]，或 [`Error::Cancelled`]），`sent` 为最后一次尝试走到了哪一步。可否重试（见
-    /// [`Error::retryable`]）：原因可重试，且确定没发出或方法是 GET；服务器可能已处理的不算，重发前先查是否已生效
+    /// 调用接口（[`crate::Engine::call`]）用 `method` 没拿到完整的响应：`cause` 为原因（请求、回调的错误，重试时重读
+    /// 系统代理或建客户端的错误，[`Error::ResponseTooLarge`]，或 [`Error::Cancelled`]），`sent` 为最后一次尝试走到了哪
+    /// 一步。可否重试（见 [`Error::retryable`]）：原因可重试，且确定没发出或方法是 GET；服务器可能已处理的不算，重发前
+    /// 先查是否已生效
     #[error("{cause}（{sent}）")]
     Call {
         method: Method,
@@ -280,7 +282,7 @@ impl Error {
     /// key、回调、校验等失败为 None。
     pub(crate) fn missable(&self) -> Option<FetchFailure> {
         match self {
-            Error::Segment { cause, .. } => cause.missable(),
+            Error::Segment { cause, .. } | Error::Call { cause, .. } => cause.missable(),
             Error::Incomplete { .. } => Some(FetchFailure::Incomplete),
             _ => self.http_failure().map(FetchFailure::Http),
         }
@@ -299,7 +301,8 @@ impl Error {
         }
     }
 
-    /// 外部依赖的临时故障，重试可能成功。
+    /// 外部依赖的临时故障，原样重发可能成功、也不会让服务器多处理一次。[`Error::Call`] 的原因是临时故障而服务器可能已处
+    /// 理时为 false，见它的 `sent`。
     pub fn retryable(&self) -> bool {
         match self {
             Error::Http { kind, .. } => kind.retryable(),
@@ -321,11 +324,13 @@ impl Error {
 /// 调用接口（[`crate::Engine::call`]）失败时，请求走到了哪一步：决定服务器是否可能已处理。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sent {
-    /// 确定没有发出，服务器没收到：连接、TLS 握手或经代理的隧道没建成，或在发出之前就出错（回调出错、取消）
+    /// 确定没有发出，服务器没收到：连接、TLS 握手或经代理的隧道没建成，或在发出之前就出错（回调出错、重读系统代理失败、
+    /// 取消）。GET 跟随重定向时只说最后一跳：前面的几跳已收到请求
     No,
-    /// 可能已发出，服务器可能已处理：发出之后、收到响应头之前失败（超时、连接断开、取消）
+    /// 可能已发出，服务器可能已处理：发出之后、收到响应头之前失败（超时、连接断开、取消）。读空闲超时
+    /// （[`crate::Timeouts::read_idle`]）比连接超时短时，连接阶段超时也算在这里
     Maybe,
-    /// 收到了状态为 `status` 的响应头，读响应体时失败或超过上限：服务器已处理
+    /// 收到了状态为 `status` 的响应头，读响应体时失败或超过上限：服务器（或途中的网关）已作出响应，是否已生效看状态
     Answered { status: u16 },
 }
 

@@ -47,7 +47,7 @@ pub(crate) use self::record::{
 use self::record::{decode, encode_file, encode_hls};
 pub(crate) use self::removal::remove;
 use self::removal::{remove_steps, remove_tracks_of};
-use crate::entries;
+use crate::entries::{self, is_canonical_number};
 use crate::error::io_error;
 use crate::ident::Fingerprint;
 use crate::{
@@ -342,6 +342,7 @@ fn open(
 ) -> Result<WorkDir, Error> {
     let job_path = root.join(JOB_FILE);
     let lock = lock_or_create(&root, lock)?;
+    check_tracks(&root)?;
     let layout = Layout { root: root.clone() };
     let conflict = |problem| Error::WorkDir {
         path: root.clone(),
@@ -406,6 +407,27 @@ fn clear_content(root: &Path, recorded: Option<&Recorded>) -> Result<(), Error> 
         let path = root.join(name);
         if entries::kind_of(&path)?.is_some_and(|kind| kind.is_file()) {
             busy::retrying(|| fs::remove_file(&path)).map_err(io_error("删除", &path))?;
+        }
+    }
+    Ok(())
+}
+
+/// 任务目录 `root` 里的 `tracks` 与其下各轨的目录（名为规范写法的编号）已有时须是目录，不跟随符号链接；不是时报
+/// [`WorkDirProblem::NotEmpty`]：读进去会把别处的文件当成已完成的分片。
+fn check_tracks(root: &Path) -> Result<(), Error> {
+    let not_ours = || Error::WorkDir {
+        path: root.to_path_buf(),
+        problem: WorkDirProblem::NotEmpty,
+    };
+    let tracks = root.join(TRACKS_DIR);
+    match entries::kind_of(&tracks)? {
+        None => return Ok(()),
+        Some(kind) if !kind.is_dir() => return Err(not_ours()),
+        Some(_) => {}
+    }
+    for entry in entries::list(&tracks)? {
+        if entry.name.to_str().is_some_and(is_canonical_number) && !entry.kind.is_dir() {
+            return Err(not_ours());
         }
     }
     Ok(())
@@ -949,8 +971,8 @@ mod tests {
         )
     }
 
-    /// `tracks` 或某条轨的目录是指向别处的符号链接：写分片报目录里有不是本库写的文件，不写进链接指向的目录；换成当前
-    /// 任务时也不进去删。
+    /// `tracks` 或某条轨的目录是指向别处的符号链接：打开时与写分片时都报目录里有不是本库写的文件，不写进链接指向的
+    /// 目录；换成当前任务时也不进去删。
     #[test]
     fn track_dirs_never_follow_symlinks() {
         let dir = Scratch::new("track-dir-symlink");
@@ -963,13 +985,16 @@ mod tests {
         fs::create_dir(&root).unwrap();
         std::os::unix::fs::symlink(&elsewhere, root.join(TRACKS_DIR)).unwrap();
 
+        assert!(is_not_empty(check_tracks(&root)));
         assert!(is_not_empty(create_track_dir(&root.join("tracks/0"))));
         clear_content(&root, None).unwrap();
         assert_eq!(fs::read_to_string(&victim).unwrap(), "user file");
 
         fs::remove_file(root.join(TRACKS_DIR)).unwrap();
         fs::create_dir(root.join(TRACKS_DIR)).unwrap();
+        check_tracks(&root).unwrap();
         std::os::unix::fs::symlink(elsewhere.join("0"), root.join("tracks/0")).unwrap();
+        assert!(is_not_empty(check_tracks(&root)));
         assert!(is_not_empty(create_track_dir(&root.join("tracks/0"))));
         create_track_dir(&root.join("tracks/1")).unwrap();
         assert!(
