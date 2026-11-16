@@ -16,7 +16,8 @@
 //!   指定代理地址）；本机建不出 HTTP 客户端：[`Error::HttpClientInit`]（修好系统环境）。除注明的外都不可重试；
 //! - 任务目录：[`Error::WorkDir`]（按 [`WorkDirProblem`] 处理）、[`Error::NothingRecorded`]、[`Error::NoSpace`]（腾出
 //!   空间再试）；
-//! - 调用方的回调出错：[`Error::Hook`]；[`Error::Cancelled`]。
+//! - 调用方的回调出错：[`Error::Hook`]；[`Error::Cancelled`]；
+//! - 调用接口没拿到完整的响应：[`Error::Call`]，看它的 `sent` 判断服务器是否可能已处理。
 //!
 //! 可否重试看 [`Error::retryable`]，服务器要求的等待看 [`Error::retry_after`]，两者都看包着的原因。
 //!
@@ -31,6 +32,7 @@ use url::Url;
 
 use crate::hooks::{HookError, HookKind, Purpose};
 use crate::ident::bare_url;
+use crate::request::Method;
 use crate::{Leftover, Mp4Unsupported, RefreshReason, StallCause};
 
 #[derive(thiserror::Error)]
@@ -86,9 +88,9 @@ pub enum Error {
     /// 拉到的 key 不是 16 字节（`on_key` 回调没有改它）
     #[error("key {} 应为 16 字节，实际 {length} 字节", bare_url(.url))]
     KeyLength { url: Box<Url>, length: usize },
-    /// 用途为 `purpose` 的请求 `url` 的响应体超过上限 `limit` 字节，读到即停。播放列表、init 段与 key 各有固定的上限，超过
-    /// 多为地址指向了视频文件或直播流；取回小资源（[`crate::Engine::fetch`]）与调用接口（[`crate::Engine::call`]）的上
-    /// 限由调用方给；分片与文件任务不设上限
+    /// 用途为 `purpose` 的请求 `url` 的响应体超过上限 `limit` 字节，读到即停。播放列表、init 段与 key 各有固定的上限，
+    /// 超过多为地址指向了视频文件或直播流；取回小资源（[`crate::Engine::fetch`]）与调用接口（[`crate::Engine::call`]）
+    /// 的上限由调用方给；分片与文件任务不设上限
     #[error("{}{} 的响应体超过 {limit} 字节", purpose_text(*.purpose), bare_url(.url))]
     ResponseTooLarge {
         url: Box<Url>,
@@ -124,6 +126,15 @@ pub enum Error {
         path: PathBuf,
         needed: u64,
         available: u64,
+    },
+    /// 调用接口（[`crate::Engine::call`]）用 `method` 发出请求之后没拿到完整的响应：`cause` 为原因（请求、回调的错误，
+    /// [`Error::ResponseTooLarge`]，或 [`Error::Cancelled`]），`sent` 为最后一次尝试走到了哪一步。可否重试（见
+    /// [`Error::retryable`]）：原因可重试，且确定没发出或方法是 GET；服务器可能已处理的不算，重发前先查是否已生效
+    #[error("{cause}（{sent}）")]
+    Call {
+        method: Method,
+        sent: Sent,
+        cause: Box<Error>,
     },
     /// 第 `track` 条轨长时间没有录到新分片，且不是直播正常结束（见 [`crate::StallCause`]）
     #[error("直播第 {track} 条轨停滞：{cause}")]
@@ -283,6 +294,7 @@ impl Error {
             Error::Segment { cause, .. } | Error::Key { cause, .. } => cause.retry_after(),
             Error::Cleanup { failure, .. } => failure.retry_after(),
             Error::LiveStalled { cause, .. } => cause.retry_after(),
+            Error::Call { cause, .. } => cause.retry_after(),
             _ => None,
         }
     }
@@ -296,7 +308,33 @@ impl Error {
             Error::Cleanup { failure, .. } => failure.retryable(),
             Error::LiveStalled { cause, .. } => cause.retryable(),
             Error::Io { cause, .. } => crate::busy::held_open(cause),
+            Error::Call {
+                method,
+                sent,
+                cause,
+            } => cause.retryable() && (*sent == Sent::No || method.safe()),
             _ => false,
+        }
+    }
+}
+
+/// 调用接口（[`crate::Engine::call`]）失败时，请求走到了哪一步：决定服务器是否可能已处理。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sent {
+    /// 确定没有发出，服务器没收到：连接、TLS 握手或经代理的隧道没建成，或在发出之前就出错（回调出错、取消）
+    No,
+    /// 可能已发出，服务器可能已处理：发出之后、收到响应头之前失败（超时、连接断开、取消）
+    Maybe,
+    /// 收到了状态为 `status` 的响应头，读响应体时失败或超过上限：服务器已处理
+    Answered { status: u16 },
+}
+
+impl fmt::Display for Sent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Sent::No => f.write_str("请求没有发出"),
+            Sent::Maybe => f.write_str("请求可能已发出"),
+            Sent::Answered { status } => write!(f, "已收到响应 {status}"),
         }
     }
 }
@@ -582,8 +620,9 @@ fn stopped_text(cause: StallCause) -> String {
 /// 任务目录不能使用的原因。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WorkDirProblem {
-    /// 目录里有不是本库写的文件，不会去动它：没有 job.json 而目录不为空（不是本库建立的任务目录），或文件任务要用的
-    /// `data`、`ranges.json` 已被不是文件任务的东西占用
+    /// 目录里有不是本库写的文件，不会去动它：没有 job.json 而目录不为空（不是本库建立的任务目录）；文件任务要用的
+    /// `data`、`ranges.json` 已被别的东西占用（不是文件任务写的，或不是普通文件）；或本库要用的锁文件 `lock`、轨目录
+    /// `tracks` 及其下各轨的目录已是别的东西（如符号链接）
     #[error("目录里有不是本库写的文件")]
     NotEmpty,
     /// 正被另一个任务使用；文件任务开头目录还不存在、加锁时已有了另一个文件任务的内容（两个任务同时用它建了目录）也是

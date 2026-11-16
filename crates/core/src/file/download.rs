@@ -287,28 +287,22 @@ fn create_data(data: &Path) -> Result<File, Error> {
         .map_err(io_error("创建", data))
 }
 
-/// 打开任务目录 `root` 里分段下载的数据文件 `data`：续传（`resumed`）时须已存在、长度为 `length`，否则为任务目录损坏；
-/// 新开始时建出长度为 `length` 的文件（多为稀疏文件，不先占空间）。
+/// 打开任务目录 `root` 里分段下载的数据文件 `data`：续传（`resumed`）时须已存在（打开任务目录时已核对过它是普通文件，
+/// 见 [`FileDir::open`]）、长度为 `length`，否则为任务目录损坏；新开始时建出长度为 `length` 的文件（多为稀疏文件，不
+/// 先占空间）。
 fn open_data(root: &Path, data: &Path, length: u64, resumed: bool) -> Result<File, Error> {
     if !resumed {
         let file = create_data(data)?;
         file.set_len(length).map_err(io_error("写入", data))?;
         return Ok(file);
     }
-    // 数据文件须是普通文件：同名的符号链接不跟随，不写到它指向的地方
-    match std::fs::symlink_metadata(data) {
-        Ok(meta) if meta.is_file() => {}
-        Ok(_) => return Err(corrupt(root, data, "不是普通文件".to_owned())),
+    let file = match File::options().read(true).write(true).open(data) {
+        Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Err(corrupt(root, data, "范围记录在，数据文件却不在".to_owned()));
         }
-        Err(cause) => return Err(io_error("检查", data)(cause)),
-    }
-    let file = File::options()
-        .read(true)
-        .write(true)
-        .open(data)
-        .map_err(io_error("打开", data))?;
+        Err(cause) => return Err(io_error("打开", data)(cause)),
+    };
     let len = file.metadata().map_err(io_error("读取", data))?.len();
     if len != length {
         return Err(corrupt(

@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LockResult, Mutex, MutexGuard};
 
 use super::LOCK_FILE;
+use crate::entries;
 use crate::error::io_error;
 use crate::{Error, WorkDirProblem};
 
@@ -68,9 +69,16 @@ impl ForkGuard {
     }
 }
 
-/// 打开锁文件并加排他锁；已被别的任务锁住时报 [`WorkDirProblem::Locked`]。
+/// 打开锁文件并加排他锁；已被别的任务锁住时报 [`WorkDirProblem::Locked`]。锁文件的位置上已有不是普通文件的东西（如
+/// 符号链接，打开会建出或锁住它指向的文件）时报 [`WorkDirProblem::NotEmpty`]。
 pub(super) fn acquire(root: &Path) -> Result<Lock, Error> {
     let path = root.join(LOCK_FILE);
+    if entries::kind_of(&path)?.is_some_and(|kind| !kind.is_file()) {
+        return Err(Error::WorkDir {
+            path: root.to_path_buf(),
+            problem: WorkDirProblem::NotEmpty,
+        });
+    }
     // 打开之前拿住登记表，加锁失败时关掉文件之后才放开（`file` 先于它 drop）
     let mut held = held();
     let file = File::options()

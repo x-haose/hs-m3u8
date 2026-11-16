@@ -1,5 +1,5 @@
-//! 调用接口：任何状态都返回整个响应，只有 GET 跟随重定向；POST、PATCH 只在确定没发出时重试，GET、DELETE 照常重试；
-//! 响应体的上限；请求体的 Content-Type。
+//! 调用接口：任何状态都返回整个响应，只有 GET 跟随重定向；只有 GET 在可能已发出之后重试，其余方法只在确定没发出时重
+//! 试，失败时报走到了哪一步；响应体的上限；请求体的 Content-Type。
 
 use std::collections::HashMap;
 use std::num::NonZeroU32;
@@ -13,12 +13,11 @@ use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use hs_m3u8_core::{
     Body, Call, Error, HookError, HookKind, Hooks, HttpErrorKind, Method, Proxy, Purpose,
-    RequestParts, RetryPolicy, Source, Url,
+    RequestParts, RetryPolicy, Sent, Source, Url,
 };
-use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 
-use crate::engine;
+use crate::{engine, read_request_head};
 
 /// 接口服务各路径收到的请求数。
 #[derive(Default)]
@@ -201,24 +200,24 @@ async fn hanging_up() -> (Url, Arc<AtomicUsize>) {
         loop {
             let (mut stream, _) = listener.accept().await.unwrap();
             counted.fetch_add(1, Ordering::Relaxed);
-            let mut head = Vec::new();
-            let mut buf = [0u8; 1024];
-            // 请求体可能与请求头一同读到
-            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
-                match stream.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => head.extend_from_slice(&buf[..n]),
-                }
-            }
+            read_request_head(&mut stream).await;
         }
     });
     (url, connections)
 }
 
-/// 连不上（请求一定没发出）时各种方法都按重试策略重试，报连接失败；发出后没等到响应时 GET、DELETE 重试，POST、PATCH
-/// 不重试（服务器可能已处理），报传输错误。
+/// 包着的原因与走到的那一步（见 [`Error::Call`]）；不是它时报错。
+fn call_failure(err: &Error) -> (&Error, Sent) {
+    match err {
+        Error::Call { cause, sent, .. } => (cause, *sent),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// 连不上（请求一定没发出）时 POST、PATCH 也按重试策略重试，报没发出的连接失败、可重试；发出后没等到响应时只有 GET
+/// 重试，POST、PATCH、DELETE 不重试（服务器可能已处理），报可能已发出的传输错误，只有 GET 的可重试。
 #[tokio::test(flavor = "multi_thread")]
-async fn only_unsent_requests_are_retried_unless_idempotent() {
+async fn only_unsent_requests_are_retried_unless_safe() {
     let closed = {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         Url::parse(&format!("http://{}/api", listener.local_addr().unwrap())).unwrap()
@@ -233,9 +232,10 @@ async fn only_unsent_requests_are_retried_unless_idempotent() {
             .await
             .unwrap_err();
 
+        let (cause, sent) = call_failure(&err);
         assert!(
             matches!(
-                err,
+                cause,
                 Error::Http {
                     kind: HttpErrorKind::Connect(_),
                     ..
@@ -243,12 +243,14 @@ async fn only_unsent_requests_are_retried_unless_idempotent() {
             ),
             "{method:?}：{err:?}"
         );
+        assert_eq!(sent, Sent::No, "{method:?}");
+        assert!(err.retryable(), "{method:?}");
         assert_eq!(attempts.0.load(Ordering::Relaxed), 3, "{method:?}");
     }
 
     for (method, body, tries) in [
         (Method::Get, None, 3),
-        (Method::Delete, None, 3),
+        (Method::Delete, None, 1),
         (Method::Post, json("{}"), 1),
         (Method::Patch, json("{}"), 1),
     ] {
@@ -259,9 +261,10 @@ async fn only_unsent_requests_are_retried_unless_idempotent() {
             .await
             .unwrap_err();
 
+        let (cause, sent) = call_failure(&err);
         assert!(
             matches!(
-                err,
+                cause,
                 Error::Http {
                     kind: HttpErrorKind::Transport(_),
                     ..
@@ -269,12 +272,13 @@ async fn only_unsent_requests_are_retried_unless_idempotent() {
             ),
             "{method:?}：{err:?}"
         );
-        assert!(err.retryable(), "{method:?}");
+        assert_eq!(sent, Sent::Maybe, "{method:?}");
+        assert_eq!(err.retryable(), method == Method::Get, "{method:?}");
         assert_eq!(connections.load(Ordering::Relaxed), tries, "{method:?}");
     }
 }
 
-/// 响应体超过上限时读到即停、报响应体过大，不重试。
+/// 响应体超过上限时读到即停、报响应体过大，带着已收到的状态，不重试。
 #[tokio::test(flavor = "multi_thread")]
 async fn oversized_replies_are_rejected_without_retrying() {
     let (base, hits) = api_server().await;
@@ -286,9 +290,10 @@ async fn oversized_replies_are_rejected_without_retrying() {
     limited.limit = 2000;
     let whole = engine().call(&big, &limited).await.unwrap();
 
+    let (cause, sent) = call_failure(&err);
     assert!(
         matches!(
-            err,
+            cause,
             Error::ResponseTooLarge {
                 purpose: Purpose::Call,
                 limit: 1000,
@@ -297,6 +302,8 @@ async fn oversized_replies_are_rejected_without_retrying() {
         ),
         "{err:?}"
     );
+    assert_eq!(sent, Sent::Answered { status: 200 });
+    assert!(!err.retryable());
     assert_eq!(whole.body.len(), 2000);
     assert_eq!(hits.of("big"), 2);
 }
@@ -313,8 +320,8 @@ impl Hooks for TypedByHook {
     }
 }
 
-/// 带了请求体时 Content-Type 只随请求体给出：请求头里另有的报参数错误，回调另加的报回调错误，都不发出请求；GET 不能带
-/// 请求体。没有请求体时请求头里的 Content-Type 照常发出。
+/// 带了请求体时 Content-Type 只随请求体给出：请求头里另有的报参数错误，回调另加的报没发出的回调错误，都不发出请求；GET
+/// 不能带请求体。没有请求体时请求头里的 Content-Type 照常发出。
 #[tokio::test(flavor = "multi_thread")]
 async fn request_bodies_carry_their_own_content_type() {
     let (base, hits) = api_server().await;
@@ -344,9 +351,10 @@ async fn request_bodies_carry_their_own_content_type() {
         matches!(in_headers, Error::InvalidInput(_)),
         "{in_headers:?}"
     );
+    let (cause, sent) = call_failure(&from_hook);
     assert!(
         matches!(
-            from_hook,
+            cause,
             Error::Hook {
                 hook: HookKind::Request,
                 ..
@@ -354,6 +362,7 @@ async fn request_bodies_carry_their_own_content_type() {
         ),
         "{from_hook:?}"
     );
+    assert_eq!(sent, Sent::No);
     assert!(matches!(get_body, Error::InvalidInput(_)), "{get_body:?}");
     assert_eq!(without_body.body, b"DELETE text/plain\n");
     assert_eq!(hits.of("echo"), 1);

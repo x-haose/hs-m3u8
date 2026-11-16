@@ -46,7 +46,7 @@ pub(crate) use self::record::{
 };
 use self::record::{decode, encode_file, encode_hls};
 pub(crate) use self::removal::remove;
-use self::removal::{remove_steps, remove_tracks};
+use self::removal::{remove_steps, remove_tracks_of};
 use crate::entries;
 use crate::error::io_error;
 use crate::ident::Fingerprint;
@@ -397,23 +397,15 @@ fn open(
 /// 它的数据文件与范围记录（记的不是文件任务时同名的文件不是本库写的）。不是本库写的文件（如删除任务目录时留下的）不影响
 /// 读写，删除任务目录时照常指出。
 fn clear_content(root: &Path, recorded: Option<&Recorded>) -> Result<(), Error> {
-    let tracks = root.join(TRACKS_DIR);
-    if exists(&tracks)? {
-        remove_tracks(&tracks, &mut Vec::new())?;
-    }
+    remove_tracks_of(root)?;
     if !matches!(recorded, Some(Recorded::File(_))) {
         return Ok(());
     }
-    // 只删普通文件：同名的符号链接、目录不是本库写的（同 removal）
+    // 只删普通文件：同名的符号链接、目录不是本库写的
     for name in [RANGES_FILE, DATA_FILE] {
         let path = root.join(name);
-        match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.is_file() => {
-                busy::retrying(|| fs::remove_file(&path)).map_err(io_error("删除", &path))?;
-            }
-            Ok(_) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(cause) => return Err(io_error("检查", &path)(cause)),
+        if entries::kind_of(&path)?.is_some_and(|kind| kind.is_file()) {
+            busy::retrying(|| fs::remove_file(&path)).map_err(io_error("删除", &path))?;
         }
     }
     Ok(())
@@ -549,7 +541,7 @@ impl FileDir {
     /// 打开或新建文件任务的任务目录并加锁，`job.json` 写为 `record`；`lock` 为 [`WorkDir::lock_existing`] 已加上的锁。
     /// `resumed` 为任务开头读到的可续内容（见 [`read_file_resume`]，调用方已核对过来源）：有时保留数据文件与范围记录，
     /// 没有时删掉之前的内容（见 [`clear_content`]），从头开始。没有 `job.json` 时目录须为空，同 [`WorkDir::open`]；
-    /// `job.json` 记的不是文件任务而目录里有名为 `data`、`ranges.json` 的文件（不是本库写的）时报
+    /// 名为 `data`、`ranges.json` 的项不是本库写的（`job.json` 记的不是文件任务，或它不是普通文件，如符号链接）时报
     /// [`WorkDirProblem::NotEmpty`]，不改记录。任务开头目录还不存在、加锁时已有了别的任务的内容（同时用它建了目录）时，
     /// 是 HLS 任务的报 [`WorkDirProblem::KindMismatch`]，是文件任务的报 [`WorkDirProblem::Locked`]。
     pub(crate) async fn open(
@@ -578,11 +570,12 @@ impl FileDir {
                     Recorded::File(_) => WorkDirProblem::Locked,
                 }));
             }
-            if !matches!(recorded, Some(Recorded::File(_))) {
-                for name in [DATA_FILE, RANGES_FILE] {
-                    if has_entry(&root.join(name))? {
-                        return Err(problem(WorkDirProblem::NotEmpty));
-                    }
+            let file_task = matches!(recorded, Some(Recorded::File(_)));
+            for name in [DATA_FILE, RANGES_FILE] {
+                match entries::kind_of(&root.join(name))? {
+                    None => {}
+                    Some(kind) if file_task && kind.is_file() => {}
+                    Some(_) => return Err(problem(WorkDirProblem::NotEmpty)),
                 }
             }
             if !resumed {
@@ -651,11 +644,11 @@ pub(crate) fn completed_len(path: &Path) -> Result<Option<u64>, Error> {
     }
 }
 
-/// 写入完整文件：先写 `.part` 并 fsync，再改名，所在目录不存在时创建。
+/// 写入某条轨的完整文件 `path`（见 [`Layout::segment`]）：先写 `.part` 并 fsync，再改名，所在的轨目录见
+/// [`create_track_dir`]。
 pub(crate) async fn write(path: PathBuf, data: Vec<u8>) -> Result<(), Error> {
     blocking(move || {
-        let dir = parent(&path);
-        fs::create_dir_all(dir).map_err(io_error("创建", dir))?;
+        create_track_dir(parent(&path))?;
         write_atomic(&path, &data)
     })
     .await?
@@ -673,8 +666,7 @@ pub(crate) async fn store_init(
         if completed_len(&path)?.is_some() {
             return Ok(StoredInit::Existing);
         }
-        let dir = parent(&path);
-        fs::create_dir_all(dir).map_err(io_error("创建", dir))?;
+        create_track_dir(parent(&path))?;
         write_atomic(&path, &data).map(|()| StoredInit::Created)
     })
     .await?
@@ -686,6 +678,29 @@ pub(crate) enum StoredInit {
     Created,
     /// 内容相同的已经存在，没有重写
     Existing,
+}
+
+/// 建出轨目录 `dir`（`<任务目录>/tracks/<轨>`）与 `tracks`，已有的沿用。已有的不是目录（如符号链接：不跟随，不写到它
+/// 指向的地方）时报 [`WorkDirProblem::NotEmpty`]。
+fn create_track_dir(dir: &Path) -> Result<(), Error> {
+    let tracks = parent(dir);
+    let root = parent(tracks);
+    for dir in [tracks, dir] {
+        match fs::create_dir(dir) {
+            Ok(()) => {}
+            // 同一条轨的分片并发写入时可能同时建它
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                if !entries::kind_of(dir)?.is_some_and(|kind| kind.is_dir()) {
+                    return Err(Error::WorkDir {
+                        path: root.to_path_buf(),
+                        problem: WorkDirProblem::NotEmpty,
+                    });
+                }
+            }
+            Err(cause) => return Err(io_error("创建", dir)(cause)),
+        }
+    }
+    Ok(())
 }
 
 /// 文件所在目录；任务目录内的文件都有上级目录。
@@ -711,15 +726,6 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<(), Error> {
     file.sync_all().map_err(io_error("落盘", &part))?;
     drop(file);
     busy::retrying(|| fs::rename(&part, path)).map_err(io_error("重命名", &part))
-}
-
-/// 目录里有名为 `path` 的这一项，不跟随符号链接（悬空的链接也算）；没有时根读不到即报错（见 [`volume::reachable`]）。
-fn has_entry(path: &Path) -> Result<bool, Error> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => Ok(true),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => volume::reachable(path).map(|()| false),
-        Err(cause) => Err(io_error("检查", path)(cause)),
-    }
 }
 
 /// 跟随符号链接；不存在时根读不到即报错（见 [`volume::reachable`]）。
@@ -931,5 +937,56 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    fn is_not_empty<T>(result: Result<T, Error>) -> bool {
+        matches!(
+            result,
+            Err(Error::WorkDir {
+                problem: WorkDirProblem::NotEmpty,
+                ..
+            })
+        )
+    }
+
+    /// `tracks` 或某条轨的目录是指向别处的符号链接：写分片报目录里有不是本库写的文件，不写进链接指向的目录；换成当前
+    /// 任务时也不进去删。
+    #[test]
+    fn track_dirs_never_follow_symlinks() {
+        let dir = Scratch::new("track-dir-symlink");
+        let elsewhere = dir.join("elsewhere");
+        fs::create_dir_all(elsewhere.join("0")).unwrap();
+        let victim = elsewhere.join("0/0-fresh-1-0-none-1000-0123456789abcdef.seg");
+        assert!(parse_segment_name("0-fresh-1-0-none-1000-0123456789abcdef.seg").is_some());
+        fs::write(&victim, "user file").unwrap();
+        let root = dir.join("work");
+        fs::create_dir(&root).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join(TRACKS_DIR)).unwrap();
+
+        assert!(is_not_empty(create_track_dir(&root.join("tracks/0"))));
+        clear_content(&root, None).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "user file");
+
+        fs::remove_file(root.join(TRACKS_DIR)).unwrap();
+        fs::create_dir(root.join(TRACKS_DIR)).unwrap();
+        std::os::unix::fs::symlink(elsewhere.join("0"), root.join("tracks/0")).unwrap();
+        assert!(is_not_empty(create_track_dir(&root.join("tracks/0"))));
+        create_track_dir(&root.join("tracks/1")).unwrap();
+        assert!(
+            fs::symlink_metadata(root.join("tracks/1"))
+                .unwrap()
+                .is_dir()
+        );
+    }
+
+    /// 锁文件是悬空的符号链接：报目录里有不是本库写的文件，不在它指向的地方建出文件。
+    #[test]
+    fn lock_files_never_follow_symlinks() {
+        let dir = Scratch::new("lock-symlink");
+        let target = dir.join("elsewhere");
+        std::os::unix::fs::symlink(&target, dir.join(LOCK_FILE)).unwrap();
+
+        assert!(is_not_empty(acquire(&dir)));
+        assert!(!target.exists());
     }
 }

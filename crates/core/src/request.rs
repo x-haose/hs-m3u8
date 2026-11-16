@@ -1,4 +1,4 @@
-//! 任务配置与校验。
+//! 请求配置与校验：来源与访问它的方式、下载任务、调用接口。
 
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::sync::Arc;
@@ -227,9 +227,10 @@ pub enum Method {
 }
 
 impl Method {
-    /// 重发不会让服务器多做一次（RFC 9110 9.2.2）：传输失败时可以重发，不必确定上一次没有发出。
-    pub(crate) fn idempotent(self) -> bool {
-        matches!(self, Method::Get | Method::Delete)
+    /// 只读、不改服务器上的东西（RFC 9110 9.2.1）：可能已发出时重发，收到的响应与只发一次时相同；跟随重定向也不会让
+    /// 别处多做什么。DELETE 虽然幂等，重发时服务器已删掉，会回 404 之类，盖住第一次的结果，所以不算。
+    pub(crate) fn safe(self) -> bool {
+        self == Method::Get
     }
 }
 
@@ -252,6 +253,9 @@ fn forbidden(name: &str) -> Option<&'static str> {
     match name {
         "proxy-authorization" => Some("代理的认证写在代理地址里，放在请求头里会发给源站"),
         "accept-encoding" => Some("本库不解压，服务器按它压缩的内容读不了"),
+        "content-length" | "transfer-encoding" => {
+            Some("请求体的长度与分块由本库定，另给的会让服务器读错请求体或一直等它")
+        }
         "range" => Some("要取的字节范围由本库定"),
         "if-none-match" | "if-modified-since" | "if-match" | "if-unmodified-since" | "if-range" => {
             Some("条件请求会让服务器不返回内容（304、412）")
@@ -294,8 +298,9 @@ pub(crate) fn check_header(name: &str, value: &str) -> Result<(), String> {
 }
 
 /// 一条请求头能否放进 [`HttpOptions::headers`]，不能时返回原因：名与值要能放进 HTTP 请求；不能是决定响应体是什么、
-/// 怎么编码的头（Accept-Encoding、Range 与条件请求的 If-*，从浏览器复制的请求头常带着），也不能是 Proxy-Authorization
-/// （代理的认证写在代理地址里，放在请求头里会发给源站）；Cookie 还要是 `名=值; 名=值` 的写法（它要记进 Cookie 存储）。
+/// 怎么编码的头（Accept-Encoding、Range 与条件请求的 If-*，从浏览器复制的请求头常带着），不能是描述请求体长度与分块的
+/// 头（Content-Length、Transfer-Encoding，由本库按请求体定），也不能是 Proxy-Authorization（代理的认证写在代理地址里，
+/// 放在请求头里会发给源站）；Cookie 还要是 `名=值; 名=值` 的写法（它要记进 Cookie 存储）。
 pub fn check_option_header(name: &str, value: &str) -> Result<(), String> {
     check_header(name, value)?;
     if name.eq_ignore_ascii_case("cookie") && cookie_pairs(value).any(|pair| pair.is_none()) {
@@ -430,6 +435,8 @@ mod tests {
             "If-None-Match",
             "IF-MODIFIED-SINCE",
             "Proxy-Authorization",
+            "Content-Length",
+            "transfer-encoding",
         ] {
             assert!(check_header(name, "x").is_err(), "{name}");
         }

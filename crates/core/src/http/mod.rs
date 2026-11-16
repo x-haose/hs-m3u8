@@ -317,10 +317,13 @@ impl Http {
         Ok(self.streaming(parts.url, response, held))
     }
 
-    /// 用于调用接口：发出 `method` 的 `url`、带上请求体 `body`，收到响应头即返回，响应体由调用方读（见
-    /// [`Streaming`]）。不占名额，`on_request` 回调同 [`Http::get_once`]；不重试，任何状态都作为响应返回。有请求体时回
-    /// 调改出的请求头里有 Content-Type 报回调错误。
-    pub(crate) async fn call(
+    /// 发出 `method` 的 `url`、带上请求体 `body`，收到响应头即返回，响应体由调用方读（见 [`Streaming`]）；用于调用接
+    /// 口。不占名额，`on_request` 回调同 [`Http::get_once`]；不重试，任何状态都作为响应返回。有请求体时回调改出的请求头
+    /// 里有 Content-Type 报回调错误。
+    ///
+    /// 简化：同下载一样带 `Accept-Encoding: identity`，几百 KB 的 JSON 照原样传；接口响应的传输时间成为瓶颈时改为接受
+    /// gzip、按解压后的大小算上限。
+    pub(crate) async fn exchange(
         &self,
         purpose: Purpose,
         url: &Url,
@@ -328,16 +331,19 @@ impl Http {
         body: Option<&Body>,
         cancel: &CancellationToken,
     ) -> Result<Streaming, SendFailure> {
-        let parts = self.prepare(purpose, url).await?;
-        let mut builder = self.request(http_method(method), &parts)?;
+        let unsent = |error| SendFailure {
+            error,
+            unsent: true,
+        };
+        let parts = self.prepare(purpose, url).await.map_err(unsent)?;
+        let mut builder = self.request(http_method(method), &parts).map_err(unsent)?;
         if let Some(body) = body {
             if parts.headers.iter().any(|(name, _)| is_content_type(name)) {
                 let cause = "带了请求体时 Content-Type 随请求体给出，回调不能另加";
-                return Err(Error::Hook {
+                return Err(unsent(Error::Hook {
                     hook: HookKind::Request,
                     cause: cause.into(),
-                }
-                .into());
+                }));
             }
             builder = builder
                 .header(CONTENT_TYPE, &body.content_type)
@@ -429,9 +435,6 @@ impl Http {
 
     /// `method` 的 `parts` 请求，带上它的请求头与 `Accept-Encoding: identity`：本库不解压，要原样的字节（不带这个头即
     /// 表示什么编码都接受，RFC 9110 12.5.3）。
-    ///
-    /// 简化：调用接口也不要压缩，几百 KB 的 JSON 照原样传；接口响应的传输时间成为瓶颈时，调用接口改为接受 gzip、按解压
-    /// 后的大小算上限。
     fn request(
         &self,
         method: reqwest::Method,
@@ -458,7 +461,10 @@ async fn dispatch(
     cancel: &CancellationToken,
 ) -> Result<reqwest::Response, SendFailure> {
     tokio::select! {
-        _ = cancel.cancelled() => Err(Error::Cancelled.into()),
+        _ = cancel.cancelled() => Err(SendFailure {
+            error: Error::Cancelled,
+            unsent: false,
+        }),
         sent = builder.send() => sent.map_err(|e| SendFailure {
             // 连接（含 TLS 握手、经代理的隧道）没建成：请求还没写出
             unsent: e.is_connect(),
@@ -472,16 +478,6 @@ pub(crate) struct SendFailure {
     pub error: Error,
     /// 确定请求没有发出，重发不会让服务器多处理一次；false 时可能已发出
     pub unsent: bool,
-}
-
-/// 不确定发没发出的失败。
-impl From<Error> for SendFailure {
-    fn from(error: Error) -> Self {
-        SendFailure {
-            error,
-            unsent: false,
-        }
-    }
 }
 
 fn http_method(method: Method) -> reqwest::Method {

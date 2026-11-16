@@ -464,7 +464,7 @@ impl From<core::StallReason> for StallReason {
 
 /// core 里只由 Python 接口不提供的功能（文件任务、认出地址、取回小资源与调用接口）产生的取值，翻译时遇不到。
 pub(crate) const RUST_ONLY: &str =
-    "只由 Python 接口不提供的功能（文件任务、认地址、取回小资源、调用接口）产生";
+    "只由 Python 接口不提供的功能（文件任务、认出地址、取回小资源与调用接口）产生";
 
 impl From<core::JobType> for JobType {
     fn from(kind: core::JobType) -> Self {

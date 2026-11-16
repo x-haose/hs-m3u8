@@ -935,8 +935,9 @@ class HttpOptions:
         r"""
         `headers` 为 None 时没有附加的请求头；`proxy`、`timeouts`、`retry` 默认取 `Proxy.System()`、`Timeouts()`、
         `RetryPolicy()`。请求头的名或值放不进 HTTP 请求、是不能另给的头（Accept-Encoding、Range 与条件请求的 If-*：
-        它们决定响应体是什么、怎么编码；Proxy-Authorization：代理的认证写在代理地址里，放在请求头里会发给源站）、Cookie
-        不是 `名=值; 名=值` 的写法、代理的协议不支持或主机名不合法时抛 `InvalidInputError`。
+        它们决定响应体是什么、怎么编码；Content-Length、Transfer-Encoding：请求体的长度与分块由本库定；
+        Proxy-Authorization：代理的认证写在代理地址里，放在请求头里会发给源站）、Cookie 不是 `名=值; 名=值` 的写法、代理
+        的协议不支持或主机名不合法时抛 `InvalidInputError`。
         """
     def __repr__(self) -> builtins.str: ...
 

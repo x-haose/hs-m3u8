@@ -62,14 +62,12 @@ pub(super) async fn remove_steps(
 }
 
 /// 删掉任务目录 `root` 下各轨的分片与 init 段（见 [`remove_tracks`]），返回认不得、留下的文件。
-fn remove_tracks_of(root: &Path) -> Result<Vec<PathBuf>, Error> {
+pub(super) fn remove_tracks_of(root: &Path) -> Result<Vec<PathBuf>, Error> {
     let tracks = root.join(TRACKS_DIR);
     let mut kept = Vec::new();
-    match fs::symlink_metadata(&tracks) {
-        Ok(meta) if meta.is_dir() => remove_tracks(&tracks, &mut kept)?,
-        Ok(_) => {}
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => return Err(io_error("读取", &tracks)(e)),
+    // 同名的符号链接不是本库写的，不进去删
+    if entries::kind_of(&tracks)?.is_some_and(|kind| kind.is_dir()) {
+        remove_tracks(&tracks, &mut kept)?;
     }
     Ok(kept)
 }
@@ -135,7 +133,7 @@ fn remove_locked(root: &Path, lock: Lock, mut kept: Vec<PathBuf>) -> Result<Vec<
 
 /// 删掉 `tracks/` 下各轨的分片与 init 段（含写到一半的 `.part`）、系统自动生成的元数据文件与变空的目录；认不得的
 /// 记进 `kept`。
-pub(super) fn remove_tracks(tracks: &Path, kept: &mut Vec<PathBuf>) -> Result<(), Error> {
+fn remove_tracks(tracks: &Path, kept: &mut Vec<PathBuf>) -> Result<(), Error> {
     let before = kept.len();
     let mut system = Vec::new();
     for track in entries::list(tracks)? {

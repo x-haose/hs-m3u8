@@ -21,6 +21,20 @@ use hs_m3u8_core::{
     Engine, Error, JobRequest, Output, OutputOptions, RetryPolicy, Source, Target, Url,
 };
 use hs_m3u8_remux::{Control, DiscontinuityGroup, Segment, Streams, TrackSegments, remux};
+use tokio::io::{AsyncRead, AsyncReadExt};
+
+/// 读完一个 HTTP 请求的请求头（读到空行为止，请求体可能一同读到），返回读到的字节；连接在此之前关闭或出错时返回 None。
+async fn read_request_head(stream: &mut (impl AsyncRead + Unpin)) -> Option<Vec<u8>> {
+    let mut head = Vec::new();
+    let mut buf = [0u8; 1024];
+    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+        match stream.read(&mut buf).await {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => head.extend_from_slice(&buf[..n]),
+        }
+    }
+    Some(head)
+}
 
 // ---------- 样本 ----------
 

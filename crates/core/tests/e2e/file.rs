@@ -16,11 +16,11 @@ use hs_m3u8_core::{
     FileSaved, JobType, Resource, RetryPolicy, Saved, Source, Stage, Unsettled, Url,
     WorkDirProblem,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
-use crate::{engine, request, run, test_dir};
+use crate::{engine, read_request_head, request, run, test_dir};
 
 const MIB: usize = 1 << 20;
 
@@ -288,17 +288,6 @@ fn assert_downloaded_kept(output: &FileOutput, body: &[u8]) {
     );
     assert_eq!(output.bytes, body.len() as u64);
     assert_eq!(output.leftovers, []);
-}
-
-/// 手写的 HTTP 服务读完一个请求的请求头。
-async fn read_request_head(stream: &mut tokio::net::TcpStream) {
-    let mut head = Vec::new();
-    let mut buf = [0u8; 1024];
-    while !head.ends_with(b"\r\n\r\n") {
-        let n = stream.read(&mut buf).await.unwrap();
-        assert!(n > 0, "请求头没读完连接就关了");
-        head.extend_from_slice(&buf[..n]);
-    }
 }
 
 /// 范围请求的起点与长度；不带 Range 时为 None。
@@ -574,7 +563,9 @@ async fn files_of_unknown_length_are_read_to_the_end() {
         while let Ok((mut stream, _)) = listener.accept().await {
             let body = served.clone();
             tokio::spawn(async move {
-                read_request_head(&mut stream).await;
+                read_request_head(&mut stream)
+                    .await
+                    .expect("请求头没读完连接就关了");
                 stream
                     .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
                     .await
@@ -795,7 +786,9 @@ async fn a_restarted_whole_download_keeps_only_the_new_bytes() {
     let served = second.clone();
     tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        read_request_head(&mut stream).await;
+        read_request_head(&mut stream)
+            .await
+            .expect("请求头没读完连接就关了");
         let head = format!(
             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
             2 * first.len()
@@ -812,7 +805,9 @@ async fn a_restarted_whole_download_keeps_only_the_new_bytes() {
         stream.shutdown().await.unwrap();
         drop(stream);
         let (mut stream, _) = listener.accept().await.unwrap();
-        read_request_head(&mut stream).await;
+        read_request_head(&mut stream)
+            .await
+            .expect("请求头没读完连接就关了");
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
             .await
@@ -1043,7 +1038,9 @@ async fn slow_whole_downloads_are_not_cut_by_the_request_timeout() {
     let served = body.clone();
     tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
-        read_request_head(&mut stream).await;
+        read_request_head(&mut stream)
+            .await
+            .expect("请求头没读完连接就关了");
         stream
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4000\r\n\r\n")
             .await
@@ -1075,6 +1072,42 @@ async fn file_tasks_do_not_take_over_foreign_data_files() {
         std::os::unix::fs::symlink(path.with_file_name("gone"), path).unwrap()
     })
     .await;
+}
+
+/// 续传时数据文件被换成了指向别处的符号链接：报目录里有不是本库写的文件，不往链接指向的文件里写。
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn symlinked_data_files_are_not_resumed() {
+    let dir = test_dir("file_data_symlink");
+    let server = FileServer::start().await;
+    let mut served = Served::new(content(4 * MIB));
+    served.etag = Some("\"v1\"".into());
+    server.put("a.bin", served);
+    let mut request = file_request(server.url("a.bin"), &dir);
+    request.connections = NonZeroUsize::new(1).unwrap();
+    request.chunk_size = NonZeroU64::new(MIB as u64);
+    server.hold_from(2 * MIB as u64);
+    interrupt_at(request.clone(), 2 * MIB as u64).await;
+    let data = dir.join("out.hsdl/data");
+    let victim = dir.join("victim.bin");
+    std::fs::rename(&data, &victim).unwrap();
+    std::os::unix::fs::symlink(&victim, &data).unwrap();
+    let before = std::fs::read(&victim).unwrap();
+    server.release();
+
+    let (result, _) = run_file(request).await;
+
+    assert!(
+        matches!(
+            result,
+            Err(Error::WorkDir {
+                problem: WorkDirProblem::NotEmpty,
+                ..
+            })
+        ),
+        "{result:?}"
+    );
+    assert_eq!(std::fs::read(&victim).unwrap(), before);
 }
 
 /// 在没有已完成分片的 HLS 任务目录里用 `put` 放下名为 `name` 的东西，文件任务两次都不接手、不动它。

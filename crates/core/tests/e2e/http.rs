@@ -11,27 +11,14 @@ use std::time::Duration;
 use hs_m3u8_core::{
     CookieHeader, CookieStore, Error, HttpErrorKind, Proxy, Purpose, RetryPolicy, Source, Url,
 };
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, copy_bidirectional};
+use tokio::io::{AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 
 use crate::server::Server;
-use crate::{engine, fixture, request, run, test_dir};
-
-/// 读完一个 HTTP 请求的请求头，返回读到的字节；连接在此之前关闭或出错时返回 None。
-async fn read_request_head(stream: &mut (impl AsyncRead + Unpin)) -> Option<Vec<u8>> {
-    let mut head = Vec::new();
-    let mut buf = [0u8; 1024];
-    while !head.ends_with(b"\r\n\r\n") {
-        match stream.read(&mut buf).await {
-            Ok(0) | Err(_) => return None,
-            Ok(n) => head.extend_from_slice(&buf[..n]),
-        }
-    }
-    Some(head)
-}
+use crate::{engine, fixture, read_request_head, request, run, test_dir};
 
 /// 用 tests/fixtures/tls 的自签名证书握手的 TLS 服务端。
 fn self_signed_acceptor() -> TlsAcceptor {

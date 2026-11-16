@@ -81,6 +81,15 @@ pub(crate) fn list(dir: &Path) -> Result<Vec<Entry>, Error> {
     Ok(all)
 }
 
+/// `path` 这一项的类型，不跟随符号链接（是链接时即链接本身，悬空的也算）；不存在时为 None。
+pub(crate) fn kind_of(path: &Path) -> Result<Option<fs::FileType>, Error> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => Ok(Some(meta.file_type())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(cause) => Err(io_error("检查", path)(cause)),
+    }
+}
+
 /// 目录里除了系统自动生成的元数据文件之外没有别的。
 pub(crate) fn is_empty(dir: &Path) -> Result<bool, Error> {
     Ok(list(dir)?.iter().all(Entry::is_system_file))

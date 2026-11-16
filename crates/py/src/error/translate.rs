@@ -230,7 +230,9 @@ fn exception(
             ),
         )?,
         E::NothingRecorded => instance(py, HsM3u8Error::chain(base, NothingRecordedError {}))?,
-        E::NoSpace { .. } | E::NotExpected { .. } => unreachable!("{}", super::RUST_ONLY),
+        E::NoSpace { .. } | E::NotExpected { .. } | E::Call { .. } => {
+            unreachable!("{}", super::RUST_ONLY)
+        }
         E::Cancelled => instance(py, HsM3u8Error::chain(base, JobCancelledError {}))?,
     };
     raised(object, message)

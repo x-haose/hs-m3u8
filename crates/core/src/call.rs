@@ -5,11 +5,11 @@ use std::fmt;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::Error;
 use crate::hooks::Purpose;
-use crate::http::{Http, SendFailure};
+use crate::http::Http;
 use crate::ident::bare_url;
 use crate::request::{Call, Source};
+use crate::{Error, Sent};
 
 /// 接口的响应（[`crate::Engine::call`]），不论状态。
 pub struct Reply {
@@ -36,34 +36,55 @@ impl fmt::Debug for Reply {
 }
 
 /// 见 [`crate::Engine::call`]。随返回的 future 被丢弃而取消。
-pub(crate) async fn call(http: &Http, source: &Source, call: &Call) -> Result<Reply, Error> {
+pub(crate) async fn call(http: &Http, source: &Source, request: &Call) -> Result<Reply, Error> {
     let cancel = CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
     let url = &source.url;
+    let method = request.method;
     let mut tried = 1;
     loop {
-        let failure = match attempt(http, url, call, &cancel).await {
+        let (error, sent) = match attempt(http, url, request, &cancel).await {
             Ok(reply) => return Ok(reply),
             Err(failure) => failure,
         };
-        if !(call.method.idempotent() || failure.unsent) {
-            return Err(failure.error);
+        let failed = |cause| Error::Call {
+            method,
+            sent,
+            cause: Box::new(cause),
+        };
+        if !(sent == Sent::No || method.safe()) {
+            return Err(failed(error));
         }
-        http.wait_to_retry(Purpose::Call, url, failure.error, &mut tried, &cancel)
-            .await?;
+        http.wait_to_retry(Purpose::Call, url, error, &mut tried, &cancel)
+            .await
+            .map_err(failed)?;
     }
 }
 
-/// 发一次 `call`、读完响应体。
+/// 发一次 `request`、读完响应体；失败时带上走到了哪一步。
 async fn attempt(
     http: &Http,
     url: &Url,
-    call: &Call,
+    request: &Call,
     cancel: &CancellationToken,
-) -> Result<Reply, SendFailure> {
+) -> Result<Reply, (Error, Sent)> {
     let stream = http
-        .call(Purpose::Call, url, call.method, call.body.as_ref(), cancel)
-        .await?;
+        .exchange(
+            Purpose::Call,
+            url,
+            request.method,
+            request.body.as_ref(),
+            cancel,
+        )
+        .await
+        .map_err(|failure| {
+            let sent = if failure.unsent {
+                Sent::No
+            } else {
+                Sent::Maybe
+            };
+            (failure.error, sent)
+        })?;
     let status = stream.status().as_u16();
     let headers = stream
         .headers()
@@ -71,8 +92,9 @@ async fn attempt(
         .map(|(name, value)| (name.as_str().to_owned(), value.as_bytes().to_vec()))
         .collect();
     let response = stream
-        .read_to_end(Vec::new(), Some(call.limit), Purpose::Call, None, cancel)
-        .await?;
+        .read_to_end(Vec::new(), Some(request.limit), Purpose::Call, None, cancel)
+        .await
+        .map_err(|error| (error, Sent::Answered { status }))?;
     Ok(Reply {
         url: response.url,
         status,
