@@ -198,7 +198,7 @@ impl Engine {
     ///
     /// 参数错误（见 [`Source::check_url`]、[`HttpOptions::validate`]；GET 带请求体，或带了请求体而请求头里另有
     /// Content-Type）、开始时系统代理用不了与建不出 HTTP 客户端时立即返回那个错误；之后的失败（没拿到完整的响应、回调出
-    /// 错、重试时重读系统代理失败、响应体超过 `request.limit`、取消）报 [`Error::Call`]，其中的 [`Sent`] 说明服务器是否
+    /// 错、重试时重读系统代理失败、响应体超过 `request.limit`）报 [`Error::Call`]，其中的 [`Sent`] 说明服务器是否
     /// 可能已处理。丢弃返回的 future 即取消；不在 tokio 运行时内调用会 panic。
     pub async fn call(&self, source: &Source, request: &Call) -> Result<Reply, Error> {
         Source::check_url(&source.url)?;

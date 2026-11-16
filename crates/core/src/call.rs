@@ -52,13 +52,9 @@ pub(crate) async fn call(http: &Http, source: &Source, request: &Call) -> Result
             sent,
             cause: Box::new(cause),
         };
-        // 可否重发由 Error::retryable 按走到的那一步判断；退避中取消报的 Cancelled 同样包上
+        // 可否重发由 Error::retryable 按走到的那一步判断。退避中的取消只因 future 被丢弃发生，那时结果已没人收
         http.wait_to_retry(Purpose::Call, url, failed(error), &mut tried, &cancel)
-            .await
-            .map_err(|error| match error {
-                Error::Call { .. } => error,
-                other => failed(other),
-            })?;
+            .await?;
     }
 }
 

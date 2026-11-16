@@ -298,6 +298,7 @@ fn read_saved(root: &Path) -> Result<Option<Saved>, Error> {
             })));
         }
     };
+    check_tracks(root)?;
     let layout = Layout {
         root: root.to_path_buf(),
     };
@@ -489,8 +490,9 @@ fn read_ranges_within(root: &Path, length: u64) -> Result<Vec<Range<u64>>, Error
     }
 }
 
-/// 目录里有没有已完成的分片。
+/// 目录里有没有已完成的分片；`tracks` 与各轨的目录不是目录时报错，见 [`check_tracks`]。
 fn has_completed_segments(root: &Path) -> Result<bool, Error> {
+    check_tracks(root)?;
     let tracks = root.join(TRACKS_DIR);
     let entries = match fs::read_dir(&tracks) {
         Ok(entries) => entries,
@@ -658,10 +660,11 @@ fn list<T>(dir: &Path, parse: fn(&str) -> Option<T>) -> Result<Vec<(T, PathBuf, 
     Ok(files)
 }
 
-/// 已完成文件的字节数；不存在时为 None。
+/// 已完成文件的字节数；不存在，或不是普通文件（如符号链接，不跟随）时为 None，同 [`list`]：不是本库写的，不算已完
+/// 成的内容，写入时替换掉的是它本身。
 pub(crate) fn completed_len(path: &Path) -> Result<Option<u64>, Error> {
-    match fs::metadata(path) {
-        Ok(meta) => Ok(Some(meta.len())),
+    match fs::symlink_metadata(path) {
+        Ok(meta) => Ok(meta.is_file().then_some(meta.len())),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(cause) => Err(io_error("读取", path)(cause)),
     }
@@ -1002,6 +1005,47 @@ mod tests {
             fs::symlink_metadata(root.join("tracks/1"))
                 .unwrap()
                 .is_dir()
+        );
+    }
+
+    /// `tracks` 是指向别处已完成分片的符号链接：判断有没有可续的内容、查看、打开都报目录里有不是本库写的文件，不把那边
+    /// 的分片算进来，打开时不改记录。轨目录里同名的分片是符号链接时不算已完成。
+    #[test]
+    fn symlinked_tracks_are_never_read() {
+        let dir = Scratch::new("tracks-symlink-read");
+        let elsewhere = dir.join("elsewhere");
+        let segment = "0-fresh-1-0-none-1000-0123456789abcdef.seg";
+        fs::create_dir_all(elsewhere.join("0")).unwrap();
+        fs::write(elsewhere.join("0").join(segment), "user file").unwrap();
+        let root = dir.join("work");
+        fs::create_dir(&root).unwrap();
+        let record = HlsRecord {
+            preference_digest: "p".into(),
+            url_digest: "u".into(),
+            selection: None,
+            kind: RecordKind::Live,
+        };
+        let job = encode_hls(&record);
+        fs::write(root.join(JOB_FILE), &job).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join(TRACKS_DIR)).unwrap();
+
+        let recorded = Recorded::Hls(Box::new(record.clone()));
+        assert!(is_not_empty(has_completed(&root, &recorded)));
+        assert!(is_not_empty(read_saved(&root)));
+        assert!(is_not_empty(open(
+            root.clone(),
+            record,
+            None,
+            SelectionCheck::SameTracks
+        )));
+        assert_eq!(fs::read(root.join(JOB_FILE)).unwrap(), job);
+
+        let linked = dir.join(segment);
+        std::os::unix::fs::symlink(elsewhere.join("0").join(segment), &linked).unwrap();
+        assert_eq!(completed_len(&linked).unwrap(), None);
+        assert_eq!(
+            completed_len(&elsewhere.join("0").join(segment)).unwrap(),
+            Some(9)
         );
     }
 

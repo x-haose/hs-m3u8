@@ -132,10 +132,12 @@ pub struct FileRequest {
     /// 见 [`Expected`]；None 时不核对
     pub expected: Option<Expected>,
     /// 调用方确知的内容身份（如网盘的文件编号加内容哈希），不能为空串。给了即由调用方担保身份相同的内容逐字节相同，内容
-    /// 对不对由调用方在下完后核对；任务目录只记它的摘要。续传时这次与记录的都有：不同报
-    /// [`WorkDirProblem::FileChanged`]；相同则地址变了也沿用已下的范围、不报 [`WorkDirProblem::SourceUnverified`]，新地址
-    /// 的请求不带记录的验证器（ETag、Last-Modified 只对给出它的地址有意义，签名地址换了主机时可能不同），改带新地址这次
-    /// 给的；总长度照常核对。一方没有时同两方都没有，按地址与验证器核对
+    /// 对不对由调用方在下完后核对；任务目录只记它的摘要。
+    ///
+    /// 续传时这次与记录的都有：不同报 [`WorkDirProblem::FileChanged`]；相同则地址变了也沿用已下的范围、不报
+    /// [`WorkDirProblem::SourceUnverified`]，新地址的请求不带记录的验证器（ETag、Last-Modified 只对给出它的地址有意义，
+    /// 签名地址换了主机时可能不同），改带新地址这次给的；总长度照常核对。一方没有时同两方都没有，按地址与验证器核对；
+    /// 核对过之后，这次给的身份记下，这次没给时记录的照旧保留。
     pub identity: Option<String>,
 }
 
@@ -350,7 +352,7 @@ async fn resumed(
                 first: None,
             };
             let record = FileRecord {
-                identity_digest: identity,
+                identity_digest: identity.or_else(|| recorded.identity_digest.clone()),
                 ..recorded.clone()
             };
             return Ok((mode, record));
@@ -358,6 +360,8 @@ async fn resumed(
     };
     let opened = open_range(http, url, span, validator.as_deref(), length, root, cancel).await?;
     let headers = opened.stream.headers();
+    // 这次没给身份时沿用记录的：照常核对过，已下的仍是记录的身份那份内容
+    let identity = identity.or_else(|| recorded.identity_digest.clone());
     let record = file_record(url, Some(length), headers, previous, identity);
     let mode = Mode::Ranged {
         length,

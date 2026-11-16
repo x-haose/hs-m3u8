@@ -18,8 +18,9 @@ use crate::{JobType, WorkDirProblem};
 /// 文件任务记录加了 `identity_digest`（14 的读作没有），其余与 14 相同。
 ///
 /// 兼容约定（outputs.json 同）：此后各版本的库读得了 1.0 起各发布版本写的任务目录（[`OLDEST_JOB_FORMAT_VERSION`] 起），
-/// 按记录的格式版本解释其中的内容。格式版本比本库写的新，或比它旧（1.0 之前开发中的版本写的）时报
-/// [`WorkDirProblem::UnsupportedVersion`]。各已发布版本的样本在 tests/fixtures/workdir 下，发布后不再改动。
+/// 按记录的格式版本解释其中的内容；下游已发布的程序按提交号依赖 core 时，那个提交写的格式也算已发布（14 即是）。格式
+/// 版本比本库写的新，或比它旧（1.0 之前开发中的版本写的）时报 [`WorkDirProblem::UnsupportedVersion`]。各已发布版本的
+/// 样本在 tests/fixtures/workdir 下，发布后不再改动。
 pub(super) const JOB_FORMAT_VERSION: u32 = 15;
 
 /// 读得了的最旧的 job.json 格式版本：1.0 写的。
@@ -27,6 +28,9 @@ const OLDEST_JOB_FORMAT_VERSION: u32 = 13;
 
 /// 加了文件任务的 job.json 格式版本。
 pub(super) const FILE_JOB_FORMAT_VERSION: u32 = 14;
+
+/// 文件任务记录加了内容身份（`identity_digest`）的 job.json 格式版本。
+const IDENTITY_JOB_FORMAT_VERSION: u32 = 15;
 
 /// job.json 里记录的任务。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,8 +59,8 @@ pub(crate) struct FileRecord {
     pub etag: Option<String>,
     /// Last-Modified 的值，原样
     pub last_modified: Option<String>,
-    /// 写下记录的那次运行调用方给的内容身份（[`crate::FileRequest::identity`]）的摘要，见 [`identity_digest`]；没给时为
-    /// None
+    /// 已下的内容的身份（调用方给的 [`crate::FileRequest::identity`]）的摘要，见 [`identity_digest`]：续传时没给身份的
+    /// 沿用记录的；从未给过时为 None
     pub identity_digest: Option<String>,
 }
 
@@ -213,7 +217,8 @@ pub(crate) fn identity_digest(identity: &str) -> String {
     digest_hex(identity)
 }
 
-/// `job.json` 的写法。`format_version` 不等于 [`JOB_FORMAT_VERSION`] 时拒绝。
+/// `job.json` 的写法。`format_version` 不在 [`OLDEST_JOB_FORMAT_VERSION`]`..=`[`JOB_FORMAT_VERSION`] 之内时拒绝，见
+/// [`check_version`]。
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 enum JobFile {
@@ -397,6 +402,14 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Recorded, WorkDirProblem> {
             JobFile::File { .. } if version < FILE_JOB_FORMAT_VERSION => {
                 return Err(WorkDirProblem::Corrupt(format!(
                     "job.json 是格式版本 {version}，那时还没有文件任务"
+                )));
+            }
+            JobFile::File {
+                identity_digest: Some(_),
+                ..
+            } if version < IDENTITY_JOB_FORMAT_VERSION => {
+                return Err(WorkDirProblem::Corrupt(format!(
+                    "job.json 是格式版本 {version}，那时文件任务还不记内容身份"
                 )));
             }
             JobFile::File {
@@ -700,6 +713,7 @@ mod tests {
             r#"{"kind":"vod","format_version":13,"preference_digest":"a","url_digest":"u","selection":null,"plan_digest":"p","extra":1}"#,
             r#"{"kind":"file","format_version":13,"url_digest":"u","length":1,"etag":null,"last_modified":null}"#,
             r#"{"kind":"file","format_version":14,"url_digest":"u","length":-1,"etag":null,"last_modified":null}"#,
+            r#"{"kind":"file","format_version":14,"url_digest":"u","length":1,"etag":null,"last_modified":null,"identity_digest":"ab"}"#,
             r#"{"format_version":13,"preference_digest":"a","url_digest":"u","selection":null,"plan_digest":"p"}"#,
             r#"{"kind":"vod","format_version":13,"preference_digest":"a","url_digest":"u","selection":null}"#,
             r#"{"kind":"vod","format_version":13,"preference_digest":"a","selection":null,"plan_digest":"p"}"#,

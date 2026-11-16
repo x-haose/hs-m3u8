@@ -532,8 +532,8 @@ async fn changed_sources_are_not_resumed() {
 }
 
 /// 调用方担保了内容身份：地址变了也沿用已下的范围，记录里没有验证器、或新地址给的 ETag 与旧地址的不同都一样；新地址的
-/// 第一个请求不带记录的验证器，之后带新地址给的。身份不同（地址没变、验证器对得上也是）、总长度不同报来源的文件变了；
-/// 只有一方给了身份时同没给，核对不了报核对不上。身份不能为空串。
+/// 第一个请求不带记录的验证器，之后带新地址给的；中间有一次没给身份时记录的照旧保留。身份不同（地址没变、验证器对得上
+/// 也是）、总长度不同报来源的文件变了；只有一方给了身份时同没给，核对不了报核对不上。身份不能为空串。
 #[tokio::test(flavor = "multi_thread")]
 async fn vouched_identities_resume_at_new_addresses() {
     let dir = test_dir("file_identity");
@@ -579,6 +579,14 @@ async fn vouched_identities_resume_at_new_addresses() {
             "{from}：{seen:?}"
         );
     }
+
+    let request = interrupted("kept", "plain.bin", Some("pikpak:a")).await;
+    let unvouched = moved(request, "plain.bin", None);
+    server.hold_from(3 * MIB as u64 / 2);
+    interrupt_at(unvouched.clone(), 3 * MIB as u64 / 2).await;
+    server.release();
+    let (output, _) = run_file(moved(unvouched, "new.bin", Some("pikpak:a"))).await;
+    assert_downloaded(&output.unwrap(), &body);
 
     let request = interrupted("other", "tagged.bin", Some("pikpak:a")).await;
     let (result, _) = run_file(moved(request, "tagged.bin", Some("pikpak:b"))).await;
