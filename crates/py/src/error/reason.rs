@@ -462,8 +462,9 @@ impl From<core::StallReason> for StallReason {
     }
 }
 
-/// core 里只由文件任务（`Engine::identify`、`Engine::start_file`）产生的取值：Python 接口不提供文件任务，翻译时遇不到。
-pub(crate) const FILE_TASKS_ONLY: &str = "只由文件任务产生，Python 接口不提供文件任务";
+/// core 里只由 Python 接口不提供的功能（文件任务、认出地址、取回小资源与调用接口）产生的取值，翻译时遇不到。
+pub(crate) const RUST_ONLY: &str =
+    "只由 Python 接口不提供的功能（文件任务、认地址、取回小资源、调用接口）产生";
 
 impl From<core::JobType> for JobType {
     fn from(kind: core::JobType) -> Self {
@@ -502,7 +503,7 @@ impl From<core::WorkDirProblem> for WorkDirProblem {
             W::SelectionGone => WorkDirProblem::SelectionGone {},
             W::SourceUnverified => WorkDirProblem::SourceUnverified {},
             W::Unaligned { track } => WorkDirProblem::Unaligned { track },
-            W::FileChanged => unreachable!("{FILE_TASKS_ONLY}"),
+            W::FileChanged => unreachable!("{RUST_ONLY}"),
         }
     }
 }

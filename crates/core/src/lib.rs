@@ -1,7 +1,7 @@
 //! HLS 下载引擎：选轨、并发拉取分片、AES-128 解密与校验、可续传的任务目录、直播录制，输出为 MP4、可直接播放的本地 HLS
 //! 目录，或两者都要。另有单个文件的分段下载（[`Engine::start_file`]），与 HLS 共用客户端、引擎的请求名额、重试与任务目
 //! 录；先认出地址是播放列表、网页还是文件用 [`Engine::identify`]，按同样的请求设置取回一个小资源（如 tracker 列表）用
-//! [`Engine::fetch`]。
+//! [`Engine::fetch`]，调用接口（如网盘的 JSON 接口，任何状态都拿回整个响应）用 [`Engine::call`]。
 //!
 //! 一个任务把一个播放列表地址变成它的输出（[`Target`]）。任务目录（默认与输出同级、名为输出的主名加 `.hsdl`）保存
 //! `job.json` 与已完成的分片；分片先写 `.part`、落盘后原子改名，因此「最终文件存在」即「该分片完整」。中断后用同样的请
@@ -22,6 +22,7 @@ mod blocking;
 struct ReadmeExamples;
 
 mod busy;
+mod call;
 mod cookies;
 mod crypto;
 mod entries;
@@ -65,6 +66,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::DropGuard;
 
+pub use call::Reply;
 pub use cookies::{CookieHeader, CookieStore};
 pub use error::{
     Error, FetchErrorKind, FetchFailure, HlsUnsupported, HttpErrorKind, HttpFailure,
@@ -86,8 +88,8 @@ pub use report::{
     Retrying, Saved, SegmentCounts, SourceBreak, Stage, StallCause, Throttled, Writing,
 };
 pub use request::{
-    HttpOptions, JobRequest, KeyOverride, LiveOptions, Proxy, RetryPolicy, Source, Timeouts,
-    check_option_header,
+    Body, Call, HttpOptions, JobRequest, KeyOverride, LiveOptions, Method, Proxy, RetryPolicy,
+    Source, Timeouts, check_option_header,
 };
 pub use tokio_util::sync::CancellationToken;
 pub use url::Url;
@@ -108,7 +110,7 @@ pub mod hls {
 
 pub(crate) use blocking::blocking;
 
-use crate::http::{Deadline, Http, Observer, Permits, RetryWaiting};
+use crate::http::{Deadline, Http, Observer, Permits, Redirects, RetryWaiting};
 
 /// 下载引擎；持有跨任务共享的在途请求上限。
 #[derive(Clone)]
@@ -124,9 +126,9 @@ impl Engine {
 
     /// `max_requests`：所有点播任务合计同时在途的 key、分片与 init 段请求数，文件任务（[`Engine::start_file`]）的每个连
     /// 接也占一个；所有直播任务的 key 与分片另有同样大小的一份，不与点播共用：直播的分片排在点播的大批下载（或挂住的请
-    /// 求）之后会滑出窗口、永久缺失。播放列表、认出地址（[`Engine::identify`]）与取回小资源（[`Engine::fetch`]）的请求
-    /// 与刷新时拉的 init 段（连同它的 key）不占名额：每条轨同时最多一个，刷新不排在本任务的分片下载之后；同一个 key 正
-    /// 被分片的请求拉取时，等那次请求（它占着名额）。
+    /// 求）之后会滑出窗口、永久缺失。播放列表、认出地址（[`Engine::identify`]）、取回小资源（[`Engine::fetch`]）与调用
+    /// 接口（[`Engine::call`]）的请求与刷新时拉的 init 段（连同它的 key）不占名额：每条轨同时最多一个，刷新不排在本任务
+    /// 的分片下载之后；同一个 key 正被分片的请求拉取时，等那次请求（它占着名额）。
     pub fn new(max_requests: NonZeroUsize) -> Self {
         Engine {
             requests: Permits::new(max_requests.get()),
@@ -137,7 +139,13 @@ impl Engine {
     /// 音轨、查看时长与是否直播。参数错误时立即返回错误；不在 tokio 运行时内调用会 panic。
     pub async fn probe(&self, source: &Source) -> Result<Probe, Error> {
         source.validate()?;
-        let http = Http::new(source, self.requests.clone(), None, Deadline::Request)?;
+        let http = Http::new(
+            source,
+            self.requests.clone(),
+            None,
+            Deadline::Request,
+            Redirects::Follow,
+        )?;
         probe::probe(&http, source).await
     }
 
@@ -148,7 +156,13 @@ impl Engine {
     /// 误；不在 tokio 运行时内调用会 panic。
     pub async fn identify(&self, source: &Source) -> Result<Resource, Error> {
         source.validate()?;
-        let http = Http::new(source, self.requests.clone(), None, Deadline::Request)?;
+        let http = Http::new(
+            source,
+            self.requests.clone(),
+            None,
+            Deadline::Request,
+            Redirects::Follow,
+        )?;
         file::identify(&http, source).await
     }
 
@@ -161,8 +175,46 @@ impl Engine {
     pub async fn fetch(&self, source: &Source, limit: u64) -> Result<Fetched, Error> {
         Source::check_url(&source.url)?;
         source.http.validate()?;
-        let http = Http::new(source, self.requests.clone(), None, Deadline::Request)?;
+        let http = Http::new(
+            source,
+            self.requests.clone(),
+            None,
+            Deadline::Request,
+            Redirects::Follow,
+        )?;
         fetched::fetch(&http, source, limit).await
+    }
+
+    /// 调用地址 `source.url` 上的接口（如网盘的 JSON 接口），不碰任务目录：发一次 `call` 的请求，任何 HTTP 状态都作为结
+    /// 果返回（见 [`Reply`]），由调用方看状态与响应体里的错误码决定怎么办；只有没拿到完整的响应（传输失败、回调出错）与
+    /// 响应体超过 `call.limit`（[`Error::ResponseTooLarge`]）才报错。请求头、Cookie、代理、证书与超时按 `source.http`，
+    /// 请求的用途为 [`Purpose::Call`]，[`Hooks::on_request`] 照常调用；不占引擎的请求名额（同 [`Engine::identify`]）。
+    /// 带 `Accept-Encoding: identity`，响应体原样给出。
+    ///
+    /// 只有 GET 跟随重定向；POST、PATCH、DELETE 不跟随，3xx 作为结果返回（不把 POST 改成 GET 重发）。状态码一律不重试。
+    /// 传输失败中可重试的（[`Error::retryable`]）按 [`HttpOptions::retry`] 重试：GET、DELETE 都重试；POST、PATCH 只在确
+    /// 定请求没有发出（连接、TLS 握手或经代理的隧道没建成）时重试，发出之后的失败照原样报出，这时服务器可能已处理了请
+    /// 求，要由调用方查是否已生效。报出的 [`HttpErrorKind`] 为 `Connect`、`Certificate`、`Proxy`、`InvalidRequest` 的
+    /// 都没有发出；`Timeout` 与 `Transport` 可能已发出。
+    ///
+    /// 参数错误（见 [`Source::check_url`]、[`HttpOptions::validate`]；GET 带请求体，或带了请求体而请求头里另有
+    /// Content-Type）时立即返回错误；丢弃返回的 future 即取消；不在 tokio 运行时内调用会 panic。
+    pub async fn call(&self, source: &Source, call: &Call) -> Result<Reply, Error> {
+        Source::check_url(&source.url)?;
+        source.http.validate()?;
+        call.validate(&source.http)?;
+        let redirects = match call.method {
+            Method::Get => Redirects::Follow,
+            Method::Post | Method::Patch | Method::Delete => Redirects::Return,
+        };
+        let http = Http::new(
+            source,
+            self.requests.clone(),
+            None,
+            Deadline::Request,
+            redirects,
+        )?;
+        call::call(&http, source, call).await
     }
 
     /// 校验文件任务的请求并在当前 tokio 运行时上启动，规则见 [`FileRequest`]；不在 tokio 运行时内调用会 panic。参数错误
@@ -175,6 +227,7 @@ impl Engine {
             self.requests.clone(),
             Some(Arc::new(ProgressObserver::new(progress_tx.clone()))),
             Deadline::Idle,
+            Redirects::Follow,
         )?;
         let cancel = CancellationToken::new();
         let task = tokio::spawn(file::run(
@@ -198,6 +251,7 @@ impl Engine {
             self.requests.clone(),
             Some(Arc::new(ProgressObserver::new(progress_tx.clone()))),
             Deadline::Request,
+            Redirects::Follow,
         )?;
         let cancel = CancellationToken::new();
         let stop = CancellationToken::new();

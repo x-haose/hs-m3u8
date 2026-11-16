@@ -13,7 +13,7 @@ use crate::ident::bare_url;
 use crate::proxy::{self, SystemProxy};
 use crate::request::{HttpOptions, Proxy, Timeouts};
 
-use super::Deadline;
+use super::{Deadline, Redirects};
 
 /// 系统代理多久重读一次：设置改了（如代理软件换了端口）几秒内新的请求就照新设置走，又不必每个请求都读。
 const SYSTEM_PROXY_TTL: Duration = Duration::from_secs(5);
@@ -35,6 +35,7 @@ impl reqwest::cookie::CookieStore for Cookies {
 struct Config {
     timeouts: Timeouts,
     deadline: Deadline,
+    redirects: Redirects,
     insecure: bool,
     cookies: Arc<Cookies>,
 }
@@ -76,10 +77,12 @@ impl Clients {
         options: &HttpOptions,
         cookies: Cookies,
         deadline: Deadline,
+        redirects: Redirects,
     ) -> Result<Self, Error> {
         let config = Config {
             timeouts: options.timeouts,
             deadline,
+            redirects,
             insecure: options.insecure,
             cookies: Arc::new(cookies),
         };
@@ -148,6 +151,10 @@ fn build(config: &Config, route: Route<'_>) -> Result<reqwest::Client, Error> {
     let builder = match config.deadline {
         Deadline::Request => builder.timeout(t.request),
         Deadline::Idle => builder,
+    };
+    let builder = match config.redirects {
+        Redirects::Follow => builder,
+        Redirects::Return => builder.redirect(reqwest::redirect::Policy::none()),
     };
     let builder = match route {
         Route::Direct => builder.no_proxy(),

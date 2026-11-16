@@ -18,7 +18,7 @@ mod translate;
 
 use self::output::HlsUnsupported;
 pub(crate) use self::output::Mp4Unsupported;
-pub(crate) use self::reason::FILE_TASKS_ONLY;
+pub(crate) use self::reason::RUST_ONLY;
 use self::reason::{
     HookKind, IntegrityFailure, Malformed, SegmentRef, SelectFailure, SourceUnsupported,
     StallReason, WorkDirProblem,

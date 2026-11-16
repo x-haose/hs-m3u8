@@ -187,6 +187,66 @@ impl JobRequest {
     }
 }
 
+/// 调用接口（[`crate::Engine::call`]）的请求。
+#[derive(Clone)]
+pub struct Call {
+    pub method: Method,
+    /// None 时不带请求体；GET 不能带
+    pub body: Option<Body>,
+    /// 响应体的上限，字节：超过时读到即停，报 [`Error::ResponseTooLarge`]
+    pub limit: u64,
+}
+
+impl Call {
+    /// 校验请求体，`http` 为发请求用的设置；不合要求时报 [`Error::InvalidInput`]：GET 带了请求体，Content-Type 放不进
+    /// HTTP 请求，或带了请求体而 `http` 的请求头里另有 Content-Type。
+    pub(crate) fn validate(&self, http: &HttpOptions) -> Result<(), Error> {
+        let Some(body) = &self.body else {
+            return Ok(());
+        };
+        if self.method == Method::Get {
+            return Err(Error::InvalidInput("GET 不能带请求体".to_owned()));
+        }
+        check_header("content-type", &body.content_type).map_err(Error::InvalidInput)?;
+        if http.headers.iter().any(|(name, _)| is_content_type(name)) {
+            return Err(Error::InvalidInput(
+                "带了请求体时 Content-Type 随请求体给出，请求头里不能再带".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// 调用接口的请求方法。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Post,
+    Patch,
+    Delete,
+}
+
+impl Method {
+    /// 重发不会让服务器多做一次（RFC 9110 9.2.2）：传输失败时可以重发，不必确定上一次没有发出。
+    pub(crate) fn idempotent(self) -> bool {
+        matches!(self, Method::Get | Method::Delete)
+    }
+}
+
+/// 请求体。不实现 `Debug`：常带口令与令牌。
+#[derive(Clone)]
+pub struct Body {
+    /// 作为请求的 Content-Type 发出
+    pub content_type: String,
+    /// 原样发出
+    pub data: Vec<u8>,
+}
+
+/// 请求头名 `name` 是 Content-Type（不分大小写）。
+pub(crate) fn is_content_type(name: &str) -> bool {
+    name.eq_ignore_ascii_case("content-type")
+}
+
 /// 不能另给的请求头（`name` 为小写）及原因。
 fn forbidden(name: &str) -> Option<&'static str> {
     match name {

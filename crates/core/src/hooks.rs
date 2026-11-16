@@ -21,6 +21,8 @@ pub enum Purpose {
     /// 文件任务（[`crate::Engine::start_file`]）的请求、认出地址是什么（[`crate::Engine::identify`]）的那一次请求，与取
     /// 回小资源（[`crate::Engine::fetch`]）的请求
     File,
+    /// 调用接口（[`crate::Engine::call`]）的请求
+    Call,
 }
 
 /// [`Hooks::on_request`] 可修改的请求。

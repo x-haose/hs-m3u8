@@ -359,7 +359,9 @@ impl From<core::Purpose> for Purpose {
             core::Purpose::Key => Purpose::Key {},
             core::Purpose::Init => Purpose::Init {},
             core::Purpose::Segment => Purpose::Segment {},
-            core::Purpose::File => unreachable!("{}", crate::error::FILE_TASKS_ONLY),
+            core::Purpose::File | core::Purpose::Call => {
+                unreachable!("{}", crate::error::RUST_ONLY)
+            }
         }
     }
 }

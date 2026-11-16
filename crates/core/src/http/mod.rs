@@ -1,4 +1,4 @@
-//! 带重试、超时、取消、全局并发上限与请求回调的 HTTP GET。
+//! 带重试、超时、取消、全局并发上限与请求回调的 HTTP 请求：下载与认地址用的 GET，调用接口用的各种方法。
 
 mod classify;
 mod client;
@@ -10,7 +10,9 @@ use std::time::{Duration, SystemTime};
 
 use hs_m3u8_hls::ByteRange;
 use reqwest::StatusCode;
-use reqwest::header::{ACCEPT_ENCODING, CONTENT_RANGE, HeaderMap, IF_RANGE, RANGE, RETRY_AFTER};
+use reqwest::header::{
+    ACCEPT_ENCODING, CONTENT_RANGE, CONTENT_TYPE, HeaderMap, IF_RANGE, RANGE, RETRY_AFTER,
+};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -19,7 +21,9 @@ use self::classify::classify;
 use self::client::{Clients, Cookies};
 use crate::cookies::Provider;
 use crate::hooks::{HookKind, Hooks, Purpose, RequestParts, run_hook};
-use crate::request::{RetryPolicy, Source, check_header, check_scheme, cookie_pairs};
+use crate::request::{
+    Body, Method, RetryPolicy, Source, check_header, check_scheme, cookie_pairs, is_content_type,
+};
 use crate::{Error, FetchFailure, HttpErrorKind, IntegrityFailure};
 
 /// 一次尝试的时限，见 [`crate::Timeouts`]：都有连接超时与读空闲超时，`Request` 另限整次尝试的时长。
@@ -29,6 +33,15 @@ pub(crate) enum Deadline {
     Request,
     /// 不限整次尝试的时长，卡住靠读空闲超时判断：文件任务的请求，响应体大小由来源决定
     Idle,
+}
+
+/// 收到重定向（3xx）时怎么办。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Redirects {
+    /// 跟随，至多 10 次
+    Follow,
+    /// 不跟随，3xx 作为响应返回
+    Return,
 }
 
 /// 请求占哪一份引擎名额（见 [`Permits`]）。
@@ -71,7 +84,7 @@ pub(crate) struct Http {
     hooks: Arc<dyn Hooks>,
     /// 引擎内所有任务共享；占名额的每次尝试从调用 `on_request` 回调到读完响应体占用一个
     requests: Arc<Permits>,
-    /// 请求的进展报给它（任务的进度）；探测、认出地址与取回小资源时为 None
+    /// 请求的进展报给它（任务的进度）；探测、认出地址、取回小资源与调用接口时为 None
     observer: Option<Arc<dyn Observer>>,
     /// 下一次退避的 [`RetryWaiting::id`]
     next_wait: AtomicU64,
@@ -129,12 +142,14 @@ pub(crate) struct Response {
 }
 
 impl Http {
-    /// 访问 `source` 的客户端（`source.http` 已校验过，见 [`crate::HttpOptions::validate`]），请求的时限见 `deadline`。
+    /// 访问 `source` 的客户端（`source.http` 已校验过，见 [`crate::HttpOptions::validate`]），请求的时限见 `deadline`，
+    /// 重定向见 `redirects`。
     pub(crate) fn new(
         source: &Source,
         requests: Arc<Permits>,
         observer: Option<Arc<dyn Observer>>,
         deadline: Deadline,
+        redirects: Redirects,
     ) -> Result<Self, Error> {
         let options = &source.http;
         let is = |name: &str, wanted: &str| name.eq_ignore_ascii_case(wanted);
@@ -155,7 +170,7 @@ impl Http {
                 Box::new(jar)
             }
         };
-        let clients = Clients::new(options, Cookies(cookies), deadline)?;
+        let clients = Clients::new(options, Cookies(cookies), deadline, redirects)?;
         let (credentials, headers) = options
             .headers
             .iter()
@@ -302,6 +317,36 @@ impl Http {
         Ok(self.streaming(parts.url, response, held))
     }
 
+    /// 用于调用接口：发出 `method` 的 `url`、带上请求体 `body`，收到响应头即返回，响应体由调用方读（见
+    /// [`Streaming`]）。不占名额，`on_request` 回调同 [`Http::get_once`]；不重试，任何状态都作为响应返回。有请求体时回
+    /// 调改出的请求头里有 Content-Type 报回调错误。
+    pub(crate) async fn call(
+        &self,
+        purpose: Purpose,
+        url: &Url,
+        method: Method,
+        body: Option<&Body>,
+        cancel: &CancellationToken,
+    ) -> Result<Streaming, SendFailure> {
+        let parts = self.prepare(purpose, url).await?;
+        let mut builder = self.request(http_method(method), &parts)?;
+        if let Some(body) = body {
+            if parts.headers.iter().any(|(name, _)| is_content_type(name)) {
+                let cause = "带了请求体时 Content-Type 随请求体给出，回调不能另加";
+                return Err(Error::Hook {
+                    hook: HookKind::Request,
+                    cause: cause.into(),
+                }
+                .into());
+            }
+            builder = builder
+                .header(CONTENT_TYPE, &body.content_type)
+                .body(body.data.clone());
+        }
+        let response = dispatch(builder, &parts.url, cancel).await?;
+        Ok(self.streaming(parts.url, response, None))
+    }
+
     fn streaming(
         &self,
         url: Url,
@@ -359,19 +404,14 @@ impl Http {
         Ok(parts)
     }
 
-    /// 发出请求，附加 `request` 的 Range 与 If-Range，收到响应头即返回；状态不在这里检查。都带
-    /// `Accept-Encoding: identity`：本库不解压，要原样的字节（不带这个头即表示什么编码都接受，RFC 9110 12.5.3）。
+    /// 发出 GET，附加 `request` 的 Range 与 If-Range，收到响应头即返回；状态不在这里检查。
     async fn send(
         &self,
         parts: &RequestParts,
         request: &RangeRequest,
         cancel: &CancellationToken,
     ) -> Result<reqwest::Response, Error> {
-        let mut builder = self.clients.get()?.get(parts.url.as_str());
-        for (name, value) in &parts.headers {
-            builder = builder.header(name, value);
-        }
-        builder = builder.header(ACCEPT_ENCODING, "identity");
+        let mut builder = self.request(reqwest::Method::GET, parts)?;
         if let Some(Span { start, end }) = request.span {
             let range = match end {
                 Some(end) => format!("bytes={start}-{}", end - 1),
@@ -382,16 +422,74 @@ impl Http {
         if let Some(validator) = &request.if_range {
             builder = builder.header(IF_RANGE, validator);
         }
-        tokio::select! {
-            _ = cancel.cancelled() => Err(Error::Cancelled),
-            sent = builder.send() => sent.map_err(|e| http_error(&parts.url, classify(e))),
+        dispatch(builder, &parts.url, cancel)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    /// `method` 的 `parts` 请求，带上它的请求头与 `Accept-Encoding: identity`：本库不解压，要原样的字节（不带这个头即
+    /// 表示什么编码都接受，RFC 9110 12.5.3）。
+    ///
+    /// 简化：调用接口也不要压缩，几百 KB 的 JSON 照原样传；接口响应的传输时间成为瓶颈时，调用接口改为接受 gzip、按解压
+    /// 后的大小算上限。
+    fn request(
+        &self,
+        method: reqwest::Method,
+        parts: &RequestParts,
+    ) -> Result<reqwest::RequestBuilder, Error> {
+        let mut builder = self.clients.get()?.request(method, parts.url.as_str());
+        for (name, value) in &parts.headers {
+            builder = builder.header(name, value);
         }
+        Ok(builder.header(ACCEPT_ENCODING, "identity"))
     }
 
     /// 第 `attempt` 次失败后的等待，抖动由地址与次数的哈希决定。
     fn backoff(&self, url: &Url, attempt: u32) -> Duration {
         let permille = 750 + (self.jitter.hash_one((url.as_str(), attempt)) % 500) as u32;
         backoff_delay(&self.retry, attempt, permille)
+    }
+}
+
+/// 发出请求 `builder`（发往 `url`，用于错误信息），收到响应头即返回。
+async fn dispatch(
+    builder: reqwest::RequestBuilder,
+    url: &Url,
+    cancel: &CancellationToken,
+) -> Result<reqwest::Response, SendFailure> {
+    tokio::select! {
+        _ = cancel.cancelled() => Err(Error::Cancelled.into()),
+        sent = builder.send() => sent.map_err(|e| SendFailure {
+            // 连接（含 TLS 握手、经代理的隧道）没建成：请求还没写出
+            unsent: e.is_connect(),
+            error: http_error(url, classify(e)),
+        }),
+    }
+}
+
+/// 没收到响应的一次请求。
+pub(crate) struct SendFailure {
+    pub error: Error,
+    /// 确定请求没有发出，重发不会让服务器多处理一次；false 时可能已发出
+    pub unsent: bool,
+}
+
+/// 不确定发没发出的失败。
+impl From<Error> for SendFailure {
+    fn from(error: Error) -> Self {
+        SendFailure {
+            error,
+            unsent: false,
+        }
+    }
+}
+
+fn http_method(method: Method) -> reqwest::Method {
+    match method {
+        Method::Get => reqwest::Method::GET,
+        Method::Post => reqwest::Method::POST,
+        Method::Patch => reqwest::Method::PATCH,
+        Method::Delete => reqwest::Method::DELETE,
     }
 }
 
@@ -575,8 +673,8 @@ pub(crate) fn body_limit(purpose: Purpose) -> Option<u64> {
         Purpose::Init => Some(16 << 20),
         // key 本身 16 字节；交给 on_key 回调换算的原始内容（如 JSON、加了密的）也不会大
         Purpose::Key => Some(1 << 20),
-        // 文件的大小由来源决定；认出是播放列表之后按播放列表的上限读
-        Purpose::Segment | Purpose::File => None,
+        // 文件的大小由来源决定，认出是播放列表之后按播放列表的上限读；取回小资源与调用接口的上限由调用方给
+        Purpose::Segment | Purpose::File | Purpose::Call => None,
     }
 }
 
