@@ -200,11 +200,13 @@ impl From<core::Mp4Unsupported> for Mp4Unsupported {
     fn from(unsupported: core::Mp4Unsupported) -> Self {
         use core::Mp4Unsupported as U;
         match unsupported {
+            // HLS 只合并成 MP4，容器恒为 MP4
             U::Codec {
                 group,
                 track,
                 kind,
                 codec,
+                container: _,
             } => Mp4Unsupported::Codec {
                 group,
                 track,

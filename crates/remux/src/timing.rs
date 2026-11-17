@@ -11,7 +11,7 @@ pub(crate) const MICROS: Rational = Rational(1, 1_000_000);
 /// 同一组的 TS 与打包音频在同一个 33 位的 90 kHz 时钟上，但各输入按自己的第一个时间戳展开回绕（FFmpeg 读每个 TS
 /// 输入、本库读打包音频都如此），起点跨在回绕点附近两侧的两个输入会差 2^33（约 26.5 小时）。以第一个读出包的这类
 /// 输入为准，其余这类输入的第一个 DTS 离它超过半个回绕周期时，整个输入平移整数个周期：同一组各轨的起点实际相距远
-/// 小于半个周期。fMP4 的时间戳不回绕，不参与。
+/// 小于半个周期。fMP4 的时间戳不回绕，不参与。在各输入读到第一个包之后、[`Source::offset_us`] 还是 0 时调用。
 pub(crate) fn align_wraps(sources: &mut [Source]) {
     let firsts: Vec<Option<i64>> = sources
         .iter()
@@ -22,7 +22,7 @@ pub(crate) fn align_wraps(sources: &mut [Source]) {
     };
     for (source, first) in sources.iter_mut().zip(firsts) {
         if let Some(first) = first {
-            source.wrap_us = wrap_shift_us(first - base);
+            source.offset_us = wrap_shift_us(first - base);
         }
     }
 }

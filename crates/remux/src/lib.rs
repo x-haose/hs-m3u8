@@ -1,4 +1,5 @@
-//! 转封装：把 HLS 各条轨的分片原样复制（不重编码）进一个 MP4。
+//! 转封装：把 HLS 各条轨的分片原样复制（不重编码）进一个 MP4（[`remux`]），或把几个完整文件（如分开下载的视频与音频）
+//! 合进一个 MP4 或 Matroska 文件（[`merge_files`]）。以下先说 HLS 的合并，完整文件的不同之处见 [`merge_files`]。
 //!
 //! 输入按不连续段组（两个 `EXT-X-DISCONTINUITY` 之间）组织，每组里每条轨一份分片列表，fMP4 另带 init 段。
 //! - 组内：一条轨的分片按字节顺序当作一个连续的输入读取，同一时刻只打开一个文件，不先拼成大文件；打包音频（RFC
@@ -12,15 +13,17 @@
 //!   的解码时间戳必须严格递增（组内不能往回跳或重复），相邻分片之间也不能往前跳得比声明的时长多出一截。TS 里损坏的
 //!   音频包、打包音频里的损坏处跳过并计数（见 [`StreamReport::discarded_corrupt_bytes`]）；每组开头解不出的视频包
 //!   不写出并计数（见 [`StreamReport::skipped_before_keyframe`]）。
-//! - 只接受 MP4 能放、FFmpeg 构建启用了解复用与解析的编码，TS 与打包音频里只收其中能逐帧读出参数的（报
-//!   [`Unsupported::Codec`] 时列出）；MP4 封装器另有的限制（MP3 的采样率、E-AC-3 的帧结构）见 [`Unsupported`] 的各项。
+//! - 只接受输出容器能放（见 [`Container::holds`]）、FFmpeg 构建启用了解复用与解析的编码，TS 与裸音频（含打包音频）
+//!   里只收其中能逐帧读出参数的（报 [`Unsupported::Codec`] 时列出）；MP4 封装器另有的限制（MP3 的采样率、E-AC-3 的帧
+//!   结构）见 [`Unsupported`] 的各项。
 //!
 //! 输出写完回读核对每路流的包数并落盘；失败或取消（见 [`Cancel`]）时输出上可能留有写了一半的文件。输出要么完整、要么
 //! 不存在由调用方写到临时路径、成功后改名、失败时删除来保证。错误信息已包含原因，不经 `source()` 重复给出。
 //!
 //! 依照链接的 FFmpeg 的这些内部行为（各处注释写作「链接的 FFmpeg …」）：movenc 的 mov_init（MP3 最低采样率）与
 //! handle_eac3（E-AC-3 的帧结构），mov 解复用器的 mov_read_tfhd、mov_read_trun（fMP4 样本的位置），mp3dec 的
-//! mp3_parse_vbr_tags（Info/Xing 帧），ADTS、MPEG 音频、AC-3 的帧头解析与 adts_aac_probe、ff_mpa_bitrate_tab。
+//! mp3_parse_vbr_tags（Info/Xing 帧），ADTS、MPEG 音频、AC-3 的帧头解析与 adts_aac_probe、ff_mpa_bitrate_tab，各解复用器
+//! 的名称与裸 AC-3 解复用器的时间基，封装器对 AVFMT_TS_NONSTRICT 的 DTS 检查。
 
 mod chain;
 mod codecs;
@@ -47,11 +50,12 @@ use std::time::Duration;
 use ffmpeg::media;
 use ffmpeg_next as ffmpeg;
 
+pub use crate::codecs::{Codec, Container};
 pub use crate::error::{Error, FfmpegError, Unsupported};
 
 use crate::chain::ffmpeg_path;
 use crate::group::{layout_of, open_group, primed, references_of};
-use crate::write::write_verified;
+use crate::write::{write_files, write_verified};
 
 /// 一个不连续段组里某条轨的分片，按播放顺序；fMP4 时 `init` 是该组使用的 init 段。fMP4 的 init 段与各分片须通过
 /// [`fmp4::check`]、最后一个 box 的长度不写 0（见 [`fmp4::seal`]），合并时再核对一遍（见 [`Error::Fmp4`]）。
@@ -103,7 +107,7 @@ impl fmt::Display for StreamKind {
     }
 }
 
-/// 一条轨在输出中贡献哪些种类的流，各组相同。
+/// 一条轨（或合并文件时一个输入）在输出中贡献哪些种类的流，各组相同。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Streams {
     All,
@@ -174,7 +178,8 @@ pub struct StreamReport {
     pub shape: Shape,
     /// 写入、且回读核对一致的包数
     pub packets: u64,
-    /// 输入中没有 DTS、因而未写入的包数
+    /// 输入中没有 DTS、因而未写入的包数。流开头缺 DTS 而带 PTS 与时长的包（Matroska 里有 B 帧时的开头几帧）按随后
+    /// 第一个 DTS 倒推补上，不算在内
     pub skipped_without_dts: u64,
     /// 各组开头解不出、因而未写入的视频包数：第一个关键帧（随机访问点）之前的包，与参考上一个 GOP 的前导帧（HEVC 为
     /// RASL；其余编码为解码在关键帧之后、呈现在它之前的帧）。音频为 0
@@ -228,20 +233,22 @@ impl Default for Cancel {
     }
 }
 
-/// 合并的进度：一组里一条轨的输入文件（init 段或分片；打包音频按分片算）写完若干个时，以写完的个数调用；各组各轨写完
-/// 时合计为它们的 init 段与分片数，回读核对输出不计。按写出的包所在的分片推进：写到第 n 个分片的包时，它之前的分片与
-/// init 段即算写完；一组写完时补齐（含不取流的轨）。在写包的线程上调用，要快、不阻塞。默认不报。
+/// 合并的进度，以新写完的量调用（只报大于 0 的），回读核对输出不计。在写包的线程上调用，要快、不阻塞。默认不报。
+/// - [`remux`]：单位为文件。一组里一条轨的输入文件（init 段或分片；打包音频按分片算）写完若干个时报；各组各轨写完时
+///   合计为它们的 init 段与分片数。按写出的包所在的分片推进：写到第 n 个分片的包时，它之前的分片与 init 段即算写完；
+///   一组写完时补齐（含不取流的轨）。
+/// - [`merge_files`]：单位为字节。按写出的包在所在文件里的字节位置推进；各文件写完时补齐，合计为各文件打开时的字节数。
 #[derive(Clone, Default)]
-pub struct WriteProgress(Option<Arc<dyn Fn(usize) + Send + Sync>>);
+pub struct WriteProgress(Option<Arc<dyn Fn(u64) + Send + Sync>>);
 
 impl WriteProgress {
-    pub fn new(written: impl Fn(usize) + Send + Sync + 'static) -> WriteProgress {
+    pub fn new(written: impl Fn(u64) + Send + Sync + 'static) -> WriteProgress {
         WriteProgress(Some(Arc::new(written)))
     }
 
-    pub(crate) fn add(&self, files: usize) {
-        if let (Some(written), 1..) = (&self.0, files) {
-            written(files);
+    pub(crate) fn add(&self, amount: u64) {
+        if let (Some(written), 1..) = (&self.0, amount) {
+            written(amount);
         }
     }
 }
@@ -274,6 +281,44 @@ pub fn remux(
         return Err(Error::NonUtf8Path(output.to_path_buf()));
     };
     let report = write_verified(streams, &groups, path, control)?;
+    sync(output)?;
+    Ok(report)
+}
+
+/// 合并完整文件时的一个输入：文件与它贡献的流。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileInput {
+    pub path: PathBuf,
+    /// 要取的流种类，指定的每种都要有（见 [`merge_files`]）
+    pub streams: Streams,
+}
+
+/// 把几个完整文件的流原样复制进 `output`（`container` 的格式，MP4 时 moov 前置），写完回读核对每路流的包数并落盘。
+/// 失败或取消时 `output` 上可能留有写了一半的文件，由调用方删除；已存在的 `output` 会被替换。
+///
+/// 与 HLS 的合并（见本 crate 的说明）不同之处：
+/// - 输入格式由 FFmpeg 按内容识别，只收 MP4 一类（含 ftyp、moov、sidx 与各 moof/mdat 连在一个文件里的分段 MP4，及
+///   M4A）、Matroska（含 WebM）、TS 与裸 AAC、MP3，其余报 [`Error::FileFormat`]；探测读到 FFmpeg 的默认上限为止。
+/// - 每个输入按 [`FileInput::streams`] 取第一路视频和（或）第一路音频，指定的每种都要有（否则报
+///   [`Error::MissingStream`]），且都要读得出能写出的包（否则报 [`Error::EmptyInput`]）；同一类流只能来自一个输入。
+/// - 各输入的时间线互不相干：每个输入各自平移，所取各路流的起始时刻落在输出的 0 处（同 `ffmpeg -i 视频 -i 音频 -c
+///   copy` 的默认做法）。起始时刻按容器的编辑列表、MP3 的 Info 帧等去掉了编码器的起始延迟，延迟里的包落在 0 之前，
+///   由输出的编辑列表（MP4）或起始的偏移跳过。不核对时间戳的推进，DTS 的递增照样核对。
+/// - 报错里的组号恒为 0，轨号为输入在 `inputs` 里的下标；进度的单位为字节（见 [`WriteProgress`]）。
+pub fn merge_files(
+    inputs: &[FileInput],
+    output: &Path,
+    container: Container,
+    control: &Control,
+) -> Result<MediaReport, Error> {
+    init()?;
+    if inputs.is_empty() {
+        return Err(Error::NoInputs);
+    }
+    let Some(path) = ffmpeg_path(output) else {
+        return Err(Error::NonUtf8Path(output.to_path_buf()));
+    };
+    let report = write_files(inputs, container, path, control)?;
     sync(output)?;
     Ok(report)
 }

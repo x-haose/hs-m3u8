@@ -1,5 +1,7 @@
 //! 打开一组各轨的分片、选出要取的流，再换成读包的输入。
 
+use std::path::Path;
+
 use ffmpeg::{Rational, codec};
 use ffmpeg_next as ffmpeg;
 
@@ -9,7 +11,9 @@ use crate::inband::Inband;
 use crate::input::Input;
 use crate::nal::Framing;
 use crate::source::Source;
-use crate::{Cancel, Error, Numbered, StreamKind, Streams, TrackSegments, Unsupported, ffi, frame};
+use crate::{
+    Cancel, Container, Error, Numbered, StreamKind, Streams, TrackSegments, Unsupported, ffi, frame,
+};
 
 /// 一条轨在某组中被选中的一路流。
 pub(crate) struct Selected {
@@ -20,9 +24,11 @@ pub(crate) struct Selected {
     /// HEVC 视频：包里 NAL 单元的排法，用于认出参考上一个 GOP 的前导帧（见 [`crate::nal::hevc_rasl`]）；其余流，及 MP4
     /// 的解码配置太短读不出排法时为 None
     pub(crate) hevc: Option<Framing>,
+    /// 参数随帧携带的输入（见 [`Input::standalone`]）：从头开始的逐包核对；其余为 None
+    pub(crate) inband: Option<Inband>,
 }
 
-/// 打开一条轨在一组里的分片，按 `wanted` 选出第一路视频与（或）第一路音频，并检查编码是否受支持。
+/// 打开一条轨在一组里的分片，按 `wanted` 选出流（见 [`select`]）。
 fn open_selected(
     segments: &TrackSegments,
     wanted: Streams,
@@ -31,6 +37,42 @@ fn open_selected(
     cancel: &Cancel,
 ) -> Result<(Input, Vec<Selected>), Error> {
     let input = Input::open(segments, group, track, cancel)?;
+    let selected = select(&input, wanted, Container::Mp4, group, track)?;
+    Ok((input, selected))
+}
+
+/// 打开完整文件 `path`，作为第 `track` 条轨按 `wanted` 选出流（见 [`select`]）；`wanted` 的每种流都要有，否则报
+/// [`Error::MissingStream`]。另返回文件打开时的字节数。
+pub(crate) fn open_file(
+    path: &Path,
+    wanted: Streams,
+    container: Container,
+    track: usize,
+    cancel: &Cancel,
+) -> Result<(OpenTrack, u64), Error> {
+    let (input, size) = Input::file(path, track, cancel)?;
+    let selected = select(&input, wanted, container, 0, track)?;
+    for kind in [StreamKind::Video, StreamKind::Audio] {
+        if wanted.wants(kind) && !selected.iter().any(|s| s.desc.shape.kind() == kind) {
+            return Err(Error::MissingStream { track, kind });
+        }
+    }
+    let opened = OpenTrack {
+        track,
+        input,
+        selected,
+    };
+    Ok((opened, size))
+}
+
+/// 按 `wanted` 选出 `input` 里第一路视频与（或）第一路音频，并检查编码能否放进 `container`。
+fn select(
+    input: &Input,
+    wanted: Streams,
+    container: Container,
+    group: usize,
+    track: usize,
+) -> Result<Vec<Selected>, Error> {
     let mut selected = Vec::new();
     for kind in [StreamKind::Video, StreamKind::Audio] {
         if !wanted.wants(kind) {
@@ -45,7 +87,8 @@ fn open_selected(
         };
         let id = stream.parameters().id();
         let shape = ffi::shape(&stream, kind);
-        check_codec(id, &shape, input.standalone(), group, track).map_err(Error::Unsupported)?;
+        check_codec(id, &shape, input.standalone(), container, group, track)
+            .map_err(Error::Unsupported)?;
         let config = if input.standalone() {
             Config::Inband
         } else {
@@ -65,15 +108,21 @@ fn open_selected(
             (Config::Init(hvcc), codec::Id::HEVC) => Framing::of_hvcc(hvcc),
             _ => None,
         };
+        let inband = if input.standalone() {
+            Some(Inband::of(id, container).expect("check_codec 只收能逐帧读出参数的编码"))
+        } else {
+            None
+        };
         selected.push(Selected {
             index: stream.index(),
             time_base: stream.time_base(),
             id,
             desc: Desc { shape, config },
             hevc,
+            inband,
         });
     }
-    Ok((input, selected))
+    Ok(selected)
 }
 
 /// 一条轨在一组里打开的输入与选中的流。

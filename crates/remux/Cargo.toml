@@ -1,7 +1,7 @@
 [package]
 name = "hs-m3u8-remux"
 version.workspace = true
-description = "Stream-copy HLS track files (TS / fMP4 / packed audio) into a single MP4 via a statically linked FFmpeg"
+description = "Stream-copy HLS track files (TS / fMP4 / packed audio) into a single MP4, or whole media files into MP4 / Matroska, via a statically linked FFmpeg"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

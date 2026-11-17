@@ -382,7 +382,10 @@ fn write_mp4(
     let advance = advance.clone();
     let control = Control {
         cancel: Cancel::new(move || token.is_cancelled()),
-        progress: WriteProgress::new(move |files| advance.mp4(files)),
+        // 合并 HLS 时单位为文件，合计不超过分片与 init 段的个数，在 usize 范围内
+        progress: WriteProgress::new(move |files| {
+            advance.mp4(usize::try_from(files).expect("文件个数在 usize 范围内"))
+        }),
     };
     hs_m3u8_remux::remux(streams, &groups, temp, &control).map_err(|e| remux_error(e, work_dir))
 }

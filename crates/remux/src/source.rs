@@ -48,12 +48,19 @@ pub(crate) struct Source {
     keyframe_pts: Vec<Option<i64>>,
     /// 上一个写出的包所在的分片（见 [`Source::check_jump`]）
     last_segment: Option<usize>,
+    /// 按输入流下标：进输出的流还没读到带 DTS 的包时，暂存的开头那些缺 DTS 的包（见 [`Source::read_input`]）
+    leading: Vec<Vec<Packet>>,
+    /// 按输入流下标：已读到带 DTS 的包
+    dts_seen: Vec<bool>,
+    /// 补好 DTS、待交给 [`Source::read_next`] 处理的包
+    filled: VecDeque<Packet>,
     /// 已读出、待写入的包及其映射；包一定带 DTS
     pub(crate) queue: VecDeque<(Packet, Mapping)>,
     /// 读到了末尾（见 [`Source::read_next`]）
     pub(crate) finished: bool,
-    /// 按回绕对齐时加到这个输入所有时间戳上的量，微秒（见 [`crate::timing::align_wraps`]）
-    pub(crate) wrap_us: i64,
+    /// 加到这个输入所有时间戳上的量，微秒：读到第一个包之后先按回绕对齐（见 [`crate::timing::align_wraps`]），写出前再
+    /// 加上平移到输出时间线的量
+    pub(crate) offset_us: i64,
 }
 
 impl Source {
@@ -78,12 +85,13 @@ impl Source {
                 time_base: s.time_base,
             });
             hevc[s.index] = s.hevc;
-            if input.standalone() {
-                inband[s.index] = Some(match references.get(output).cloned().flatten() {
-                    Some(reference) => reference.for_next_group(),
-                    None => Inband::of(s.id).expect("check_codec 只收能逐帧读出参数的编码"),
-                });
-            }
+            inband[s.index] =
+                s.inband
+                    .as_ref()
+                    .map(|own| match references.get(output).cloned().flatten() {
+                        Some(reference) => reference.for_next_group(),
+                        None => own.clone(),
+                    });
         }
         Source {
             group,
@@ -94,10 +102,13 @@ impl Source {
             dropped: vec![Dropped::default(); streams],
             hevc,
             keyframe_pts: vec![None; streams],
+            leading: vec![Vec::new(); streams],
+            dts_seen: vec![false; streams],
+            filled: VecDeque::new(),
             last_segment: None,
             queue: VecDeque::new(),
             finished: false,
-            wrap_us: 0,
+            offset_us: 0,
         }
     }
 
@@ -112,7 +123,7 @@ impl Source {
     pub(crate) fn read_next(&mut self) -> Result<Option<(Packet, Mapping)>, Error> {
         loop {
             let mut packet = Packet::empty();
-            if !self.input.read(&mut packet, self.group, self.track)? {
+            if !self.read_input(&mut packet)? {
                 if let Some((stream, bytes)) = self.input.discarded() {
                     self.dropped[stream].corrupt_bytes += bytes;
                 }
@@ -163,7 +174,56 @@ impl Source {
         }
     }
 
-    /// 写出前核对：包 `packet`（对齐回绕后的 DTS 为 `dts_us`，微秒）比全组已写出的最大 DTS `clock_us` 超出的部分，减去
+    /// 从输入读下一个包，补上进输出的流开头缺的 DTS：Matroska 只存 PTS，有 B 帧时 FFmpeg 按重排的延迟由 PTS 推出 DTS，
+    /// 开头延迟那几个包推不出。这些包（带 PTS 与时长）先暂存，读到这路流第一个带 DTS 的包时，从它的 DTS 起按各包的时长
+    /// 往前倒推（同 ffmpeg 命令行补的值）。读到末尾仍没有 DTS 的照原样交出，按缺 DTS 计数。读到末尾返回 false。
+    fn read_input(&mut self, packet: &mut Packet) -> Result<bool, Error> {
+        loop {
+            if let Some(filled) = self.filled.pop_front() {
+                *packet = filled;
+                return Ok(true);
+            }
+            if !self.input.read(packet, self.group, self.track)? {
+                for leading in &mut self.leading {
+                    self.filled.extend(leading.drain(..));
+                }
+                match self.filled.pop_front() {
+                    Some(filled) => {
+                        *packet = filled;
+                        return Ok(true);
+                    }
+                    None => return Ok(false),
+                }
+            }
+            let stream = packet.stream();
+            // TS 可能在文件中途出现新流，其下标超出建立映射时的流数；不进输出的流不补
+            if self.map.get(stream).is_none_or(Option::is_none) || self.dts_seen[stream] {
+                return Ok(true);
+            }
+            let Some(dts) = packet.dts() else {
+                if packet.pts().is_some() && packet.duration() > 0 {
+                    self.leading[stream].push(std::mem::replace(packet, Packet::empty()));
+                    continue;
+                }
+                return Ok(true);
+            };
+            self.dts_seen[stream] = true;
+            let mut leading = std::mem::take(&mut self.leading[stream]);
+            if leading.is_empty() {
+                return Ok(true);
+            }
+            let mut next = dts;
+            for earlier in leading.iter_mut().rev() {
+                next -= earlier.duration();
+                earlier.set_dts(Some(next));
+            }
+            self.filled.extend(leading);
+            self.filled
+                .push_back(std::mem::replace(packet, Packet::empty()));
+        }
+    }
+
+    /// 写出前核对：包 `packet`（输出时间线上的 DTS 为 `dts_us`，微秒）比全组已写出的最大 DTS `clock_us` 超出的部分，减去
     /// 这个输入上一个包所在的片（它在那片里之后还有多久不知道，按整片算）与其间各片声明的时长，即输出里整组都没有内容的
     /// 空档，超过容差（见 [`crate::input::SegmentMap::tolerance_us`]）时报 [`Unsupported::TimestampJump`]。一路流单独中
     /// 断时别的流推着时钟走，帧稀疏时跨片的间隔有所在的片抵着，都不算；片内的跳变照样量得到。没有位置的包（解析器从一个
@@ -293,10 +353,37 @@ impl Source {
         }
     }
 
-    /// 队首的包对齐回绕后的 DTS，微秒。
+    /// 队首的包加上 [`Source::offset_us`] 之后的 DTS，微秒。
     pub(crate) fn front_dts_us(&self) -> Option<i64> {
         let (packet, mapping) = self.queue.front()?;
         let dts = packet.dts().expect("队列中的包都带 DTS");
-        Some(dts.rescale(mapping.time_base, MICROS) + self.wrap_us)
+        Some(dts.rescale(mapping.time_base, MICROS) + self.offset_us)
+    }
+
+    /// 这个输入里进输出的各路流最早的起始时刻，微秒：FFmpeg 给的流的起始时刻（第一个包的 PTS，已按容器的编辑列表、MP3
+    /// 的 Info 帧等去掉编码器的起始延迟，延迟里的包时间戳为负），没有的取队列里这路流最早的 PTS（没有 PTS 的取 DTS）。
+    /// 进输出的流都没有包时为 None。
+    pub(crate) fn start_us(&self) -> Option<i64> {
+        let ictx = self.input.context();
+        self.map
+            .iter()
+            .enumerate()
+            .filter_map(|(index, mapping)| {
+                let mapping = mapping.as_ref()?;
+                let given = ictx.stream(index).map(|s| s.start_time());
+                let start = given
+                    .filter(|&ts| ts != ffmpeg::ffi::AV_NOPTS_VALUE)
+                    .or_else(|| {
+                        self.queue
+                            .iter()
+                            .filter(|(_, m)| m.output == mapping.output)
+                            .map(|(packet, _)| {
+                                packet.pts().or(packet.dts()).expect("队列中的包都带 DTS")
+                            })
+                            .min()
+                    })?;
+                Some(start.rescale(mapping.time_base, MICROS))
+            })
+            .min()
     }
 }

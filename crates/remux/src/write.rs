@@ -1,4 +1,4 @@
-//! 写出 MP4：按第 0 组建立输出流，逐组平移时间戳、交错写出，写完回读核对包数。
+//! 写出：按第 0 组（或各完整文件）建立输出流，平移时间戳、交错写出，写完回读核对包数。
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -10,12 +10,12 @@ use crate::chain::{self, Halt, SegmentChain};
 use crate::compare::Desc;
 use crate::error::file_error;
 use crate::ffi::{self, OpenFailure, OutputFile};
-use crate::group::{OpenTrack, layout_of, open_group, primed, references_of};
+use crate::group::{OpenTrack, layout_of, open_file, open_group, primed, references_of};
 use crate::source::{Dropped, Mapping, Source};
 use crate::timing::{MICROS, align_wraps, group_offset, retime};
 use crate::{
-    Cancel, Control, Error, FfmpegError, MediaReport, Numbered, Shape, StreamReport, Streams,
-    TrackSegments, Unsupported, WriteProgress,
+    Cancel, Container, Control, Error, FfmpegError, FileInput, MediaReport, Numbered, Shape,
+    StreamReport, Streams, TrackSegments, Unsupported, WriteProgress,
 };
 
 /// 一路输出流：第 0 组决定其编码参数，写出过程中累计统计。`_us` 结尾的时刻为输出时间线上的微秒。
@@ -60,7 +60,7 @@ pub(crate) fn write_verified(
     let cancel = &control.cancel;
     let first = open_group(streams, groups[0], None, cancel)?;
     let layout = layout_of(&first)?;
-    let mut muxer = Muxer::open(path, cancel, &first, &layout)?;
+    let mut muxer = Muxer::open(path, Container::Mp4, cancel, &first, &layout)?;
     let sources = primed(groups[0].0, first, &layout, &[])?;
     let references = references_of(&sources, muxer.outs.len());
     let (group, tracks) = groups[0];
@@ -70,16 +70,35 @@ pub(crate) fn write_verified(
         let sources = primed(numbered.0, opened, &layout, &references)?;
         muxer.write_group(numbered.0, sources, &numbered.1.tracks, &control.progress)?;
     }
-    let outs = muxer.finish()?;
-    verify(Path::new(path), &outs, cancel)?;
-    Ok(MediaReport {
-        streams: outs.into_iter().map(OutStream::report).collect(),
-    })
+    muxer.finish_verified(path, cancel)
 }
 
-/// 正在写的 MP4：已建好输出流、写完头。
+/// 合并各完整文件写到 `path`（`container` 的格式），写完回读核对每路流的包数。
+pub(crate) fn write_files(
+    inputs: &[FileInput],
+    container: Container,
+    path: &str,
+    control: &Control,
+) -> Result<MediaReport, Error> {
+    let cancel = &control.cancel;
+    let mut opened = Vec::with_capacity(inputs.len());
+    let mut sizes = Vec::with_capacity(inputs.len());
+    for (track, input) in inputs.iter().enumerate() {
+        let (file, size) = open_file(&input.path, input.streams, container, track, cancel)?;
+        opened.push(file);
+        sizes.push(size);
+    }
+    let layout = layout_of(&opened)?;
+    let mut muxer = Muxer::open(path, container, cancel, &opened, &layout)?;
+    let sources = primed(0, opened, &layout, &[])?;
+    muxer.write_files(sources, &sizes, &control.progress)?;
+    muxer.finish_verified(path, cancel)
+}
+
+/// 正在写的输出：已建好输出流、写完头。
 struct Muxer {
     file: OutputFile,
+    container: Container,
     outs: Vec<OutStream>,
     /// 组间余量：最粗的输出时间基的一个 tick（向上取整到微秒）。换到输出时间基时的舍入不超过半个 tick，因此下一组的
     /// 首个 DTS 一定大于上一组的末个 DTS
@@ -87,17 +106,18 @@ struct Muxer {
 }
 
 impl Muxer {
-    /// 打开输出，按第 0 组 `first`（各轨选中的流为 `layout`）建立输出流并写头。
+    /// 以 `container` 的格式打开输出，按第 0 组 `first`（各轨选中的流为 `layout`）建立输出流并写头。
     fn open(
         path: &str,
+        container: Container,
         cancel: &Cancel,
         first: &[OpenTrack],
         layout: &[Vec<Desc>],
     ) -> Result<Muxer, Error> {
-        let mut file =
-            ffi::open_output(path, cancel).map_err(|failure| open_error(failure, path, cancel))?;
-        add_streams(&mut file.octx, first)?;
-        write_header(&mut file)?;
+        let mut file = ffi::open_output(path, container, cancel)
+            .map_err(|failure| open_error(failure, path, cancel))?;
+        add_streams(&mut file.octx, container, first)?;
+        write_header(&mut file, container)?;
         let outs: Vec<OutStream> = layout
             .iter()
             .flatten()
@@ -120,6 +140,7 @@ impl Muxer {
             .expect("第 0 组至少有一路输出流");
         Ok(Muxer {
             file,
+            container,
             outs,
             margin_us,
         })
@@ -136,12 +157,79 @@ impl Muxer {
     ) -> Result<(), Error> {
         align_wraps(&mut sources);
         let offset_us = self.offset_of(group, &sources)?;
-        // 全组已写出的最大 DTS，输入时间线上（对齐回绕后）的微秒
+        for source in &mut sources {
+            source.offset_us += offset_us;
+        }
+        // 全组已写出的最大 DTS，输出时间线上的微秒
         let mut clock_us: Option<i64> = None;
         // 各轨已报为写完的文件数（见 [`WriteProgress`]）
-        let mut written = vec![0; tracks.len()];
+        let mut written = vec![0u64; tracks.len()];
+        self.interleave(group, &mut sources, |source, packet, mapping, dts_us| {
+            source.check_jump(packet, mapping, dts_us, clock_us)?;
+            if let Some(segment) = source.segment() {
+                let init = tracks[source.track].init.is_some();
+                let done = u64::from(init) + segment as u64;
+                progress.add(done.saturating_sub(written[source.track]));
+                written[source.track] = written[source.track].max(done);
+            }
+            clock_us = Some(clock_us.map_or(dts_us, |clock| clock.max(dts_us)));
+            Ok(())
+        })?;
+        for (track, done) in tracks.iter().zip(written) {
+            let files = track.segments.len() as u64 + u64::from(track.init.is_some());
+            progress.add(files - done);
+        }
+        Ok(())
+    }
+
+    /// 写出各完整文件（各输入已读到每路流的第一个包，下标即轨号，`sizes` 为各文件打开时的字节数）：每个输入各自平移，
+    /// 起始时刻（见 [`Source::start_us`]）落在 0，按 DTS 交错写出。进度按写出的包在所在文件里的字节位置推进（见 [`WriteProgress`]）。
+    fn write_files(
+        &mut self,
+        mut sources: Vec<Source>,
+        sizes: &[u64],
+        progress: &WriteProgress,
+    ) -> Result<(), Error> {
+        for source in &mut sources {
+            let unfilled = source.map.iter().flatten().find(|m| {
+                !source
+                    .queue
+                    .iter()
+                    .any(|(_, queued)| queued.output == m.output)
+            });
+            if let Some(mapping) = unfilled {
+                return Err(Error::EmptyInput {
+                    track: source.track,
+                    kind: mapping.kind,
+                });
+            }
+            source.offset_us = -source.start_us().expect("各路流都有排队的包");
+        }
+        let mut written = vec![0u64; sizes.len()];
+        self.interleave(0, &mut sources, |source, packet, _, _| {
+            if let Ok(position) = u64::try_from(packet.position()) {
+                let done = &mut written[source.track];
+                progress.add(position.saturating_sub(*done));
+                *done = (*done).max(position);
+            }
+            Ok(())
+        })?;
+        for (size, done) in sizes.iter().zip(written) {
+            progress.add(size.saturating_sub(done));
+        }
+        Ok(())
+    }
+
+    /// 按加上各输入 [`Source::offset_us`] 之后的 DTS 交错写出各输入的包，直到都读完；`before` 在每个包写出之前调用，参数
+    /// 为它所在的输入、包、映射与输出时间线上的 DTS（微秒），返回错误时中止。读完后把各输入丢弃的包计入输出流。
+    fn interleave(
+        &mut self,
+        group: usize,
+        sources: &mut [Source],
+        mut before: impl FnMut(&mut Source, &Packet, Mapping, i64) -> Result<(), Error>,
+    ) -> Result<(), Error> {
         loop {
-            for source in &mut sources {
+            for source in sources.iter_mut() {
                 if source.queue.is_empty()
                     && !source.finished
                     && let Some(item) = source.read_next()?
@@ -149,7 +237,6 @@ impl Muxer {
                     source.queue.push_back(item);
                 }
             }
-            // 同组各输入共用一个偏移，按对齐回绕后的 DTS 交错写出
             let next = sources
                 .iter()
                 .enumerate()
@@ -158,24 +245,15 @@ impl Muxer {
             let Some((i, dts_us)) = next else { break };
             let source = &mut sources[i];
             let (packet, mapping) = source.queue.pop_front().expect("next 只指向有待写包的输入");
-            source.check_jump(&packet, mapping, dts_us, clock_us)?;
-            if let Some(segment) = source.segment() {
-                let done = usize::from(tracks[source.track].init.is_some()) + segment;
-                progress.add(done.saturating_sub(written[source.track]));
-                written[source.track] = written[source.track].max(done);
-            }
-            clock_us = Some(clock_us.map_or(dts_us, |clock| clock.max(dts_us)));
+            before(source, &packet, mapping, dts_us)?;
             let at = Placed {
                 group,
                 track: source.track,
-                offset_us: offset_us + source.wrap_us,
+                offset_us: source.offset_us,
             };
             self.write_packet(packet, mapping, at)?;
         }
-        for (track, done) in tracks.iter().zip(written) {
-            progress.add(track.segments.len() + usize::from(track.init.is_some()) - done);
-        }
-        self.add_dropped(&sources);
+        self.add_dropped(sources);
         Ok(())
     }
 
@@ -193,15 +271,15 @@ impl Muxer {
         }
     }
 
-    /// 本组的时间偏移（见 [`group_offset`]），由各输出流本组的首个 DTS 与全组最早的 PTS（输入时间线，微秒，取自各输入
-    /// 已读出的包；队列内同一路流按解码顺序排列）算出。
+    /// 本组的时间偏移（见 [`group_offset`]），由各输出流本组的首个 DTS 与全组最早的 PTS（对齐回绕后的输入时间线，微秒，
+    /// 取自各输入已读出的包；队列内同一路流按解码顺序排列）算出。
     fn offset_of(&self, group: usize, sources: &[Source]) -> Result<i64, Error> {
         let mut first_dts_us: Vec<Option<i64>> = vec![None; self.outs.len()];
         let mut min_pts_us: Option<i64> = None;
         for source in sources {
             for (packet, mapping) in &source.queue {
                 let tb = mapping.time_base;
-                let us = |ts: i64| ts.rescale(tb, MICROS) + source.wrap_us;
+                let us = |ts: i64| ts.rescale(tb, MICROS) + source.offset_us;
                 let dts = us(packet.dts().expect("队列中的包都带 DTS"));
                 let pts = packet.pts().map_or(dts, us);
                 first_dts_us[mapping.output].get_or_insert(dts);
@@ -233,10 +311,14 @@ impl Muxer {
         let out = mapping.output;
         let o = &mut self.outs[out];
         let t = retime(&mut packet, mapping.time_base, o.time_base, at.offset_us);
-        // 每路流的 DTS 在输出时间基下须严格递增（同一条 MP4 轨不能有两个样本同时解码）。FFmpeg 的封装器遇到不递增的
-        // 只报「参数不合法」，上一个为 0 时还不查，这里一律拦下；组间的偏移保证跨组递增，不递增只会出在组内
+        // 每路流的 DTS 在输出时间基下须递增：MP4 严格递增（同一条轨不能有两个样本同时解码），Matroska 的时间基为 1 毫秒，
+        // 换算后相等的不算（链接的 FFmpeg 对带 AVFMT_TS_NONSTRICT 的封装器同样只拦往回跳的）。FFmpeg 的 MP4 封装器遇到
+        // 不递增的只报「参数不合法」，上一个为 0 时还不查，这里一律拦下；组间的偏移保证跨组递增，不递增只会出在组内
         let dts = packet.dts().expect("retime 设了 DTS");
-        if o.last_dts.is_some_and(|last| dts <= last) {
+        let strict = self.container == Container::Mp4;
+        if o.last_dts
+            .is_some_and(|last| dts < last || (strict && dts == last))
+        {
             return Err(Error::Unsupported(Unsupported::DtsNotIncreasing {
                 group: at.group,
                 track: at.track,
@@ -256,15 +338,19 @@ impl Muxer {
         Ok(())
     }
 
-    /// 写尾（moov 前置时在这里把数据整体后移，FFmpeg 读写文件时同样轮询取消），关闭输出并检查关闭的结果。
-    fn finish(mut self) -> Result<Vec<OutStream>, Error> {
+    /// 写尾（MP4 的 moov 前置时在这里把数据整体后移，FFmpeg 读写文件时同样轮询取消），关闭输出并检查关闭的结果，再回读
+    /// `path` 核对每路流的包数。
+    fn finish_verified(mut self, path: &str, cancel: &Cancel) -> Result<MediaReport, Error> {
         if let Err(e) = self.file.octx.write_trailer() {
             return Err(self.file.write_error(e));
         }
         if let Err(e) = self.file.close() {
             return Err(self.file.close_error(e));
         }
-        Ok(self.outs)
+        verify(Path::new(path), &self.outs, cancel)?;
+        Ok(MediaReport {
+            streams: self.outs.into_iter().map(OutStream::report).collect(),
+        })
     }
 }
 
@@ -330,7 +416,11 @@ impl OutputFile {
 }
 
 /// 按第 0 组建立输出流，创建顺序即输出流下标（见 [`layout_of`]）。
-fn add_streams(octx: &mut format::context::Output, first: &[OpenTrack]) -> Result<(), Error> {
+fn add_streams(
+    octx: &mut format::context::Output,
+    container: Container,
+    first: &[OpenTrack],
+) -> Result<(), Error> {
     for t in first {
         for s in &t.selected {
             let stream = t
@@ -342,16 +432,18 @@ fn add_streams(octx: &mut format::context::Output, first: &[OpenTrack]) -> Resul
                 .add_stream(encoder::find(codec::Id::None))
                 .map_err(|e| Error::Mux(e.into()))?;
             ost.set_parameters(stream.parameters());
-            ffi::set_codec_tag(&mut ost, s.id);
+            ffi::set_codec_tag(&mut ost, s.id, container);
         }
     }
     Ok(())
 }
 
-/// 写 MP4 头（moov 前置）；封装器不认识的选项视为错误。
-fn write_header(file: &mut OutputFile) -> Result<(), Error> {
+/// 写头（MP4 的 moov 前置）；封装器不认识的选项视为错误。
+fn write_header(file: &mut OutputFile, container: Container) -> Result<(), Error> {
     let mut options = Dictionary::new();
-    options.set("movflags", "+faststart");
+    if container == Container::Mp4 {
+        options.set("movflags", "+faststart");
+    }
     let written = file.octx.write_header_with(options).map(|rejected| {
         rejected
             .iter()

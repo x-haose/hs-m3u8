@@ -3,6 +3,7 @@
 mod check;
 mod codecs;
 mod control;
+mod files;
 mod fmp4;
 mod io;
 mod keyframes;

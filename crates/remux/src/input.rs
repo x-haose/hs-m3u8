@@ -1,5 +1,5 @@
-//! 一条轨在一组里的输入。同一组的各输入读出的时间戳都在来源的同一条时间线上（TS 与打包音频为 33 位的 90 kHz
-//! 时钟，回绕另行对齐；fMP4 为媒体时间），整组因此共用一个偏移。
+//! 一条轨在一组里的输入，或合并文件时的一个完整文件。同一组的各输入读出的时间戳都在来源的同一条时间线上（TS 与打包
+//! 音频为 33 位的 90 kHz 时钟，回绕另行对齐；fMP4 为媒体时间），整组因此共用一个偏移；各完整文件的时间线互不相干。
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -14,13 +14,13 @@ use crate::packed::Packed;
 use crate::{Cancel, Error, Segment, TrackSegments, Unsupported, fmp4, standalone};
 
 pub(crate) enum Input {
-    /// TS 与 fMP4：init 段与分片按字节相连，作为一个输入读
+    /// TS 与 fMP4：init 段与分片按字节相连，作为一个输入读；或一个完整文件
     Chain {
         ictx: format::context::Input,
         /// 读分片文件出错时的路径与原因
         failure: chain::Failure,
-        /// 有 init 段（fMP4）：编码参数都在 init 段里，不随帧携带
-        init: bool,
+        /// 编码参数都在文件头（fMP4 的 init 段，或完整的 MP4、Matroska 文件的头）里，不随帧携带
+        header: bool,
         segments: SegmentMap,
     },
     Packed(Box<Packed>),
@@ -101,9 +101,37 @@ impl Input {
         Ok(Input::Chain {
             ictx,
             failure,
-            init,
+            header: init,
             segments: SegmentMap::new(starts, segments),
         })
+    }
+
+    /// 完整文件 `path`，作为第 0 组第 `track` 条轨。格式交给 FFmpeg 按内容识别，只收 MP4 一类（含单文件的分段
+    /// MP4、M4A）、Matroska（含 WebM）、TS 与裸 AAC、MP3，其余报 [`Error::FileFormat`]；探测读到 FFmpeg 的默认上限为止
+    /// （见 [`Probe::DEFAULT`]）。另返回文件打开时的字节数。
+    pub(crate) fn file(path: &Path, track: usize, cancel: &Cancel) -> Result<(Input, u64), Error> {
+        let len = std::fs::metadata(path).map_err(read_error(path))?.len();
+        let (chain, failure) = new_chain(vec![(path.to_path_buf(), 0..len)], cancel)?;
+        let ictx = open_chain(chain, &failure, Probe::DEFAULT, 0, track)?;
+        // 链接的 FFmpeg 中各解复用器的名称。裸 AC-3、E-AC-3 不收：其解复用器的时间基为 1/90000 秒，44.1 kHz 等采样率下
+        // 逐帧向下取整，时间戳随时长越差越多
+        let header = match ictx.format().name() {
+            "mov,mp4,m4a,3gp,3g2,mj2" | "matroska,webm" => true,
+            "mpegts" | "aac" | "mp3" => false,
+            other => {
+                return Err(Error::FileFormat {
+                    path: path.to_path_buf(),
+                    format: other.to_owned(),
+                });
+            }
+        };
+        let input = Input::Chain {
+            ictx,
+            failure,
+            header,
+            segments: SegmentMap::whole(),
+        };
+        Ok((input, len))
     }
 
     pub(crate) fn context(&self) -> &format::context::Input {
@@ -126,10 +154,10 @@ impl Input {
         }
     }
 
-    /// 没有 init 段的分片（TS 与打包音频）：编码参数随帧携带，要逐包核对（见 [`crate::inband`]）；时间戳在 33 位的
-    /// 90 kHz 时钟上，会回绕。
+    /// TS 与裸音频（含打包音频）：编码参数随帧携带，要逐包核对（见 [`crate::inband`]）。HLS 的分片的时间戳在 33 位的
+    /// 90 kHz 时钟上，同组各输入之间要对齐回绕（见 [`crate::timing::align_wraps`]）。
     pub(crate) fn standalone(&self) -> bool {
-        !matches!(self, Input::Chain { init: true, .. })
+        !matches!(self, Input::Chain { header: true, .. })
     }
 
     /// 打包音频丢弃的损坏字节：音频流的下标与字节数（见 [`Packed`]，读到末尾后才是全部）；其余输入为 None。
@@ -176,6 +204,16 @@ impl SegmentMap {
             longest_us: durations_us.iter().copied().max().unwrap_or(0),
             durations_us,
             gaps: segments.gaps.clone(),
+        }
+    }
+
+    /// 完整文件：一个时长未知的分片，不核对时间戳的推进。
+    pub(crate) fn whole() -> SegmentMap {
+        SegmentMap {
+            starts: vec![0],
+            durations_us: vec![0],
+            gaps: Vec::new(),
+            longest_us: 0,
         }
     }
 
@@ -280,6 +318,12 @@ pub(crate) struct Probe {
 }
 
 impl Probe {
+    /// FFmpeg 的默认上限（时长取 TS 的）：完整文件不能按整个文件探测，有流一直探测不出时读过的包都缓存在内存里。
+    pub(crate) const DEFAULT: Probe = Probe {
+        bytes: Probe::DEFAULT_BYTES,
+        duration_us: Probe::DEFAULT_DURATION_US,
+    };
+
     /// FFmpeg 探测的默认字节数（libavformat options_table.h 的 probesize）。
     const DEFAULT_BYTES: u64 = 5_000_000;
     /// FFmpeg 探测的默认时长，微秒：没设 analyzeduration 时 TS 的流按 7 秒、其余按 5 秒（libavformat demux.c 的

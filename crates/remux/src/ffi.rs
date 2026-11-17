@@ -10,7 +10,7 @@ use ffmpeg::format::stream::{Stream, StreamMut};
 use ffmpeg::util::interrupt::{self, InterruptGuard};
 use ffmpeg_next as ffmpeg;
 
-use crate::{Cancel, Shape, StreamKind};
+use crate::{Cancel, Container, Shape, StreamKind};
 
 pub(crate) fn shape(stream: &Stream<'_>, kind: StreamKind) -> Shape {
     let params = stream.parameters();
@@ -125,9 +125,10 @@ pub(crate) fn parsed_picture(stream: &Stream<'_>) -> Option<(u32, u32, i32)> {
     ))
 }
 
-/// HEVC 标 `hvc1`（QuickTime/Safari 不播 `hev1`）；其余置 0，由 MP4 封装器按编码选择。
-pub(crate) fn set_codec_tag(ost: &mut StreamMut<'_>, id: codec::Id) {
-    let tag = if id == codec::Id::HEVC {
+/// MP4 里的 HEVC 标 `hvc1`（QuickTime/Safari 不播 `hev1`）；其余置 0，由封装器按编码选择：从输入复制来的标签（如
+/// MP4 的 `mp4a`）可能不在另一种封装器的标签表里，写头时报不兼容。
+pub(crate) fn set_codec_tag(ost: &mut StreamMut<'_>, id: codec::Id, container: Container) {
+    let tag = if container == Container::Mp4 && id == codec::Id::HEVC {
         u32::from_le_bytes(*b"hvc1")
     } else {
         0
@@ -172,15 +173,19 @@ impl Drop for OutputFile {
 
 /// 打开输出时失败的一步。
 pub(crate) enum OpenFailure {
-    /// 建立 MP4 封装器的上下文
+    /// 建立封装器的上下文
     Muxer(ffmpeg::Error),
     /// 创建文件
     File(ffmpeg::Error),
 }
 
-/// 以 MP4 格式打开输出 `path`（不含 NUL 的 UTF-8），装上中断回调：FFmpeg 每次读写文件前轮询它（含写 moov 前置时
-/// 重新打开输出搬动数据的第二遍），`cancel` 取消后读写以 AVERROR_EXIT 失败。
-pub(crate) fn open_output(path: &str, cancel: &Cancel) -> Result<OutputFile, OpenFailure> {
+/// 以 `container` 的格式打开输出 `path`（不含 NUL 的 UTF-8），装上中断回调：FFmpeg 每次读写文件前轮询它（含写 moov
+/// 前置时重新打开输出搬动数据的第二遍），`cancel` 取消后读写以 AVERROR_EXIT 失败。
+pub(crate) fn open_output(
+    path: &str,
+    container: Container,
+    cancel: &Cancel,
+) -> Result<OutputFile, OpenFailure> {
     let c_path = CString::new(path).expect("调用方保证路径不含 NUL");
     let polled = cancel.clone();
     let interrupt = interrupt::new(Box::new(move || polled.is_cancelled()));
@@ -190,7 +195,7 @@ pub(crate) fn open_output(path: &str, cancel: &Cancel) -> Result<OutputFile, Ope
         ffmpeg::ffi::avformat_alloc_output_context2(
             &raw mut ctx,
             std::ptr::null(),
-            c"mp4".as_ptr(),
+            container.muxer().as_ptr(),
             c_path.as_ptr(),
         )
     };

@@ -1,5 +1,5 @@
-//! 参数随帧携带的输入（TS 与打包音频，没有 MP4 那样的样本描述）里每个包的编码参数。MP4 的一条轨只有一个样本描述，
-//! 由开头的包得出；同一路流后面的包参数变了，样本描述就与它们不符，如采样率变了时播放的音调与速度都不对。音频的
+//! 参数随帧携带的输入（TS 与裸音频，没有 MP4 那样的样本描述）里每个包的编码参数。输出（MP4 或 Matroska）的一条轨只有
+//! 一个样本描述，由开头的包得出；同一路流后面的包参数变了，样本描述就与它们不符，如采样率变了时播放的音调与速度都不对。音频的
 //! 参数从帧头读出（见 [`crate::frame`]）；视频（H.264、HEVC）的画面宽高与像素格式取 FFmpeg 解复用器的解析器从参数集
 //! 得出的值。
 
@@ -7,7 +7,7 @@ use ffmpeg::codec;
 use ffmpeg::format::stream::Stream;
 use ffmpeg_next as ffmpeg;
 
-use crate::{ffi, frame};
+use crate::{Container, ffi, frame};
 
 /// 一路流在一组里的参数核对：编码不变，每个包的参数须与第一个包的相同。第 0 组之后的组从第 0 组的核对开始（见
 /// [`Inband::for_next_group`]），第一个包就与第 0 组的比较。
@@ -19,6 +19,8 @@ pub(crate) struct Inband {
     params: Params,
     /// 第一个包的参数取自第 0 组，这一组还没有核对过读得出的包
     leading: bool,
+    /// 输出为 MP4：E-AC-3 另须满足 MP4 封装器的帧结构要求（见 [`check_eac3`]）
+    mp4: bool,
 }
 
 #[derive(Clone)]
@@ -34,28 +36,25 @@ enum Params {
 }
 
 impl Inband {
-    /// 编码 `id` 的核对；不能逐帧读出参数的编码为 None。
-    pub(crate) fn of(id: codec::Id) -> Option<Inband> {
-        let framing = match id {
-            codec::Id::H264 | codec::Id::HEVC => {
-                return Some(Inband {
-                    codec: id,
-                    params: Params::Video { first: None },
-                    leading: false,
-                });
-            }
-            codec::Id::AAC => frame::Framing::Adts,
-            codec::Id::AC3 | codec::Id::EAC3 => frame::Framing::Ac3,
-            codec::Id::MP2 | codec::Id::MP3 => frame::Framing::Mpeg,
-            _ => return None,
+    /// 编码 `id` 能逐帧读出参数。
+    pub(crate) fn readable(id: codec::Id) -> bool {
+        matches!(id, codec::Id::H264 | codec::Id::HEVC) || framing(id).is_some()
+    }
+
+    /// 编码 `id` 放进 `container` 的核对；不能逐帧读出参数的编码为 None。
+    pub(crate) fn of(id: codec::Id, container: Container) -> Option<Inband> {
+        let params = match id {
+            codec::Id::H264 | codec::Id::HEVC => Params::Video { first: None },
+            _ => Params::Audio {
+                framing: framing(id)?,
+                first: None,
+            },
         };
         Some(Inband {
             codec: id,
-            params: Params::Audio {
-                framing,
-                first: None,
-            },
+            params,
             leading: false,
+            mp4: container == Container::Mp4,
         })
     }
 
@@ -81,7 +80,7 @@ impl Inband {
             Params::Audio { framing, first } => {
                 let params = audio_params(*framing, data).ok_or(Mismatch::Unreadable)?;
                 self.leading = false;
-                if let AudioParams::Ac3(frames) = &params {
+                if let (true, AudioParams::Ac3(frames)) = (self.mp4, &params) {
                     check_eac3(frames)?;
                 }
                 *first.get_or_insert_with(|| params.clone()) == params
@@ -95,6 +94,16 @@ impl Inband {
             },
         };
         if same { Ok(()) } else { Err(differs) }
+    }
+}
+
+/// 音频编码 `id` 的帧头格式；不能逐帧读出参数的为 None。
+fn framing(id: codec::Id) -> Option<frame::Framing> {
+    match id {
+        codec::Id::AAC => Some(frame::Framing::Adts),
+        codec::Id::AC3 | codec::Id::EAC3 => Some(frame::Framing::Ac3),
+        codec::Id::MP2 | codec::Id::MP3 => Some(frame::Framing::Mpeg),
+        _ => None,
     }
 }
 

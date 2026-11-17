@@ -94,10 +94,14 @@ pub use request::{
 pub use tokio_util::sync::CancellationToken;
 pub use url::Url;
 
-/// 公开接口用到的合并报告与合并错误的类型。
+/// 公开接口用到的合并报告与合并错误的类型，及合并完整文件（如分开下载的视频与音频）的同步接口
+/// [`merge_files`](remux::merge_files)：它会阻塞，要在阻塞线程池中调用。
 pub mod remux {
     pub use hs_m3u8_remux::fmp4::Problem as Fmp4Problem;
-    pub use hs_m3u8_remux::{Error, FfmpegError, MediaReport, Shape, StreamKind, StreamReport};
+    pub use hs_m3u8_remux::{
+        Cancel, Codec, Container, Control, Error, FfmpegError, FileInput, MediaReport, Shape,
+        StreamKind, StreamReport, Streams, Unsupported, WriteProgress, merge_files,
+    };
 }
 
 /// 公开接口用到的播放列表解析与选轨类型。
