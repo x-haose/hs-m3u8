@@ -122,12 +122,26 @@ pub(crate) enum Mismatch {
     Eac3Substreams,
 }
 
-/// 参数在文件头里的输入（MP4、Matroska）的一个 E-AC-3 包 `data`，MP4 封装器能否处理其帧结构（见 [`check_eac3`]）：包
-/// 须恰好由整个同步帧组成，读不出时为 [`Mismatch::Unreadable`]。参数随帧携带的输入由 [`Inband::check`] 核对。
-pub(crate) fn eac3_for_mp4(data: &[u8]) -> Result<(), Mismatch> {
-    match audio_params(frame::Framing::Ac3, data) {
-        Some(AudioParams::Ac3(frames)) => check_eac3(&frames),
-        _ => Err(Mismatch::Unreadable),
+/// 一路流的逐包核对。
+#[derive(Clone)]
+pub(crate) enum PacketCheck {
+    /// 参数随帧携带的输入（TS 与裸音频）：编码参数前后一致，音频读得出帧头（见 [`Inband`]）
+    Inband(Inband),
+    /// 参数在文件头里的输入（fMP4、MP4、Matroska）的 E-AC-3、输出为 MP4：MP4 封装器处理得了帧结构（见
+    /// [`check_eac3`]）。包读不出同步帧时不在这里判断，原样交给封装器，由它报错
+    Eac3ForMp4,
+}
+
+impl PacketCheck {
+    /// 核对 `stream` 的一个包 `data`。
+    pub(crate) fn check(&mut self, data: &[u8], stream: &Stream<'_>) -> Result<(), Mismatch> {
+        match self {
+            PacketCheck::Inband(inband) => inband.check(data, stream),
+            PacketCheck::Eac3ForMp4 => match audio_params(frame::Framing::Ac3, data) {
+                Some(AudioParams::Ac3(frames)) => check_eac3(&frames),
+                _ => Ok(()),
+            },
+        }
     }
 }
 

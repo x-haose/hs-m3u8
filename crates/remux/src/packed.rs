@@ -131,10 +131,10 @@ impl Packed {
                 return Ok(true);
             };
             // 第一个分片从 0 起，位置已知时总能归到某一片
-            let segment = self.segments.segment_at(packet.position()).ok_or_else(|| {
-                let (group, track) = at.track();
-                Error::UnplacedPacket { group, track }
-            })?;
+            let segment = self
+                .segments
+                .segment_at(packet.position())
+                .ok_or(Error::UnplacedPacket { at })?;
             let position = u64::try_from(packet.position()).expect("归得到分片的位置非负");
             if self.resumes[segment].is_some_and(|resume| position >= resume) {
                 // 上一片损坏之后暂存的包读完了（这一片从开头就在损坏之后时，中间没有不暂存的包）

@@ -104,23 +104,27 @@ pub mod remux {
 }
 
 /// 把几个完整文件（如分开下载的视频与音频）的流原样复制进 `output`（`container` 的格式），在阻塞线程池中执行；格式、
-/// 编码、时间线与各种失败见 [`hs_m3u8_remux::merge_files`]。失败或取消时 `output` 上可能留有写了一半的文件，由调用方
-/// 删除（写到临时路径、成功后改名）。`cancel` 取消后以 [`remux::Error::Cancelled`] 结束，运行时关闭时同样；
-/// `progress` 以写完的字节数调用，合计为各输入文件的字节数（见 [`remux::WriteProgress`]）。
+/// 编码、时间线、临时文件与各种失败见 [`hs_m3u8_remux::merge_files`]：失败或取消时 `output` 不变。`cancel` 取消、或
+/// 返回的 future 被丢弃时合并在下一处检查停下，以 [`Error::Cancelled`] 结束；其余失败为 [`Error::Remux`]。`progress`
+/// 以写完的字节数调用，合计为各输入文件的字节数（见 [`remux::WriteProgress`]）。
 pub async fn merge_files(
     inputs: Vec<remux::FileInput>,
     output: std::path::PathBuf,
     container: remux::Container,
     cancel: CancellationToken,
     progress: remux::WriteProgress,
-) -> Result<remux::MediaReport, remux::Error> {
+) -> Result<remux::MediaReport, Error> {
+    let _cancel_on_drop = cancel.clone().drop_guard();
     let control = hs_m3u8_remux::Control {
         cancel: hs_m3u8_remux::Cancel::new(move || cancel.is_cancelled()),
         progress,
     };
     blocking(move || hs_m3u8_remux::merge_files(&inputs, &output, container, &control))
-        .await
-        .unwrap_or(Err(remux::Error::Cancelled))
+        .await?
+        .map_err(|error| match error {
+            hs_m3u8_remux::Error::Cancelled => Error::Cancelled,
+            other => Error::Remux(Box::new(other)),
+        })
 }
 
 /// 公开接口用到的播放列表解析与选轨类型。

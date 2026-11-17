@@ -7,11 +7,11 @@ use ffmpeg::{Packet, Rational, Rescale};
 use ffmpeg_next as ffmpeg;
 
 use crate::group::Selected;
-use crate::inband::{Inband, Mismatch};
+use crate::inband::{Inband, Mismatch, PacketCheck};
 use crate::input::Input;
 use crate::nal::{self, Framing};
 use crate::timing::MICROS;
-use crate::{Error, Origin, StreamKind, Unsupported, ffi, inband};
+use crate::{Error, Origin, StreamKind, Unsupported, ffi};
 
 /// 一路输入流对应的输出流。
 #[derive(Clone, Copy)]
@@ -40,14 +40,12 @@ pub(crate) struct Source {
     pub(crate) input: Input,
     /// 按输入流下标；None 表示该流不进输出
     pub(crate) map: Vec<Option<Mapping>>,
-    /// 按输入流下标；进输出、参数随帧携带的流为 Some
-    pub(crate) inband: Vec<Option<Inband>>,
+    /// 按输入流下标：进输出、要逐包核对的流的核对（见 [`Selected::check`]）
+    pub(crate) checks: Vec<Option<PacketCheck>>,
     /// 按输入流下标
     pub(crate) dropped: Vec<Dropped>,
     /// 按输入流下标：HEVC 视频流包里 NAL 单元的排法（见 [`Selected::hevc`]）
     hevc: Vec<Option<Framing>>,
-    /// 按输入流下标：逐包核对 E-AC-3 的帧结构（见 [`Selected::eac3_for_mp4`]）
-    eac3_for_mp4: Vec<bool>,
     /// 按输入流下标：视频流在这一组里读到的第一个能开始解码的帧的 PTS（没有 PTS 时为 DTS），还没读到时为 None
     keyframe_pts: Vec<Option<i64>>,
     /// 上一个写出的包所在的分片（见 [`Source::check_jump`]）
@@ -74,10 +72,9 @@ impl Source {
     ) -> Self {
         let streams = input.context().nb_streams() as usize;
         let mut map = vec![None; streams];
-        let mut inband = vec![None; streams];
+        let mut checks = vec![None; streams];
         let mut hevc = vec![None; streams];
-        let mut eac3_for_mp4 = vec![false; streams];
-        let mut delays = vec![None; streams];
+        let mut mapped = vec![false; streams];
         for (s, &output) in selected.iter().zip(outputs) {
             let kind = s.desc.shape.kind();
             let frames = match s.desc.shape {
@@ -93,26 +90,23 @@ impl Source {
                 frames,
             });
             hevc[s.index] = s.hevc;
-            eac3_for_mp4[s.index] = s.eac3_for_mp4;
-            delays[s.index] = (s.video_delay > 0).then_some(s.video_delay);
-            inband[s.index] =
-                s.inband
-                    .as_ref()
-                    .map(|own| match references.get(output).cloned().flatten() {
-                        Some(reference) => reference.for_next_group(),
-                        None => own.clone(),
-                    });
+            mapped[s.index] = true;
+            checks[s.index] = match (&s.check, references.get(output).cloned().flatten()) {
+                (Some(PacketCheck::Inband(_)), Some(reference)) => {
+                    Some(PacketCheck::Inband(reference.for_next_group()))
+                }
+                (own, _) => own.clone(),
+            };
         }
         Source {
             at,
             input,
             map,
-            inband,
+            checks,
             dropped: vec![Dropped::default(); streams],
             hevc,
-            eac3_for_mp4,
             keyframe_pts: vec![None; streams],
-            fill: DtsFill::new(delays),
+            fill: DtsFill::new(&mapped),
             last_segment: None,
             queue: VecDeque::new(),
             finished: false,
@@ -150,24 +144,16 @@ impl Source {
                 self.dropped[packet.stream()].before_keyframe += 1;
                 continue;
             }
-            if let Some(check) = self.inband[packet.stream()].as_mut() {
+            if let Some(check) = self.checks[packet.stream()].as_mut() {
                 let stream = self
                     .input
                     .context()
                     .stream(packet.stream())
                     .expect("包所属的流存在");
                 let checked = check.check(packet.data().unwrap_or_default(), &stream);
-                if self.passes(checked, &packet, mapping)? {
-                    return Ok(Some((packet, mapping)));
+                if !self.passes(checked, &packet, mapping)? {
+                    continue;
                 }
-                continue;
-            }
-            if self.eac3_for_mp4[packet.stream()] {
-                let checked = inband::eac3_for_mp4(packet.data().unwrap_or_default());
-                if self.passes(checked, &packet, mapping)? {
-                    return Ok(Some((packet, mapping)));
-                }
-                continue;
             }
             return Ok(Some((packet, mapping)));
         }
@@ -188,11 +174,7 @@ impl Source {
                 return Ok(false);
             }
             Err(Mismatch::Changed) => Unsupported::ParamsChangedInGroup { at, kind },
-            Err(Mismatch::Config) => {
-                // 只有核对从上一组的开始时才有这一种（见 Inband::for_next_group）
-                let (group, track) = at.track();
-                Unsupported::ConfigChanged { group, track, kind }
-            }
+            Err(Mismatch::Config) => Unsupported::ConfigChanged { at, kind },
             Err(Mismatch::Eac3ShortFrames) => Unsupported::Eac3ShortFrames { at },
             Err(Mismatch::Eac3Substreams) => Unsupported::Eac3Substreams { at },
         };
@@ -248,10 +230,8 @@ impl Source {
         let hole = (dts_us - clock_us).saturating_sub_unsigned(skipped);
         match u64::try_from(hole) {
             Ok(jump_us) if jump_us > tolerance => {
-                let (group, track) = self.at.track();
                 Err(Error::Unsupported(Unsupported::TimestampJump {
-                    group,
-                    track,
+                    at: self.at,
                     kind: mapping.kind,
                     segment,
                     jump_us,
@@ -382,14 +362,14 @@ impl Source {
     }
 }
 
-/// 补上进输出的流开头缺的 DTS。Matroska 只存 PTS，TS 的 PES 也可以只带 PTS；有 B 帧时 FFmpeg 按重排的延迟由 PTS 推出
-/// DTS，开头延迟那几个包推不出（不超过流的重排延迟）。这些包（带 PTS 与时长）先暂存，读到这路流第一个带 DTS 的包时，
-/// 从它的 DTS 起按各包的时长往前倒推（同 ffmpeg 命令行补的值）。暂存的超过重排延迟、或读到末尾仍没有 DTS 时，照原样
-/// 交出，按缺 DTS 计数。对各种输入都生效；带 DTS 的输入（fMP4、打包音频）用不到。
+/// 补上进输出的流开头缺的 DTS。Matroska 只存 PTS，TS 的 PES 也可以只带 PTS；FFmpeg 按重排的延迟由 PTS 推出 DTS，
+/// 开头几个包推不出（延迟还没定下时也是这样，如探测读满上限而解码器还没解出够多的帧）。这些包（带 PTS 与时长）先
+/// 暂存，读到这路流第一个带 DTS 的包时往前补：每个包取「后一个包的 DTS 减去它的时长」与它自己的 PTS 中较小的，DTS
+/// 因而严格递增、不大于 PTS（有 B 帧时同 ffmpeg 命令行补的值）。暂存的超过 [`DtsFill::LIMIT`] 个、或读到末尾仍没有
+/// DTS 时照原样交出，按缺 DTS 计数。对各种输入都生效；带 DTS 的输入（fMP4、打包音频）用不到。
 struct DtsFill {
-    /// 按输入流下标：还在等第一个 DTS 的流最多暂存几个包（视频的重排延迟）；不进输出、没有重排延迟、已读到 DTS 或已
-    /// 放弃补的流为 None
-    limits: Vec<Option<usize>>,
+    /// 按输入流下标：还在等第一个 DTS 的进输出的流为真；已读到 DTS 或已放弃补的为假
+    waiting: Vec<bool>,
     /// 按输入流下标：暂存的包
     held: Vec<Vec<Packet>>,
     /// 补好或放弃补、待交出的包，按读出的顺序
@@ -397,11 +377,14 @@ struct DtsFill {
 }
 
 impl DtsFill {
-    /// `limits` 见 [`DtsFill::limits`]。
-    fn new(limits: Vec<Option<usize>>) -> DtsFill {
+    /// 一路流最多暂存几个包：FFmpeg 推 DTS 时最多的重排延迟（链接的 FFmpeg 中 libavformat 的 MAX_REORDER_DELAY）。
+    const LIMIT: usize = 16;
+
+    /// `mapped` 按输入流下标，进输出的流为真。
+    fn new(mapped: &[bool]) -> DtsFill {
         DtsFill {
-            held: vec![Vec::new(); limits.len()],
-            limits,
+            waiting: mapped.to_vec(),
+            held: vec![Vec::new(); mapped.len()],
             ready: VecDeque::new(),
         }
     }
@@ -414,28 +397,29 @@ impl DtsFill {
     fn push(&mut self, packet: Packet) -> Option<Packet> {
         let stream = packet.stream();
         // TS 可能在文件中途出现新流，其下标超出建立映射时的流数
-        let Some(limit) = self.limits.get(stream).copied().flatten() else {
+        if !self.waiting.get(stream).copied().unwrap_or(false) {
             return Some(packet);
-        };
+        }
         let held = &mut self.held[stream];
         let Some(dts) = packet.dts() else {
             if packet.pts().is_none() || packet.duration() <= 0 {
                 return Some(packet);
             }
             held.push(packet);
-            if held.len() > limit {
-                self.limits[stream] = None;
+            if held.len() > DtsFill::LIMIT {
+                self.waiting[stream] = false;
                 self.ready.extend(held.drain(..));
             }
             return None;
         };
-        self.limits[stream] = None;
+        self.waiting[stream] = false;
         if held.is_empty() {
             return Some(packet);
         }
         let mut next = dts;
         for earlier in held.iter_mut().rev() {
-            next -= earlier.duration();
+            let pts = earlier.pts().expect("暂存的包都带 PTS");
+            next = (next - earlier.duration()).min(pts);
             earlier.set_dts(Some(next));
         }
         self.ready.extend(held.drain(..));
@@ -449,5 +433,58 @@ impl DtsFill {
             self.ready.extend(held.drain(..));
         }
         !self.ready.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 流 0 的包：PTS、DTS（None 为缺）、时长。
+    fn packet(pts: i64, dts: Option<i64>, duration: i64) -> Packet {
+        let mut packet = Packet::empty();
+        packet.set_stream(0);
+        packet.set_pts(Some(pts));
+        packet.set_dts(dts);
+        packet.set_duration(duration);
+        packet
+    }
+
+    /// 依次放进各包，读完后交出的各包的 DTS。
+    fn filled(packets: Vec<Packet>) -> Vec<Option<i64>> {
+        let mut fill = DtsFill::new(&[true]);
+        let mut out = Vec::new();
+        for p in packets {
+            out.extend(fill.push(p));
+            while let Some(p) = fill.pop() {
+                out.push(p);
+            }
+        }
+        fill.finish();
+        while let Some(p) = fill.pop() {
+            out.push(p);
+        }
+        out.iter().map(Packet::dts).collect()
+    }
+
+    #[test]
+    fn leading_packets_get_increasing_dts_not_after_their_pts() {
+        // 两层 B 帧：开头两个包按时长倒推
+        let b_frames = vec![
+            packet(0, None, 40),
+            packet(120, None, 40),
+            packet(40, Some(0), 40),
+        ];
+        assert_eq!(filled(b_frames), [Some(-80), Some(-40), Some(0)]);
+        // 没有重排、时长取整：倒推的值会大于 PTS 时取 PTS
+        let rounded = vec![
+            packet(0, None, 20),
+            packet(30, None, 20),
+            packet(70, Some(70), 20),
+        ];
+        assert_eq!(filled(rounded), [Some(0), Some(30), Some(70)]);
+        // 一直没有 DTS：超过上限后照原样交出
+        let never: Vec<Packet> = (0..20).map(|i| packet(i * 40, None, 40)).collect();
+        assert_eq!(filled(never), vec![None; 20]);
     }
 }

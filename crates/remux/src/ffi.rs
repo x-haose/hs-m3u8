@@ -94,16 +94,12 @@ pub(crate) fn decoded_aac(stream: &Stream<'_>) -> Option<DecodedAac> {
     })
 }
 
-/// 流的帧长与重排延迟：音频每帧的采样点数（codecpar 的 frame_size，帧长不固定或不知道时为 None），视频的重排延迟
-/// （codecpar 的 video_delay，帧数；没有时为 0）。
-pub(crate) fn timing(stream: &Stream<'_>) -> (Option<u32>, usize) {
+/// 音频每帧的采样点数（codecpar 的 frame_size）；帧长不固定或不知道时为 None。
+pub(crate) fn frame_samples(stream: &Stream<'_>) -> Option<u32> {
     let params = stream.parameters();
     // SAFETY: 指针指向该流的 codecpar，在 params 存活期间有效且非空；此处只读。
     let p = unsafe { &*params.as_ptr() };
-    (
-        u32::try_from(p.frame_size).ok().filter(|&n| n > 0),
-        usize::try_from(p.video_delay).unwrap_or(0),
-    )
+    u32::try_from(p.frame_size).ok().filter(|&n| n > 0)
 }
 
 /// 按文件开头的字节 `head` 探测格式（同 FFmpeg 打开输入时，按各解复用器的探测打分取最高的），返回解复用器名；认不出

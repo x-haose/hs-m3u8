@@ -253,21 +253,22 @@ fn lock_or_create(root: &Path, lock: Option<Lock>) -> Result<Lock, Error> {
     acquire(root)
 }
 
-/// 前 `tracks` 条轨已完成的分片与 init 段；各轨的目录见 [`track_dirs`]。
+/// 前 `tracks` 条轨已完成的分片与 init 段；各轨的目录见 [`track_dirs`]，更后面的轨不读。
 fn scan(layout: &Layout, tracks: usize) -> Result<Stored, Error> {
-    track_dirs(&layout.root)?;
     let mut stored = Stored {
-        segments: Vec::with_capacity(tracks),
+        segments: vec![Vec::new(); tracks],
         init_bytes: 0,
     };
-    for track in 0..tracks {
-        let dir = layout.track(track);
+    for (track, dir) in track_dirs(&layout.root)? {
+        let Some(segments) = stored.segments.get_mut(track) else {
+            continue;
+        };
         let mut files: Vec<SegmentFile> = list(&dir, parse_segment_name)?
             .into_iter()
             .map(|(name, path, len)| SegmentFile { name, path, len })
             .collect();
         files.sort_by_key(|f| (f.name.session, f.name.sequence));
-        stored.segments.push(files);
+        *segments = files;
         for (_, _, len) in list(&dir, parse_init_name)? {
             stored.init_bytes += len;
         }
@@ -415,9 +416,9 @@ fn clear_content(root: &Path, recorded: Option<&Recorded>) -> Result<(), Error> 
     Ok(())
 }
 
-/// 任务目录 `root` 里 `tracks` 下各轨的目录：名为规范写法的编号的项，按轨号升序；`tracks` 不存在时为空。读 `tracks`
-/// 的各处都经这里：`tracks` 本身或这样的项不是目录（不跟随符号链接）时报 [`WorkDirProblem::NotEmpty`]，读进去会把别处
-/// 的文件当成已完成的分片；其余名字的项不是本库建的，不读。
+/// 任务目录 `root` 里 `tracks` 下各轨的目录与轨号：名为规范写法的编号的项，按轨号升序；`tracks` 不存在时为空。查找
+/// 已完成的内容都经这里：`tracks` 本身或这样的项不是目录（不跟随符号链接）时报 [`WorkDirProblem::NotEmpty`]，读进去
+/// 会把别处的文件当成已完成的分片；其余名字的项不是本库建的，不读。删除任务目录另按自己的规则列（见 removal）。
 fn track_dirs(root: &Path) -> Result<Vec<(usize, PathBuf)>, Error> {
     let not_ours = || Error::WorkDir {
         path: root.to_path_buf(),

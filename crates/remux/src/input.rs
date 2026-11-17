@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::Read;
+use std::io::{self, Read};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -20,8 +20,7 @@ pub(crate) enum Input {
         ictx: format::context::Input,
         /// 读分片文件出错时的路径与原因
         failure: chain::Failure,
-        /// 编码参数都在文件头（fMP4 的 init 段，或完整的 MP4、Matroska 文件的头）里，不随帧携带
-        header: bool,
+        params: ParamsIn,
         segments: SegmentMap,
     },
     Packed(Box<Packed>),
@@ -42,11 +41,7 @@ impl Input {
                 .map(|segment| segment_head(&segment.path))
                 .collect::<Result<Vec<_>, Error>>()?;
             if heads.iter().any(|h| h.format != heads[0].format) {
-                let (group, track) = at.track();
-                return Err(Error::Unsupported(Unsupported::FormatChangedInGroup {
-                    group,
-                    track,
-                }));
+                return Err(Error::Unsupported(Unsupported::FormatChangedInGroup { at }));
             }
             if heads[0].format != standalone::Format::Ts {
                 return Packed::open(segments, &heads, at, cancel)
@@ -97,42 +92,52 @@ impl Input {
         Ok(Input::Chain {
             ictx,
             failure,
-            header: init,
+            params: if init {
+                ParamsIn::Header
+            } else {
+                ParamsIn::Frames
+            },
             segments: SegmentMap::new(starts, segments),
         })
     }
 
-    /// 完整文件 `path`，调用方给的第 `input` 个输入。格式先由 FFmpeg 按开头的内容探测，只收 MP4 一类（含单文件的分段
+    /// 完整文件 `path`，调用方给的第 `input` 个输入，须是普通文件（跟随符号链接；FIFO 等读开头时会阻塞）。格式先由
+    /// FFmpeg 按开头的内容探测，只收 MP4 一类（含单文件的分段
     /// MP4、M4A）、Matroska（含 WebM）、TS 与裸 AAC、MP3，认不出或不收时报 [`Error::FileFormat`]，收的格式打不开时
     /// 报 [`Error::OpenInput`]；探测流参数读到 FFmpeg 的默认上限为止（见 [`Probe::DEFAULT`]）。另返回文件打开时的
     /// 字节数。
     pub(crate) fn file(path: &Path, input: usize, cancel: &Cancel) -> Result<(Input, u64), Error> {
         let at = Origin::Input(input);
         let unaccepted = |format: Option<&str>| Error::FileFormat {
-            input,
+            at,
             path: path.to_path_buf(),
             format: format.map(str::to_owned),
         };
+        let meta = std::fs::metadata(path).map_err(read_error(path))?;
+        if !meta.is_file() {
+            let cause = io::Error::new(io::ErrorKind::InvalidInput, "不是普通文件");
+            return Err(read_error(path)(cause));
+        }
         let mut head = Vec::new();
         File::open(path)
             .and_then(|file| file.take(PROBE_HEAD).read_to_end(&mut head))
             .map_err(read_error(path))?;
         let probed = ffi::probe_format(&head);
-        if probed.and_then(header_in).is_none() {
+        if probed.and_then(accepted).is_none() {
             return Err(unaccepted(probed));
         }
-        let len = std::fs::metadata(path).map_err(read_error(path))?.len();
+        let len = meta.len();
         let (chain, failure) = new_chain(vec![(path.to_path_buf(), 0..len)], cancel)?;
         let ictx = open_chain(chain, &failure, Probe::DEFAULT, at)?;
         // 打开时 FFmpeg 再探测一次，读的范围可能不同
         let opened = ictx.format().name().to_owned();
-        let Some(header) = header_in(&opened) else {
+        let Some(params) = accepted(&opened) else {
             return Err(unaccepted(Some(&opened)));
         };
         let input = Input::Chain {
             ictx,
             failure,
-            header,
+            params,
             segments: SegmentMap::whole(),
         };
         Ok((input, len))
@@ -156,7 +161,13 @@ impl Input {
     /// TS 与裸音频（含打包音频）：编码参数随帧携带，要逐包核对（见 [`crate::inband`]）。HLS 的分片的时间戳在 33 位的
     /// 90 kHz 时钟上，同组各输入之间要对齐回绕（见 [`crate::timing::wrap_shifts_us`]）。
     pub(crate) fn standalone(&self) -> bool {
-        !matches!(self, Input::Chain { header: true, .. })
+        !matches!(
+            self,
+            Input::Chain {
+                params: ParamsIn::Header,
+                ..
+            }
+        )
     }
 
     /// 打包音频丢弃的损坏字节：音频流的下标与字节数（见 [`Packed`]，读到末尾后才是全部）；其余输入为 None。
@@ -185,13 +196,22 @@ impl Input {
 /// 比它长时认不出。
 const PROBE_HEAD: u64 = 1 << 20;
 
-/// FFmpeg 的解复用器名 `name`（链接的 FFmpeg 中各解复用器的名称）是不是合并文件收的格式：收的为编码参数是否在文件头里
-/// （见 [`Input::standalone`]），不收的为 None。裸 AC-3、E-AC-3 不收：其解复用器的时间基为 1/90000 秒，44.1 kHz 等
-/// 采样率下逐帧向下取整，时间戳随时长越差越多。
-fn header_in(name: &str) -> Option<bool> {
+/// 编码参数在输入的哪里。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParamsIn {
+    /// 文件头（fMP4 的 init 段，完整的 MP4、Matroska 文件的头）里，不随帧携带
+    Header,
+    /// 随帧携带（TS 与裸音频），要逐包核对（见 [`crate::inband`]）
+    Frames,
+}
+
+/// 合并文件收的格式（`name` 为 FFmpeg 的解复用器名，链接的 FFmpeg 中各解复用器的名称）的编码参数在哪里；不收的为
+/// None。裸 AC-3、E-AC-3 不收：其解复用器的时间基为 1/90000 秒，44.1 kHz 等采样率下逐帧向下取整，时间戳随时长越差
+/// 越多。
+fn accepted(name: &str) -> Option<ParamsIn> {
     match name {
-        "mov,mp4,m4a,3gp,3g2,mj2" | "matroska,webm" => Some(true),
-        "mpegts" | "aac" | "mp3" => Some(false),
+        "mov,mp4,m4a,3gp,3g2,mj2" | "matroska,webm" => Some(ParamsIn::Header),
+        "mpegts" | "aac" | "mp3" => Some(ParamsIn::Frames),
         _ => None,
     }
 }

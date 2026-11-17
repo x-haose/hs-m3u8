@@ -4,8 +4,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use hs_m3u8_core::CancellationToken;
-use hs_m3u8_core::remux::{Container, Error, FileInput, Streams, WriteProgress};
+use hs_m3u8_core::remux::{Container, FileInput, Streams, WriteProgress};
+use hs_m3u8_core::{CancellationToken, Error};
 use hs_m3u8_remux::Control;
 
 use crate::{fixtures, test_dir};

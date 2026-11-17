@@ -1,6 +1,6 @@
 //! 后续组与第 0 组的流布局、编码参数与解码配置的比较：MP4 的样本描述由第 0 组的写成，其余组须相同。
 
-use crate::{Error, Shape, StreamKind, Unsupported, ffi};
+use crate::{Error, Origin, Shape, StreamKind, Unsupported, ffi};
 
 impl Shape {
     /// 与第 0 组同一路流的编码参数比较；视频的像素格式可能探测不出，其余各项在打开时已确认探测得出。
@@ -135,13 +135,12 @@ impl Compared {
     }
 }
 
-/// 一条轨这一组选中的流 `found` 与第 0 组的 `first` 比较：种类、编码参数或解码配置不同时报错；其余各项相同、有项
+/// `at` 处的轨这一组选中的流 `found` 与第 0 组的 `first` 比较：种类、编码参数或解码配置不同时报错；其余各项相同、有项
 /// 只有一边探测出时返回第一路这样的流的种类。
 pub(crate) fn same_streams(
     found: &[&Desc],
     first: &[Desc],
-    group: usize,
-    track: usize,
+    at: Origin,
 ) -> Result<Option<StreamKind>, Error> {
     if found.len() != first.len()
         || found
@@ -149,10 +148,7 @@ pub(crate) fn same_streams(
             .zip(first)
             .any(|(d, f)| d.shape.kind() != f.shape.kind())
     {
-        return Err(Error::Unsupported(Unsupported::LayoutChanged {
-            group,
-            track,
-        }));
+        return Err(Error::Unsupported(Unsupported::LayoutChanged { at }));
     }
     let mut unknown = None;
     for (d, f) in found.iter().zip(first) {
@@ -160,19 +156,14 @@ pub(crate) fn same_streams(
         let (shape, config) = d.compare(f);
         if shape == Compared::Differs {
             return Err(Error::Unsupported(Unsupported::ParamsChanged {
-                group,
-                track,
+                at,
                 kind,
                 first: f.shape,
                 found: d.shape,
             }));
         }
         if config == Compared::Differs {
-            return Err(Error::Unsupported(Unsupported::ConfigChanged {
-                group,
-                track,
-                kind,
-            }));
+            return Err(Error::Unsupported(Unsupported::ConfigChanged { at, kind }));
         }
         if shape == Compared::Unknown || config == Compared::Unknown {
             unknown.get_or_insert(kind);

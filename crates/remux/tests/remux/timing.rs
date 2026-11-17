@@ -80,8 +80,7 @@ fn a_forward_timestamp_jump_within_a_group_is_rejected() {
         matches!(
             err,
             Error::Unsupported(Unsupported::TimestampJump {
-                group: 0,
-                track: 0,
+                at: Origin::Track { group: 0, track: 0 },
                 segment: 1,
                 jump_us,
                 ..

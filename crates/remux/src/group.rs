@@ -5,14 +5,12 @@ use ffmpeg_next as ffmpeg;
 
 use crate::codecs::check_codec;
 use crate::compare::{Config, Desc, same_streams};
-use crate::inband::Inband;
+use crate::hls::{HLS_CONTAINER, Numbered};
+use crate::inband::{Inband, PacketCheck};
 use crate::input::Input;
 use crate::nal::Framing;
 use crate::source::Source;
-use crate::{
-    Cancel, Container, Error, HLS_CONTAINER, Numbered, Origin, StreamKind, Streams, Unsupported,
-    ffi, frame,
-};
+use crate::{Cancel, Container, Error, Origin, StreamKind, Streams, Unsupported, ffi, frame};
 
 /// 一条轨在某组中（或一个完整文件里）被选中的一路流。
 pub(crate) struct Selected {
@@ -23,16 +21,11 @@ pub(crate) struct Selected {
     /// HEVC 视频：包里 NAL 单元的排法，用于认出参考上一个 GOP 的前导帧（见 [`crate::nal::hevc_rasl`]）；其余流，及 MP4
     /// 的解码配置太短读不出排法时为 None
     pub(crate) hevc: Option<Framing>,
-    /// 参数随帧携带的输入（见 [`Input::standalone`]）：从头开始的逐包核对；其余为 None
-    pub(crate) inband: Option<Inband>,
-    /// 参数在文件头里的 E-AC-3、输出为 MP4：逐包核对 MP4 封装器能否处理帧结构（见 [`crate::inband::eac3_for_mp4`]；
-    /// 参数随帧携带的由 `inband` 核对）
-    pub(crate) eac3_for_mp4: bool,
-    /// 音频每帧的采样点数（FFmpeg 给的 frame_size）；视频，或帧长不固定、不知道时为 None
+    /// 从头开始的逐包核对（见 [`PacketCheck`]）；不用核对时为 None
+    pub(crate) check: Option<PacketCheck>,
+    /// 音频每帧的采样点数（FFmpeg 给的 frame_size，链接的 FFmpeg 里只有解得出帧的 AAC 有）；视频，或帧长不固定、
+    /// 不知道时为 None
     pub(crate) frame_samples: Option<u32>,
-    /// 视频的重排延迟（FFmpeg 给的 video_delay），帧数：流开头最多这么多个包推不出 DTS（见
-    /// [`Source::read_input`]）；音频为 0
-    pub(crate) video_delay: usize,
 }
 
 /// 按 `wanted` 选出 `input`（`at` 处的输入）里第一路视频与（或）第一路音频，并检查编码能否放进 `container`。
@@ -76,22 +69,22 @@ pub(crate) fn select(
             (Config::Init(hvcc), codec::Id::HEVC) => Framing::of_hvcc(hvcc),
             _ => None,
         };
-        let inband = if input.standalone() {
-            Some(Inband::of(id, container).expect("check_codec 只收能逐帧读出参数的编码"))
+        let check = if input.standalone() {
+            let inband = Inband::of(id, container).expect("check_codec 只收能逐帧读出参数的编码");
+            Some(PacketCheck::Inband(inband))
+        } else if container == Container::Mp4 && id == codec::Id::EAC3 {
+            Some(PacketCheck::Eac3ForMp4)
         } else {
             None
         };
-        let (frame_samples, video_delay) = ffi::timing(&stream);
         selected.push(Selected {
             index: stream.index(),
             time_base: stream.time_base(),
             id,
             desc: Desc { shape, config },
             hevc,
-            eac3_for_mp4: inband.is_none() && container == Container::Mp4 && id == codec::Id::EAC3,
-            inband,
-            frame_samples: frame_samples.filter(|_| kind == StreamKind::Audio),
-            video_delay,
+            check,
+            frame_samples: ffi::frame_samples(&stream).filter(|_| kind == StreamKind::Audio),
         });
     }
     Ok(selected)
@@ -121,7 +114,7 @@ pub(crate) fn open_group(
         let selected = select(&input, streams[track], HLS_CONTAINER, at)?;
         let found: Vec<&Desc> = selected.iter().map(|s| &s.desc).collect();
         if let Some(layout) = layout
-            && let Some(kind) = same_streams(&found, &layout[track], group, track)?
+            && let Some(kind) = same_streams(&found, &layout[track], at)?
         {
             unknown.get_or_insert((at, kind));
         }
@@ -131,7 +124,7 @@ pub(crate) fn open_group(
             selected,
         });
     }
-    check_timed(group, &opened)?;
+    check_timed(&opened)?;
     match unknown {
         Some((at, kind)) => Err(Error::Unsupported(Unsupported::ParamsUnknown { at, kind })),
         None => Ok(opened),
@@ -164,13 +157,12 @@ pub(crate) fn layout_of(first: &[OpenTrack]) -> Result<Vec<Vec<Desc>>, Error> {
 }
 
 /// 一组里有打包音频的轨没有时间戳时，只有它一条轨贡献流才能定时。
-fn check_timed(group: usize, opened: &[OpenTrack]) -> Result<(), Error> {
+fn check_timed(opened: &[OpenTrack]) -> Result<(), Error> {
     let contributing: Vec<&OpenTrack> = opened.iter().filter(|t| !t.selected.is_empty()).collect();
     match contributing.iter().find(|t| t.input.untimed()) {
         Some(untimed) if contributing.len() > 1 => {
             Err(Error::Unsupported(Unsupported::UntimedPackedAudio {
-                group,
-                track: untimed.at.index(),
+                at: untimed.at,
             }))
         }
         _ => Ok(()),
@@ -220,8 +212,8 @@ pub(crate) fn primed(
 pub(crate) fn references_of(sources: &[Source], outputs: usize) -> Vec<Option<Inband>> {
     let mut references = vec![None; outputs];
     for source in sources {
-        for (mapping, inband) in source.map.iter().zip(&source.inband) {
-            if let (Some(mapping), Some(inband)) = (mapping, inband) {
+        for (mapping, check) in source.map.iter().zip(&source.checks) {
+            if let (Some(mapping), Some(PacketCheck::Inband(inband))) = (mapping, check) {
                 references[mapping.output] = Some(inband.clone());
             }
         }

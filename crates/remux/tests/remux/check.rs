@@ -49,7 +49,10 @@ fn check_finds_what_cannot_go_into_an_mp4_from_the_first_segments() {
     assert!(
         matches!(
             err,
-            Error::Unsupported(Unsupported::ParamsChanged { group: 1, .. })
+            Error::Unsupported(Unsupported::ParamsChanged {
+                at: Origin::Track { group: 1, .. },
+                ..
+            })
         ),
         "实际 {err:?}"
     );
@@ -61,7 +64,10 @@ fn check_finds_what_cannot_go_into_an_mp4_from_the_first_segments() {
     assert!(
         matches!(
             err,
-            Error::Unsupported(Unsupported::ConfigChanged { group: 1, .. })
+            Error::Unsupported(Unsupported::ConfigChanged {
+                at: Origin::Track { group: 1, .. },
+                ..
+            })
         ),
         "实际 {err:?}"
     );
@@ -93,7 +99,10 @@ fn check_compares_with_a_first_group_that_has_no_keyframe_yet() {
     assert!(
         matches!(
             err,
-            Error::Unsupported(Unsupported::ParamsChanged { group: 1, .. })
+            Error::Unsupported(Unsupported::ParamsChanged {
+                at: Origin::Track { group: 1, .. },
+                ..
+            })
         ),
         "{err:?}"
     );
@@ -235,7 +244,7 @@ fn check_skips_what_a_head_without_samples_cannot_tell() {
         matches!(
             err,
             Error::Unsupported(Unsupported::ConfigChanged {
-                group: 1,
+                at: Origin::Track { group: 1, .. },
                 kind: StreamKind::Video,
                 ..
             })
@@ -261,7 +270,7 @@ fn check_skips_what_a_head_without_samples_cannot_tell() {
         matches!(
             err,
             Error::Unsupported(Unsupported::ParamsChanged {
-                group: 1,
+                at: Origin::Track { group: 1, .. },
                 kind: StreamKind::Audio,
                 found: Shape::Audio {
                     sample_rate: 44_100,

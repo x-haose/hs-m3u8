@@ -24,8 +24,7 @@ fn resolution_change_between_groups_is_rejected() {
         matches!(
             err,
             Error::Unsupported(Unsupported::ParamsChanged {
-                group: 1,
-                track: 0,
+                at: Origin::Track { group: 1, track: 0 },
                 kind: StreamKind::Video,
                 ..
             })
@@ -96,7 +95,7 @@ fn chroma_changes_are_rejected() {
         matches!(
             err,
             Error::Unsupported(Unsupported::ParamsChanged {
-                group: 1,
+                at: Origin::Track { group: 1, .. },
                 first: Shape::Video {
                     pixel_format: Some("yuv420p"),
                     ..
@@ -156,7 +155,7 @@ fn decoder_configs_differing_between_groups_are_rejected() {
         assert!(
             matches!(
                 &err,
-                Error::Unsupported(Unsupported::ConfigChanged { group: 1, track: 0, kind: found })
+                Error::Unsupported(Unsupported::ConfigChanged { at: Origin::Track { group: 1, track: 0 }, kind: found })
                     if *found == kind
             ),
             "{first} 接 {second}：实际 {err:?}"
@@ -314,7 +313,9 @@ fn format_changes_within_a_group_are_rejected() {
         assert!(
             matches!(
                 err,
-                Error::Unsupported(Unsupported::FormatChangedInGroup { group: 0, track: 0 })
+                Error::Unsupported(Unsupported::FormatChangedInGroup {
+                    at: Origin::Track { group: 0, track: 0 }
+                })
             ),
             "实际 {err:?}"
         );

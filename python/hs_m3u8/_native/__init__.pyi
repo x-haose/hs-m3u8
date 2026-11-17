@@ -2032,7 +2032,7 @@ class Mp4Unsupported:
     @typing.final
     class Eac3ShortFrames(Mp4Unsupported):
         r"""
-        E-AC-3 每帧不足 6 块（只出在 TS 与打包音频里）：MP4 封装器把几帧并成一个样本，末尾凑不满的帧不写出
+        E-AC-3 每帧不足 6 块：MP4 封装器把几帧并成一个样本，末尾凑不满的帧不写出
         """
         __match_args__ = ("group", "track",)
         @property
@@ -2050,7 +2050,7 @@ class Mp4Unsupported:
     @typing.final
     class Eac3Substreams(Mp4Unsupported):
         r"""
-        E-AC-3 有多个独立子流（只出在 TS 与打包音频里）：MP4 封装器不支持
+        E-AC-3 有多个独立子流：MP4 封装器不支持
         """
         __match_args__ = ("group", "track",)
         @property

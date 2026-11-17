@@ -90,8 +90,11 @@ pub(crate) fn retime(
 }
 
 /// 音频按采样点接续的时钟（同 FFmpeg 的 av_rescale_delta，ffmpeg 命令行复制音频时用它）。输入时间基比一个采样点
-/// 粗（如 Matroska 的 1 毫秒）时，逐包取整的时间戳换到以采样率为时间基的输出（MP4）里，样本时长忽长忽短（48 kHz 的
-/// AAC 一帧 1024 个采样点，取整后为 1008 与 1056 交替）。每包的时刻落在输入时间戳的取整误差以内时，取上一包按帧长
+/// 粗（如 Matroska 的 1 毫秒）时，逐包取整的时间戳换到更细的输出时间基（如 MP4 以采样率为时间基）里，样本时长忽长
+/// 忽短（48 kHz 的 AAC 一帧 1024 个采样点，取整后为 1008 与 1056 交替），见 [`SampleClock::applies`]。
+///
+/// 简化：帧长取 FFmpeg 给的每帧采样点数，链接的 FFmpeg 里只有解得出帧的 AAC 有；其余编码（MP3、AC-3、E-AC-3、FLAC
+/// 等）照原样换算，样本时长差不过一个输入 tick。要它们也整帧接续时，按帧头读出每包的采样点数。每包的时刻落在输入时间戳的取整误差以内时，取上一包按帧长
 /// 接续的值；超出时（时间戳本身有跳变）按输入的时间戳重新开始接续。误差按一个输入 tick 算：写入时四舍五入的差半个
 /// tick，截断的差不到一个（FFmpeg 的 av_rescale_delta 只容半个）。
 pub(crate) struct SampleClock {
@@ -104,9 +107,12 @@ pub(crate) struct SampleClock {
 }
 
 impl SampleClock {
-    /// 输入时间基 `in_tb` 比采样率为 `rate` 的一个采样点粗：这时才要接续。
-    pub(crate) fn coarse(in_tb: Rational, rate: u32) -> bool {
-        i64::from(in_tb.numerator()) * i64::from(rate) > i64::from(in_tb.denominator())
+    /// 采样率为 `rate` 的音频从时间基 `in_tb` 换到 `out_tb` 要不要接续：输入时间基比一个采样点粗、输出时间基比输入
+    /// 细时才要；输出与输入一样粗（如都是 Matroska 的 1 毫秒）时原样换算。
+    pub(crate) fn applies(in_tb: Rational, out_tb: Rational, rate: u32) -> bool {
+        let tick = |tb: Rational| (i64::from(tb.numerator()), i64::from(tb.denominator()));
+        let ((in_num, in_den), (out_num, out_den)) = (tick(in_tb), tick(out_tb));
+        in_num * i64::from(rate) > in_den && out_num * in_den < in_num * out_den
     }
 
     /// 采样率为 `rate`、每帧 `frame` 个采样点的音频。
@@ -158,7 +164,8 @@ mod tests {
     fn audio_in_millisecond_timestamps_continues_sample_by_sample() {
         // 48 kHz、每帧 1024 个采样点（21.333 毫秒）的音频，时间戳截断或四舍五入到毫秒
         let ms = Rational(1, 1000);
-        assert!(SampleClock::coarse(ms, 48_000));
+        let mp4 = Rational(1, 48_000);
+        assert!(SampleClock::applies(ms, mp4, 48_000));
         for rounded in [false, true] {
             let mut clock = SampleClock::new(48_000, 1024);
             let placed: Vec<i64> = (0..6i64)
@@ -178,8 +185,9 @@ mod tests {
         // 时间戳跳了 1 秒：从输入的时刻重新接续
         assert_eq!(clock.place(1_128_000, ms), 54_144);
         assert_eq!(clock.place(1_149_000, ms), 54_144 + 1024);
-        // 输入时间基比采样点细时不用接续
-        assert!(!SampleClock::coarse(Rational(1, 90_000), 48_000));
-        assert!(!SampleClock::coarse(Rational(1, 48_000), 48_000));
+        // 输入时间基比采样点细，或输出与输入一样粗时不用接续
+        assert!(!SampleClock::applies(Rational(1, 90_000), mp4, 48_000));
+        assert!(!SampleClock::applies(mp4, mp4, 48_000));
+        assert!(!SampleClock::applies(ms, ms, 48_000));
     }
 }

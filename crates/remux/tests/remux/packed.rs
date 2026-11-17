@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use hs_m3u8_remux::{Control, Error, Segment, Streams, TrackSegments, Unsupported, remux};
+use hs_m3u8_remux::{Control, Error, Origin, Segment, Streams, TrackSegments, Unsupported, remux};
 
 use crate::{
     concat_track, earliest, first_frames, group, packed_fixture, packed_segment, packet_sizes,
@@ -544,7 +544,9 @@ fn untimed_packed_audio_is_used_only_alone() {
         assert!(
             matches!(
                 err,
-                Error::Unsupported(Unsupported::UntimedPackedAudio { group: 0, track: 1 })
+                Error::Unsupported(Unsupported::UntimedPackedAudio {
+                    at: Origin::Track { group: 0, track: 1 }
+                })
             ),
             "实际 {err:?}"
         );

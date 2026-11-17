@@ -10,12 +10,13 @@ publish = false
 
 [dependencies]
 ffmpeg-next.workspace = true
-same-file.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # FFmpeg 读写文件出错时给的是 MSVC C 运行库的 errno，按它的取值换成 io::ErrorKind
 libc.workspace = true
+# 合并文件时比对输出与输入是不是同一个文件（卷序列号与文件索引）；Unix 上直接比 stat 的设备号与 inode
+same-file.workspace = true
 
 [dev-dependencies]
 # 测试中压低进程的文件描述符上限（setrlimit）

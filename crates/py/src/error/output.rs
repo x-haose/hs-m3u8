@@ -107,7 +107,7 @@ variants! {
             /// 第几条轨
             track: usize,
         },
-        /// E-AC-3 每帧不足 6 块（只出在 TS 与打包音频里）：MP4 封装器把几帧并成一个样本，末尾凑不满的帧不写出
+        /// E-AC-3 每帧不足 6 块：MP4 封装器把几帧并成一个样本，末尾凑不满的帧不写出
         #[pyo3(constructor = (*, group, track))]
         Eac3ShortFrames {
             /// 第几个不连续段组
@@ -115,7 +115,7 @@ variants! {
             /// 第几条轨
             track: usize,
         },
-        /// E-AC-3 有多个独立子流（只出在 TS 与打包音频里）：MP4 封装器不支持
+        /// E-AC-3 有多个独立子流：MP4 封装器不支持
         #[pyo3(constructor = (*, group, track))]
         Eac3Substreams {
             /// 第几个不连续段组
@@ -199,31 +199,24 @@ variants! {
 impl From<core::Mp4Unsupported> for Mp4Unsupported {
     fn from(unsupported: core::Mp4Unsupported) -> Self {
         use core::Mp4Unsupported as U;
+        // NoStreams 不带位置，它的分支不用组号与轨号
+        let (group, track) = unsupported.at().map_or((0, 0), hls_track);
         match unsupported {
             // HLS 只合并成 MP4，容器恒为 MP4
-            U::Codec {
-                at,
-                kind,
-                codec,
-                container: _,
-            } => Mp4Unsupported::Codec {
-                group: hls_track(at).0,
-                track: hls_track(at).1,
+            U::Codec { kind, codec, .. } => Mp4Unsupported::Codec {
+                group,
+                track,
                 kind: kind.into(),
                 codec: codec.to_owned(),
             },
-            U::ParamsUnknown { at, kind } => Mp4Unsupported::ParamsUnknown {
-                group: hls_track(at).0,
-                track: hls_track(at).1,
-                kind: kind.into(),
-            },
-            U::LayoutChanged { group, track } => Mp4Unsupported::LayoutChanged { group, track },
-            U::ParamsChanged {
+            U::ParamsUnknown { kind, .. } => Mp4Unsupported::ParamsUnknown {
                 group,
                 track,
-                kind,
-                first,
-                found,
+                kind: kind.into(),
+            },
+            U::LayoutChanged { .. } => Mp4Unsupported::LayoutChanged { group, track },
+            U::ParamsChanged {
+                kind, first, found, ..
             } => Mp4Unsupported::ParamsChanged {
                 group,
                 track,
@@ -231,54 +224,39 @@ impl From<core::Mp4Unsupported> for Mp4Unsupported {
                 first: first.into(),
                 found: found.into(),
             },
-            U::ConfigChanged { group, track, kind } => Mp4Unsupported::ConfigChanged {
+            U::ConfigChanged { kind, .. } => Mp4Unsupported::ConfigChanged {
                 group,
                 track,
                 kind: kind.into(),
             },
-            U::StreamChangedInGroup { at, kind } => {
-                let (group, track) = hls_track(at);
-                Mp4Unsupported::StreamChangedInGroup {
-                    group,
-                    track,
-                    kind: kind.into(),
-                }
-            }
-            U::ParamsChangedInGroup { at, kind } => {
-                let (group, track) = hls_track(at);
-                Mp4Unsupported::ParamsChangedInGroup {
-                    group,
-                    track,
-                    kind: kind.into(),
-                }
-            }
-            U::Mp3SampleRate { at, sample_rate } => Mp4Unsupported::Mp3SampleRate {
-                group: hls_track(at).0,
-                track: hls_track(at).1,
+            U::StreamChangedInGroup { kind, .. } => Mp4Unsupported::StreamChangedInGroup {
+                group,
+                track,
+                kind: kind.into(),
+            },
+            U::ParamsChangedInGroup { kind, .. } => Mp4Unsupported::ParamsChangedInGroup {
+                group,
+                track,
+                kind: kind.into(),
+            },
+            U::Mp3SampleRate { sample_rate, .. } => Mp4Unsupported::Mp3SampleRate {
+                group,
+                track,
                 sample_rate,
             },
-            U::FormatChangedInGroup { group, track } => {
-                Mp4Unsupported::FormatChangedInGroup { group, track }
-            }
-            U::Eac3ShortFrames { at } => {
-                let (group, track) = hls_track(at);
-                Mp4Unsupported::Eac3ShortFrames { group, track }
-            }
-            U::Eac3Substreams { at } => {
-                let (group, track) = hls_track(at);
-                Mp4Unsupported::Eac3Substreams { group, track }
-            }
-            U::DtsNotIncreasing { at, kind } => Mp4Unsupported::DtsNotIncreasing {
-                group: hls_track(at).0,
-                track: hls_track(at).1,
+            U::FormatChangedInGroup { .. } => Mp4Unsupported::FormatChangedInGroup { group, track },
+            U::Eac3ShortFrames { .. } => Mp4Unsupported::Eac3ShortFrames { group, track },
+            U::Eac3Substreams { .. } => Mp4Unsupported::Eac3Substreams { group, track },
+            U::DtsNotIncreasing { kind, .. } => Mp4Unsupported::DtsNotIncreasing {
+                group,
+                track,
                 kind: kind.into(),
             },
             U::TimestampJump {
-                group,
-                track,
                 kind,
                 segment,
                 jump_us,
+                ..
             } => Mp4Unsupported::TimestampJump {
                 group,
                 track,
@@ -286,19 +264,14 @@ impl From<core::Mp4Unsupported> for Mp4Unsupported {
                 segment,
                 jump: Duration::from_micros(jump_us),
             },
-            U::NoKeyframe { at } => {
-                let (group, track) = hls_track(at);
-                Mp4Unsupported::NoKeyframe { group, track }
-            }
-            U::UntimedPackedAudio { group, track } => {
-                Mp4Unsupported::UntimedPackedAudio { group, track }
-            }
+            U::NoKeyframe { .. } => Mp4Unsupported::NoKeyframe { group, track },
+            U::UntimedPackedAudio { .. } => Mp4Unsupported::UntimedPackedAudio { group, track },
             U::NoStreams => Mp4Unsupported::NoStreams {},
         }
     }
 }
 
-/// 出错的轨的组号与轨号：Python 只有 HLS 的合并，没有合并文件时的输入下标。
+/// 出错的轨的组号与轨号：Python 只有 HLS 的合并，原因都出自不连续段组里的轨，没有合并文件的输入。
 fn hls_track(at: core::remux::Origin) -> (usize, usize) {
     match at {
         core::remux::Origin::Track { group, track } => (group, track),

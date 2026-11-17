@@ -7,7 +7,7 @@ use hs_m3u8_core::{
     Error, JobType, LiveEnd, LiveOptions, LiveReport, MissReason, Mp4Unsupported, Stage, Target,
     Unsupported, Url, WorkDirProblem,
 };
-use hs_m3u8_remux::{DiscontinuityGroup, StreamKind, Streams};
+use hs_m3u8_remux::{DiscontinuityGroup, Origin, StreamKind, Streams};
 
 use super::{
     STALL, expected_split_long, interrupt, live_request, missed, outcome, playlist, playlist_in,
@@ -66,8 +66,7 @@ async fn a_new_session_is_checked_against_the_group_recorded_before() {
         matches!(
             reason,
             Mp4Unsupported::ParamsChanged {
-                group: 1,
-                track: 0,
+                at: Origin::Track { group: 1, track: 0 },
                 kind: StreamKind::Video,
                 ..
             }
@@ -97,8 +96,7 @@ async fn problems_recorded_before_are_reported_again_when_resuming() {
         matches!(
             reason,
             Some(Mp4Unsupported::ParamsChanged {
-                group: 1,
-                track: 0,
+                at: Origin::Track { group: 1, track: 0 },
                 kind: StreamKind::Video,
                 ..
             })

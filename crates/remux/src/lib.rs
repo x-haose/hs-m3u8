@@ -17,8 +17,12 @@
 //!   里只收其中能逐帧读出参数的（报 [`Unsupported::Codec`] 时列出）；MP4 封装器另有的限制（MP3 的采样率、E-AC-3 的帧
 //!   结构）见 [`Unsupported`] 的各项。
 //!
-//! 输出写完回读核对每路流的包数并落盘；失败或取消（见 [`Cancel`]）时输出上可能留有写了一半的文件。输出要么完整、要么
-//! 不存在由调用方写到临时路径、成功后改名、失败时删除来保证。错误信息已包含原因，不经 `source()` 重复给出。
+//! 音频的输入时间基比一个采样点粗（如 Matroska 与部分 fMP4 的 1 毫秒）、输出时间基更细时，帧长已知的编码（链接的
+//! FFmpeg 里为 AAC）按采样点接续，每个样本的时长都是整帧（同 ffmpeg 命令行复制音频时的做法），HLS 与合并文件都如此。
+//!
+//! 输出写完回读核对每路流的包数并落盘。[`remux`] 失败或取消（见 [`Cancel`]）时输出上可能留有写了一半的文件，输出
+//! 要么完整、要么不存在由调用方写到临时路径、成功后改名、失败时删除来保证；[`merge_files`] 自己写临时文件、成功后
+//! 换上。错误信息已包含原因，不经 `source()` 重复给出。
 //!
 //! 依照链接的 FFmpeg 的这些内部行为（各处注释写作「链接的 FFmpeg …」）：movenc 的 mov_init（MP3 最低采样率）与
 //! handle_eac3（E-AC-3 的帧结构），mov 解复用器的 mov_read_tfhd、mov_read_trun（fMP4 样本的位置），mp3dec 的
@@ -34,6 +38,7 @@ mod files;
 pub mod fmp4;
 mod frame;
 mod group;
+mod hls;
 mod inband;
 mod input;
 mod nal;
@@ -54,10 +59,7 @@ use ffmpeg_next as ffmpeg;
 pub use crate::codecs::{Codec, Container};
 pub use crate::error::{Error, FfmpegError, Origin, Unsupported};
 pub use crate::files::{FileInput, merge_files};
-
-use crate::chain::ffmpeg_path;
-use crate::group::{layout_of, open_group, primed, references_of};
-use crate::write::write_groups;
+pub use crate::hls::{check, remux};
 
 /// 一个不连续段组里某条轨的分片，按播放顺序；fMP4 时 `init` 是该组使用的 init 段。fMP4 的 init 段与各分片须通过
 /// [`fmp4::check`]、最后一个 box 的长度不写 0（见 [`fmp4::seal`]），合并时再核对一遍（见 [`Error::Fmp4`]）。
@@ -268,86 +270,6 @@ pub struct Control {
     pub progress: WriteProgress,
 }
 
-/// 把各不连续段组的分片复制进 `output`（MP4，moov 前置），写完回读核对每路流的包数并落盘。失败或取消时 `output` 上
-/// 可能留有写了一半的文件，由调用方删除；已存在的 `output` 会被替换。`streams[i]` 为第 i 条轨贡献的流种类。
-pub fn remux(
-    streams: &[Streams],
-    groups: &[DiscontinuityGroup],
-    output: &Path,
-    control: &Control,
-) -> Result<MediaReport, Error> {
-    init()?;
-    let groups: Vec<Numbered<'_>> = groups.iter().enumerate().collect();
-    validate(streams, &groups)?;
-    let Some(path) = ffmpeg_path(output) else {
-        return Err(Error::NonUtf8Path(output.to_path_buf()));
-    };
-    let report = write_groups(streams, &groups, path, control)?;
-    sync(output)?;
-    Ok(report)
-}
-
-/// 核对能否合并进一个 MP4，不写输出，用于下载完全部分片之前尽早发现放不进 MP4 的内容：各轨只给开头的分片。打开各组
-/// 各轨的输入、读到每路流的第一个包，核对编码受支持，同类流不来自两条轨，各组的流种类、编码参数与解码配置与第 0 组
-/// 相同，给出的分片有时间戳（打包音频与别的轨同组时），E-AC-3 的帧结构。
-///
-/// 只靠开头的分片判断不了的不报，留给合并：FFmpeg 打不开（如只有一两帧的 MP3）或探测不出参数（如开头没有这路流的包）
-/// 的组跳过，第 0 组这样时其余各组只核对自身（编码、E-AC-3 的帧结构等），不与第 0 组比较；开头的分片里没有关键帧的组
-/// 不核对逐帧的参数，流种类、编码参数与解码配置照样比较。通过不保证合并成功：组内中途的变化、后面的分片缺时间戳、
-/// 时间戳不递增等要读到才知道。
-///
-/// `groups` 的各项为报错时用的组号（合并时这一组的下标）与这一组，按合并的顺序，第一项为第 0 组：可以只核对其中几组，
-/// 如直播录制中拿第 0 组与新录到的一组核对。
-pub fn check(streams: &[Streams], groups: &[(usize, &DiscontinuityGroup)]) -> Result<(), Error> {
-    init()?;
-    validate(streams, groups)?;
-    let cancel = Cancel::never();
-    // 第 0 组的流布局；它开头的分片预读判断不了（如没有关键帧）时逐包参照留空，流布局与参数照样拿来比较
-    let first = match judgeable(open_group(streams, groups[0], None, &cancel))? {
-        Some(first) => {
-            let layout = layout_of(&first)?;
-            let outputs = layout.iter().map(Vec::len).sum();
-            let references = match judgeable(primed(first, &layout, &[]))? {
-                Some(sources) => references_of(&sources, outputs),
-                None => vec![None; outputs],
-            };
-            Some((layout, references))
-        }
-        None => None,
-    };
-    for &numbered in &groups[1..] {
-        let layout = first.as_ref().map(|(layout, _)| layout.as_slice());
-        judgeable(open_group(streams, numbered, layout, &cancel).and_then(
-            |opened| match &first {
-                Some((layout, references)) => primed(opened, layout, references),
-                None => {
-                    let own = layout_of(&opened)?;
-                    primed(opened, &own, &[])
-                }
-            },
-        ))?;
-    }
-    Ok(())
-}
-
-/// 一个不连续段组与报错时用的组号。
-pub(crate) type Numbered<'a> = (usize, &'a DiscontinuityGroup);
-
-/// 只给开头的分片时判断不了的结果当作没有结果（见 [`check`]）：合并时有整组的数据，同样的问题照常报出。
-fn judgeable<T>(result: Result<T, Error>) -> Result<Option<T>, Error> {
-    match result {
-        Ok(value) => Ok(Some(value)),
-        Err(
-            Error::OpenInput { .. }
-            | Error::Unsupported(Unsupported::ParamsUnknown { .. } | Unsupported::NoKeyframe { .. }),
-        ) => Ok(None),
-        Err(e) => Err(e),
-    }
-}
-
-/// HLS 的合并只输出 MP4。
-pub(crate) const HLS_CONTAINER: Container = Container::Mp4;
-
 /// 落盘。Windows 上落盘要求写权限，所以以可写方式打开。
 pub(crate) fn sync(path: &Path) -> Result<(), Error> {
     std::fs::File::options()
@@ -372,33 +294,4 @@ pub(crate) fn init() -> Result<(), Error> {
     })
     .clone()
     .map_err(Error::Init)
-}
-
-fn validate(streams: &[Streams], groups: &[Numbered<'_>]) -> Result<(), Error> {
-    let (_, first) = groups.first().ok_or(Error::NoGroups)?;
-    if streams.len() != first.tracks.len() {
-        return Err(Error::StreamsCount {
-            expected: first.tracks.len(),
-            found: streams.len(),
-        });
-    }
-    for &(group, g) in groups {
-        if g.tracks.len() != first.tracks.len() {
-            return Err(Error::TrackCount {
-                group,
-                expected: first.tracks.len(),
-                found: g.tracks.len(),
-            });
-        }
-        for (track, t) in g.tracks.iter().enumerate() {
-            if t.segments.is_empty() {
-                return Err(Error::EmptyTrack { group, track });
-            }
-            let ascending = t.gaps.windows(2).all(|w| w[0] < w[1]);
-            if !ascending || t.gaps.iter().any(|&i| i == 0 || i >= t.segments.len()) {
-                return Err(Error::InvalidGaps { group, track });
-            }
-        }
-    }
-    Ok(())
 }

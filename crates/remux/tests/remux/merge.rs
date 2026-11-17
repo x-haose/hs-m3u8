@@ -379,7 +379,12 @@ fn invalid_gaps_are_rejected() {
         )
         .unwrap_err();
         assert!(
-            matches!(err, Error::InvalidGaps { group: 0, track: 0 }),
+            matches!(
+                err,
+                Error::InvalidGaps {
+                    at: Origin::Track { group: 0, track: 0 }
+                }
+            ),
             "实际 {err:?}"
         );
     }

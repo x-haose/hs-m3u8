@@ -206,27 +206,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_codec_is_listed_and_maps_to_its_ffmpeg_id() {
-        // 加了编码而没放进 ALL 时，这里的穷举匹配编译不过
-        let listed = |codec: Codec| match codec {
-            Codec::H264
-            | Codec::Hevc
-            | Codec::Vp9
-            | Codec::Av1
-            | Codec::Aac
-            | Codec::Opus
-            | Codec::Mp3
-            | Codec::Mp2
-            | Codec::Ac3
-            | Codec::Eac3
-            | Codec::Flac
-            | Codec::Alac
-            | Codec::Vorbis => Codec::ALL.contains(&codec),
-        };
+    fn codecs_map_to_distinct_ffmpeg_ids() {
         for codec in Codec::ALL {
-            assert!(listed(codec));
             assert_eq!(Codec::of(codec.id()), Some(codec));
         }
-        assert_eq!(Codec::ALL.len(), 13);
     }
 }

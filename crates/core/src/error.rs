@@ -163,7 +163,8 @@ pub enum Error {
     #[error("无法创建 HTTP 客户端：{0}")]
     HttpClientInit(String),
     /// 合并 MP4 或下载中核对能否合并时失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是
-    /// [`Unsupported::Mp4`]
+    /// [`Unsupported::Mp4`]。合并完整文件（[`crate::merge_files`]）时，取消以外的失败都是这一项，含输入不对、内容
+    /// 放不进输出与读写文件出错
     #[error("合并失败：{0}")]
     Remux(Box<hs_m3u8_remux::Error>),
     /// 写输出失败后收拾本次写出的、或任务开头收拾上次写输出留下的，没能做完：`failure` 为失败的原因（后者为

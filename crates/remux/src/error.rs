@@ -42,14 +42,6 @@ impl Origin {
             Origin::Track { track, .. } | Origin::Input(track) => track,
         }
     }
-
-    /// HLS 的组号与轨号。只在 HLS 才有的情形（分片、不连续段组之间的比较）里调用，合并文件走不到。
-    pub(crate) fn track(self) -> (usize, usize) {
-        match self {
-            Origin::Track { group, track } => (group, track),
-            Origin::Input(_) => unreachable!("合并完整文件没有分片与不连续段组"),
-        }
-    }
 }
 
 impl fmt::Display for Origin {
@@ -61,8 +53,8 @@ impl fmt::Display for Origin {
     }
 }
 
-/// 合并与核对的错误。两种合并都会报的以 [`Origin`] 指出出错的输入；只有 HLS 才有的以组号与轨号指出，只有合并文件
-/// 才有的以输入的下标（`input`，从 0 起）指出。
+/// 合并与核对的错误。指向某一个输入的以 `at`（[`Origin`]）指出是哪个；HLS 的合并为不连续段组里的轨，合并文件为
+/// 第几个输入。只关乎一组的（如 [`Error::TrackCount`]）只带组号。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("FFmpeg 初始化失败：{0}")]
@@ -77,33 +69,33 @@ pub enum Error {
         expected: usize,
         found: usize,
     },
-    #[error("第 {group} 组第 {track} 条轨没有分片")]
-    EmptyTrack { group: usize, track: usize },
-    #[error("第 {group} 组第 {track} 条轨的缺片下标须升序、在 1 到分片数减 1 之间")]
-    InvalidGaps { group: usize, track: usize },
+    #[error("{at}没有分片")]
+    EmptyTrack { at: Origin },
+    #[error("{at}的缺片下标须升序、在 1 到分片数减 1 之间")]
+    InvalidGaps { at: Origin },
     #[error("合并文件至少需要一个输入")]
     NoInputs,
-    /// 合并完整文件时，输出与第 `input` 个输入是同一个文件（含经符号链接、硬链接）：写输出会先把它截断
-    #[error("输出与第 {input} 个输入是同一个文件")]
-    OutputIsInput { input: usize },
-    /// 合并完整文件时，第 `input` 个输入里没有调用方指定要取的这类流
-    #[error("第 {input} 个输入里没有{kind}流")]
-    MissingStream { input: usize, kind: StreamKind },
-    /// 合并完整文件时，第 `input` 个输入的格式不收：`format` 为 FFmpeg 认出的格式（解复用器名），认不出时为 None
+    /// 合并完整文件时，输出与这个输入是同一个文件（含经符号链接、硬链接）：换上输出时会把它替换掉
+    #[error("输出与{at}是同一个文件")]
+    OutputIsInput { at: Origin },
+    /// 合并完整文件时，这个输入里没有调用方指定要取的这类流
+    #[error("{at}里没有{kind}流")]
+    MissingStream { at: Origin, kind: StreamKind },
+    /// 合并完整文件时，这个输入的格式不收：`format` 为 FFmpeg 认出的格式（解复用器名），认不出时为 None
     #[error(
-        "第 {input} 个输入 {} 的格式{}不收，合并文件只收 MP4（含 M4A）、Matroska（含 WebM）、TS 与裸 AAC、MP3",
+        "{at} {} 的格式{}不收，合并文件只收 MP4（含 M4A）、Matroska（含 WebM）、TS 与裸 AAC、MP3",
         .path.display(),
         .format.as_deref().map_or_else(|| "认不出，".to_owned(), |f| format!("是 {f}，"))
     )]
     FileFormat {
-        input: usize,
+        at: Origin,
         path: PathBuf,
         format: Option<String>,
     },
-    /// 合并完整文件时，第 `input` 个输入里要取的这类流有，却没有一个包写出：没有包，或都没有 DTS。视频的包都在第一个
-    /// 关键帧之前时报 [`Unsupported::NoKeyframe`]
-    #[error("第 {input} 个输入的{kind}流没有能写出的包")]
-    EmptyInput { input: usize, kind: StreamKind },
+    /// 合并完整文件时，这个输入里要取的这类流有，却没有一个包写出：没有包，或都没有 DTS。视频的包都在第一个关键帧
+    /// 之前时报 [`Unsupported::NoKeyframe`]
+    #[error("{at}的{kind}流没有能写出的包")]
+    EmptyInput { at: Origin, kind: StreamKind },
     #[error("第 {group} 组读不出任何视频或音频包")]
     EmptyGroup { group: usize },
     #[error("输出路径无法交给 FFmpeg（不是有效的 UTF-8 或含 NUL 字符）：{}", .0.display())]
@@ -126,10 +118,8 @@ pub enum Error {
     #[error("{at}的{kind}流与前面的重复")]
     DuplicateKind { at: Origin, kind: StreamKind },
     /// 打包音频要按包在输入里的字节位置找到所在的分片；FFmpeg 的裸音频解复用器都给出位置
-    #[error(
-        "读取第 {group} 组第 {track} 条轨（打包音频）时，包没有在输入里的字节位置，定不了属于哪个分片"
-    )]
-    UnplacedPacket { group: usize, track: usize },
+    #[error("读取{at}（打包音频）时，包没有在输入里的字节位置，定不了属于哪个分片")]
+    UnplacedPacket { at: Origin },
     #[error("{0}")]
     Unsupported(Unsupported),
     #[error("创建输出 {path} 失败：{cause}")]
@@ -150,7 +140,8 @@ pub enum Error {
         written: u64,
         found: u64,
     },
-    /// 读分片、写出或关闭输出、回读输出时文件出错（写出时含 FFmpeg 写文件的错误，如盘满）
+    /// 读分片或输入文件、写出或关闭输出、回读输出时文件出错（写出时含 FFmpeg 写文件的错误，如盘满）；合并文件时另有
+    /// 读输出与临时文件的属性、删掉上次留下的临时文件、换上输出时的出错，及输入不是普通文件
     #[error("{action} {path} 失败：{cause}")]
     Io {
         action: &'static str,
@@ -195,14 +186,11 @@ pub enum Unsupported {
         "{at}的{kind}流探测不出编码参数或解码配置（分片的这一组第一个分片、或文件开头探测的范围里没有能解的数据），判断不了能否放进输出"
     )]
     ParamsUnknown { at: Origin, kind: StreamKind },
-    #[error("第 {group} 组第 {track} 条轨的流种类与第 0 组不同，无法放进同一个 MP4")]
-    LayoutChanged { group: usize, track: usize },
-    #[error(
-        "第 {group} 组第 {track} 条轨的{kind}参数 {found:?} 与第 0 组 {first:?} 不同，无法放进同一条 MP4 轨"
-    )]
+    #[error("{at}的流种类与第 0 组不同，无法放进同一个 MP4")]
+    LayoutChanged { at: Origin },
+    #[error("{at}的{kind}参数 {found:?} 与第 0 组 {first:?} 不同，无法放进同一条 MP4 轨")]
     ParamsChanged {
-        group: usize,
-        track: usize,
+        at: Origin,
         kind: StreamKind,
         first: Shape,
         found: Shape,
@@ -211,13 +199,9 @@ pub enum Unsupported {
     /// （如 AAC 的 profile 与采样率下标，LC 与 HE-AAC 的采样率都可以是 48 kHz）；或一组是 fMP4 而另一组是 TS 或打包
     /// 音频。MP4 的样本描述由第 0 组的写成，用在后面的组上解不出
     #[error(
-        "第 {group} 组第 {track} 条轨的{kind}解码配置（如 AAC 的 profile、H.264 的参数集，或分片封装）与第 0 组不同，无法放进同一条 MP4 轨"
+        "{at}的{kind}解码配置（如 AAC 的 profile、H.264 的参数集，或分片封装）与第 0 组不同，无法放进同一条 MP4 轨"
     )]
-    ConfigChanged {
-        group: usize,
-        track: usize,
-        kind: StreamKind,
-    },
+    ConfigChanged { at: Origin, kind: StreamKind },
     /// TS 的一条轨在组内（或一个 TS 文件中途）换了要取的那一路的 PID：PMT 更新后原来那路不再列出、换成了另一路
     /// （RFC 8216 要求这时标 EXT-X-DISCONTINUITY）。不报的话新 PID 的包都不进输出
     #[error("{at}的{kind}流中途换了 PID（PMT 更新后原来那路不再列出），无法放进输出的同一条轨")]
@@ -229,9 +213,9 @@ pub enum Unsupported {
     /// 没有 init 段的一条轨在组内换了分片格式（TS 与打包音频，或打包音频的格式之间）：读取时只认开头那一种，其余的
     /// 分片被当作杂字节跳过
     #[error(
-        "第 {group} 组第 {track} 条轨的分片格式在组内变了（TS 与打包音频，或打包音频的格式之间），无法放进同一条 MP4 轨"
+        "{at}的分片格式在组内变了（TS 与打包音频，或打包音频的格式之间），无法放进同一条 MP4 轨"
     )]
-    FormatChangedInGroup { group: usize, track: usize },
+    FormatChangedInGroup { at: Origin },
     /// E-AC-3 每帧不足 6 块，输出为 MP4：MP4 封装器把几帧并成一个 6 块（1536 个采样点）的样本，末尾凑不满的帧不写出
     #[error("{at}的 E-AC-3 每帧不足 6 块，放不进 MP4")]
     Eac3ShortFrames { at: Origin },
@@ -246,11 +230,10 @@ pub enum Unsupported {
     /// 声明时长（见 [`crate::Segment::duration_us`]）还长：多为来源在时间戳重新开始处漏标了 `EXT-X-DISCONTINUITY`。
     /// 一路流单独中断不算；其间有缺片时不核对
     #[error(
-        "第 {group} 组第 {track} 条轨的{kind}时间戳在第 {segment} 个分片里往前跳，输出里会留下至少 {jump_us} 微秒的空档，无法放进同一条 MP4 轨"
+        "{at}的{kind}时间戳在第 {segment} 个分片里往前跳，输出里会留下至少 {jump_us} 微秒的空档，无法放进同一条 MP4 轨"
     )]
     TimestampJump {
-        group: usize,
-        track: usize,
+        at: Origin,
         kind: StreamKind,
         /// 跳变后的第一个包所在的分片在这一组这条轨里的下标
         segment: usize,
@@ -261,14 +244,37 @@ pub enum Unsupported {
     /// 的 I 帧不算：之后的帧可能参考它之前的帧）：写进去解不出画面
     #[error("{at}的视频没有关键帧，无法放进输出")]
     NoKeyframe { at: Origin },
-    /// 第 `track` 条轨是打包音频，这一组有分片没有 ID3 时间戳（RFC 8216 3.4 要求每片都有），而这一组还有别的轨：
-    /// 不知道它与别的轨怎样对齐。只有它一条轨时按样本数从头接续
-    #[error(
-        "第 {group} 组第 {track} 条轨是打包音频，这一组有分片没有 ID3 时间戳，无法与其他轨对齐"
-    )]
-    UntimedPackedAudio { group: usize, track: usize },
+    /// 这条轨是打包音频，这一组有分片没有 ID3 时间戳（RFC 8216 3.4 要求每片都有），而这一组还有别的轨：不知道它与
+    /// 别的轨怎样对齐。只有它一条轨时按样本数从头接续
+    #[error("{at}是打包音频，这一组有分片没有 ID3 时间戳，无法与其他轨对齐")]
+    UntimedPackedAudio { at: Origin },
     #[error("各轨都没有要取的视频或音频流，写不出输出")]
     NoStreams,
+}
+
+impl Unsupported {
+    /// 出在哪个输入；与具体输入无关的（[`Unsupported::NoStreams`]）为 None。
+    pub fn at(&self) -> Option<Origin> {
+        use Unsupported as U;
+        match self {
+            U::Codec { at, .. }
+            | U::Mp3SampleRate { at, .. }
+            | U::ParamsUnknown { at, .. }
+            | U::LayoutChanged { at }
+            | U::ParamsChanged { at, .. }
+            | U::ConfigChanged { at, .. }
+            | U::StreamChangedInGroup { at, .. }
+            | U::ParamsChangedInGroup { at, .. }
+            | U::FormatChangedInGroup { at }
+            | U::Eac3ShortFrames { at }
+            | U::Eac3Substreams { at }
+            | U::DtsNotIncreasing { at, .. }
+            | U::TimestampJump { at, .. }
+            | U::NoKeyframe { at }
+            | U::UntimedPackedAudio { at } => Some(*at),
+            U::NoStreams => None,
+        }
+    }
 }
 
 /// FFmpeg 读写文件出错时给的 AVERROR（负的 errno）换成 [`io::Error`]；不是 errno 的（FFmpeg 自己的错误码，取值远在 errno

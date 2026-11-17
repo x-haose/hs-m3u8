@@ -254,7 +254,7 @@ fn wrong_inputs_are_reported() {
         matches!(
             err,
             Error::MissingStream {
-                input: 0,
+                at: Origin::Input(0),
                 kind: StreamKind::Audio
             }
         ),
@@ -276,7 +276,7 @@ fn wrong_inputs_are_reported() {
     );
     let err = run(&[input("audio.ac3", Streams::Audio)]);
     assert!(
-        matches!(&err, Error::FileFormat { input: 0, path, format: Some(format) }
+        matches!(&err, Error::FileFormat { at: Origin::Input(0), path, format: Some(format) }
             if path == &file("audio.ac3") && format == "ac3"),
         "{err:?}"
     );
@@ -304,7 +304,7 @@ fn wrong_inputs_are_reported() {
             streams: Streams::Audio,
         }]);
         assert!(
-            matches!(&err, Error::FileFormat { input: 0, path: p, format: None } if *p == path),
+            matches!(&err, Error::FileFormat { at: Origin::Input(0), path: p, format: None } if *p == path),
             "{err:?}"
         );
     }
@@ -346,7 +346,15 @@ fn output_that_is_an_input_is_refused() {
     ];
     for output in [&audio, &linked] {
         let err = merge_files(&inputs, output, Container::Mp4, &Control::default()).unwrap_err();
-        assert!(matches!(err, Error::OutputIsInput { input: 1 }), "{err:?}");
+        assert!(
+            matches!(
+                err,
+                Error::OutputIsInput {
+                    at: Origin::Input(1)
+                }
+            ),
+            "{err:?}"
+        );
     }
     assert_eq!(std::fs::read(&audio).unwrap(), original);
 }
@@ -468,4 +476,83 @@ fn progress_counts_input_bytes_and_cancel_stops() {
     .unwrap_err();
     assert!(matches!(err, Error::Cancelled), "{err:?}");
     assert!(written.load(Ordering::Relaxed) < total);
+}
+
+/// 失败时原有的输出不变、临时文件删掉；上次留下的临时文件是指向别处的符号链接时先删掉它，不顺着写到别处。
+#[test]
+fn output_is_replaced_only_on_success() {
+    let dir = work_dir("files_replace");
+    let output = dir.join("out.mp4");
+    let temp = dir.join("out.mp4.part");
+    std::fs::write(&output, "old").unwrap();
+    let headless = track("ts_long_gop").segments[1].path.clone();
+    let err = merge_files(
+        &[FileInput {
+            path: headless,
+            streams: Streams::Video,
+        }],
+        &output,
+        Container::Mp4,
+        &Control::default(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, Error::Unsupported(Unsupported::NoKeyframe { .. })),
+        "{err:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&output).unwrap(), "old");
+    assert!(!temp.exists());
+
+    #[cfg(unix)]
+    {
+        let victim = dir.join("victim");
+        std::fs::write(&victim, "user file").unwrap();
+        std::os::unix::fs::symlink(&victim, &temp).unwrap();
+        merge(
+            &dir,
+            &[input("audio_aac.m4a", Streams::Audio)],
+            Container::Mp4,
+        );
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "user file");
+        assert!(std::fs::symlink_metadata(&temp).is_err());
+        assert_ne!(std::fs::read(&output).unwrap(), b"old");
+    }
+}
+
+/// 输出或输入是 FIFO 时不打开它等写方：输出照常换上，输入报不是普通文件。
+#[cfg(unix)]
+#[test]
+fn fifos_do_not_block() {
+    let dir = work_dir("files_fifo");
+    let fifo = |name: &str| {
+        let path = dir.join(name);
+        let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        // SAFETY: c 是 NUL 结尾的路径。
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        path
+    };
+    let output = fifo("out.mp4");
+    merge_files(
+        &[input("audio_aac.m4a", Streams::Audio)],
+        &output,
+        Container::Mp4,
+        &Control::default(),
+    )
+    .unwrap();
+    assert!(std::fs::metadata(&output).unwrap().is_file());
+
+    let err = merge_files(
+        &[FileInput {
+            path: fifo("in.m4a"),
+            streams: Streams::Audio,
+        }],
+        &dir.join("other.mp4"),
+        Container::Mp4,
+        &Control::default(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&err, Error::Io { cause, .. } if cause.kind() == std::io::ErrorKind::InvalidInput),
+        "{err:?}"
+    );
 }
