@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # 生成 remux 与 core 的测试样本：ffmpeg 合成画面与正弦音，按 1 秒切成 HLS 分片，不含第三方内容。
-# 每个目录是一条轨在一个不连续段组里的分片（fMP4 另带 init.mp4）；各节目的时间戳都从头开始，
-# 前后拼接即构成 EXT-X-DISCONTINUITY。需要带 libx264、libx265、libmp3lame、libaom、libvpx、libopus 的
-# ffmpeg 命令行；ts_he_aac、fmp4_aac_at、fmp4_he_aac 另要 macOS 上的 aac_at。
+# 除 files 外，每个目录是一条轨在一个不连续段组里的分片（fMP4 另带 init.mp4）；各节目的时间戳都从头开始，
+# 前后拼接即构成 EXT-X-DISCONTINUITY。files 下是合并完整文件用的完整文件。需要带 libx264、libx265、libmp3lame、
+# libaom、libvpx、libopus、libvorbis 的 ffmpeg 命令行；ts_he_aac、fmp4_aac_at、fmp4_he_aac 另要 macOS 上的 aac_at。
 # 产物已提交到仓库，仅在需要重建时运行。
 set -euo pipefail
 
@@ -235,7 +235,9 @@ mkdir -p "$DIR/ts_wrap_audio"
 
 # 合并完整文件（hs_m3u8_remux::merge_files）用的 2 秒完整文件，放在 files 下：
 # - video_h264_frag.mp4：YouTube 那样 ftyp、moov、sidx 与各 moof/mdat 连在一个文件里的分段 MP4，H.264 带 B 帧
-# - audio_aac.m4a：普通 M4A（编辑列表跳过编码器的起始延迟）；audio_vp9.webm 等按名称为编码与容器
+# - audio_aac.m4a：普通 M4A（编辑列表跳过编码器的起始延迟）；video_vp9.webm 等按名称为编码与容器
+# - audio_aac.mkv：Matroska 里 48 kHz 的 AAC，时间戳只精确到毫秒，一帧 21.333 毫秒
+# - audio_eac3_short.mkv：每帧 3 块的 E-AC-3（码率高于 1.024 Mbps 时 FFmpeg 的编码器这样编），放不进 MP4
 # - av_h264_ac3.mkv：同一文件里有带 B 帧的 H.264 与 AC-3（Matroska 只存 PTS，DTS 要由 FFmpeg 推出）
 # - av_h264_aac.ts：TS 的时间戳从 1.4 秒（mpegts 封装器的起始延迟）开始，与从 0 开始的文件合并时各自平移
 # - audio.aac、audio.mp3：裸 ADTS 与带 ID3v2、Info 帧的 MP3；audio.ac3：裸 AC-3，合并不收
@@ -243,7 +245,7 @@ rm -rf -- "${DIR:?}/files"
 mkdir -p "$DIR/files"
 files_video=(-f lavfi -i testsrc2=size=160x90:rate=25 -t 2)
 files_audio=(-f lavfi -i sine=frequency=440:sample_rate=48000 -t 2)
-files_h264=(-c:v libx264 -preset veryfast -g 25 -bf 2 -pix_fmt yuv420p -b:v 80k)
+files_h264=("${h264[@]}" -bf 2 -b:v 80k)
 "${ff[@]}" "${files_video[@]}" "${files_h264[@]}" \
   -movflags +frag_keyframe+empty_moov+default_base_moof+global_sidx+skip_trailer -f mp4 "$DIR/files/video_h264_frag.mp4"
 "${ff[@]}" "${files_audio[@]}" "${aac[@]}" "$DIR/files/audio_aac.m4a"
@@ -253,6 +255,8 @@ files_h264=(-c:v libx264 -preset veryfast -g 25 -bf 2 -pix_fmt yuv420p -b:v 80k)
 "${ff[@]}" "${files_audio[@]}" -c:a libvorbis -b:a 48k "$DIR/files/audio_vorbis.webm"
 "${ff[@]}" "${files_audio[@]}" -c:a flac "$DIR/files/audio_flac.mkv"
 "${ff[@]}" "${files_audio[@]}" -c:a eac3 -ac 6 -b:a 384k "$DIR/files/audio_eac3.mkv"
+"${ff[@]}" -f lavfi -i sine=frequency=440:sample_rate=48000 -t 0.5 -ac 6 -c:a eac3 -b:a 1500k "$DIR/files/audio_eac3_short.mkv"
+"${ff[@]}" "${files_audio[@]}" "${aac[@]}" "$DIR/files/audio_aac.mkv"
 "${ff[@]}" "${files_video[@]}" "${files_audio[@]}" "${files_h264[@]}" -c:a ac3 -b:a 96k "$DIR/files/av_h264_ac3.mkv"
 "${ff[@]}" "${files_video[@]}" "${files_audio[@]}" "${files_h264[@]}" "${aac[@]}" -f mpegts "$DIR/files/av_h264_aac.ts"
 "${ff[@]}" "${files_audio[@]}" "${aac[@]}" -f adts "$DIR/files/audio.aac"

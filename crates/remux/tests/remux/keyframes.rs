@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use ffmpeg_next as ffmpeg;
-use hs_m3u8_remux::{Control, Error, Streams, TrackSegments, Unsupported, remux};
+use hs_m3u8_remux::{Control, Error, Origin, Streams, TrackSegments, Unsupported, remux};
 
 use crate::{check, concat_track, group, timelines, track, work_dir};
 
@@ -142,7 +142,9 @@ fn an_h264_open_gop_without_recovery_points_has_no_keyframe() {
     assert!(
         matches!(
             err,
-            Error::Unsupported(Unsupported::NoKeyframe { group: 0, track: 0 })
+            Error::Unsupported(Unsupported::NoKeyframe {
+                at: Origin::Track { group: 0, track: 0 }
+            })
         ),
         "{err:?}"
     );
@@ -204,7 +206,9 @@ fn a_group_without_any_decodable_video_frame_is_rejected() {
     assert!(
         matches!(
             err,
-            Error::Unsupported(Unsupported::NoKeyframe { group: 0, track: 0 })
+            Error::Unsupported(Unsupported::NoKeyframe {
+                at: Origin::Track { group: 0, track: 0 }
+            })
         ),
         "{err:?}"
     );

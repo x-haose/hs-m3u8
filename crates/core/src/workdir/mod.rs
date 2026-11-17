@@ -253,8 +253,9 @@ fn lock_or_create(root: &Path, lock: Option<Lock>) -> Result<Lock, Error> {
     acquire(root)
 }
 
-/// 前 `tracks` 条轨已完成的分片与 init 段。
+/// 前 `tracks` 条轨已完成的分片与 init 段；各轨的目录见 [`track_dirs`]。
 fn scan(layout: &Layout, tracks: usize) -> Result<Stored, Error> {
+    track_dirs(&layout.root)?;
     let mut stored = Stored {
         segments: Vec::with_capacity(tracks),
         init_bytes: 0,
@@ -298,7 +299,6 @@ fn read_saved(root: &Path) -> Result<Option<Saved>, Error> {
             })));
         }
     };
-    check_tracks(root)?;
     let layout = Layout {
         root: root.to_path_buf(),
     };
@@ -344,7 +344,8 @@ fn open(
 ) -> Result<WorkDir, Error> {
     let job_path = root.join(JOB_FILE);
     let lock = lock_or_create(&root, lock)?;
-    check_tracks(&root)?;
+    // 记录与当前请求对不上、或还没有已完成的内容时要清空目录：清空前先确认 tracks 不是别人的东西
+    track_dirs(&root)?;
     let layout = Layout { root: root.clone() };
     let conflict = |problem| Error::WorkDir {
         path: root.clone(),
@@ -414,25 +415,37 @@ fn clear_content(root: &Path, recorded: Option<&Recorded>) -> Result<(), Error> 
     Ok(())
 }
 
-/// 任务目录 `root` 里的 `tracks` 与其下各轨的目录（名为规范写法的编号）已有时须是目录，不跟随符号链接；不是时报
-/// [`WorkDirProblem::NotEmpty`]：读进去会把别处的文件当成已完成的分片。
-fn check_tracks(root: &Path) -> Result<(), Error> {
+/// 任务目录 `root` 里 `tracks` 下各轨的目录：名为规范写法的编号的项，按轨号升序；`tracks` 不存在时为空。读 `tracks`
+/// 的各处都经这里：`tracks` 本身或这样的项不是目录（不跟随符号链接）时报 [`WorkDirProblem::NotEmpty`]，读进去会把别处
+/// 的文件当成已完成的分片；其余名字的项不是本库建的，不读。
+fn track_dirs(root: &Path) -> Result<Vec<(usize, PathBuf)>, Error> {
     let not_ours = || Error::WorkDir {
         path: root.to_path_buf(),
         problem: WorkDirProblem::NotEmpty,
     };
     let tracks = root.join(TRACKS_DIR);
     match entries::kind_of(&tracks)? {
-        None => return Ok(()),
+        None => return Ok(Vec::new()),
         Some(kind) if !kind.is_dir() => return Err(not_ours()),
         Some(_) => {}
     }
+    let mut dirs = Vec::new();
     for entry in entries::list(&tracks)? {
-        if entry.name.to_str().is_some_and(is_canonical_number) && !entry.kind.is_dir() {
+        let Some(track) = entry
+            .name
+            .to_str()
+            .filter(|name| is_canonical_number(name))
+            .and_then(|name| name.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        if !entry.kind.is_dir() {
             return Err(not_ours());
         }
+        dirs.push((track, tracks.join(&entry.name)));
     }
-    Ok(())
+    dirs.sort();
+    Ok(dirs)
 }
 
 /// 没有 `job.json` 的目录只能是空的（是普通文件的 `.part` 残留与锁文件除外），否则不是本库建立的任务目录。
@@ -490,21 +503,9 @@ fn read_ranges_within(root: &Path, length: u64) -> Result<Vec<Range<u64>>, Error
     }
 }
 
-/// 目录里有没有已完成的分片；`tracks` 与各轨的目录不是目录时报错，见 [`check_tracks`]。
+/// 目录里有没有已完成的分片；各轨的目录见 [`track_dirs`]。
 fn has_completed_segments(root: &Path) -> Result<bool, Error> {
-    check_tracks(root)?;
-    let tracks = root.join(TRACKS_DIR);
-    let entries = match fs::read_dir(&tracks) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(cause) => return Err(io_error("读取", &tracks)(cause)),
-    };
-    for entry in entries {
-        let entry = entry.map_err(io_error("读取", &tracks))?;
-        let dir = entry.path();
-        if !entry.file_type().map_err(io_error("读取", &dir))?.is_dir() {
-            continue;
-        }
+    for (_, dir) in track_dirs(root)? {
         if !list(&dir, parse_segment_name)?.is_empty() {
             return Ok(true);
         }
@@ -975,6 +976,20 @@ mod tests {
         )
     }
 
+    /// `tracks` 下名字不是编号的目录不是本库建的：里面的文件不算已完成的分片，与查看任务目录时的口径一致。
+    #[test]
+    fn only_numbered_track_dirs_count() {
+        let dir = Scratch::new("track-dir-names");
+        let root = dir.join("work");
+        let name = "0-fresh-1-0-none-1000-0123456789abcdef.seg";
+        fs::create_dir_all(root.join("tracks/abc")).unwrap();
+        fs::write(root.join("tracks/abc").join(name), "x").unwrap();
+        assert!(!has_completed_segments(&root).unwrap());
+        fs::create_dir_all(root.join("tracks/0")).unwrap();
+        fs::write(root.join("tracks/0").join(name), "x").unwrap();
+        assert!(has_completed_segments(&root).unwrap());
+    }
+
     /// `tracks` 或某条轨的目录是指向别处的符号链接：打开时与写分片时都报目录里有不是本库写的文件，不写进链接指向的
     /// 目录；换成当前任务时也不进去删。
     #[test]
@@ -989,16 +1004,16 @@ mod tests {
         fs::create_dir(&root).unwrap();
         std::os::unix::fs::symlink(&elsewhere, root.join(TRACKS_DIR)).unwrap();
 
-        assert!(is_not_empty(check_tracks(&root)));
+        assert!(is_not_empty(track_dirs(&root).map(drop)));
         assert!(is_not_empty(create_track_dir(&root.join("tracks/0"))));
         clear_content(&root, None).unwrap();
         assert_eq!(fs::read_to_string(&victim).unwrap(), "user file");
 
         fs::remove_file(root.join(TRACKS_DIR)).unwrap();
         fs::create_dir(root.join(TRACKS_DIR)).unwrap();
-        check_tracks(&root).unwrap();
+        track_dirs(&root).unwrap();
         std::os::unix::fs::symlink(elsewhere.join("0"), root.join("tracks/0")).unwrap();
-        assert!(is_not_empty(check_tracks(&root)));
+        assert!(is_not_empty(track_dirs(&root).map(drop)));
         assert!(is_not_empty(create_track_dir(&root.join("tracks/0"))));
         create_track_dir(&root.join("tracks/1")).unwrap();
         assert!(

@@ -1,7 +1,7 @@
 //! 组内的时间戳：往回跳、往前跳与不算跳变的中断，以及 33 位时间戳的回绕。
 
 use hs_m3u8_remux::{
-    Control, Error, Segment, StreamKind, Streams, TrackSegments, Unsupported, remux,
+    Control, Error, Origin, Segment, StreamKind, Streams, TrackSegments, Unsupported, remux,
 };
 
 use crate::{concat_track, earliest, group, timelines, track, work_dir};
@@ -26,8 +26,7 @@ fn timestamps_going_back_within_a_group_fail() {
         matches!(
             err,
             Error::Unsupported(Unsupported::DtsNotIncreasing {
-                group: 0,
-                track: 0,
+                at: Origin::Track { group: 0, track: 0 },
                 ..
             })
         ),
@@ -53,8 +52,7 @@ fn a_frame_repeated_across_segments_fails() {
         matches!(
             err,
             Error::Unsupported(Unsupported::DtsNotIncreasing {
-                group: 0,
-                track: 0,
+                at: Origin::Track { group: 0, track: 0 },
                 kind: StreamKind::Video,
             })
         ),

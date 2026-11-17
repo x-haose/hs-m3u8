@@ -110,6 +110,7 @@ rustpython-ast 0.4.0  MIT  https://github.com/RustPython/Parser
 rustpython-parser 0.4.0  MIT  https://github.com/RustPython/Parser
 rustpython-parser-core 0.4.0  MIT  https://github.com/RustPython/Parser
 rustpython-parser-vendored 0.4.0  MIT  https://github.com/RustPython/Parser
+same-file 1.0.6  Unlicense/MIT  https://github.com/BurntSushi/same-file
 scopeguard 1.2.0  MIT OR Apache-2.0  https://github.com/bluss/scopeguard
 security-framework 3.7.0  MIT OR Apache-2.0  https://github.com/kornelski/rust-security-framework
 security-framework-sys 2.17.0  MIT OR Apache-2.0  https://github.com/kornelski/rust-security-framework
@@ -159,6 +160,7 @@ untrusted 0.9.0  ISC  https://github.com/briansmith/untrusted
 url 2.5.8  MIT OR Apache-2.0  https://github.com/servo/rust-url
 utf8_iter 1.0.4  Apache-2.0 OR MIT  https://github.com/hsivonen/utf8_iter
 want 0.3.2  MIT  https://github.com/seanmonstar/want
+winapi-util 0.1.11  Unlicense OR MIT  https://github.com/BurntSushi/winapi-util
 windows-link 0.2.1  MIT OR Apache-2.0  https://github.com/microsoft/windows-rs
 windows-registry 0.6.1  MIT OR Apache-2.0  https://github.com/microsoft/windows-rs
 windows-result 0.4.1  MIT OR Apache-2.0  https://github.com/microsoft/windows-rs
@@ -5260,6 +5262,8 @@ Software.
 
 --------------------------------------------------------------------------------
 memchr 2.8.3：COPYING
+same-file 1.0.6：COPYING
+winapi-util 0.1.11：COPYING
 --------------------------------------------------------------------------------
 
 This project is dual-licensed under the Unlicense and MIT licenses.
@@ -5294,6 +5298,8 @@ THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 memchr 2.8.3：UNLICENSE
+same-file 1.0.6：UNLICENSE
+winapi-util 0.1.11：UNLICENSE
 --------------------------------------------------------------------------------
 
 This is free and unencumbered software released into the public domain.
@@ -6928,6 +6934,33 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+--------------------------------------------------------------------------------
+same-file 1.0.6：LICENSE-MIT
+winapi-util 0.1.11：LICENSE-MIT
+--------------------------------------------------------------------------------
+
+The MIT License (MIT)
+
+Copyright (c) 2017 Andrew Gallant
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 
 --------------------------------------------------------------------------------
 scopeguard 1.2.0：LICENSE-MIT

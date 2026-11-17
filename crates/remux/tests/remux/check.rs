@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use hs_m3u8_remux::{
-    Control, Error, Shape, StreamKind, Streams, TrackSegments, Unsupported, remux,
+    Control, Error, Origin, Shape, StreamKind, Streams, TrackSegments, Unsupported, remux,
 };
 
 use crate::{
@@ -69,7 +69,10 @@ fn check_finds_what_cannot_go_into_an_mp4_from_the_first_segments() {
     assert!(
         matches!(
             err,
-            Error::Unsupported(Unsupported::Eac3ShortFrames { group: 0, .. })
+            Error::Unsupported(Unsupported::Eac3ShortFrames {
+                at: Origin::Track { group: 0, .. },
+                ..
+            })
         ),
         "实际 {err:?}"
     );
@@ -115,7 +118,7 @@ fn check_leaves_what_the_first_segment_cannot_tell_to_the_merge() {
         matches!(
             err,
             Error::Unsupported(Unsupported::Codec {
-                group: 1,
+                at: Origin::Track { group: 1, .. },
                 codec: "opus",
                 ..
             })
@@ -140,8 +143,7 @@ fn check_leaves_what_the_first_segment_cannot_tell_to_the_merge() {
         matches!(
             err,
             Error::Unsupported(Unsupported::ParamsUnknown {
-                group: 0,
-                track: 0,
+                at: Origin::Track { group: 0, track: 0 },
                 kind: StreamKind::Audio
             })
         ),

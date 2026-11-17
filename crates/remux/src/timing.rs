@@ -1,6 +1,6 @@
-//! 时间戳：同组各输入的回绕对齐、组间的偏移、平移到输出时间线。
+//! 时间戳：同组各输入的回绕对齐、组间的偏移、平移到输出时间线、音频按采样点接续。
 
-use ffmpeg::{Packet, Rational, Rescale};
+use ffmpeg::{Packet, Rational, Rescale, Rounding};
 use ffmpeg_next as ffmpeg;
 
 use crate::source::Source;
@@ -11,20 +11,20 @@ pub(crate) const MICROS: Rational = Rational(1, 1_000_000);
 /// 同一组的 TS 与打包音频在同一个 33 位的 90 kHz 时钟上，但各输入按自己的第一个时间戳展开回绕（FFmpeg 读每个 TS
 /// 输入、本库读打包音频都如此），起点跨在回绕点附近两侧的两个输入会差 2^33（约 26.5 小时）。以第一个读出包的这类
 /// 输入为准，其余这类输入的第一个 DTS 离它超过半个回绕周期时，整个输入平移整数个周期：同一组各轨的起点实际相距远
-/// 小于半个周期。fMP4 的时间戳不回绕，不参与。在各输入读到第一个包之后、[`Source::offset_us`] 还是 0 时调用。
-pub(crate) fn align_wraps(sources: &mut [Source]) {
+/// 小于半个周期。fMP4 的时间戳不回绕，不参与。返回各输入（已读到第一个包）要平移的量，微秒，顺序同 `sources`。
+pub(crate) fn wrap_shifts_us(sources: &[Source]) -> Vec<i64> {
     let firsts: Vec<Option<i64>> = sources
         .iter()
-        .map(|s| s.front_dts_us().filter(|_| s.input.standalone()))
+        .map(|s| s.front_input_dts_us().filter(|_| s.input.standalone()))
         .collect();
-    let Some(&base) = firsts.iter().flatten().next() else {
-        return;
-    };
-    for (source, first) in sources.iter_mut().zip(firsts) {
-        if let Some(first) = first {
-            source.offset_us = wrap_shift_us(first - base);
-        }
-    }
+    let base = firsts.iter().flatten().next().copied();
+    firsts
+        .into_iter()
+        .map(|first| match (first, base) {
+            (Some(first), Some(base)) => wrap_shift_us(first - base),
+            _ => 0,
+        })
+        .collect()
 }
 
 /// 相距 `distance_us` 的两个时刻要相距不超过半个回绕周期，后者要加的整数个 33 位回绕周期（90 kHz），微秒。
@@ -89,6 +89,54 @@ pub(crate) fn retime(
     }
 }
 
+/// 音频按采样点接续的时钟（同 FFmpeg 的 av_rescale_delta，ffmpeg 命令行复制音频时用它）。输入时间基比一个采样点
+/// 粗（如 Matroska 的 1 毫秒）时，逐包取整的时间戳换到以采样率为时间基的输出（MP4）里，样本时长忽长忽短（48 kHz 的
+/// AAC 一帧 1024 个采样点，取整后为 1008 与 1056 交替）。每包的时刻落在输入时间戳的取整误差以内时，取上一包按帧长
+/// 接续的值；超出时（时间戳本身有跳变）按输入的时间戳重新开始接续。误差按一个输入 tick 算：写入时四舍五入的差半个
+/// tick，截断的差不到一个（FFmpeg 的 av_rescale_delta 只容半个）。
+pub(crate) struct SampleClock {
+    /// 采样点的时间基，1/采样率
+    samples: Rational,
+    /// 每帧的采样点数
+    frame: i64,
+    /// 下一包按接续应在的时刻，采样点
+    next: Option<i64>,
+}
+
+impl SampleClock {
+    /// 输入时间基 `in_tb` 比采样率为 `rate` 的一个采样点粗：这时才要接续。
+    pub(crate) fn coarse(in_tb: Rational, rate: u32) -> bool {
+        i64::from(in_tb.numerator()) * i64::from(rate) > i64::from(in_tb.denominator())
+    }
+
+    /// 采样率为 `rate`、每帧 `frame` 个采样点的音频。
+    pub(crate) fn new(rate: u32, frame: u32) -> SampleClock {
+        SampleClock {
+            samples: Rational(1, i32::try_from(rate).expect("采样率在 i32 范围内")),
+            frame: i64::from(frame),
+            next: None,
+        }
+    }
+
+    /// 输出时间线上 DTS 为 `dts_us`（微秒）、输入时间基为 `in_tb` 的包按接续定的时刻，以采样点为单位。
+    pub(crate) fn place(&mut self, dts_us: i64, in_tb: Rational) -> i64 {
+        let tick_us = 1i64.rescale_with(in_tb, MICROS, Rounding::Up);
+        let earliest = (dts_us - tick_us).rescale_with(MICROS, self.samples, Rounding::Down);
+        let latest = (dts_us + tick_us).rescale_with(MICROS, self.samples, Rounding::Up);
+        let at = match self.next {
+            Some(next) if (earliest..=latest).contains(&next) => next,
+            _ => dts_us.rescale(MICROS, self.samples),
+        };
+        self.next = Some(at + self.frame);
+        at
+    }
+
+    /// 采样点为单位的时刻 `at` 换到时间基 `tb`。
+    pub(crate) fn to(&self, at: i64, tb: Rational) -> i64 {
+        at.rescale(self.samples, tb)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,5 +152,34 @@ mod tests {
         assert_eq!(wrap_shift_us(75_000_000 - wrap), wrap);
         assert_eq!(wrap_shift_us(wrap - 75_000_000), -wrap);
         assert_eq!(wrap_shift_us(2 * wrap), -2 * wrap);
+    }
+
+    #[test]
+    fn audio_in_millisecond_timestamps_continues_sample_by_sample() {
+        // 48 kHz、每帧 1024 个采样点（21.333 毫秒）的音频，时间戳截断或四舍五入到毫秒
+        let ms = Rational(1, 1000);
+        assert!(SampleClock::coarse(ms, 48_000));
+        for rounded in [false, true] {
+            let mut clock = SampleClock::new(48_000, 1024);
+            let placed: Vec<i64> = (0..6i64)
+                .map(|n| {
+                    let half = if rounded { 24_000 } else { 0 };
+                    clock.place((n * 1024 * 1000 + half) / 48_000 * 1000, ms)
+                })
+                .collect();
+            assert_eq!(
+                placed,
+                [0, 1024, 2048, 3072, 4096, 5120],
+                "四舍五入：{rounded}"
+            );
+        }
+        let mut clock = SampleClock::new(48_000, 1024);
+        clock.place(0, ms);
+        // 时间戳跳了 1 秒：从输入的时刻重新接续
+        assert_eq!(clock.place(1_128_000, ms), 54_144);
+        assert_eq!(clock.place(1_149_000, ms), 54_144 + 1024);
+        // 输入时间基比采样点细时不用接续
+        assert!(!SampleClock::coarse(Rational(1, 90_000), 48_000));
+        assert!(!SampleClock::coarse(Rational(1, 48_000), 48_000));
     }
 }

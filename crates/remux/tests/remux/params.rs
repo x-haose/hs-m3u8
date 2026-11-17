@@ -2,7 +2,7 @@
 
 use ffmpeg_next as ffmpeg;
 use hs_m3u8_remux::{
-    Control, Error, Shape, StreamKind, Streams, TrackSegments, Unsupported, remux,
+    Control, Error, Origin, Shape, StreamKind, Streams, TrackSegments, Unsupported, remux,
 };
 
 use crate::{check, group, packed_fixture, packed_segment, segs, track, work_dir};
@@ -68,8 +68,7 @@ fn chroma_changes_are_rejected() {
         matches!(
             err,
             Error::Unsupported(Unsupported::ParamsChangedInGroup {
-                group: 0,
-                track: 0,
+                at: Origin::Track { group: 0, track: 0 },
                 kind: StreamKind::Video
             })
         ),
@@ -185,7 +184,7 @@ fn parameter_changes_within_a_group_are_rejected() {
         assert!(
             matches!(
                 &err,
-                Error::Unsupported(Unsupported::ParamsChangedInGroup { group: 0, track: 0, kind: found })
+                Error::Unsupported(Unsupported::ParamsChangedInGroup { at: Origin::Track { group: 0, track: 0 }, kind: found })
                     if *found == kind
             ),
             "{kind}：实际 {err:?}"
@@ -212,8 +211,7 @@ fn a_pid_change_within_a_group_is_rejected() {
         matches!(
             err,
             Error::Unsupported(Unsupported::StreamChangedInGroup {
-                group: 0,
-                track: 0,
+                at: Origin::Track { group: 0, track: 0 },
                 kind: StreamKind::Audio
             })
         ),
@@ -276,8 +274,7 @@ fn a_codec_switch_on_one_pid_is_rejected() {
         matches!(
             err,
             Error::Unsupported(Unsupported::ParamsChangedInGroup {
-                group: 0,
-                track: 0,
+                at: Origin::Track { group: 0, track: 0 },
                 kind: StreamKind::Audio
             })
         ),

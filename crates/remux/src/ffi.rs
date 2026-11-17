@@ -1,5 +1,5 @@
 //! 本 crate 的全部 unsafe：直接读写 AVCodecParameters 字段，读解复用器给流用的解析器的状态、输入的节目列表，查像素
-//! 格式描述表，打开装了中断回调的输出、读输出的读写错误，ffmpeg-next 没有对应的安全接口。
+//! 格式描述表，按开头的字节探测格式，打开装了中断回调的输出、读输出的读写错误，ffmpeg-next 没有对应的安全接口。
 
 use std::ffi::{CStr, CString};
 use std::path::PathBuf;
@@ -92,6 +92,40 @@ pub(crate) fn decoded_aac(stream: &Stream<'_>) -> Option<DecodedAac> {
         profile: p.profile,
         frame_size: p.frame_size,
     })
+}
+
+/// 流的帧长与重排延迟：音频每帧的采样点数（codecpar 的 frame_size，帧长不固定或不知道时为 None），视频的重排延迟
+/// （codecpar 的 video_delay，帧数；没有时为 0）。
+pub(crate) fn timing(stream: &Stream<'_>) -> (Option<u32>, usize) {
+    let params = stream.parameters();
+    // SAFETY: 指针指向该流的 codecpar，在 params 存活期间有效且非空；此处只读。
+    let p = unsafe { &*params.as_ptr() };
+    (
+        u32::try_from(p.frame_size).ok().filter(|&n| n > 0),
+        usize::try_from(p.video_delay).unwrap_or(0),
+    )
+}
+
+/// 按文件开头的字节 `head` 探测格式（同 FFmpeg 打开输入时，按各解复用器的探测打分取最高的），返回解复用器名；认不出
+/// 时为 None。
+pub(crate) fn probe_format(head: &[u8]) -> Option<&'static str> {
+    // 探测函数要求数据后面跟 AVPROBE_PADDING_SIZE 个 0
+    let mut buf = head.to_vec();
+    buf.resize(head.len() + ffmpeg::ffi::AVPROBE_PADDING_SIZE as usize, 0);
+    let probe = ffmpeg::ffi::AVProbeData {
+        filename: c"".as_ptr(),
+        buf: buf.as_mut_ptr(),
+        buf_size: i32::try_from(head.len()).expect("调用方只给开头 1 MiB"),
+        mime_type: std::ptr::null(),
+    };
+    let mut score = 0;
+    // SAFETY: probe 的各指针在调用期间有效：文件名为空串，缓冲区有 buf_size 个字节外加要求的补零；只读。返回的格式描述是
+    // FFmpeg 的静态数据，名称为静态的 NUL 结尾字符串。
+    unsafe {
+        let format = ffmpeg::ffi::av_probe_input_format2(&raw const probe, 1, &raw mut score);
+        let format = format.as_ref()?;
+        CStr::from_ptr(format.name).to_str().ok()
+    }
 }
 
 /// FFmpeg 的像素格式值 `format`（AVPixelFormat）的名称；不认识（含 AV_PIX_FMT_NONE）时为 None。逐个查像素格式描述

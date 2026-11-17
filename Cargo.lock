@@ -706,6 +706,7 @@ version = "1.0.0"
 dependencies = [
  "ffmpeg-next",
  "libc",
+ "same-file",
  "thiserror",
 ]
 

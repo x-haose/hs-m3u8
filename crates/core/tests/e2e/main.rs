@@ -6,6 +6,7 @@ mod discard;
 mod file;
 mod http;
 mod live;
+mod merge;
 mod output;
 mod samples;
 mod server;

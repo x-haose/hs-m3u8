@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
+use std::io::Read;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -11,7 +12,7 @@ use ffmpeg_next as ffmpeg;
 
 use crate::chain::{self, Halt, SegmentChain};
 use crate::packed::Packed;
-use crate::{Cancel, Error, Segment, TrackSegments, Unsupported, fmp4, standalone};
+use crate::{Cancel, Error, Origin, Segment, TrackSegments, Unsupported, ffi, fmp4, standalone};
 
 pub(crate) enum Input {
     /// TS 与 fMP4：init 段与分片按字节相连，作为一个输入读；或一个完整文件
@@ -31,8 +32,7 @@ impl Input {
     /// 的为打包音频。`cancel` 取消后打开与读取以 [`Error::Cancelled`] 失败。
     pub(crate) fn open(
         segments: &TrackSegments,
-        group: usize,
-        track: usize,
+        at: Origin,
         cancel: &Cancel,
     ) -> Result<Input, Error> {
         if segments.init.is_none() {
@@ -42,26 +42,22 @@ impl Input {
                 .map(|segment| segment_head(&segment.path))
                 .collect::<Result<Vec<_>, Error>>()?;
             if heads.iter().any(|h| h.format != heads[0].format) {
+                let (group, track) = at.track();
                 return Err(Error::Unsupported(Unsupported::FormatChangedInGroup {
                     group,
                     track,
                 }));
             }
             if heads[0].format != standalone::Format::Ts {
-                return Packed::open(segments, &heads, group, track, cancel)
+                return Packed::open(segments, &heads, at, cancel)
                     .map(|packed| Input::Packed(Box::new(packed)));
             }
         }
-        Input::chain(segments, group, track, cancel)
+        Input::chain(segments, at, cancel)
     }
 
     /// TS 与 fMP4：init 段与分片按字节相连打开，fMP4 的各片先核对（见 [`fmp4_len`]）。
-    fn chain(
-        segments: &TrackSegments,
-        group: usize,
-        track: usize,
-        cancel: &Cancel,
-    ) -> Result<Input, Error> {
+    fn chain(segments: &TrackSegments, at: Origin, cancel: &Cancel) -> Result<Input, Error> {
         let init = segments.init.is_some();
         let trex = segments.init.as_deref().map(init_trex).transpose()?;
         let paths = segments
@@ -97,7 +93,7 @@ impl Input {
             .sum();
         let probe = Probe::first_segment(first_end, &segments.segments[0]);
         let (chain, failure) = new_chain(files, cancel)?;
-        let ictx = open_chain(chain, &failure, probe, group, track)?;
+        let ictx = open_chain(chain, &failure, probe, at)?;
         Ok(Input::Chain {
             ictx,
             failure,
@@ -106,24 +102,32 @@ impl Input {
         })
     }
 
-    /// 完整文件 `path`，作为第 0 组第 `track` 条轨。格式交给 FFmpeg 按内容识别，只收 MP4 一类（含单文件的分段
-    /// MP4、M4A）、Matroska（含 WebM）、TS 与裸 AAC、MP3，其余报 [`Error::FileFormat`]；探测读到 FFmpeg 的默认上限为止
-    /// （见 [`Probe::DEFAULT`]）。另返回文件打开时的字节数。
-    pub(crate) fn file(path: &Path, track: usize, cancel: &Cancel) -> Result<(Input, u64), Error> {
+    /// 完整文件 `path`，调用方给的第 `input` 个输入。格式先由 FFmpeg 按开头的内容探测，只收 MP4 一类（含单文件的分段
+    /// MP4、M4A）、Matroska（含 WebM）、TS 与裸 AAC、MP3，认不出或不收时报 [`Error::FileFormat`]，收的格式打不开时
+    /// 报 [`Error::OpenInput`]；探测流参数读到 FFmpeg 的默认上限为止（见 [`Probe::DEFAULT`]）。另返回文件打开时的
+    /// 字节数。
+    pub(crate) fn file(path: &Path, input: usize, cancel: &Cancel) -> Result<(Input, u64), Error> {
+        let at = Origin::Input(input);
+        let unaccepted = |format: Option<&str>| Error::FileFormat {
+            input,
+            path: path.to_path_buf(),
+            format: format.map(str::to_owned),
+        };
+        let mut head = Vec::new();
+        File::open(path)
+            .and_then(|file| file.take(PROBE_HEAD).read_to_end(&mut head))
+            .map_err(read_error(path))?;
+        let probed = ffi::probe_format(&head);
+        if probed.and_then(header_in).is_none() {
+            return Err(unaccepted(probed));
+        }
         let len = std::fs::metadata(path).map_err(read_error(path))?.len();
         let (chain, failure) = new_chain(vec![(path.to_path_buf(), 0..len)], cancel)?;
-        let ictx = open_chain(chain, &failure, Probe::DEFAULT, 0, track)?;
-        // 链接的 FFmpeg 中各解复用器的名称。裸 AC-3、E-AC-3 不收：其解复用器的时间基为 1/90000 秒，44.1 kHz 等采样率下
-        // 逐帧向下取整，时间戳随时长越差越多
-        let header = match ictx.format().name() {
-            "mov,mp4,m4a,3gp,3g2,mj2" | "matroska,webm" => true,
-            "mpegts" | "aac" | "mp3" => false,
-            other => {
-                return Err(Error::FileFormat {
-                    path: path.to_path_buf(),
-                    format: other.to_owned(),
-                });
-            }
+        let ictx = open_chain(chain, &failure, Probe::DEFAULT, at)?;
+        // 打开时 FFmpeg 再探测一次，读的范围可能不同
+        let opened = ictx.format().name().to_owned();
+        let Some(header) = header_in(&opened) else {
+            return Err(unaccepted(Some(&opened)));
         };
         let input = Input::Chain {
             ictx,
@@ -141,21 +145,16 @@ impl Input {
         }
     }
 
-    /// 读下一个包；读到末尾返回 false。
-    pub(crate) fn read(
-        &mut self,
-        packet: &mut Packet,
-        group: usize,
-        track: usize,
-    ) -> Result<bool, Error> {
+    /// 读下一个包（`at` 为这个输入在哪里，报错用）；读到末尾返回 false。
+    pub(crate) fn read(&mut self, packet: &mut Packet, at: Origin) -> Result<bool, Error> {
         match self {
-            Input::Chain { ictx, failure, .. } => read_packet(ictx, failure, packet, group, track),
-            Input::Packed(packed) => packed.read(packet, group, track),
+            Input::Chain { ictx, failure, .. } => read_packet(ictx, failure, packet, at),
+            Input::Packed(packed) => packed.read(packet, at),
         }
     }
 
     /// TS 与裸音频（含打包音频）：编码参数随帧携带，要逐包核对（见 [`crate::inband`]）。HLS 的分片的时间戳在 33 位的
-    /// 90 kHz 时钟上，同组各输入之间要对齐回绕（见 [`crate::timing::align_wraps`]）。
+    /// 90 kHz 时钟上，同组各输入之间要对齐回绕（见 [`crate::timing::wrap_shifts_us`]）。
     pub(crate) fn standalone(&self) -> bool {
         !matches!(self, Input::Chain { header: true, .. })
     }
@@ -179,6 +178,21 @@ impl Input {
     /// 打包音频，而这一组有分片没有时间戳。
     pub(crate) fn untimed(&self) -> bool {
         matches!(self, Input::Packed(packed) if !packed.timed())
+    }
+}
+
+/// 合并文件时探测格式读的开头字节数：FFmpeg 探测格式时最多读的量（libavformat 的 PROBE_BUF_MAX），开头的 ID3v2 标签
+/// 比它长时认不出。
+const PROBE_HEAD: u64 = 1 << 20;
+
+/// FFmpeg 的解复用器名 `name`（链接的 FFmpeg 中各解复用器的名称）是不是合并文件收的格式：收的为编码参数是否在文件头里
+/// （见 [`Input::standalone`]），不收的为 None。裸 AC-3、E-AC-3 不收：其解复用器的时间基为 1/90000 秒，44.1 kHz 等
+/// 采样率下逐帧向下取整，时间戳随时长越差越多。
+fn header_in(name: &str) -> Option<bool> {
+    match name {
+        "mov,mp4,m4a,3gp,3g2,mj2" | "matroska,webm" => Some(true),
+        "mpegts" | "aac" | "mp3" => Some(false),
+        _ => None,
     }
 }
 
@@ -207,7 +221,7 @@ impl SegmentMap {
         }
     }
 
-    /// 完整文件：一个时长未知的分片，不核对时间戳的推进。
+    /// 完整文件：整个文件算一个时长未知的分片。合并文件不按分片核对时间戳的推进、不按分片报进度，用不到它。
     pub(crate) fn whole() -> SegmentMap {
         SegmentMap {
             starts: vec![0],
@@ -307,8 +321,8 @@ pub(crate) fn new_chain(
     })
 }
 
-/// 打开输入时 FFmpeg 探测流参数最多读多少：至少读完第一个分片，探测不出的参数即第一个分片里没有（见
-/// [`crate::Unsupported::ParamsUnknown`]）。各流的参数都探测出后 FFmpeg 就停下；有流（含不进输出的，如节目列表里有、
+/// 打开输入时 FFmpeg 探测流参数最多读多少：HLS 的分片至少读完第一个分片，探测不出的参数即第一个分片里没有（见
+/// [`crate::Unsupported::ParamsUnknown`]）；完整文件按 FFmpeg 的默认上限（[`Probe::DEFAULT`]）。各流的参数都探测出后 FFmpeg 就停下；有流（含不进输出的，如节目列表里有、
 /// 第一个分片里却没有数据的另一路音频）一直探测不出时读到上限为止，读过的包缓存在内存里：分片小时可能不止一片。
 pub(crate) struct Probe {
     /// 字节，不小于 FFmpeg 的默认值
@@ -351,14 +365,12 @@ pub(crate) fn open_chain(
     chain: SegmentChain,
     failure: &chain::Failure,
     probe: Probe,
-    group: usize,
-    track: usize,
+    at: Origin,
 ) -> Result<format::context::Input, Error> {
     chain::open(chain, failure, Some(probe.options())).map_err(|halt| match halt {
         Halt::Stopped(stopped) => stopped.into_error("读取"),
         Halt::Ffmpeg(cause) => Error::OpenInput {
-            group,
-            track,
+            at,
             cause: cause.into(),
         },
     })
@@ -369,14 +381,12 @@ pub(crate) fn read_packet(
     ictx: &mut format::context::Input,
     failure: &chain::Failure,
     packet: &mut Packet,
-    group: usize,
-    track: usize,
+    at: Origin,
 ) -> Result<bool, Error> {
     chain::read(ictx, failure, packet).map_err(|halt| match halt {
         Halt::Stopped(stopped) => stopped.into_error("读取"),
         Halt::Ffmpeg(cause) => Error::Read {
-            group,
-            track,
+            at,
             cause: cause.into(),
         },
     })

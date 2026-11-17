@@ -122,6 +122,15 @@ pub(crate) enum Mismatch {
     Eac3Substreams,
 }
 
+/// 参数在文件头里的输入（MP4、Matroska）的一个 E-AC-3 包 `data`，MP4 封装器能否处理其帧结构（见 [`check_eac3`]）：包
+/// 须恰好由整个同步帧组成，读不出时为 [`Mismatch::Unreadable`]。参数随帧携带的输入由 [`Inband::check`] 核对。
+pub(crate) fn eac3_for_mp4(data: &[u8]) -> Result<(), Mismatch> {
+    match audio_params(frame::Framing::Ac3, data) {
+        Some(AudioParams::Ac3(frames)) => check_eac3(&frames),
+        _ => Err(Mismatch::Unreadable),
+    }
+}
+
 /// E-AC-3 的帧结构 MP4 封装器能否处理（链接的 FFmpeg 中 movenc 的 handle_eac3）。
 fn check_eac3(frames: &[frame::Ac3Frame]) -> Result<(), Mismatch> {
     for frame in frames {

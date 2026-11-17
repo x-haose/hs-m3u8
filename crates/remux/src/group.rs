@@ -1,6 +1,4 @@
-//! 打开一组各轨的分片、选出要取的流，再换成读包的输入。
-
-use std::path::Path;
+//! 选出一条轨（或一个完整文件）里要取的流，打开 HLS 一组的各轨，再换成读包的输入。
 
 use ffmpeg::{Rational, codec};
 use ffmpeg_next as ffmpeg;
@@ -12,10 +10,11 @@ use crate::input::Input;
 use crate::nal::Framing;
 use crate::source::Source;
 use crate::{
-    Cancel, Container, Error, Numbered, StreamKind, Streams, TrackSegments, Unsupported, ffi, frame,
+    Cancel, Container, Error, HLS_CONTAINER, Numbered, Origin, StreamKind, Streams, Unsupported,
+    ffi, frame,
 };
 
-/// 一条轨在某组中被选中的一路流。
+/// 一条轨在某组中（或一个完整文件里）被选中的一路流。
 pub(crate) struct Selected {
     pub(crate) index: usize,
     pub(crate) time_base: Rational,
@@ -26,52 +25,22 @@ pub(crate) struct Selected {
     pub(crate) hevc: Option<Framing>,
     /// 参数随帧携带的输入（见 [`Input::standalone`]）：从头开始的逐包核对；其余为 None
     pub(crate) inband: Option<Inband>,
+    /// 参数在文件头里的 E-AC-3、输出为 MP4：逐包核对 MP4 封装器能否处理帧结构（见 [`crate::inband::eac3_for_mp4`]；
+    /// 参数随帧携带的由 `inband` 核对）
+    pub(crate) eac3_for_mp4: bool,
+    /// 音频每帧的采样点数（FFmpeg 给的 frame_size）；视频，或帧长不固定、不知道时为 None
+    pub(crate) frame_samples: Option<u32>,
+    /// 视频的重排延迟（FFmpeg 给的 video_delay），帧数：流开头最多这么多个包推不出 DTS（见
+    /// [`Source::read_input`]）；音频为 0
+    pub(crate) video_delay: usize,
 }
 
-/// 打开一条轨在一组里的分片，按 `wanted` 选出流（见 [`select`]）。
-fn open_selected(
-    segments: &TrackSegments,
-    wanted: Streams,
-    group: usize,
-    track: usize,
-    cancel: &Cancel,
-) -> Result<(Input, Vec<Selected>), Error> {
-    let input = Input::open(segments, group, track, cancel)?;
-    let selected = select(&input, wanted, Container::Mp4, group, track)?;
-    Ok((input, selected))
-}
-
-/// 打开完整文件 `path`，作为第 `track` 条轨按 `wanted` 选出流（见 [`select`]）；`wanted` 的每种流都要有，否则报
-/// [`Error::MissingStream`]。另返回文件打开时的字节数。
-pub(crate) fn open_file(
-    path: &Path,
-    wanted: Streams,
-    container: Container,
-    track: usize,
-    cancel: &Cancel,
-) -> Result<(OpenTrack, u64), Error> {
-    let (input, size) = Input::file(path, track, cancel)?;
-    let selected = select(&input, wanted, container, 0, track)?;
-    for kind in [StreamKind::Video, StreamKind::Audio] {
-        if wanted.wants(kind) && !selected.iter().any(|s| s.desc.shape.kind() == kind) {
-            return Err(Error::MissingStream { track, kind });
-        }
-    }
-    let opened = OpenTrack {
-        track,
-        input,
-        selected,
-    };
-    Ok((opened, size))
-}
-
-/// 按 `wanted` 选出 `input` 里第一路视频与（或）第一路音频，并检查编码能否放进 `container`。
-fn select(
+/// 按 `wanted` 选出 `input`（`at` 处的输入）里第一路视频与（或）第一路音频，并检查编码能否放进 `container`。
+pub(crate) fn select(
     input: &Input,
     wanted: Streams,
     container: Container,
-    group: usize,
-    track: usize,
+    at: Origin,
 ) -> Result<Vec<Selected>, Error> {
     let mut selected = Vec::new();
     for kind in [StreamKind::Video, StreamKind::Audio] {
@@ -87,8 +56,7 @@ fn select(
         };
         let id = stream.parameters().id();
         let shape = ffi::shape(&stream, kind);
-        check_codec(id, &shape, input.standalone(), container, group, track)
-            .map_err(Error::Unsupported)?;
+        check_codec(id, &shape, input.standalone(), container, at).map_err(Error::Unsupported)?;
         let config = if input.standalone() {
             Config::Inband
         } else {
@@ -113,28 +81,32 @@ fn select(
         } else {
             None
         };
+        let (frame_samples, video_delay) = ffi::timing(&stream);
         selected.push(Selected {
             index: stream.index(),
             time_base: stream.time_base(),
             id,
             desc: Desc { shape, config },
             hevc,
+            eac3_for_mp4: inband.is_none() && container == Container::Mp4 && id == codec::Id::EAC3,
             inband,
+            frame_samples: frame_samples.filter(|_| kind == StreamKind::Audio),
+            video_delay,
         });
     }
     Ok(selected)
 }
 
-/// 一条轨在一组里打开的输入与选中的流。
+/// 一条轨在一组里（或一个完整文件）打开的输入与选中的流。
 pub(crate) struct OpenTrack {
-    pub(crate) track: usize,
+    pub(crate) at: Origin,
     pub(crate) input: Input,
     pub(crate) selected: Vec<Selected>,
 }
 
-/// 打开第 `group` 组的各轨并选流（见 [`open_selected`]）。`layout` 为第 0 组各轨选中的流（见
-/// [`layout_of`]），其余组的流种类、参数与解码配置须与它相同（见 [`same_streams`]），各轨都没有确定的
-/// 不同、而有项只有一边探测出时报 [`Unsupported::ParamsUnknown`]；打开第 0 组时为 None。
+/// 打开第 `group` 组的各轨并选流（见 [`select`]）。`layout` 为第 0 组各轨选中的流（见 [`layout_of`]），其余组的流种类、
+/// 参数与解码配置须与它相同（见 [`same_streams`]），各轨都没有确定的不同、而有项只有一边探测出时报
+/// [`Unsupported::ParamsUnknown`]；打开第 0 组时为 None。
 pub(crate) fn open_group(
     streams: &[Streams],
     (group, tracks): Numbered<'_>,
@@ -144,31 +116,30 @@ pub(crate) fn open_group(
     let mut opened = Vec::new();
     let mut unknown = None;
     for (track, segments) in tracks.tracks.iter().enumerate() {
-        let (input, selected) = open_selected(segments, streams[track], group, track, cancel)?;
+        let at = Origin::Track { group, track };
+        let input = Input::open(segments, at, cancel)?;
+        let selected = select(&input, streams[track], HLS_CONTAINER, at)?;
         let found: Vec<&Desc> = selected.iter().map(|s| &s.desc).collect();
         if let Some(layout) = layout
             && let Some(kind) = same_streams(&found, &layout[track], group, track)?
         {
-            unknown.get_or_insert((track, kind));
+            unknown.get_or_insert((at, kind));
         }
         opened.push(OpenTrack {
-            track,
+            at,
             input,
             selected,
         });
     }
     check_timed(group, &opened)?;
     match unknown {
-        Some((track, kind)) => Err(Error::Unsupported(Unsupported::ParamsUnknown {
-            group,
-            track,
-            kind,
-        })),
+        Some((at, kind)) => Err(Error::Unsupported(Unsupported::ParamsUnknown { at, kind })),
         None => Ok(opened),
     }
 }
 
-/// 第 0 组各轨选中的流，下标为轨道号；依次排开即各路输出流。同一类流只能来自一条轨，各轨合起来至少一路。
+/// 第 0 组各轨（或各完整文件）选中的流，下标为轨号；依次排开即各路输出流。同一类流只能来自一条轨，各轨合起来至少
+/// 一路。
 pub(crate) fn layout_of(first: &[OpenTrack]) -> Result<Vec<Vec<Desc>>, Error> {
     let mut layout: Vec<Vec<Desc>> = Vec::new();
     for t in first {
@@ -180,7 +151,7 @@ pub(crate) fn layout_of(first: &[OpenTrack]) -> Result<Vec<Vec<Desc>>, Error> {
         });
         if let Some(s) = duplicate {
             return Err(Error::DuplicateKind {
-                track: t.track,
+                at: t.at,
                 kind: s.desc.shape.kind(),
             });
         }
@@ -199,32 +170,47 @@ fn check_timed(group: usize, opened: &[OpenTrack]) -> Result<(), Error> {
         Some(untimed) if contributing.len() > 1 => {
             Err(Error::Unsupported(Unsupported::UntimedPackedAudio {
                 group,
-                track: untimed.track,
+                track: untimed.at.index(),
             }))
         }
         _ => Ok(()),
     }
 }
 
-/// 一组打开的各轨换成读包的输入，各自读到每路流的第一个包（见 [`Source::prime`]）：各轨选中的流按 `layout` 依次
-/// 对应输出流；没有要取的流的轨不贡献，不读它的包。`references` 见 [`references_of`]，第 0 组为空。
-pub(crate) fn primed(
-    group: usize,
+/// 打开的各轨（或各完整文件）换成读包的输入：各轨选中的流按 `layout` 依次对应输出流；没有要取的流的轨不贡献。
+/// `references` 见 [`references_of`]，第 0 组与完整文件为空。
+pub(crate) fn sources(
     opened: Vec<OpenTrack>,
     layout: &[Vec<Desc>],
     references: &[Option<Inband>],
-) -> Result<Vec<Source>, Error> {
+) -> Vec<Source> {
     let mut next = 0;
     let mut sources = Vec::new();
     for t in opened {
         let outputs: Vec<usize> = (next..next + t.selected.len()).collect();
-        next += layout[t.track].len();
+        next += layout[t.at.index()].len();
         if !t.selected.is_empty() {
-            let mut source =
-                Source::new(group, t.track, t.input, &t.selected, &outputs, references);
-            source.prime()?;
-            sources.push(source);
+            sources.push(Source::new(
+                t.at,
+                t.input,
+                &t.selected,
+                &outputs,
+                references,
+            ));
         }
+    }
+    sources
+}
+
+/// HLS 一组打开的各轨换成读包的输入（见 [`sources`]），各自读到每路流的第一个包（见 [`Source::prime`]）。
+pub(crate) fn primed(
+    opened: Vec<OpenTrack>,
+    layout: &[Vec<Desc>],
+    references: &[Option<Inband>],
+) -> Result<Vec<Source>, Error> {
+    let mut sources = sources(opened, layout, references);
+    for source in &mut sources {
+        source.prime()?;
     }
     Ok(sources)
 }

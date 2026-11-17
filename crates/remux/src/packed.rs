@@ -10,7 +10,7 @@ use ffmpeg_next as ffmpeg;
 
 use crate::input::{Probe, SegmentMap, new_chain, open_chain, read_packet};
 use crate::standalone::{Format, Head, Item, is_id3v1, item};
-use crate::{Cancel, Error, TrackSegments, chain, frame};
+use crate::{Cancel, Error, Origin, TrackSegments, chain, frame};
 
 /// 打包音频时间戳的时钟（90 kHz）。
 const CLOCK_90K: Rational = Rational(1, 90_000);
@@ -54,8 +54,7 @@ impl Packed {
     pub(crate) fn open(
         segments: &TrackSegments,
         heads: &[Head],
-        group: usize,
-        track: usize,
+        at: Origin,
         cancel: &Cancel,
     ) -> Result<Packed, Error> {
         let Joined {
@@ -73,7 +72,7 @@ impl Packed {
         let first_end = starts.get(1).copied().unwrap_or(total);
         let probe = Probe::first_segment(first_end, &segments.segments[0]);
         let (chain, failure) = new_chain(pieces, cancel)?;
-        let ictx = open_chain(chain, &failure, probe, group, track)?;
+        let ictx = open_chain(chain, &failure, probe, at)?;
         let audio = ictx
             .streams()
             .find(|s| s.parameters().medium() == media::Type::Audio)
@@ -112,18 +111,13 @@ impl Packed {
     }
 
     /// 读下一个包，音频包平移到所在分片的时间戳处（见 [`Packed`]）；读到末尾返回 false。
-    pub(crate) fn read(
-        &mut self,
-        packet: &mut Packet,
-        group: usize,
-        track: usize,
-    ) -> Result<bool, Error> {
+    pub(crate) fn read(&mut self, packet: &mut Packet, at: Origin) -> Result<bool, Error> {
         loop {
             if let Some(ready) = self.ready.pop_front() {
                 *packet = ready;
                 return Ok(true);
             }
-            if !read_packet(&mut self.ictx, &self.failure, packet, group, track)? {
+            if !read_packet(&mut self.ictx, &self.failure, packet, at)? {
                 let Some((segment, packets)) = self.pending.take() else {
                     return Ok(false);
                 };
@@ -137,10 +131,10 @@ impl Packed {
                 return Ok(true);
             };
             // 第一个分片从 0 起，位置已知时总能归到某一片
-            let segment = self
-                .segments
-                .segment_at(packet.position())
-                .ok_or(Error::UnplacedPacket { group, track })?;
+            let segment = self.segments.segment_at(packet.position()).ok_or_else(|| {
+                let (group, track) = at.track();
+                Error::UnplacedPacket { group, track }
+            })?;
             let position = u64::try_from(packet.position()).expect("归得到分片的位置非负");
             if self.resumes[segment].is_some_and(|resume| position >= resume) {
                 // 上一片损坏之后暂存的包读完了（这一片从开头就在损坏之后时，中间没有不暂存的包）

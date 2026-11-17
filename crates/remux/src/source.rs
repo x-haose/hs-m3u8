@@ -1,4 +1,5 @@
-//! 一条轨在一组里的输入读出的包：选流、核对随帧携带的参数、记下没写出的部分。
+//! 一条轨在一组里（或一个完整文件）的输入读出的包：选流、补开头缺的 DTS、核对随帧携带的参数与 E-AC-3 的帧结构、
+//! 记下没写出的部分。
 
 use std::collections::VecDeque;
 
@@ -10,7 +11,7 @@ use crate::inband::{Inband, Mismatch};
 use crate::input::Input;
 use crate::nal::{self, Framing};
 use crate::timing::MICROS;
-use crate::{Error, StreamKind, Unsupported, ffi};
+use crate::{Error, Origin, StreamKind, Unsupported, ffi, inband};
 
 /// 一路输入流对应的输出流。
 #[derive(Clone, Copy)]
@@ -19,6 +20,8 @@ pub(crate) struct Mapping {
     pub(crate) kind: StreamKind,
     /// 输入流的时间基
     pub(crate) time_base: Rational,
+    /// 音频：采样率（Hz）与每帧的采样点数，见 [`crate::timing::SampleClock`]；视频或帧长不知道时为 None
+    pub(crate) frames: Option<(u32, u32)>,
 }
 
 /// 一路输入流读到而没有写出的部分。
@@ -33,8 +36,7 @@ pub(crate) struct Dropped {
 }
 
 pub(crate) struct Source {
-    pub(crate) group: usize,
-    pub(crate) track: usize,
+    pub(crate) at: Origin,
     pub(crate) input: Input,
     /// 按输入流下标；None 表示该流不进输出
     pub(crate) map: Vec<Option<Mapping>>,
@@ -44,30 +46,27 @@ pub(crate) struct Source {
     pub(crate) dropped: Vec<Dropped>,
     /// 按输入流下标：HEVC 视频流包里 NAL 单元的排法（见 [`Selected::hevc`]）
     hevc: Vec<Option<Framing>>,
+    /// 按输入流下标：逐包核对 E-AC-3 的帧结构（见 [`Selected::eac3_for_mp4`]）
+    eac3_for_mp4: Vec<bool>,
     /// 按输入流下标：视频流在这一组里读到的第一个能开始解码的帧的 PTS（没有 PTS 时为 DTS），还没读到时为 None
     keyframe_pts: Vec<Option<i64>>,
     /// 上一个写出的包所在的分片（见 [`Source::check_jump`]）
     last_segment: Option<usize>,
-    /// 按输入流下标：进输出的流还没读到带 DTS 的包时，暂存的开头那些缺 DTS 的包（见 [`Source::read_input`]）
-    leading: Vec<Vec<Packet>>,
-    /// 按输入流下标：已读到带 DTS 的包
-    dts_seen: Vec<bool>,
-    /// 补好 DTS、待交给 [`Source::read_next`] 处理的包
-    filled: VecDeque<Packet>,
+    /// 补开头缺的 DTS（见 [`Source::read_input`]）
+    fill: DtsFill,
     /// 已读出、待写入的包及其映射；包一定带 DTS
     pub(crate) queue: VecDeque<(Packet, Mapping)>,
     /// 读到了末尾（见 [`Source::read_next`]）
     pub(crate) finished: bool,
-    /// 加到这个输入所有时间戳上的量，微秒：读到第一个包之后先按回绕对齐（见 [`crate::timing::align_wraps`]），写出前再
-    /// 加上平移到输出时间线的量
+    /// 从输入时间线平移到输出时间线要加的量，微秒；写出前设定
     pub(crate) offset_us: i64,
 }
 
 impl Source {
-    /// `outputs[i]` 为 `selected[i]` 对应的输出流下标；`references` 见 [`crate::group::references_of`]，第 0 组为空。
+    /// `at` 处的输入；`outputs[i]` 为 `selected[i]` 对应的输出流下标；`references` 见
+    /// [`crate::group::references_of`]，第 0 组与完整文件为空。
     pub(crate) fn new(
-        group: usize,
-        track: usize,
+        at: Origin,
         input: Input,
         selected: &[Selected],
         outputs: &[usize],
@@ -77,14 +76,25 @@ impl Source {
         let mut map = vec![None; streams];
         let mut inband = vec![None; streams];
         let mut hevc = vec![None; streams];
+        let mut eac3_for_mp4 = vec![false; streams];
+        let mut delays = vec![None; streams];
         for (s, &output) in selected.iter().zip(outputs) {
             let kind = s.desc.shape.kind();
+            let frames = match s.desc.shape {
+                crate::Shape::Audio { sample_rate, .. } => {
+                    s.frame_samples.map(|samples| (sample_rate, samples))
+                }
+                crate::Shape::Video { .. } => None,
+            };
             map[s.index] = Some(Mapping {
                 output,
                 kind,
                 time_base: s.time_base,
+                frames,
             });
             hevc[s.index] = s.hevc;
+            eac3_for_mp4[s.index] = s.eac3_for_mp4;
+            delays[s.index] = (s.video_delay > 0).then_some(s.video_delay);
             inband[s.index] =
                 s.inband
                     .as_ref()
@@ -94,17 +104,15 @@ impl Source {
                     });
         }
         Source {
-            group,
-            track,
+            at,
             input,
             map,
             inband,
             dropped: vec![Dropped::default(); streams],
             hevc,
+            eac3_for_mp4,
             keyframe_pts: vec![None; streams],
-            leading: vec![Vec::new(); streams],
-            dts_seen: vec![false; streams],
-            filled: VecDeque::new(),
+            fill: DtsFill::new(delays),
             last_segment: None,
             queue: VecDeque::new(),
             finished: false,
@@ -118,7 +126,7 @@ impl Source {
     }
 
     /// 读下一个要写出的包。跳过未映射流的包；没有 DTS 的包、组开头解不出的视频包（见 [`Source::decodable`]）与损坏（读
-    /// 不出帧头或帧长与包长对不上）的音频包记入 `dropped`；参数随帧携带的包核对参数。读到末尾返回 `None` 并记下
+    /// 不出帧头或帧长与包长对不上）的音频包记入 `dropped`；参数随帧携带的包核对参数，要放进 MP4 的 E-AC-3 核对帧结构。读到末尾返回 `None` 并记下
     /// `finished`，打包音频丢弃的损坏字节这时才是全部（见 [`Input::discarded`]），一并记入 `dropped`；之后不再调用。
     pub(crate) fn read_next(&mut self) -> Result<Option<(Packet, Mapping)>, Error> {
         loop {
@@ -148,78 +156,67 @@ impl Source {
                     .context()
                     .stream(packet.stream())
                     .expect("包所属的流存在");
-                let (group, track) = (self.group, self.track);
-                let unsupported = match check.check(packet.data().unwrap_or_default(), &stream) {
-                    Ok(()) => return Ok(Some((packet, mapping))),
-                    Err(Mismatch::Unreadable) => {
-                        self.dropped[packet.stream()].corrupt_bytes += packet.size() as u64;
-                        continue;
-                    }
-                    Err(Mismatch::Changed) => Unsupported::ParamsChangedInGroup {
-                        group,
-                        track,
-                        kind: mapping.kind,
-                    },
-                    Err(Mismatch::Config) => Unsupported::ConfigChanged {
-                        group,
-                        track,
-                        kind: mapping.kind,
-                    },
-                    Err(Mismatch::Eac3ShortFrames) => Unsupported::Eac3ShortFrames { group, track },
-                    Err(Mismatch::Eac3Substreams) => Unsupported::Eac3Substreams { group, track },
-                };
-                return Err(Error::Unsupported(unsupported));
+                let checked = check.check(packet.data().unwrap_or_default(), &stream);
+                if self.passes(checked, &packet, mapping)? {
+                    return Ok(Some((packet, mapping)));
+                }
+                continue;
+            }
+            if self.eac3_for_mp4[packet.stream()] {
+                let checked = inband::eac3_for_mp4(packet.data().unwrap_or_default());
+                if self.passes(checked, &packet, mapping)? {
+                    return Ok(Some((packet, mapping)));
+                }
+                continue;
             }
             return Ok(Some((packet, mapping)));
         }
     }
 
-    /// 从输入读下一个包，补上进输出的流开头缺的 DTS：Matroska 只存 PTS，有 B 帧时 FFmpeg 按重排的延迟由 PTS 推出 DTS，
-    /// 开头延迟那几个包推不出。这些包（带 PTS 与时长）先暂存，读到这路流第一个带 DTS 的包时，从它的 DTS 起按各包的时长
-    /// 往前倒推（同 ffmpeg 命令行补的值）。读到末尾仍没有 DTS 的照原样交出，按缺 DTS 计数。读到末尾返回 false。
+    /// 包 `packet` 的核对结果 `checked`：通过为真；读不出的计入损坏字节、为假；其余报错。
+    fn passes(
+        &mut self,
+        checked: Result<(), Mismatch>,
+        packet: &Packet,
+        mapping: Mapping,
+    ) -> Result<bool, Error> {
+        let (at, kind) = (self.at, mapping.kind);
+        let unsupported = match checked {
+            Ok(()) => return Ok(true),
+            Err(Mismatch::Unreadable) => {
+                self.dropped[packet.stream()].corrupt_bytes += packet.size() as u64;
+                return Ok(false);
+            }
+            Err(Mismatch::Changed) => Unsupported::ParamsChangedInGroup { at, kind },
+            Err(Mismatch::Config) => {
+                // 只有核对从上一组的开始时才有这一种（见 Inband::for_next_group）
+                let (group, track) = at.track();
+                Unsupported::ConfigChanged { group, track, kind }
+            }
+            Err(Mismatch::Eac3ShortFrames) => Unsupported::Eac3ShortFrames { at },
+            Err(Mismatch::Eac3Substreams) => Unsupported::Eac3Substreams { at },
+        };
+        Err(Error::Unsupported(unsupported))
+    }
+
+    /// 从输入读下一个包，补上进输出的流开头缺的 DTS（见 [`DtsFill`]）；读到末尾返回 false。
     fn read_input(&mut self, packet: &mut Packet) -> Result<bool, Error> {
         loop {
-            if let Some(filled) = self.filled.pop_front() {
-                *packet = filled;
+            if let Some(ready) = self.fill.pop() {
+                *packet = ready;
                 return Ok(true);
             }
-            if !self.input.read(packet, self.group, self.track)? {
-                for leading in &mut self.leading {
-                    self.filled.extend(leading.drain(..));
-                }
-                match self.filled.pop_front() {
-                    Some(filled) => {
-                        *packet = filled;
-                        return Ok(true);
-                    }
-                    None => return Ok(false),
-                }
-            }
-            let stream = packet.stream();
-            // TS 可能在文件中途出现新流，其下标超出建立映射时的流数；不进输出的流不补
-            if self.map.get(stream).is_none_or(Option::is_none) || self.dts_seen[stream] {
-                return Ok(true);
-            }
-            let Some(dts) = packet.dts() else {
-                if packet.pts().is_some() && packet.duration() > 0 {
-                    self.leading[stream].push(std::mem::replace(packet, Packet::empty()));
+            let mut read = Packet::empty();
+            if !self.input.read(&mut read, self.at)? {
+                if self.fill.finish() {
                     continue;
                 }
-                return Ok(true);
-            };
-            self.dts_seen[stream] = true;
-            let mut leading = std::mem::take(&mut self.leading[stream]);
-            if leading.is_empty() {
+                return Ok(false);
+            }
+            if let Some(read) = self.fill.push(read) {
+                *packet = read;
                 return Ok(true);
             }
-            let mut next = dts;
-            for earlier in leading.iter_mut().rev() {
-                next -= earlier.duration();
-                earlier.set_dts(Some(next));
-            }
-            self.filled.extend(leading);
-            self.filled
-                .push_back(std::mem::replace(packet, Packet::empty()));
         }
     }
 
@@ -251,9 +248,10 @@ impl Source {
         let hole = (dts_us - clock_us).saturating_sub_unsigned(skipped);
         match u64::try_from(hole) {
             Ok(jump_us) if jump_us > tolerance => {
+                let (group, track) = self.at.track();
                 Err(Error::Unsupported(Unsupported::TimestampJump {
-                    group: self.group,
-                    track: self.track,
+                    group,
+                    track,
                     kind: mapping.kind,
                     segment,
                     jump_us,
@@ -301,8 +299,7 @@ impl Source {
         });
         match replaced {
             Some(mapping) => Err(Error::Unsupported(Unsupported::StreamChangedInGroup {
-                group: self.group,
-                track: self.track,
+                at: self.at,
                 kind: mapping.kind,
             })),
             None => Ok(()),
@@ -331,10 +328,7 @@ impl Source {
             })
         });
         if undecodable {
-            return Err(Error::Unsupported(Unsupported::NoKeyframe {
-                group: self.group,
-                track: self.track,
-            }));
+            return Err(Error::Unsupported(Unsupported::NoKeyframe { at: self.at }));
         }
         Ok(())
     }
@@ -353,37 +347,107 @@ impl Source {
         }
     }
 
-    /// 队首的包加上 [`Source::offset_us`] 之后的 DTS，微秒。
-    pub(crate) fn front_dts_us(&self) -> Option<i64> {
+    /// 队首的包在输入时间线上的 DTS，微秒。
+    pub(crate) fn front_input_dts_us(&self) -> Option<i64> {
         let (packet, mapping) = self.queue.front()?;
         let dts = packet.dts().expect("队列中的包都带 DTS");
-        Some(dts.rescale(mapping.time_base, MICROS) + self.offset_us)
+        Some(dts.rescale(mapping.time_base, MICROS))
     }
 
-    /// 这个输入里进输出的各路流最早的起始时刻，微秒：FFmpeg 给的流的起始时刻（第一个包的 PTS，已按容器的编辑列表、MP3
-    /// 的 Info 帧等去掉编码器的起始延迟，延迟里的包时间戳为负），没有的取队列里这路流最早的 PTS（没有 PTS 的取 DTS）。
-    /// 进输出的流都没有包时为 None。
+    /// 队首的包在输出时间线上（加上 [`Source::offset_us`]）的 DTS，微秒。
+    pub(crate) fn front_dts_us(&self) -> Option<i64> {
+        Some(self.front_input_dts_us()? + self.offset_us)
+    }
+
+    /// 这个输入（完整文件）的起始时刻，输入时间线上的微秒：进输出的各路流里 FFmpeg 给了起始时刻的（第一个包的 PTS，
+    /// 已按容器的编辑列表、MP3 的 Info 帧等去掉编码器的起始延迟，延迟里的包时间戳为负）取最早的。打开时探测到的范围
+    /// 里有包的流才有起始时刻，没有的流开始得更晚，不影响最早的。都没有时取队列里最早的 PTS（没有 PTS 的取 DTS），队列
+    /// 也为空时为 None。
     pub(crate) fn start_us(&self) -> Option<i64> {
         let ictx = self.input.context();
-        self.map
-            .iter()
-            .enumerate()
-            .filter_map(|(index, mapping)| {
-                let mapping = mapping.as_ref()?;
-                let given = ictx.stream(index).map(|s| s.start_time());
-                let start = given
-                    .filter(|&ts| ts != ffmpeg::ffi::AV_NOPTS_VALUE)
-                    .or_else(|| {
-                        self.queue
-                            .iter()
-                            .filter(|(_, m)| m.output == mapping.output)
-                            .map(|(packet, _)| {
-                                packet.pts().or(packet.dts()).expect("队列中的包都带 DTS")
-                            })
-                            .min()
-                    })?;
-                Some(start.rescale(mapping.time_base, MICROS))
-            })
-            .min()
+        let given = self.map.iter().enumerate().filter_map(|(index, mapping)| {
+            let mapping = mapping.as_ref()?;
+            let start = ictx.stream(index)?.start_time();
+            (start != ffmpeg::ffi::AV_NOPTS_VALUE).then(|| start.rescale(mapping.time_base, MICROS))
+        });
+        given.min().or_else(|| {
+            self.queue
+                .iter()
+                .map(|(packet, mapping)| {
+                    let ts = packet.pts().or(packet.dts()).expect("队列中的包都带 DTS");
+                    ts.rescale(mapping.time_base, MICROS)
+                })
+                .min()
+        })
+    }
+}
+
+/// 补上进输出的流开头缺的 DTS。Matroska 只存 PTS，TS 的 PES 也可以只带 PTS；有 B 帧时 FFmpeg 按重排的延迟由 PTS 推出
+/// DTS，开头延迟那几个包推不出（不超过流的重排延迟）。这些包（带 PTS 与时长）先暂存，读到这路流第一个带 DTS 的包时，
+/// 从它的 DTS 起按各包的时长往前倒推（同 ffmpeg 命令行补的值）。暂存的超过重排延迟、或读到末尾仍没有 DTS 时，照原样
+/// 交出，按缺 DTS 计数。对各种输入都生效；带 DTS 的输入（fMP4、打包音频）用不到。
+struct DtsFill {
+    /// 按输入流下标：还在等第一个 DTS 的流最多暂存几个包（视频的重排延迟）；不进输出、没有重排延迟、已读到 DTS 或已
+    /// 放弃补的流为 None
+    limits: Vec<Option<usize>>,
+    /// 按输入流下标：暂存的包
+    held: Vec<Vec<Packet>>,
+    /// 补好或放弃补、待交出的包，按读出的顺序
+    ready: VecDeque<Packet>,
+}
+
+impl DtsFill {
+    /// `limits` 见 [`DtsFill::limits`]。
+    fn new(limits: Vec<Option<usize>>) -> DtsFill {
+        DtsFill {
+            held: vec![Vec::new(); limits.len()],
+            limits,
+            ready: VecDeque::new(),
+        }
+    }
+
+    fn pop(&mut self) -> Option<Packet> {
+        self.ready.pop_front()
+    }
+
+    /// 读出的一个包：不用补的原样返回；暂存或连同暂存的一起放进待交出的，返回 None。
+    fn push(&mut self, packet: Packet) -> Option<Packet> {
+        let stream = packet.stream();
+        // TS 可能在文件中途出现新流，其下标超出建立映射时的流数
+        let Some(limit) = self.limits.get(stream).copied().flatten() else {
+            return Some(packet);
+        };
+        let held = &mut self.held[stream];
+        let Some(dts) = packet.dts() else {
+            if packet.pts().is_none() || packet.duration() <= 0 {
+                return Some(packet);
+            }
+            held.push(packet);
+            if held.len() > limit {
+                self.limits[stream] = None;
+                self.ready.extend(held.drain(..));
+            }
+            return None;
+        };
+        self.limits[stream] = None;
+        if held.is_empty() {
+            return Some(packet);
+        }
+        let mut next = dts;
+        for earlier in held.iter_mut().rev() {
+            next -= earlier.duration();
+            earlier.set_dts(Some(next));
+        }
+        self.ready.extend(held.drain(..));
+        self.ready.push_back(packet);
+        None
+    }
+
+    /// 读到了末尾：还暂存着的照原样放进待交出的；有这样的包时为真。
+    fn finish(&mut self) -> bool {
+        for held in &mut self.held {
+            self.ready.extend(held.drain(..));
+        }
+        !self.ready.is_empty()
     }
 }

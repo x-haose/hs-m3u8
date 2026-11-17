@@ -6,7 +6,7 @@ use ffmpeg::codec;
 use ffmpeg_next as ffmpeg;
 
 use crate::inband::Inband;
-use crate::{Shape, StreamKind, Unsupported};
+use crate::{Origin, Shape, StreamKind, Unsupported};
 
 /// 输出容器。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -18,8 +18,9 @@ pub enum Container {
 }
 
 impl Container {
-    /// 编码 `codec` 能否放进这种容器。只看编码；MP4 封装器另有的限制见 [`Unsupported::Mp3SampleRate`]、
-    /// [`Unsupported::Eac3ShortFrames`] 与 [`Unsupported::Eac3Substreams`]。
+    /// 编码 `codec` 能否放进这种容器。只看编码，不看输入：TS 与裸音频（含打包音频）里另外只收能逐帧读出参数的 H.264、
+    /// HEVC、AAC、AC-3、E-AC-3、MP2、MP3（如 TS 里的 Opus 放不进任何容器）；MP4 封装器另有的限制见
+    /// [`Unsupported::Mp3SampleRate`]、[`Unsupported::Eac3ShortFrames`] 与 [`Unsupported::Eac3Substreams`]。
     pub fn holds(self, codec: Codec) -> bool {
         match self {
             Container::Mp4 => codec != Codec::Vorbis,
@@ -172,23 +173,21 @@ pub(crate) fn check_codec(
     shape: &Shape,
     standalone: bool,
     container: Container,
-    group: usize,
-    track: usize,
+    at: Origin,
 ) -> Result<(), Unsupported> {
     let kind = shape.kind();
     if id != codec::Id::None
         && !Codec::of(id).is_some_and(|c| c.kind() == kind && accepts(c, container, standalone))
     {
         return Err(Unsupported::Codec {
-            group,
-            track,
+            at,
             kind,
             codec: id.name(),
             container,
         });
     }
     if id == codec::Id::None || !shape.determined() {
-        return Err(Unsupported::ParamsUnknown { group, track, kind });
+        return Err(Unsupported::ParamsUnknown { at, kind });
     }
     match *shape {
         Shape::Audio { sample_rate, .. }
@@ -196,11 +195,7 @@ pub(crate) fn check_codec(
                 && id == codec::Id::MP3
                 && sample_rate < MP3_MIN_SAMPLE_RATE =>
         {
-            Err(Unsupported::Mp3SampleRate {
-                group,
-                track,
-                sample_rate,
-            })
+            Err(Unsupported::Mp3SampleRate { at, sample_rate })
         }
         _ => Ok(()),
     }
@@ -211,11 +206,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mp4_holds_every_codec_but_vorbis_and_matroska_holds_all() {
+    fn every_codec_is_listed_and_maps_to_its_ffmpeg_id() {
+        // 加了编码而没放进 ALL 时，这里的穷举匹配编译不过
+        let listed = |codec: Codec| match codec {
+            Codec::H264
+            | Codec::Hevc
+            | Codec::Vp9
+            | Codec::Av1
+            | Codec::Aac
+            | Codec::Opus
+            | Codec::Mp3
+            | Codec::Mp2
+            | Codec::Ac3
+            | Codec::Eac3
+            | Codec::Flac
+            | Codec::Alac
+            | Codec::Vorbis => Codec::ALL.contains(&codec),
+        };
         for codec in Codec::ALL {
-            assert_eq!(Container::Mp4.holds(codec), codec != Codec::Vorbis);
-            assert!(Container::Matroska.holds(codec));
+            assert!(listed(codec));
             assert_eq!(Codec::of(codec.id()), Some(codec));
         }
+        assert_eq!(Codec::ALL.len(), 13);
     }
 }

@@ -333,6 +333,8 @@ async fn resumed(
         (Some(_), Some(_)) => true,
         _ => false,
     };
+    // 这次没给身份时沿用记录的：照常核对过，已下的仍是记录的身份那份内容
+    let identity = identity.or_else(|| recorded.identity_digest.clone());
     let moved = recorded.url_digest != url_digest(url);
     // 记录的验证器是旧地址给的：身份相同时不拿它去问新地址，这次的记录也不沿用它
     let previous = (!(moved && vouched)).then_some(recorded);
@@ -352,7 +354,7 @@ async fn resumed(
                 first: None,
             };
             let record = FileRecord {
-                identity_digest: identity.or_else(|| recorded.identity_digest.clone()),
+                identity_digest: identity,
                 ..recorded.clone()
             };
             return Ok((mode, record));
@@ -360,8 +362,6 @@ async fn resumed(
     };
     let opened = open_range(http, url, span, validator.as_deref(), length, root, cancel).await?;
     let headers = opened.stream.headers();
-    // 这次没给身份时沿用记录的：照常核对过，已下的仍是记录的身份那份内容
-    let identity = identity.or_else(|| recorded.identity_digest.clone());
     let record = file_record(url, Some(length), headers, previous, identity);
     let mode = Mode::Ranged {
         length,
@@ -371,7 +371,7 @@ async fn resumed(
 }
 
 /// 写进 job.json 的记录：地址 `url` 的摘要、总长度 `length`，响应头 `headers` 里的强 ETag、Last-Modified（响应没带的
-/// 沿用之前的记录 `previous`；弱 ETag 不记），与这次给的内容身份的摘要 `identity_digest`。
+/// 沿用之前的记录 `previous`；弱 ETag 不记），与要记下的内容身份的摘要 `identity_digest`。
 fn file_record(
     url: &Url,
     length: Option<u64>,

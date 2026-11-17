@@ -30,6 +30,7 @@ mod codecs;
 mod compare;
 mod error;
 mod ffi;
+mod files;
 pub mod fmp4;
 mod frame;
 mod group;
@@ -51,11 +52,12 @@ use ffmpeg::media;
 use ffmpeg_next as ffmpeg;
 
 pub use crate::codecs::{Codec, Container};
-pub use crate::error::{Error, FfmpegError, Unsupported};
+pub use crate::error::{Error, FfmpegError, Origin, Unsupported};
+pub use crate::files::{FileInput, merge_files};
 
 use crate::chain::ffmpeg_path;
 use crate::group::{layout_of, open_group, primed, references_of};
-use crate::write::{write_files, write_verified};
+use crate::write::write_groups;
 
 /// 一个不连续段组里某条轨的分片，按播放顺序；fMP4 时 `init` 是该组使用的 init 段。fMP4 的 init 段与各分片须通过
 /// [`fmp4::check`]、最后一个 box 的长度不写 0（见 [`fmp4::seal`]），合并时再核对一遍（见 [`Error::Fmp4`]）。
@@ -280,45 +282,7 @@ pub fn remux(
     let Some(path) = ffmpeg_path(output) else {
         return Err(Error::NonUtf8Path(output.to_path_buf()));
     };
-    let report = write_verified(streams, &groups, path, control)?;
-    sync(output)?;
-    Ok(report)
-}
-
-/// 合并完整文件时的一个输入：文件与它贡献的流。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileInput {
-    pub path: PathBuf,
-    /// 要取的流种类，指定的每种都要有（见 [`merge_files`]）
-    pub streams: Streams,
-}
-
-/// 把几个完整文件的流原样复制进 `output`（`container` 的格式，MP4 时 moov 前置），写完回读核对每路流的包数并落盘。
-/// 失败或取消时 `output` 上可能留有写了一半的文件，由调用方删除；已存在的 `output` 会被替换。
-///
-/// 与 HLS 的合并（见本 crate 的说明）不同之处：
-/// - 输入格式由 FFmpeg 按内容识别，只收 MP4 一类（含 ftyp、moov、sidx 与各 moof/mdat 连在一个文件里的分段 MP4，及
-///   M4A）、Matroska（含 WebM）、TS 与裸 AAC、MP3，其余报 [`Error::FileFormat`]；探测读到 FFmpeg 的默认上限为止。
-/// - 每个输入按 [`FileInput::streams`] 取第一路视频和（或）第一路音频，指定的每种都要有（否则报
-///   [`Error::MissingStream`]），且都要读得出能写出的包（否则报 [`Error::EmptyInput`]）；同一类流只能来自一个输入。
-/// - 各输入的时间线互不相干：每个输入各自平移，所取各路流的起始时刻落在输出的 0 处（同 `ffmpeg -i 视频 -i 音频 -c
-///   copy` 的默认做法）。起始时刻按容器的编辑列表、MP3 的 Info 帧等去掉了编码器的起始延迟，延迟里的包落在 0 之前，
-///   由输出的编辑列表（MP4）或起始的偏移跳过。不核对时间戳的推进，DTS 的递增照样核对。
-/// - 报错里的组号恒为 0，轨号为输入在 `inputs` 里的下标；进度的单位为字节（见 [`WriteProgress`]）。
-pub fn merge_files(
-    inputs: &[FileInput],
-    output: &Path,
-    container: Container,
-    control: &Control,
-) -> Result<MediaReport, Error> {
-    init()?;
-    if inputs.is_empty() {
-        return Err(Error::NoInputs);
-    }
-    let Some(path) = ffmpeg_path(output) else {
-        return Err(Error::NonUtf8Path(output.to_path_buf()));
-    };
-    let report = write_files(inputs, container, path, control)?;
+    let report = write_groups(streams, &groups, path, control)?;
     sync(output)?;
     Ok(report)
 }
@@ -343,7 +307,7 @@ pub fn check(streams: &[Streams], groups: &[(usize, &DiscontinuityGroup)]) -> Re
         Some(first) => {
             let layout = layout_of(&first)?;
             let outputs = layout.iter().map(Vec::len).sum();
-            let references = match judgeable(primed(groups[0].0, first, &layout, &[]))? {
+            let references = match judgeable(primed(first, &layout, &[]))? {
                 Some(sources) => references_of(&sources, outputs),
                 None => vec![None; outputs],
             };
@@ -355,10 +319,10 @@ pub fn check(streams: &[Streams], groups: &[(usize, &DiscontinuityGroup)]) -> Re
         let layout = first.as_ref().map(|(layout, _)| layout.as_slice());
         judgeable(open_group(streams, numbered, layout, &cancel).and_then(
             |opened| match &first {
-                Some((layout, references)) => primed(numbered.0, opened, layout, references),
+                Some((layout, references)) => primed(opened, layout, references),
                 None => {
                     let own = layout_of(&opened)?;
-                    primed(numbered.0, opened, &own, &[])
+                    primed(opened, &own, &[])
                 }
             },
         ))?;
@@ -381,8 +345,11 @@ fn judgeable<T>(result: Result<T, Error>) -> Result<Option<T>, Error> {
     }
 }
 
+/// HLS 的合并只输出 MP4。
+pub(crate) const HLS_CONTAINER: Container = Container::Mp4;
+
 /// 落盘。Windows 上落盘要求写权限，所以以可写方式打开。
-fn sync(path: &Path) -> Result<(), Error> {
+pub(crate) fn sync(path: &Path) -> Result<(), Error> {
     std::fs::File::options()
         .write(true)
         .open(path)
@@ -394,7 +361,7 @@ fn sync(path: &Path) -> Result<(), Error> {
         })
 }
 
-fn init() -> Result<(), Error> {
+pub(crate) fn init() -> Result<(), Error> {
     static INIT: OnceLock<Result<(), FfmpegError>> = OnceLock::new();
     INIT.get_or_init(|| {
         ffmpeg::init()?;

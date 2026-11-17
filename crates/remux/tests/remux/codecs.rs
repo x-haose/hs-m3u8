@@ -3,7 +3,9 @@
 use std::path::Path;
 
 use ffmpeg_next as ffmpeg;
-use hs_m3u8_remux::{Control, Error, StreamKind, Streams, TrackSegments, Unsupported, remux};
+use hs_m3u8_remux::{
+    Control, Error, Origin, StreamKind, Streams, TrackSegments, Unsupported, remux,
+};
 
 use crate::{
     concat_track, group, packed_fixture, packed_segment, segs, timelines, track, work_dir,
@@ -76,7 +78,9 @@ fn eac3_with_fewer_than_six_blocks_per_frame_is_rejected() {
     assert!(
         matches!(
             err,
-            Error::Unsupported(Unsupported::Eac3ShortFrames { group: 0, track: 0 })
+            Error::Unsupported(Unsupported::Eac3ShortFrames {
+                at: Origin::Track { group: 0, track: 0 }
+            })
         ),
         "实际 {err:?}"
     );

@@ -10,12 +10,12 @@ use crate::chain::{self, Halt, SegmentChain};
 use crate::compare::Desc;
 use crate::error::file_error;
 use crate::ffi::{self, OpenFailure, OutputFile};
-use crate::group::{OpenTrack, layout_of, open_file, open_group, primed, references_of};
+use crate::group::{OpenTrack, layout_of, open_group, primed, references_of};
 use crate::source::{Dropped, Mapping, Source};
-use crate::timing::{MICROS, align_wraps, group_offset, retime};
+use crate::timing::{MICROS, SampleClock, group_offset, retime, wrap_shifts_us};
 use crate::{
-    Cancel, Container, Control, Error, FfmpegError, FileInput, MediaReport, Numbered, Shape,
-    StreamReport, Streams, TrackSegments, Unsupported, WriteProgress,
+    Cancel, Container, Control, Error, FfmpegError, HLS_CONTAINER, MediaReport, Numbered, Origin,
+    Shape, StreamReport, Streams, TrackSegments, Unsupported, WriteProgress,
 };
 
 /// 一路输出流：第 0 组决定其编码参数，写出过程中累计统计。`_us` 结尾的时刻为输出时间线上的微秒。
@@ -30,6 +30,8 @@ struct OutStream {
     last_dts_us: Option<i64>,
     /// 写出的上一个包的 DTS，输出时间基
     last_dts: Option<i64>,
+    /// 音频的输入时间基比采样点粗时按采样点接续（见 [`SampleClock`]），遇到这样的输入时建立
+    clock: Option<SampleClock>,
 }
 
 impl OutStream {
@@ -50,8 +52,8 @@ impl OutStream {
     }
 }
 
-/// 合并各组写到 `path`（MP4，moov 前置），写完回读核对每路流的包数。
-pub(crate) fn write_verified(
+/// 合并 HLS 的各组写到 `path`（MP4，moov 前置），写完回读核对每路流的包数。
+pub(crate) fn write_groups(
     streams: &[Streams],
     groups: &[Numbered<'_>],
     path: &str,
@@ -60,54 +62,29 @@ pub(crate) fn write_verified(
     let cancel = &control.cancel;
     let first = open_group(streams, groups[0], None, cancel)?;
     let layout = layout_of(&first)?;
-    let mut muxer = Muxer::open(path, Container::Mp4, cancel, &first, &layout)?;
-    let sources = primed(groups[0].0, first, &layout, &[])?;
+    let mut muxer = Muxer::open(path, HLS_CONTAINER, cancel, &first, &layout)?;
+    let sources = primed(first, &layout, &[])?;
     let references = references_of(&sources, muxer.outs.len());
     let (group, tracks) = groups[0];
     muxer.write_group(group, sources, &tracks.tracks, &control.progress)?;
     for &numbered in &groups[1..] {
         let opened = open_group(streams, numbered, Some(&layout), cancel)?;
-        let sources = primed(numbered.0, opened, &layout, &references)?;
+        let sources = primed(opened, &layout, &references)?;
         muxer.write_group(numbered.0, sources, &numbered.1.tracks, &control.progress)?;
     }
     muxer.finish_verified(path, cancel)
 }
 
-/// 合并各完整文件写到 `path`（`container` 的格式），写完回读核对每路流的包数。
-pub(crate) fn write_files(
-    inputs: &[FileInput],
-    container: Container,
-    path: &str,
-    control: &Control,
-) -> Result<MediaReport, Error> {
-    let cancel = &control.cancel;
-    let mut opened = Vec::with_capacity(inputs.len());
-    let mut sizes = Vec::with_capacity(inputs.len());
-    for (track, input) in inputs.iter().enumerate() {
-        let (file, size) = open_file(&input.path, input.streams, container, track, cancel)?;
-        opened.push(file);
-        sizes.push(size);
-    }
-    let layout = layout_of(&opened)?;
-    let mut muxer = Muxer::open(path, container, cancel, &opened, &layout)?;
-    let sources = primed(0, opened, &layout, &[])?;
-    muxer.write_files(sources, &sizes, &control.progress)?;
-    muxer.finish_verified(path, cancel)
-}
-
 /// 正在写的输出：已建好输出流、写完头。
-struct Muxer {
+pub(crate) struct Muxer {
     file: OutputFile,
     container: Container,
     outs: Vec<OutStream>,
-    /// 组间余量：最粗的输出时间基的一个 tick（向上取整到微秒）。换到输出时间基时的舍入不超过半个 tick，因此下一组的
-    /// 首个 DTS 一定大于上一组的末个 DTS
-    margin_us: i64,
 }
 
 impl Muxer {
-    /// 以 `container` 的格式打开输出，按第 0 组 `first`（各轨选中的流为 `layout`）建立输出流并写头。
-    fn open(
+    /// 以 `container` 的格式打开输出，按第 0 组（或各完整文件）`first`（各轨选中的流为 `layout`）建立输出流并写头。
+    pub(crate) fn open(
         path: &str,
         container: Container,
         cancel: &Cancel,
@@ -131,22 +108,23 @@ impl Muxer {
                 end_us: None,
                 last_dts_us: None,
                 last_dts: None,
+                clock: None,
             })
             .collect();
-        let margin_us = outs
-            .iter()
-            .map(|o| 1i64.rescale_with(o.time_base, MICROS, Rounding::Up))
-            .max()
-            .expect("第 0 组至少有一路输出流");
         Ok(Muxer {
             file,
             container,
             outs,
-            margin_us,
         })
     }
 
-    /// 写出一组（各输入已读到每路流的第一个包）：各输入按回绕对齐（见 [`align_wraps`]），再按全组共用的偏移平移时间戳，
+    /// 输出流 `output` 写出的包数与读到而没有写出的部分（各输入读完后才是全部）。
+    pub(crate) fn outcome(&self, output: usize) -> (u64, Dropped) {
+        let o = &self.outs[output];
+        (o.written, o.dropped)
+    }
+
+    /// 写出一组（各输入已读到每路流的第一个包）：各输入按回绕对齐（见 [`wrap_shifts_us`]），再按全组共用的偏移平移时间戳，
     /// 按 DTS 交错写出，写出前核对时间戳没有往前跳（见 [`Source::check_jump`]）。
     fn write_group(
         &mut self,
@@ -155,22 +133,22 @@ impl Muxer {
         tracks: &[TrackSegments],
         progress: &WriteProgress,
     ) -> Result<(), Error> {
-        align_wraps(&mut sources);
-        let offset_us = self.offset_of(group, &sources)?;
-        for source in &mut sources {
-            source.offset_us += offset_us;
+        let wraps = wrap_shifts_us(&sources);
+        let offset_us = self.offset_of(group, &sources, &wraps)?;
+        for (source, wrap_us) in sources.iter_mut().zip(wraps) {
+            source.offset_us = wrap_us + offset_us;
         }
         // 全组已写出的最大 DTS，输出时间线上的微秒
         let mut clock_us: Option<i64> = None;
         // 各轨已报为写完的文件数（见 [`WriteProgress`]）
         let mut written = vec![0u64; tracks.len()];
-        self.interleave(group, &mut sources, |source, packet, mapping, dts_us| {
+        self.interleave(&mut sources, |source, packet, mapping, dts_us| {
             source.check_jump(packet, mapping, dts_us, clock_us)?;
             if let Some(segment) = source.segment() {
-                let init = tracks[source.track].init.is_some();
-                let done = u64::from(init) + segment as u64;
-                progress.add(done.saturating_sub(written[source.track]));
-                written[source.track] = written[source.track].max(done);
+                let track = source.at.index();
+                let done = u64::from(tracks[track].init.is_some()) + segment as u64;
+                progress.add(done.saturating_sub(written[track]));
+                written[track] = written[track].max(done);
             }
             clock_us = Some(clock_us.map_or(dts_us, |clock| clock.max(dts_us)));
             Ok(())
@@ -182,49 +160,10 @@ impl Muxer {
         Ok(())
     }
 
-    /// 写出各完整文件（各输入已读到每路流的第一个包，下标即轨号，`sizes` 为各文件打开时的字节数）：每个输入各自平移，
-    /// 起始时刻（见 [`Source::start_us`]）落在 0，按 DTS 交错写出。进度按写出的包在所在文件里的字节位置推进（见 [`WriteProgress`]）。
-    fn write_files(
-        &mut self,
-        mut sources: Vec<Source>,
-        sizes: &[u64],
-        progress: &WriteProgress,
-    ) -> Result<(), Error> {
-        for source in &mut sources {
-            let unfilled = source.map.iter().flatten().find(|m| {
-                !source
-                    .queue
-                    .iter()
-                    .any(|(_, queued)| queued.output == m.output)
-            });
-            if let Some(mapping) = unfilled {
-                return Err(Error::EmptyInput {
-                    track: source.track,
-                    kind: mapping.kind,
-                });
-            }
-            source.offset_us = -source.start_us().expect("各路流都有排队的包");
-        }
-        let mut written = vec![0u64; sizes.len()];
-        self.interleave(0, &mut sources, |source, packet, _, _| {
-            if let Ok(position) = u64::try_from(packet.position()) {
-                let done = &mut written[source.track];
-                progress.add(position.saturating_sub(*done));
-                *done = (*done).max(position);
-            }
-            Ok(())
-        })?;
-        for (size, done) in sizes.iter().zip(written) {
-            progress.add(size.saturating_sub(done));
-        }
-        Ok(())
-    }
-
     /// 按加上各输入 [`Source::offset_us`] 之后的 DTS 交错写出各输入的包，直到都读完；`before` 在每个包写出之前调用，参数
     /// 为它所在的输入、包、映射与输出时间线上的 DTS（微秒），返回错误时中止。读完后把各输入丢弃的包计入输出流。
-    fn interleave(
+    pub(crate) fn interleave(
         &mut self,
-        group: usize,
         sources: &mut [Source],
         mut before: impl FnMut(&mut Source, &Packet, Mapping, i64) -> Result<(), Error>,
     ) -> Result<(), Error> {
@@ -246,12 +185,8 @@ impl Muxer {
             let source = &mut sources[i];
             let (packet, mapping) = source.queue.pop_front().expect("next 只指向有待写包的输入");
             before(source, &packet, mapping, dts_us)?;
-            let at = Placed {
-                group,
-                track: source.track,
-                offset_us: source.offset_us,
-            };
-            self.write_packet(packet, mapping, at)?;
+            let (at, offset_us) = (source.at, source.offset_us);
+            self.write_packet(packet, mapping, at, offset_us)?;
         }
         self.add_dropped(sources);
         Ok(())
@@ -271,15 +206,17 @@ impl Muxer {
         }
     }
 
-    /// 本组的时间偏移（见 [`group_offset`]），由各输出流本组的首个 DTS 与全组最早的 PTS（对齐回绕后的输入时间线，微秒，
-    /// 取自各输入已读出的包；队列内同一路流按解码顺序排列）算出。
-    fn offset_of(&self, group: usize, sources: &[Source]) -> Result<i64, Error> {
+    /// 本组的时间偏移（见 [`group_offset`]），由各输出流本组的首个 DTS 与全组最早的 PTS（各输入加上回绕对齐的量
+    /// `wraps_us` 之后的输入时间线，微秒，取自各输入已读出的包；队列内同一路流按解码顺序排列）算出。组间余量为最粗的
+    /// 输出时间基的一个 tick（向上取整到微秒）：换到输出时间基时的舍入不超过半个 tick，因此下一组的首个 DTS 一定大于
+    /// 上一组的末个 DTS。
+    fn offset_of(&self, group: usize, sources: &[Source], wraps_us: &[i64]) -> Result<i64, Error> {
         let mut first_dts_us: Vec<Option<i64>> = vec![None; self.outs.len()];
         let mut min_pts_us: Option<i64> = None;
-        for source in sources {
+        for (source, &wrap_us) in sources.iter().zip(wraps_us) {
             for (packet, mapping) in &source.queue {
                 let tb = mapping.time_base;
-                let us = |ts: i64| ts.rescale(tb, MICROS) + source.offset_us;
+                let us = |ts: i64| ts.rescale(tb, MICROS) + wrap_us;
                 let dts = us(packet.dts().expect("队列中的包都带 DTS"));
                 let pts = packet.pts().map_or(dts, us);
                 first_dts_us[mapping.output].get_or_insert(dts);
@@ -289,28 +226,45 @@ impl Muxer {
         let min_pts_us = min_pts_us.ok_or(Error::EmptyGroup { group })?;
         let ends_us: Vec<Option<i64>> = self.outs.iter().map(|o| o.end_us).collect();
         let last_dts_us: Vec<Option<i64>> = self.outs.iter().map(|o| o.last_dts_us).collect();
+        let margin_us = self
+            .outs
+            .iter()
+            .map(|o| 1i64.rescale_with(o.time_base, MICROS, Rounding::Up))
+            .max()
+            .expect("至少有一路输出流");
         Ok(group_offset(
             &ends_us,
             &last_dts_us,
             &first_dts_us,
             min_pts_us,
-            self.margin_us,
+            margin_us,
         ))
     }
 
-    /// 把包平移到输出时间线上、写出。
+    /// 把 `at` 处的输入的包平移 `offset_us`（微秒）到输出时间线上、写出。
     fn write_packet(
         &mut self,
         mut packet: Packet,
         mapping: Mapping,
-        at: Placed,
+        at: Origin,
+        offset_us: i64,
     ) -> Result<(), Error> {
         if self.file.cancel.is_cancelled() {
             return Err(Error::Cancelled);
         }
         let out = mapping.output;
         let o = &mut self.outs[out];
-        let t = retime(&mut packet, mapping.time_base, o.time_base, at.offset_us);
+        let t = retime(&mut packet, mapping.time_base, o.time_base, offset_us);
+        if let Some((rate, frame)) = mapping.frames
+            && SampleClock::coarse(mapping.time_base, rate)
+        {
+            let clock = o.clock.get_or_insert_with(|| SampleClock::new(rate, frame));
+            let placed = clock.place(t.dts_us, mapping.time_base);
+            let dts = clock.to(placed, o.time_base);
+            let shift = dts - packet.dts().expect("retime 设了 DTS");
+            packet.set_dts(Some(dts));
+            packet.set_pts(packet.pts().map(|pts| pts + shift));
+        }
         // 每路流的 DTS 在输出时间基下须递增：MP4 严格递增（同一条轨不能有两个样本同时解码），Matroska 的时间基为 1 毫秒，
         // 换算后相等的不算（链接的 FFmpeg 对带 AVFMT_TS_NONSTRICT 的封装器同样只拦往回跳的）。FFmpeg 的 MP4 封装器遇到
         // 不递增的只报「参数不合法」，上一个为 0 时还不查，这里一律拦下；组间的偏移保证跨组递增，不递增只会出在组内
@@ -320,8 +274,7 @@ impl Muxer {
             .is_some_and(|last| dts < last || (strict && dts == last))
         {
             return Err(Error::Unsupported(Unsupported::DtsNotIncreasing {
-                group: at.group,
-                track: at.track,
+                at,
                 kind: o.shape.kind(),
             }));
         }
@@ -340,7 +293,11 @@ impl Muxer {
 
     /// 写尾（MP4 的 moov 前置时在这里把数据整体后移，FFmpeg 读写文件时同样轮询取消），关闭输出并检查关闭的结果，再回读
     /// `path` 核对每路流的包数。
-    fn finish_verified(mut self, path: &str, cancel: &Cancel) -> Result<MediaReport, Error> {
+    pub(crate) fn finish_verified(
+        mut self,
+        path: &str,
+        cancel: &Cancel,
+    ) -> Result<MediaReport, Error> {
         if let Err(e) = self.file.octx.write_trailer() {
             return Err(self.file.write_error(e));
         }
@@ -456,13 +413,6 @@ fn write_header(file: &mut OutputFile, container: Container) -> Result<(), Error
     } else {
         Err(Error::RejectedOptions(rejected))
     }
-}
-
-/// 一个包在哪一组哪条轨，及它的输入要加的时间偏移（微秒）。
-struct Placed {
-    group: usize,
-    track: usize,
-    offset_us: i64,
 }
 
 /// 回读输出，核对每路流的包数与写入的一致。

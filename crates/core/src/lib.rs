@@ -94,14 +94,33 @@ pub use request::{
 pub use tokio_util::sync::CancellationToken;
 pub use url::Url;
 
-/// 公开接口用到的合并报告与合并错误的类型，及合并完整文件（如分开下载的视频与音频）的同步接口
-/// [`merge_files`](remux::merge_files)：它会阻塞，要在阻塞线程池中调用。
+/// 公开接口用到的合并报告与合并错误的类型，及合并完整文件（[`crate::merge_files`]）用到的类型。
 pub mod remux {
     pub use hs_m3u8_remux::fmp4::Problem as Fmp4Problem;
     pub use hs_m3u8_remux::{
-        Cancel, Codec, Container, Control, Error, FfmpegError, FileInput, MediaReport, Shape,
-        StreamKind, StreamReport, Streams, Unsupported, WriteProgress, merge_files,
+        Codec, Container, Error, FfmpegError, FileInput, MediaReport, Origin, Shape, StreamKind,
+        StreamReport, Streams, Unsupported, WriteProgress,
     };
+}
+
+/// 把几个完整文件（如分开下载的视频与音频）的流原样复制进 `output`（`container` 的格式），在阻塞线程池中执行；格式、
+/// 编码、时间线与各种失败见 [`hs_m3u8_remux::merge_files`]。失败或取消时 `output` 上可能留有写了一半的文件，由调用方
+/// 删除（写到临时路径、成功后改名）。`cancel` 取消后以 [`remux::Error::Cancelled`] 结束，运行时关闭时同样；
+/// `progress` 以写完的字节数调用，合计为各输入文件的字节数（见 [`remux::WriteProgress`]）。
+pub async fn merge_files(
+    inputs: Vec<remux::FileInput>,
+    output: std::path::PathBuf,
+    container: remux::Container,
+    cancel: CancellationToken,
+    progress: remux::WriteProgress,
+) -> Result<remux::MediaReport, remux::Error> {
+    let control = hs_m3u8_remux::Control {
+        cancel: hs_m3u8_remux::Cancel::new(move || cancel.is_cancelled()),
+        progress,
+    };
+    blocking(move || hs_m3u8_remux::merge_files(&inputs, &output, container, &control))
+        .await
+        .unwrap_or(Err(remux::Error::Cancelled))
 }
 
 /// 公开接口用到的播放列表解析与选轨类型。

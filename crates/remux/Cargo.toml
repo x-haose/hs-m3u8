@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 ffmpeg-next.workspace = true
+same-file.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]

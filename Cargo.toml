@@ -30,6 +30,8 @@ pyo3 = { version = "0.29.3", features = ["abi3-py312", "experimental-async", "mu
 pyo3-stub-gen = { version = "0.23.1", default-features = false, features = ["infer_signature"] }
 reqwest = { version = "0.13.5", features = ["cookies", "socks"] }
 rustls = { version = "0.23.46", default-features = false, features = ["std"] }
+# 合并文件时比对输出与输入是不是同一个文件（Unix 比设备号与 inode，Windows 比卷序列号与文件索引）
+same-file = "1.0.6"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"

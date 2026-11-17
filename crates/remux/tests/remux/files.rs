@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex};
 
 use ffmpeg_next as ffmpeg;
 use hs_m3u8_remux::{
-    Cancel, Codec, Container, Control, Error, FileInput, MediaReport, StreamKind, Streams,
+    Cancel, Codec, Container, Control, Error, FileInput, MediaReport, Origin, StreamKind, Streams,
     Unsupported, WriteProgress, merge_files,
 };
 
-use crate::{Timeline, earliest, fixtures, span, timelines, work_dir};
+use crate::{Timeline, earliest, fixtures, span, timelines, track, work_dir};
 
 fn file(name: &str) -> PathBuf {
     fixtures().join("files").join(name)
@@ -145,8 +145,7 @@ fn vorbis_goes_into_matroska_but_not_mp4() {
         matches!(
             err,
             Error::Unsupported(Unsupported::Codec {
-                group: 0,
-                track: 1,
+                at: Origin::Input(1),
                 kind: StreamKind::Audio,
                 codec: "vorbis",
                 container: Container::Mp4,
@@ -255,7 +254,7 @@ fn wrong_inputs_are_reported() {
         matches!(
             err,
             Error::MissingStream {
-                track: 0,
+                input: 0,
                 kind: StreamKind::Audio
             }
         ),
@@ -269,7 +268,7 @@ fn wrong_inputs_are_reported() {
         matches!(
             err,
             Error::DuplicateKind {
-                track: 1,
+                at: Origin::Input(1),
                 kind: StreamKind::Video
             }
         ),
@@ -277,26 +276,153 @@ fn wrong_inputs_are_reported() {
     );
     let err = run(&[input("audio.ac3", Streams::Audio)]);
     assert!(
-        matches!(&err, Error::FileFormat { path, format } if path == &file("audio.ac3") && format == "ac3"),
+        matches!(&err, Error::FileFormat { input: 0, path, format: Some(format) }
+            if path == &file("audio.ac3") && format == "ac3"),
         "{err:?}"
     );
+    // 认不出的格式（链接的 FFmpeg 没有它的解复用器，如 WAV）与乱码一样报格式不收
+    let wav = dir.join("tone.wav");
+    let header = [
+        b"RIFF".as_slice(),
+        &36u32.to_le_bytes(),
+        b"WAVEfmt ",
+        &16u32.to_le_bytes(),
+        &[1, 0, 1, 0],
+        &48_000u32.to_le_bytes(),
+        &96_000u32.to_le_bytes(),
+        &[2, 0, 16, 0],
+        b"data",
+        &0u32.to_le_bytes(),
+    ]
+    .concat();
+    std::fs::write(&wav, header).unwrap();
     let garbage = dir.join("garbage.bin");
     std::fs::write(&garbage, [0x5Au8; 4096]).unwrap();
+    for path in [wav, garbage] {
+        let err = run(&[FileInput {
+            path: path.clone(),
+            streams: Streams::Audio,
+        }]);
+        assert!(
+            matches!(&err, Error::FileFormat { input: 0, path: p, format: None } if *p == path),
+            "{err:?}"
+        );
+    }
+    // 认得出是 Matroska（EBML 头完整）、后面是乱码，打不开
+    let broken = dir.join("broken.mkv");
+    let head = &std::fs::read(file("audio_flac.mkv")).unwrap()[..40];
+    std::fs::write(&broken, [head, &[0x5A; 4096]].concat()).unwrap();
     let err = run(&[FileInput {
-        path: garbage,
+        path: broken,
         streams: Streams::Audio,
     }]);
     assert!(
         matches!(
             err,
             Error::OpenInput {
-                group: 0,
-                track: 0,
+                at: Origin::Input(0),
                 ..
             }
         ),
         "{err:?}"
     );
+}
+
+/// 输出与某个输入是同一个文件（同一路径或硬链接）时不动它，报出是哪个输入。
+#[test]
+fn output_that_is_an_input_is_refused() {
+    let dir = work_dir("files_output_is_input");
+    let audio = dir.join("audio.m4a");
+    std::fs::copy(file("audio_aac.m4a"), &audio).unwrap();
+    let linked = dir.join("linked.mp4");
+    std::fs::hard_link(&audio, &linked).unwrap();
+    let original = std::fs::read(&audio).unwrap();
+    let inputs = [
+        input("video_h264_frag.mp4", Streams::Video),
+        FileInput {
+            path: audio.clone(),
+            streams: Streams::Audio,
+        },
+    ];
+    for output in [&audio, &linked] {
+        let err = merge_files(&inputs, output, Container::Mp4, &Control::default()).unwrap_err();
+        assert!(matches!(err, Error::OutputIsInput { input: 1 }), "{err:?}");
+    }
+    assert_eq!(std::fs::read(&audio).unwrap(), original);
+}
+
+/// 进 MP4 的 E-AC-3 不论来自什么容器都核对帧结构：Matroska 里每帧 3 块的报放不进 MP4，进 Matroska 照常。
+#[test]
+fn eac3_with_short_frames_from_matroska_is_rejected_for_mp4() {
+    let dir = work_dir("files_eac3_short");
+    let inputs = [input("audio_eac3_short.mkv", Streams::Audio)];
+    let err = merge_files(
+        &inputs,
+        &dir.join("out.mp4"),
+        Container::Mp4,
+        &Control::default(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::Eac3ShortFrames {
+                at: Origin::Input(0)
+            })
+        ),
+        "{err:?}"
+    );
+    merge(&dir, &inputs, Container::Matroska);
+}
+
+/// 视频一个关键帧都没有的文件（长 GOP 的 TS 截掉开头）：报没有关键帧，指出是哪个输入。
+#[test]
+fn video_without_keyframes_is_reported() {
+    let dir = work_dir("files_no_keyframe");
+    let headless = track("ts_long_gop").segments[1].path.clone();
+    let err = merge_files(
+        &[
+            input("audio_aac.m4a", Streams::Audio),
+            FileInput {
+                path: headless,
+                streams: Streams::Video,
+            },
+        ],
+        &dir.join("out.mp4"),
+        Container::Mp4,
+        &Control::default(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            Error::Unsupported(Unsupported::NoKeyframe {
+                at: Origin::Input(1)
+            })
+        ),
+        "{err:?}"
+    );
+}
+
+/// Matroska 的时间戳只精确到毫秒：48 kHz 的 AAC（一帧 21.333 毫秒）进 MP4 后按采样点接续，每个样本都是 1024 个采样点。
+#[test]
+fn audio_from_millisecond_timestamps_keeps_whole_frames() {
+    let dir = work_dir("files_sample_clock");
+    let (output, report) = merge(
+        &dir,
+        &[input("audio_aac.mkv", Streams::Audio)],
+        Container::Mp4,
+    );
+    let audio = timelines(&output).1;
+    assert_eq!(report.streams[0].packets, audio.len() as u64);
+    let frame = 1024.0 / 48_000.0;
+    for pair in audio.windows(2) {
+        assert!(
+            (pair[1].0 - pair[0].0 - frame).abs() < 1e-6,
+            "相邻样本相隔 {} 秒",
+            pair[1].0 - pair[0].0
+        );
+    }
 }
 
 /// 进度以字节报，各次之和为各输入的字节数；取消后以 [`Error::Cancelled`] 结束。

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use hs_m3u8_remux::{Control, Error, Shape, StreamKind, Streams, Unsupported, remux};
+use hs_m3u8_remux::{Control, Error, Origin, Shape, StreamKind, Streams, Unsupported, remux};
 
 use crate::{Timeline, concat_track, fixtures, group, span, timelines, track, track_in, work_dir};
 
@@ -248,7 +248,7 @@ fn same_stream_kind_from_two_tracks_is_rejected() {
         matches!(
             err,
             Error::DuplicateKind {
-                track: 1,
+                at: Origin::Track { group: 0, track: 1 },
                 kind: StreamKind::Audio
             }
         ),

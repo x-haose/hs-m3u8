@@ -1,5 +1,6 @@
 //! 合并与核对的错误。
 
+use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
@@ -25,8 +26,43 @@ impl From<ffmpeg::Error> for FfmpegError {
     }
 }
 
-/// 合并与核对的错误。各项的 `group`、`track` 为出错的不连续段组与轨；合并完整文件（[`crate::merge_files`]）时组号恒为
-/// 0，轨号为输入在调用方给的列表里的下标。
+/// 出错的输入在哪里。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Origin {
+    /// HLS 的合并（[`crate::remux`]）：第 `group` 个不连续段组的第 `track` 条轨
+    Track { group: usize, track: usize },
+    /// 合并完整文件（[`crate::merge_files`]）：调用方给的第几个输入，从 0 起
+    Input(usize),
+}
+
+impl Origin {
+    /// 轨号或输入的下标。
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Origin::Track { track, .. } | Origin::Input(track) => track,
+        }
+    }
+
+    /// HLS 的组号与轨号。只在 HLS 才有的情形（分片、不连续段组之间的比较）里调用，合并文件走不到。
+    pub(crate) fn track(self) -> (usize, usize) {
+        match self {
+            Origin::Track { group, track } => (group, track),
+            Origin::Input(_) => unreachable!("合并完整文件没有分片与不连续段组"),
+        }
+    }
+}
+
+impl fmt::Display for Origin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Origin::Track { group, track } => write!(f, "第 {group} 组第 {track} 条轨"),
+            Origin::Input(index) => write!(f, "第 {index} 个输入"),
+        }
+    }
+}
+
+/// 合并与核对的错误。两种合并都会报的以 [`Origin`] 指出出错的输入；只有 HLS 才有的以组号与轨号指出，只有合并文件
+/// 才有的以输入的下标（`input`，从 0 起）指出。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("FFmpeg 初始化失败：{0}")]
@@ -47,19 +83,27 @@ pub enum Error {
     InvalidGaps { group: usize, track: usize },
     #[error("合并文件至少需要一个输入")]
     NoInputs,
-    /// 合并完整文件时，第 `track` 个输入里没有调用方指定要取的这类流
-    #[error("第 {track} 个输入里没有{kind}流")]
-    MissingStream { track: usize, kind: StreamKind },
-    /// 合并完整文件时，FFmpeg 认出的格式（`format` 为其解复用器名）不在收的范围里
+    /// 合并完整文件时，输出与第 `input` 个输入是同一个文件（含经符号链接、硬链接）：写输出会先把它截断
+    #[error("输出与第 {input} 个输入是同一个文件")]
+    OutputIsInput { input: usize },
+    /// 合并完整文件时，第 `input` 个输入里没有调用方指定要取的这类流
+    #[error("第 {input} 个输入里没有{kind}流")]
+    MissingStream { input: usize, kind: StreamKind },
+    /// 合并完整文件时，第 `input` 个输入的格式不收：`format` 为 FFmpeg 认出的格式（解复用器名），认不出时为 None
     #[error(
-        "{} 的格式是 {format}，合并文件只收 MP4（含 M4A）、Matroska（含 WebM）、TS 与裸 AAC、MP3",
-        .path.display()
+        "第 {input} 个输入 {} 的格式{}不收，合并文件只收 MP4（含 M4A）、Matroska（含 WebM）、TS 与裸 AAC、MP3",
+        .path.display(),
+        .format.as_deref().map_or_else(|| "认不出，".to_owned(), |f| format!("是 {f}，"))
     )]
-    FileFormat { path: PathBuf, format: String },
-    /// 合并完整文件时，第 `track` 个输入里要取的这类流有，却读不出一个能写出的包（没有包，或都没有 DTS、在第一个
-    /// 关键帧之前）
-    #[error("第 {track} 个输入的{kind}流读不出能写出的包")]
-    EmptyInput { track: usize, kind: StreamKind },
+    FileFormat {
+        input: usize,
+        path: PathBuf,
+        format: Option<String>,
+    },
+    /// 合并完整文件时，第 `input` 个输入里要取的这类流有，却没有一个包写出：没有包，或都没有 DTS。视频的包都在第一个
+    /// 关键帧之前时报 [`Unsupported::NoKeyframe`]
+    #[error("第 {input} 个输入的{kind}流没有能写出的包")]
+    EmptyInput { input: usize, kind: StreamKind },
     #[error("第 {group} 组读不出任何视频或音频包")]
     EmptyGroup { group: usize },
     #[error("输出路径无法交给 FFmpeg（不是有效的 UTF-8 或含 NUL 字符）：{}", .0.display())]
@@ -77,14 +121,10 @@ pub enum Error {
     /// [`fmp4`]）
     #[error("{} 第 {at} 字节起的最后一个 box 长度写为 0（到文件末尾）", .path.display())]
     Fmp4OpenEnded { path: PathBuf, at: u64 },
-    #[error("打开第 {group} 组第 {track} 条轨失败：{cause}")]
-    OpenInput {
-        group: usize,
-        track: usize,
-        cause: FfmpegError,
-    },
-    #[error("第 {track} 条轨的{kind}流与前面的轨重复")]
-    DuplicateKind { track: usize, kind: StreamKind },
+    #[error("打开{at}失败：{cause}")]
+    OpenInput { at: Origin, cause: FfmpegError },
+    #[error("{at}的{kind}流与前面的重复")]
+    DuplicateKind { at: Origin, kind: StreamKind },
     /// 打包音频要按包在输入里的字节位置找到所在的分片；FFmpeg 的裸音频解复用器都给出位置
     #[error(
         "读取第 {group} 组第 {track} 条轨（打包音频）时，包没有在输入里的字节位置，定不了属于哪个分片"
@@ -96,12 +136,8 @@ pub enum Error {
     OpenOutput { path: PathBuf, cause: FfmpegError },
     #[error("封装器不接受选项 {0:?}")]
     RejectedOptions(Vec<(String, String)>),
-    #[error("读取第 {group} 组第 {track} 条轨失败：{cause}")]
-    Read {
-        group: usize,
-        track: usize,
-        cause: FfmpegError,
-    },
+    #[error("读取{at}失败：{cause}")]
+    Read { at: Origin, cause: FfmpegError },
     #[error("写入输出失败：{0}")]
     Mux(FfmpegError),
     #[error("回读输出 {path} 失败：{cause}")]
@@ -132,12 +168,11 @@ pub enum Error {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unsupported {
     #[error(
-        "第 {group} 组第 {track} 条轨的{kind}编码 {codec} 放不进 {container}（{}）",
+        "{at}的{kind}编码 {codec} 放不进 {container}（{}）",
         supported_codecs(*container)
     )]
     Codec {
-        group: usize,
-        track: usize,
+        at: Origin,
         kind: StreamKind,
         /// FFmpeg 的编码名，如 `vorbis`
         codec: &'static str,
@@ -145,12 +180,11 @@ pub enum Unsupported {
     },
     /// MP3 的采样率低于 16 kHz（MPEG-2.5 的 8、11.025、12 kHz）：MP4 封装器不收
     #[error(
-        "第 {group} 组第 {track} 条轨的 MP3 采样率 {sample_rate} Hz 低于 {} Hz，放不进 MP4",
+        "{at}的 MP3 采样率 {sample_rate} Hz 低于 {} Hz，放不进 MP4",
         MP3_MIN_SAMPLE_RATE
     )]
     Mp3SampleRate {
-        group: usize,
-        track: usize,
+        at: Origin,
         /// Hz
         sample_rate: u32,
     },
@@ -158,13 +192,9 @@ pub enum Unsupported {
     /// 比不了（视频的像素格式只有一边探测出，fMP4 里配置不同的 AAC 有一边没解出帧）：这一组的第一个分片里没有这路流
     /// 能解的数据（打开输入时探测读完第一个分片；完整文件探测读到 FFmpeg 的默认上限）
     #[error(
-        "第 {group} 组第 {track} 条轨的{kind}流探测不出编码参数或解码配置（这一组的第一个分片或文件开头探测的范围里没有能解的数据），判断不了能否放进输出"
+        "{at}的{kind}流探测不出编码参数或解码配置（分片的这一组第一个分片、或文件开头探测的范围里没有能解的数据），判断不了能否放进输出"
     )]
-    ParamsUnknown {
-        group: usize,
-        track: usize,
-        kind: StreamKind,
-    },
+    ParamsUnknown { at: Origin, kind: StreamKind },
     #[error("第 {group} 组第 {track} 条轨的流种类与第 0 组不同，无法放进同一个 MP4")]
     LayoutChanged { group: usize, track: usize },
     #[error(
@@ -188,47 +218,30 @@ pub enum Unsupported {
         track: usize,
         kind: StreamKind,
     },
-    /// TS 的一条轨在组内换了要取的那一路的 PID：PMT 更新后原来那路不再列出、换成了另一路（RFC 8216 要求这时标
-    /// EXT-X-DISCONTINUITY）。不报的话新 PID 的包都不进输出
-    #[error(
-        "第 {group} 组第 {track} 条轨的{kind}流在组内换了 PID（PMT 更新后原来那路不再列出），无法放进输出的同一条轨"
-    )]
-    StreamChangedInGroup {
-        group: usize,
-        track: usize,
-        kind: StreamKind,
-    },
-    /// 参数随帧携带的输入（TS 与裸音频）里，这路流在组内中途换了编码或编码参数（采样率、声道、画面宽高等）：输出的
-    /// 一条轨只有一个样本描述
-    #[error("第 {group} 组第 {track} 条轨的{kind}编码参数在组内变了，无法放进输出的同一条轨")]
-    ParamsChangedInGroup {
-        group: usize,
-        track: usize,
-        kind: StreamKind,
-    },
+    /// TS 的一条轨在组内（或一个 TS 文件中途）换了要取的那一路的 PID：PMT 更新后原来那路不再列出、换成了另一路
+    /// （RFC 8216 要求这时标 EXT-X-DISCONTINUITY）。不报的话新 PID 的包都不进输出
+    #[error("{at}的{kind}流中途换了 PID（PMT 更新后原来那路不再列出），无法放进输出的同一条轨")]
+    StreamChangedInGroup { at: Origin, kind: StreamKind },
+    /// 参数随帧携带的输入（TS 与裸音频）里，这路流在组内（或文件）中途换了编码或编码参数（采样率、声道、画面宽高
+    /// 等）：输出的一条轨只有一个样本描述
+    #[error("{at}的{kind}编码参数中途变了，无法放进输出的同一条轨")]
+    ParamsChangedInGroup { at: Origin, kind: StreamKind },
     /// 没有 init 段的一条轨在组内换了分片格式（TS 与打包音频，或打包音频的格式之间）：读取时只认开头那一种，其余的
     /// 分片被当作杂字节跳过
     #[error(
         "第 {group} 组第 {track} 条轨的分片格式在组内变了（TS 与打包音频，或打包音频的格式之间），无法放进同一条 MP4 轨"
     )]
     FormatChangedInGroup { group: usize, track: usize },
-    /// TS 或裸音频（含打包音频）里的 E-AC-3 每帧不足 6 块，输出为 MP4：MP4 封装器把几帧并成一个 6 块（1536 个采样点）
-    /// 的样本，末尾凑不满的帧不写出
-    #[error("第 {group} 组第 {track} 条轨的 E-AC-3 每帧不足 6 块，放不进 MP4")]
-    Eac3ShortFrames { group: usize, track: usize },
-    /// TS 或裸音频（含打包音频）里的 E-AC-3 有多个独立子流，输出为 MP4：MP4 封装器不支持
-    #[error("第 {group} 组第 {track} 条轨的 E-AC-3 有多个独立子流，放不进 MP4")]
-    Eac3Substreams { group: usize, track: usize },
+    /// E-AC-3 每帧不足 6 块，输出为 MP4：MP4 封装器把几帧并成一个 6 块（1536 个采样点）的样本，末尾凑不满的帧不写出
+    #[error("{at}的 E-AC-3 每帧不足 6 块，放不进 MP4")]
+    Eac3ShortFrames { at: Origin },
+    /// E-AC-3 有多个独立子流，输出为 MP4：MP4 封装器不支持
+    #[error("{at}的 E-AC-3 有多个独立子流，放不进 MP4")]
+    Eac3Substreams { at: Origin },
     /// 往回跳多为来源在时间戳重新开始处漏标了 `EXT-X-DISCONTINUITY`，重复多为相邻分片首尾重复了一帧。MP4 要求严格
     /// 递增；Matroska 的时间基为 1 毫秒，换算后相等的不算
-    #[error(
-        "第 {group} 组第 {track} 条轨的{kind}解码时间戳不递增（往回跳或重复），无法放进输出的同一条轨"
-    )]
-    DtsNotIncreasing {
-        group: usize,
-        track: usize,
-        kind: StreamKind,
-    },
+    #[error("{at}的{kind}解码时间戳不递增（往回跳或重复），无法放进输出的同一条轨")]
+    DtsNotIncreasing { at: Origin, kind: StreamKind },
     /// 组内时间戳往前跳，输出里会留下整组都没有内容的空档，扣掉这条轨上一个包所在的片（跨片时）之后仍比一个最长的
     /// 声明时长（见 [`crate::Segment::duration_us`]）还长：多为来源在时间戳重新开始处漏标了 `EXT-X-DISCONTINUITY`。
     /// 一路流单独中断不算；其间有缺片时不核对
@@ -244,10 +257,10 @@ pub enum Unsupported {
         /// 空档至少多长，微秒：与全组已写出的最大 DTS 之差，减去这条轨上一个包所在的片与其间各片声明的时长
         jump_us: u64,
     },
-    /// 这一组里这条轨的视频没有关键帧（随机访问点；不带 recovery point SEI 的 H.264 开放 GOP 里非 IDR 的 I 帧不算：
-    /// 之后的帧可能参考它之前的帧）：写进去解不出画面
-    #[error("第 {group} 组第 {track} 条轨的视频没有关键帧，无法放进输出")]
-    NoKeyframe { group: usize, track: usize },
+    /// 这一组里这条轨（或这个文件）的视频没有关键帧（随机访问点；不带 recovery point SEI 的 H.264 开放 GOP 里非 IDR
+    /// 的 I 帧不算：之后的帧可能参考它之前的帧）：写进去解不出画面
+    #[error("{at}的视频没有关键帧，无法放进输出")]
+    NoKeyframe { at: Origin },
     /// 第 `track` 条轨是打包音频，这一组有分片没有 ID3 时间戳（RFC 8216 3.4 要求每片都有），而这一组还有别的轨：
     /// 不知道它与别的轨怎样对齐。只有它一条轨时按样本数从头接续
     #[error(
