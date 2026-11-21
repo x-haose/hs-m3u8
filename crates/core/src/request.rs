@@ -72,7 +72,11 @@ pub struct HttpOptions {
     /// http 地址也算）；服务器给这个主机下发同名、路径为 `/` 的（不带 Domain 或 Domain 即这个主机）即被替换，路径或域不
     /// 同的与它并存、一同发出（不带 Path 的路径为请求地址所在的目录）。Authorization 只附加到与来源地址协议、主机、端口
     /// 都相同的请求，按 [`crate::Hooks::on_request`] 改写之前的地址判断：回调把地址改到别的源时由它去掉。其余的发往所有
-    /// 地址。跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉 Authorization
+    /// 地址。跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉 Authorization。
+    ///
+    /// 经 `on_request` 回调改后仍没有 User-Agent 的请求，按本机平台的桌面版 Chrome 补 User-Agent、Accept-Language、
+    /// Sec-CH-UA 等请求头，文件用途的请求另按在地址栏打开补网页导航的 Accept 等（只补没给的）；有 User-Agent 时一个都
+    /// 不补
     pub headers: Vec<(String, String)>,
     /// 调用方持有的 Cookie 存储，跨任务保存；None 时每个任务各用一个，任务结束即丢。给了它时 `headers` 里不能有 Cookie
     pub cookies: Option<Arc<dyn CookieStore>>,

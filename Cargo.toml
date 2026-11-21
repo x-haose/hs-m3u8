@@ -35,6 +35,8 @@ same-file = "1.0.6"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
+# 请求补的 Accept-Language 取系统的首选语言
+sys-locale = "0.3.2"
 system-configuration = "0.7.0"
 thiserror = "2.0.21"
 tokio = "1.54.1"

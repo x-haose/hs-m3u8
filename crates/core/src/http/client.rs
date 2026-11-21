@@ -136,8 +136,8 @@ fn system_route(proxy: Option<&SystemProxy>) -> Route<'_> {
 fn build(config: &Config, route: Route<'_>) -> Result<reqwest::Client, Error> {
     let t = config.timeouts;
     // 不自动写 Referer：开着时 reqwest 跟随重定向会把它换成上一跳的地址，盖掉调用方给的
+    // User-Agent 按请求补（见 browser.rs），这里不设默认的
     let builder = reqwest::Client::builder()
-        .user_agent(concat!("hs-m3u8/", env!("CARGO_PKG_VERSION")))
         .referer(false)
         .cookie_provider(config.cookies.clone())
         .connect_timeout(t.connect)

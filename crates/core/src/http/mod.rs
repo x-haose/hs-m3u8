@@ -1,5 +1,6 @@
 //! 带重试、超时、取消、全局并发上限与请求回调的 HTTP 请求：下载与认地址用的 GET，调用接口用的各种方法。
 
+mod browser;
 mod classify;
 mod client;
 
@@ -291,7 +292,7 @@ impl Http {
             }),
             if_range: None,
         };
-        let response = self.send(&parts, &request, cancel).await?;
+        let response = self.send(purpose, &parts, &request, cancel).await?;
         check_status(&response, &parts.url, range)?;
         self.streaming(parts.url, response, held)
             .read_to_end(Vec::new(), body_limit(purpose), purpose, range, cancel)
@@ -312,7 +313,7 @@ impl Http {
     ) -> Result<Streaming, Error> {
         let held = self.acquire(permit, cancel).await?;
         let parts = self.prepare(purpose, url).await?;
-        let response = self.send(&parts, request, cancel).await?;
+        let response = self.send(purpose, &parts, request, cancel).await?;
         check_status(&response, &parts.url, None)?;
         Ok(self.streaming(parts.url, response, held))
     }
@@ -336,7 +337,9 @@ impl Http {
             unsent: true,
         };
         let parts = self.prepare(purpose, url).await.map_err(unsent)?;
-        let mut builder = self.request(http_method(method), &parts).map_err(unsent)?;
+        let mut builder = self
+            .request(http_method(method), purpose, &parts)
+            .map_err(unsent)?;
         if let Some(body) = body {
             if parts.headers.iter().any(|(name, _)| is_content_type(name)) {
                 let cause = "带了请求体时 Content-Type 随请求体给出，回调不能另加";
@@ -410,14 +413,15 @@ impl Http {
         Ok(parts)
     }
 
-    /// 发出 GET，附加 `request` 的 Range 与 If-Range，收到响应头即返回；状态不在这里检查。
+    /// 发出用途为 `purpose` 的 GET，附加 `request` 的 Range 与 If-Range，收到响应头即返回；状态不在这里检查。
     async fn send(
         &self,
+        purpose: Purpose,
         parts: &RequestParts,
         request: &RangeRequest,
         cancel: &CancellationToken,
     ) -> Result<reqwest::Response, Error> {
-        let mut builder = self.request(reqwest::Method::GET, parts)?;
+        let mut builder = self.request(reqwest::Method::GET, purpose, parts)?;
         if let Some(Span { start, end }) = request.span {
             let range = match end {
                 Some(end) => format!("bytes={start}-{}", end - 1),
@@ -433,15 +437,19 @@ impl Http {
             .map_err(|failure| failure.error)
     }
 
-    /// `method` 的 `parts` 请求，带上它的请求头与 `Accept-Encoding: identity`：本库不解压，要原样的字节（不带这个头即
-    /// 表示什么编码都接受，RFC 9110 12.5.3）。
+    /// 用途为 `purpose`、`method` 的 `parts` 请求，带上它的请求头、按浏览器补的请求头（见 [`browser`]）与
+    /// `Accept-Encoding: identity`：本库不解压，要原样的字节（不带这个头即表示什么编码都接受，RFC 9110 12.5.3）。
     fn request(
         &self,
         method: reqwest::Method,
+        purpose: Purpose,
         parts: &RequestParts,
     ) -> Result<reqwest::RequestBuilder, Error> {
         let mut builder = self.clients.get()?.request(method, parts.url.as_str());
         for (name, value) in &parts.headers {
+            builder = builder.header(name, value);
+        }
+        for (name, value) in browser::headers(purpose, &parts.url, &parts.headers) {
             builder = builder.header(name, value);
         }
         Ok(builder.header(ACCEPT_ENCODING, "identity"))

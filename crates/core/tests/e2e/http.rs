@@ -1,4 +1,5 @@
-//! HTTP 请求：证书校验失败与重定向失败不重试，原因写在错误里；重定向后保留调用方给的 Referer；HTTP 库用不上的代理
+//! HTTP 请求：证书校验失败与重定向失败不重试，原因写在错误里；重定向后保留调用方给的 Referer；没给 User-Agent 时按
+//! 浏览器补请求头；HTTP 库用不上的代理
 //! 报参数错误，拒绝 CONNECT 的代理报代理拒绝；Cookie 与 Authorization 的发送范围，调用方的 Cookie 存储；响应体的上限；
 //! 取回小资源。
 
@@ -145,6 +146,57 @@ async fn redirects_keep_the_callers_referer() {
     let probe = engine().probe(&source).await.unwrap();
 
     assert_eq!(probe.tracks[0].segments, 1);
+}
+
+/// 没给 User-Agent 时按 Chrome 补：文件用途（认出地址、文件任务、取回小资源）按在地址栏打开（网页导航的 Accept），
+/// 播放列表按网页里脚本的请求（`*/*`）；给了 User-Agent 时一个都不补。
+#[tokio::test(flavor = "multi_thread")]
+async fn requests_look_like_chrome_unless_the_caller_names_its_client() {
+    let server = Server::start().await;
+    server.put("a.bin", "data");
+    server.put(
+        "index.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n",
+    );
+    let chrome = |agent: Option<String>| agent.is_some_and(|a| a.contains(" Chrome/"));
+
+    engine()
+        .fetch(&Source::new(server.url("a.bin")), 1024)
+        .await
+        .unwrap();
+    assert!(chrome(server.received("a.bin", "user-agent")));
+    let accept = server.received("a.bin", "accept").unwrap();
+    assert!(accept.starts_with("text/html,"), "{accept}");
+    assert_eq!(
+        server
+            .received("a.bin", "upgrade-insecure-requests")
+            .as_deref(),
+        Some("1")
+    );
+
+    engine()
+        .probe(&Source::new(server.url("index.m3u8")))
+        .await
+        .unwrap();
+    assert!(chrome(server.received("index.m3u8", "user-agent")));
+    assert_eq!(
+        server.received("index.m3u8", "accept").as_deref(),
+        Some("*/*")
+    );
+    assert_eq!(
+        server.received("index.m3u8", "upgrade-insecure-requests"),
+        None
+    );
+
+    let mut source = Source::new(server.url("a.bin"));
+    source.http.headers = vec![("User-Agent".into(), "agent/1".into())];
+    engine().fetch(&source, 1024).await.unwrap();
+    assert_eq!(
+        server.received("a.bin", "user-agent").as_deref(),
+        Some("agent/1")
+    );
+    assert_eq!(server.received("a.bin", "accept").as_deref(), Some("*/*"));
+    assert_eq!(server.received("a.bin", "upgrade-insecure-requests"), None);
 }
 
 /// HTTP 库用不上的代理（协议写错，或 socks 地址的主机名它解析不了）：报参数错误，不发出请求。不报的话代理不起作用，
