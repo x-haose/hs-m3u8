@@ -179,18 +179,27 @@ impl Engine {
     /// 认出地址 `source.url` 是什么（见 [`Resource`]），不碰任务目录：发一次带 `Range: bytes=0-` 的请求（回 416 或
     /// Content-Range 不对时不带 Range 再发一次），看响应头与内容开头。是播放列表时接着照 [`Engine::probe`] 解析选轨（主
     /// 播放列表还要拉所选轨的媒体播放列表；206 只给了开头一部分时不带 Range 再取一次完整的）；是文件时读到开头几个字节
-    /// 即断开，不下载其余内容。请求的用途为 [`Purpose::File`]，失败按 [`HttpOptions::retry`] 重试。参数错误时立即返回错
-    /// 误；不在 tokio 运行时内调用会 panic。
+    /// 即断开，不下载其余内容。请求的用途为 [`Purpose::File`]，失败按 [`HttpOptions::retry`] 重试。服务器回 406（按请求的
+    /// Accept 给不出内容，多为只给浏览器看网页的网站）时按在地址栏打开（网页导航的 Accept 等，见 [`HttpOptions::headers`]）
+    /// 从头再认一次，结果以这一次为准。参数错误时立即返回错误；不在 tokio 运行时内调用会 panic。
     pub async fn identify(&self, source: &Source) -> Result<Resource, Error> {
         source.validate()?;
-        let http = Http::new(
-            source,
-            self.requests.clone(),
-            None,
-            Deadline::Request,
-            Redirects::Follow,
-        )?;
-        file::identify(&http, source).await
+        let http = || {
+            Http::new(
+                source,
+                self.requests.clone(),
+                None,
+                Deadline::Request,
+                Redirects::Follow,
+            )
+        };
+        match file::identify(&http()?, source).await {
+            Err(Error::Http {
+                kind: HttpErrorKind::Status(406),
+                ..
+            }) => file::identify(&http()?.navigating(), source).await,
+            identified => identified,
+        }
     }
 
     /// 取回地址 `source.url` 上的一个小资源（如 BitTorrent 的公共 tracker 列表），不碰任务目录：一次 GET，请求头、

@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hs_m3u8_core::{
-    CookieHeader, CookieStore, Error, HttpErrorKind, Proxy, Purpose, RetryPolicy, Source, Url,
+    CookieHeader, CookieStore, Error, HttpErrorKind, Proxy, Purpose, Resource, RetryPolicy, Source,
+    Url,
 };
 use tokio::io::{AsyncWriteExt, copy_bidirectional};
 use tokio::net::{TcpListener, TcpStream};
@@ -148,8 +149,8 @@ async fn redirects_keep_the_callers_referer() {
     assert_eq!(probe.tracks[0].segments, 1);
 }
 
-/// 没给 User-Agent 时按 Chrome 补：文件用途（认出地址、文件任务、取回小资源）按在地址栏打开（网页导航的 Accept），
-/// 播放列表按网页里脚本的请求（`*/*`）；给了 User-Agent 时一个都不补。
+/// 没给 User-Agent 时按 Chrome 补，Accept 照下载器的 `*/*`；认出地址时服务器回 406 就按在地址栏打开（网页导航的
+/// Accept）再认一次；给了 User-Agent 时一个都不补。
 #[tokio::test(flavor = "multi_thread")]
 async fn requests_look_like_chrome_unless_the_caller_names_its_client() {
     let server = Server::start().await;
@@ -158,6 +159,7 @@ async fn requests_look_like_chrome_unless_the_caller_names_its_client() {
         "index.m3u8",
         "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n",
     );
+    server.put_html_only("live", "<html></html>");
     let chrome = |agent: Option<String>| agent.is_some_and(|a| a.contains(" Chrome/"));
 
     engine()
@@ -165,14 +167,9 @@ async fn requests_look_like_chrome_unless_the_caller_names_its_client() {
         .await
         .unwrap();
     assert!(chrome(server.received("a.bin", "user-agent")));
-    let accept = server.received("a.bin", "accept").unwrap();
-    assert!(accept.starts_with("text/html,"), "{accept}");
-    assert_eq!(
-        server
-            .received("a.bin", "upgrade-insecure-requests")
-            .as_deref(),
-        Some("1")
-    );
+    assert_eq!(server.received("a.bin", "accept").as_deref(), Some("*/*"));
+    assert_eq!(server.received("a.bin", "upgrade-insecure-requests"), None);
+    assert!(server.received("a.bin", "accept-language").is_some());
 
     engine()
         .probe(&Source::new(server.url("index.m3u8")))
@@ -183,9 +180,23 @@ async fn requests_look_like_chrome_unless_the_caller_names_its_client() {
         server.received("index.m3u8", "accept").as_deref(),
         Some("*/*")
     );
+
+    let page = engine()
+        .identify(&Source::new(server.url("live")))
+        .await
+        .unwrap();
     assert_eq!(
-        server.received("index.m3u8", "upgrade-insecure-requests"),
-        None
+        page,
+        Resource::Page {
+            content_type: "text/html".into()
+        }
+    );
+    assert_eq!(server.hits("live"), 2);
+    assert_eq!(
+        server
+            .received("live", "upgrade-insecure-requests")
+            .as_deref(),
+        Some("1")
     );
 
     let mut source = Source::new(server.url("a.bin"));
@@ -195,8 +206,7 @@ async fn requests_look_like_chrome_unless_the_caller_names_its_client() {
         server.received("a.bin", "user-agent").as_deref(),
         Some("agent/1")
     );
-    assert_eq!(server.received("a.bin", "accept").as_deref(), Some("*/*"));
-    assert_eq!(server.received("a.bin", "upgrade-insecure-requests"), None);
+    assert_eq!(server.received("a.bin", "accept-language"), None);
 }
 
 /// HTTP 库用不上的代理（协议写错，或 socks 地址的主机名它解析不了）：报参数错误，不发出请求。不报的话代理不起作用，

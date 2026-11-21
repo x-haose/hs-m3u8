@@ -74,9 +74,11 @@ pub struct HttpOptions {
     /// 都相同的请求，按 [`crate::Hooks::on_request`] 改写之前的地址判断：回调把地址改到别的源时由它去掉。其余的发往所有
     /// 地址。跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉 Authorization。
     ///
-    /// 经 `on_request` 回调改后仍没有 User-Agent 的请求，按本机平台的桌面版 Chrome 补 User-Agent、Accept-Language、
-    /// Sec-CH-UA 等请求头，文件用途的请求另按在地址栏打开补网页导航的 Accept 等（只补没给的）；有 User-Agent 时一个都
-    /// 不补
+    /// 经 [`crate::Hooks::on_request`] 回调改后仍没有 User-Agent 的请求，按本机平台的桌面版 Chrome 补没给的：
+    /// User-Agent、Accept-Language（系统的首选语言，读不出时为 `en-US,en;q=0.9`），https 地址另补 Sec-CH-UA、
+    /// Sec-CH-UA-Mobile、Sec-CH-UA-Platform；Accept 为 `*/*`。[`crate::Engine::identify`] 回 406 后再认的那一次按在地址
+    /// 栏打开，另补网页导航的 Accept 与 Upgrade-Insecure-Requests，https 地址在没给 Referer 与任一 Sec-Fetch-* 时补
+    /// Sec-Fetch-Site、Sec-Fetch-Mode、Sec-Fetch-User、Sec-Fetch-Dest。有 User-Agent 时一个都不补
     pub headers: Vec<(String, String)>,
     /// 调用方持有的 Cookie 存储，跨任务保存；None 时每个任务各用一个，任务结束即丢。给了它时 `headers` 里不能有 Cookie
     pub cookies: Option<Arc<dyn CookieStore>>,

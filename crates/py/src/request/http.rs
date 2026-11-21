@@ -153,9 +153,9 @@ pub struct HttpOptions {
     /// 来源地址协议、主机、端口都相同的请求，按 `Hooks.on_request` 改写之前的地址判断：回调把地址改到别的源时由它去掉。
     /// 其余的发往所有地址。跟随重定向时照样带上，跳到别的主机（或端口、协议）时去掉 Authorization。
     ///
-    /// 经 `on_request` 回调改后仍没有 User-Agent 的请求，按本机平台的桌面版 Chrome 补 User-Agent、Accept-Language、
-    /// Sec-CH-UA 等请求头，文件用途的请求另按在地址栏打开补网页导航的 Accept 等（只补没给的）；有 User-Agent 时一个都
-    /// 不补
+    /// 经 `Hooks.on_request` 回调改后仍没有 User-Agent 的请求，按本机平台的桌面版 Chrome 补没给的：User-Agent、
+    /// Accept-Language（系统的首选语言，读不出时为 `en-US,en;q=0.9`），https 地址另补 Sec-CH-UA、Sec-CH-UA-Mobile、
+    /// Sec-CH-UA-Platform；Accept 为 `*/*`。有 User-Agent 时一个都不补
     pub headers: Headers,
     /// 经不经代理、经哪个
     pub proxy: Proxy,

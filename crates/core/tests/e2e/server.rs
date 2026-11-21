@@ -1,5 +1,5 @@
-//! 测试用 HTTP 服务：按路径返回内容，可注入 500、指定状态码、404、重定向、按请求次数变化的内容、阻塞点与下发的
-//! Cookie，记下各路径最近一次请求带的请求头。
+//! 测试用 HTTP 服务：按路径返回内容，可注入 500、指定状态码、404、重定向、按请求次数变化的内容、只给浏览器的网页、
+//! 阻塞点与下发的 Cookie，记下各路径最近一次请求带的请求头。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -19,6 +19,8 @@ enum Entry {
     Status(StatusCode),
     /// 返回该状态并带 Retry-After 头
     RetryAfter(StatusCode, String),
+    /// 网页（text/html）：请求的 Accept 不以 `text/html` 开头时回 406；不理 Range
+    HtmlOnly(Vec<u8>),
 }
 
 /// 收到请求后先通知测试，再等测试放行。
@@ -88,6 +90,16 @@ impl Server {
     pub(crate) fn put_sequence(&self, path: &str, bodies: Vec<impl Into<Vec<u8>>>) {
         let entry = Entry::Sequence(bodies.into_iter().map(Into::into).collect());
         self.insert_counted(path, entry);
+    }
+
+    /// 之后请求该路径时，Accept 以 `text/html` 开头的回网页 `body`，其余回 406。
+    pub(crate) fn put_html_only(&self, path: &str, body: impl Into<Vec<u8>>) {
+        let entry = Entry::HtmlOnly(body.into());
+        self.state
+            .entries
+            .lock()
+            .unwrap()
+            .insert(path.into(), entry);
     }
 
     /// 之后请求该路径返回 404。
@@ -231,6 +243,13 @@ async fn serve(State(state): State<Arc<ServerState>>, uri: Uri, headers: HeaderM
                 format!("/{to}")
             };
             return (StatusCode::FOUND, [(header::LOCATION, location)]).into_response();
+        }
+        Some(Entry::HtmlOnly(body)) => {
+            let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
+            if !accept.is_some_and(|a| a.starts_with("text/html")) {
+                return StatusCode::NOT_ACCEPTABLE.into_response();
+            }
+            return ([(header::CONTENT_TYPE, "text/html")], body.clone()).into_response();
         }
         Some(Entry::Body(body)) => body.clone(),
         Some(Entry::Sequence(bodies)) => bodies[nth(bodies.len())].clone(),

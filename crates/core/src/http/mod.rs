@@ -87,6 +87,8 @@ pub(crate) struct Http {
     requests: Arc<Permits>,
     /// 请求的进展报给它（任务的进度）；探测、认出地址、取回小资源与调用接口时为 None
     observer: Option<Arc<dyn Observer>>,
+    /// 文件用途（[`Purpose::File`]）的请求按在地址栏打开发（见 [`browser`]）
+    navigate: bool,
     /// 下一次退避的 [`RetryWaiting::id`]
     next_wait: AtomicU64,
     jitter: std::hash::RandomState,
@@ -187,9 +189,18 @@ impl Http {
             hooks: source.hooks.clone(),
             requests,
             observer,
+            navigate: false,
             next_wait: AtomicU64::new(0),
             jitter: std::hash::RandomState::new(),
         })
+    }
+
+    /// 文件用途（[`Purpose::File`]）的请求改为按在地址栏打开发：网页导航的 Accept 等（见 [`browser`]）。
+    pub(crate) fn navigating(self) -> Self {
+        Http {
+            navigate: true,
+            ..self
+        }
     }
 
     /// GET `url`；`range` 不为空时只取这段字节。失败按 [`Http::retrying`] 重试。
@@ -449,7 +460,8 @@ impl Http {
         for (name, value) in &parts.headers {
             builder = builder.header(name, value);
         }
-        for (name, value) in browser::headers(purpose, &parts.url, &parts.headers) {
+        let navigate = self.navigate && purpose == Purpose::File;
+        for (name, value) in browser::headers(navigate, &parts.url, &parts.headers) {
             builder = builder.header(name, value);
         }
         Ok(builder.header(ACCEPT_ENCODING, "identity"))

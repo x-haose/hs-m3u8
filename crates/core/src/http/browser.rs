@@ -1,23 +1,24 @@
 //! 请求按桌面版 Chrome 补的请求头：调用方与回调没给的才补；它们给了 User-Agent 时一个都不补（请求冒充的是那个客户端，
 //! 补上 Chrome 的会与它对不上）。Accept-Encoding 固定为 identity（本库要原样的字节），与浏览器不同。
 //!
-//! - 都补：User-Agent（本机平台的 Chrome）、Accept-Language（系统的首选语言，读不出时不补）；https 地址另补 Chrome 的
-//!   User-Agent Client Hints（Sec-CH-UA、Sec-CH-UA-Mobile、Sec-CH-UA-Platform，Chrome 只发给安全来源）。
-//! - [`Purpose::File`]（认出地址、文件任务、取回小资源）按在地址栏打开它补：网页导航的 Accept 与
-//!   Upgrade-Insecure-Requests；https 地址在没给 Referer 时另补 Sec-Fetch-*（Site 为 none：不是从别的网页发起的）。
-//!   给了 Referer 时不知道与它是不是同一站点，不补 Sec-Fetch-*。
-//! - 其余用途（播放列表、key、init 段、分片、调用接口）是网页里脚本发的请求，Accept 照 HTTP 库默认的 `*/*`；不知道
-//!   发起它的网页是哪个，不补 Sec-Fetch-*。
+//! - 都补：User-Agent（本机平台的 Chrome）、Accept-Language（系统的首选语言；读不出或为 `C`、`POSIX` 时同 Chrome 在这种
+//!   系统上的 `en-US,en;q=0.9`）；https 地址另补 Chrome 的 User-Agent Client Hints（Sec-CH-UA、Sec-CH-UA-Mobile、
+//!   Sec-CH-UA-Platform，Chrome 只发给安全来源）。Accept 照 HTTP 库默认的 `*/*`（下载器的习惯：图床等按 Accept 里有没有
+//!   `text/html` 决定给文件本身还是跳到网页），不补 Sec-Fetch-*（不知道发起请求的网页是哪个）。
+//! - 按在地址栏打开发的请求（`navigate`）另补网页导航的 Accept 与 Upgrade-Insecure-Requests；https 地址在没给 Referer
+//!   与任一 Sec-Fetch-* 时另补 Sec-Fetch-* 四项（Site 为 none：不是从别的网页发起的）。给了 Referer 时不知道与它是不是
+//!   同一站点，给了某一项时补齐的会与它对不上，都不补。
+//!
+//! 简化：按发出的第一个地址判断 https 与否，跟随重定向时不重算（http 跳到 https 后缺 Client Hints，反过来多出）；网站
+//! 按这一点拦截时改为自己跟随重定向、逐跳重算。
 
 use std::sync::LazyLock;
 
 use url::Url;
 
-use crate::hooks::Purpose;
-
-/// Chrome 稳定版的主版本（2026-11-18 发布 159.0.8154.13）。User-Agent 里只写主版本，其余固定为 0.0.0。
+/// Chrome 稳定版的主版本。User-Agent 里只写主版本，其余固定为 0.0.0。
 ///
-/// 简化：写死，随本库发版更新；网站开始按版本过旧拦截时改为按日期推算。
+/// 简化：写死，本库发版时核对；落后到被网站按版本拦截时改为按 Chrome 的发布节奏推算。
 const MAJOR: u32 = 159;
 
 /// 本机平台在 User-Agent 里的写法与 Sec-CH-UA-Platform 的值：Chrome 在 macOS 上一律写 Intel 与 10_15_7，在 Windows 上
@@ -41,12 +42,18 @@ static USER_AGENT: LazyLock<String> = LazyLock::new(|| {
 
 static BRANDS: LazyLock<String> = LazyLock::new(|| brands(MAJOR));
 
-static ACCEPT_LANGUAGE: LazyLock<Option<String>> =
-    LazyLock::new(|| sys_locale::get_locale().and_then(|locale| accept_language(&locale)));
+/// Chrome 在系统语言读不出或为 `C`、`POSIX` 时用的。
+const FALLBACK_LANGUAGE: &str = "en-US,en;q=0.9";
 
-/// 用途为 `purpose`、发往 `url` 的请求要补的请求头；`given` 为调用方与回调给的（见模块说明）。
+static ACCEPT_LANGUAGE: LazyLock<String> = LazyLock::new(|| {
+    sys_locale::get_locale()
+        .and_then(|locale| accept_language(&locale))
+        .unwrap_or_else(|| FALLBACK_LANGUAGE.to_owned())
+});
+
+/// 发往 `url` 的请求要补的请求头，`navigate` 为按在地址栏打开发；`given` 为调用方与回调给的（见模块说明）。
 pub(super) fn headers(
-    purpose: Purpose,
+    navigate: bool,
     url: &Url,
     given: &[(String, String)],
 ) -> Vec<(&'static str, String)> {
@@ -55,7 +62,6 @@ pub(super) fn headers(
         return Vec::new();
     }
     let secure = url.scheme() == "https";
-    let navigate = purpose == Purpose::File;
     let mut headers = Vec::new();
     if secure {
         headers.extend([
@@ -83,9 +89,7 @@ pub(super) fn headers(
             ("Sec-Fetch-Dest", "document".to_owned()),
         ]);
     }
-    if let Some(language) = ACCEPT_LANGUAGE.as_ref() {
-        headers.push(("Accept-Language", language.clone()));
-    }
+    headers.push(("Accept-Language", ACCEPT_LANGUAGE.clone()));
     headers.retain(|(name, _)| !has(name));
     headers
 }
@@ -202,8 +206,8 @@ mod tests {
     #[test]
     fn navigation_over_https_looks_like_typing_the_address() {
         let url = Url::parse("https://a.example/watch").unwrap();
-        let headers = headers(Purpose::File, &url, &[]);
-        let mut expected = vec![
+        let headers = headers(true, &url, &[]);
+        let expected = vec![
             "Sec-CH-UA",
             "Sec-CH-UA-Mobile",
             "Sec-CH-UA-Platform",
@@ -214,21 +218,33 @@ mod tests {
             "Sec-Fetch-Mode",
             "Sec-Fetch-User",
             "Sec-Fetch-Dest",
+            "Accept-Language",
         ];
-        if ACCEPT_LANGUAGE.is_some() {
-            expected.push("Accept-Language");
-        }
         assert_eq!(names(&headers), expected);
     }
 
+    /// 不按地址栏打开时 Accept 留给 HTTP 库（`*/*`），不补导航的头；http 地址没有 Client Hints 与 Sec-Fetch-*。
     #[test]
-    fn plain_http_gets_no_client_hints_or_fetch_metadata() {
-        let url = Url::parse("http://a.example/watch").unwrap();
-        let headers = headers(Purpose::File, &url, &[]);
-        assert!(names(&headers).iter().all(|name| !name.starts_with("Sec-")));
-        let playlist = super::headers(Purpose::Playlist, &url, &[]);
-        assert!(!names(&playlist).contains(&"Accept"));
-        assert!(!names(&playlist).contains(&"Upgrade-Insecure-Requests"));
+    fn other_requests_keep_the_downloaders_accept() {
+        let secure = Url::parse("https://a.example/a.jpg").unwrap();
+        assert_eq!(
+            names(&headers(false, &secure, &[])),
+            [
+                "Sec-CH-UA",
+                "Sec-CH-UA-Mobile",
+                "Sec-CH-UA-Platform",
+                "User-Agent",
+                "Accept-Language"
+            ]
+        );
+        let plain = Url::parse("http://a.example/watch").unwrap();
+        let navigation = headers(true, &plain, &[]);
+        assert!(
+            names(&navigation)
+                .iter()
+                .all(|name| !name.starts_with("Sec-"))
+        );
+        assert!(names(&navigation).contains(&"Accept"));
     }
 
     /// 给了的不补；给了 Referer 或任一 Sec-Fetch-* 时 Sec-Fetch-* 一个都不补；给了 User-Agent 时什么都不补。
@@ -236,16 +252,16 @@ mod tests {
     fn given_headers_win() {
         let url = Url::parse("https://a.example/watch").unwrap();
         let given = |name: &str| vec![(name.to_owned(), "x".to_owned())];
-        let accept = headers(Purpose::File, &url, &given("accept"));
+        let accept = headers(true, &url, &given("accept"));
         assert!(!names(&accept).contains(&"Accept"));
         for name in ["Referer", "sec-fetch-mode"] {
-            let headers = headers(Purpose::File, &url, &given(name));
+            let headers = headers(true, &url, &given(name));
             assert!(
                 names(&headers).iter().all(|n| !n.starts_with("Sec-Fetch-")),
                 "{name}"
             );
             assert!(names(&headers).contains(&"Sec-CH-UA"), "{name}");
         }
-        assert!(headers(Purpose::File, &url, &given("User-Agent")).is_empty());
+        assert!(headers(true, &url, &given("User-Agent")).is_empty());
     }
 }
