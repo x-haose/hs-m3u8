@@ -664,6 +664,7 @@ dependencies = [
  "axum",
  "cbc",
  "fs4",
+ "h2",
  "hs-m3u8-hls",
  "hs-m3u8-remux",
  "hs-m3u8-sysproxy",

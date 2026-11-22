@@ -30,6 +30,7 @@ url.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+h2.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
 tokio-rustls.workspace = true
 

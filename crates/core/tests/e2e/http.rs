@@ -1,4 +1,4 @@
-//! HTTP 请求：证书校验失败与重定向失败不重试，原因写在错误里；重定向后保留调用方给的 Referer；没给 User-Agent 时按
+//! HTTP 请求：证书校验失败与重定向失败不重试，原因写在错误里；HTTP/2 收得下与 Chrome 一样大的响应头；重定向后保留调用方给的 Referer；没给 User-Agent 时按
 //! 浏览器补请求头；HTTP 库用不上的代理
 //! 报参数错误，拒绝 CONNECT 的代理报代理拒绝；Cookie 与 Authorization 的发送范围，调用方的 Cookie 存储；响应体的上限；
 //! 取回小资源。
@@ -22,16 +22,51 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use crate::server::Server;
 use crate::{engine, fixture, read_request_head, request, run, test_dir};
 
-/// 用 tests/fixtures/tls 的自签名证书握手的 TLS 服务端。
-fn self_signed_acceptor() -> TlsAcceptor {
+/// 用 tests/fixtures/tls 的自签名证书握手的 TLS 服务端设置。
+fn self_signed_config() -> ServerConfig {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/tls");
     let cert = CertificateDer::from(std::fs::read(dir.join("cert.der")).unwrap());
     let key = PrivatePkcs8KeyDer::from(std::fs::read(dir.join("key.der")).unwrap());
-    let config = ServerConfig::builder()
+    ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![cert], key.into())
-        .unwrap();
-    TlsAcceptor::from(Arc::new(config))
+        .unwrap()
+}
+
+/// 用 tests/fixtures/tls 的自签名证书握手的 TLS 服务端。
+fn self_signed_acceptor() -> TlsAcceptor {
+    TlsAcceptor::from(Arc::new(self_signed_config()))
+}
+
+/// 只说 HTTP/2 的本地 TLS 服务（自签名证书），返回其上的地址：任何请求都回 200、`Content-Type: text/html`、没有响应体，
+/// 响应头里另带一个值长 `filler` 字节的 `x-filler`。
+async fn http2_server(filler: usize) -> Url {
+    let mut config = self_signed_config();
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let filler = "x".repeat(filler);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let acceptor = acceptor.clone();
+            let filler = filler.clone();
+            tokio::spawn(async move {
+                let tls = acceptor.accept(stream).await.ok()?;
+                let mut connection = h2::server::handshake(tls).await.ok()?;
+                while let Some(Ok((_, mut respond))) = connection.accept().await {
+                    let response = http::Response::builder()
+                        .header("content-type", "text/html")
+                        .header("x-filler", filler.as_str())
+                        .body(())
+                        .unwrap();
+                    respond.send_response(response, true).ok()?;
+                }
+                Some(())
+            });
+        }
+    });
+    Url::parse(&format!("https://{addr}/watch")).unwrap()
 }
 
 /// 用自签名证书握手的本地 TLS 服务，返回其上的播放列表地址。握手后不回 HTTP 响应：证书不受信任时客户端在握手时就拒绝，
@@ -103,6 +138,23 @@ async fn untrusted_certificates_are_reported_without_retrying() {
             }
         ),
         "{err}"
+    );
+}
+
+/// HTTP/2 的响应头超过 HTTP 库默认的上限（16 KiB）、不超过 Chrome 的（256 KiB）：照常认出，同浏览器。
+#[tokio::test(flavor = "multi_thread")]
+async fn large_http2_response_headers_are_accepted() {
+    let mut source = Source::new(http2_server(64 * 1024).await);
+    source.http.insecure = true;
+    source.http.retry.attempts = NonZeroU32::MIN;
+
+    let resource = engine().identify(&source).await.unwrap();
+
+    assert_eq!(
+        resource,
+        Resource::Page {
+            content_type: "text/html".into()
+        }
     );
 }
 

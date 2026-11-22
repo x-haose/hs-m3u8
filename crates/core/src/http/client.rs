@@ -18,6 +18,10 @@ use super::{Deadline, Redirects};
 /// 系统代理多久重读一次：设置改了（如代理软件换了端口）几秒内新的请求就照新设置走，又不必每个请求都读。
 const SYSTEM_PROXY_TTL: Duration = Duration::from_secs(5);
 
+/// HTTP/2 响应头的总大小上限（字节，按 RFC 9113 的算法：每项的名与值的字节数再加 32），同 Chrome。HTTP 库默认的
+/// 16 KiB 收不下有的网站（如 YouTube 网页的响应头约 20 KiB），超过时整个请求失败。
+const MAX_RESPONSE_HEADER_LIST: u32 = 256 * 1024;
+
 /// 本任务的 Cookie 存储：调用方给的（见 [`crate::CookieStore`]）或本任务自己的，换客户端时沿用。
 pub(super) struct Cookies(pub(super) Box<dyn reqwest::cookie::CookieStore>);
 
@@ -147,6 +151,7 @@ fn build(config: &Config, route: Route<'_>) -> Result<reqwest::Client, Error> {
         .no_brotli()
         .no_zstd()
         .no_deflate()
+        .http2_max_header_list_size(MAX_RESPONSE_HEADER_LIST)
         .tls_danger_accept_invalid_certs(config.insecure);
     let builder = match config.deadline {
         Deadline::Request => builder.timeout(t.request),
