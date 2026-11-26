@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use hs_m3u8_remux::Streams;
 use tokio::sync::watch;
@@ -319,6 +320,38 @@ pub(crate) async fn discard(
     Ok(leftovers)
 }
 
+/// 第 `session` 个会话里第 `track` 条轨合并进输出的最后一个分片的结束时刻（见 [`UnrecordedTail::at`]）：之前各组按
+/// 声明时长（音视频轨中最长的）首尾相接，加上这一组里这条轨各分片的声明时长；这个会话里它没有分片合并进输出时为 None。
+fn tail_at(
+    plan: &live::MergePlan,
+    streams: &[Streams],
+    session: u32,
+    track: usize,
+) -> Option<Duration> {
+    let last = plan
+        .keys
+        .iter()
+        .zip(&plan.groups)
+        .rposition(|((s, _), group)| *s == session && !group[track].segments.is_empty())?;
+    let declared =
+        |segments: &[output::GroupSegment]| -> u64 { segments.iter().map(|s| s.duration_us).sum() };
+    let before: u64 = plan.groups[..last]
+        .iter()
+        .map(|group| {
+            group
+                .iter()
+                .zip(streams)
+                .filter(|(_, s)| **s != Streams::Subtitles)
+                .map(|(t, _)| declared(&t.segments))
+                .max()
+                .unwrap_or(0)
+        })
+        .sum();
+    Some(Duration::from_micros(
+        before + declared(&plan.groups[last][track].segments),
+    ))
+}
+
 /// 合并直播录到的分片；`recording` 为本次运行的录制，只合并时为 None。
 fn merge_live(
     dir: &WorkDir,
@@ -352,6 +385,7 @@ fn merge_live(
         .map(|&(session, track)| UnrecordedTail {
             session,
             track,
+            at: tail_at(&plan, &streams, session, track),
             after: stored.segments[track]
                 .iter()
                 .filter(|f| f.name.session == session)
@@ -422,4 +456,45 @@ async fn finish(
     let output = output::write(dir, content, options, bytes, cancel, progress).await?;
     progress.send_modify(|p| p.stage = Stage::Done);
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::output::{GroupSegment, GroupTrack};
+
+    fn track(durations: &[u64]) -> GroupTrack {
+        GroupTrack {
+            init: None,
+            segments: durations
+                .iter()
+                .map(|&duration_us| GroupSegment {
+                    path: PathBuf::new(),
+                    duration_us,
+                })
+                .collect(),
+            gaps: Vec::new(),
+        }
+    }
+
+    /// 尾部的时刻：之前各组按音视频轨中最长的声明时长首尾相接，加上这一组里字幕轨的；这个会话里字幕轨没有分片的组不算。
+    #[test]
+    fn tail_times_add_up_the_groups_before() {
+        let streams = [Streams::Video, Streams::Audio, Streams::Subtitles];
+        let plan = live::MergePlan {
+            groups: vec![
+                vec![track(&[4, 4]), track(&[9]), track(&[4])],
+                vec![track(&[2]), track(&[2]), track(&[1, 1])],
+                vec![track(&[5]), track(&[5]), track(&[])],
+                vec![track(&[3]), track(&[3]), track(&[])],
+            ],
+            keys: vec![(0, 0), (0, 1), (0, 2), (1, 0)],
+            sessions: 2,
+            unmergeable: Vec::new(),
+            holes: Vec::new(),
+        };
+        let at = |session| tail_at(&plan, &streams, session, 2);
+        assert_eq!(at(0), Some(Duration::from_micros(9 + 2)));
+        assert_eq!(at(1), None);
+    }
 }

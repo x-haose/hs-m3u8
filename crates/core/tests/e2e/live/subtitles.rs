@@ -1,5 +1,7 @@
 //! 直播录字幕：字幕轨与音视频一样按会话录、停止后一起合并，跨片重复的 cue 只留一条。
 
+use std::time::Duration;
+
 use axum::http::StatusCode;
 use hs_m3u8_core::hls::Renditions;
 use hs_m3u8_core::remux::{Container, Shape};
@@ -8,7 +10,7 @@ use hs_m3u8_core::{
     SubtitleFileFormat, SubtitleOutput, TailCause, Target, TrackKind, UnrecordedTail,
 };
 
-use super::{STALL, live_request};
+use super::{STALL, interrupt, live_request};
 use crate::server::Server;
 use crate::{engine, fixture, test_dir};
 
@@ -246,6 +248,7 @@ async fn a_subtitle_playlist_that_stops_updating_does_not_stall_the_recording() 
             session: 0,
             track: 1,
             after: Some(0),
+            at: Some(Duration::from_secs(1)),
             cause: Some(TailCause::Ended(StallCause::NoNewSegments)),
         }]
     );
@@ -307,7 +310,10 @@ async fn a_failing_subtitle_playlist_is_reported_as_an_unrecorded_tail() {
     let [tail] = &live.unrecorded_tails[..] else {
         panic!("{:?}", live.unrecorded_tails);
     };
-    assert_eq!((tail.session, tail.track, tail.after), (0, 1, Some(0)));
+    assert_eq!(
+        (tail.session, tail.track, tail.after, tail.at),
+        (0, 1, Some(0), Some(Duration::from_secs(1)))
+    );
     assert!(
         matches!(
             &tail.cause,
@@ -340,7 +346,76 @@ async fn a_failing_subtitle_playlist_is_reported_as_an_unrecorded_tail() {
             session: 0,
             track: 1,
             after: Some(0),
+            at: Some(Duration::from_secs(1)),
             cause: None,
+        }]
+    );
+}
+
+/// 续录时字幕播放列表一直没有分片：会话判定不一直等它，字幕轨满了停滞时限就这次不录、报为尾部没录到，画面照常续录。
+#[tokio::test(flavor = "multi_thread")]
+async fn resuming_without_subtitle_segments_does_not_wait_for_them() {
+    let dir = test_dir("live_subtitles_resume_empty");
+    let server = Server::start().await;
+    let video = |count: usize, ended: bool| {
+        let mut playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n".to_owned();
+        for i in 0..count {
+            playlist += &format!("#EXTINF:1,\nv/seg{i}.ts\n");
+        }
+        if ended {
+            playlist += "#EXT-X-ENDLIST\n";
+        }
+        playlist
+    };
+    for i in 0..2 {
+        server.put(&format!("v/seg{i}.ts"), fixture(&format!("ts_a/seg{i}.ts")));
+    }
+    server.put("v.m3u8", video(1, false));
+    server.put(
+        "subs/0.vtt",
+        "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:131280,LOCAL:00:00:00.000\n\n00:00.300 --> 00:00.800\n字幕\n",
+    );
+    server.put(
+        "subs.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nsubs/0.vtt\n",
+    );
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n\
+         #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"zh\",LANGUAGE=\"zh\",URI=\"subs.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=200000,SUBTITLES=\"subs\"\nv.m3u8\n",
+    );
+    let mut req = live_request(server.url("master.m3u8"), &dir, STALL);
+    req.source.preference.subtitles = Renditions::All;
+    req.output.target = Target::File(MergedFile {
+        path: dir.join("out.mkv"),
+        container: Container::Matroska,
+    });
+    interrupt(&req, |p| {
+        p.tracks.iter().map(|t| t.segments.done).eq([1, 1])
+    })
+    .await;
+
+    server.put("subs.m3u8", "#EXTM3U\n#EXT-X-TARGETDURATION:1\n");
+    server.put("v.m3u8", video(2, true));
+    let job = engine().start(req).unwrap();
+    // 判定一直等下去时这里超时
+    let output = tokio::time::timeout(Duration::from_secs(60), job.wait())
+        .await
+        .expect("会话判定不等没有分片的字幕轨")
+        .unwrap();
+
+    let live = output.live.unwrap();
+    assert_eq!(live.end, Some(LiveEnd::EndList));
+    assert_eq!(output.segments, 2);
+    assert_eq!(
+        live.unrecorded_tails,
+        [UnrecordedTail {
+            session: 0,
+            track: 1,
+            after: Some(0),
+            at: Some(Duration::from_secs(1)),
+            cause: Some(TailCause::Ended(StallCause::NoNewSegments)),
         }]
     );
 }

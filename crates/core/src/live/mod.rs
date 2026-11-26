@@ -32,7 +32,7 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-pub(crate) use self::merge::{merge_plan, report_missed};
+pub(crate) use self::merge::{MergePlan, merge_plan, report_missed};
 use self::merge_check::{Batch, MergeCheck};
 use self::session::Verdicts;
 use self::stall::Stall;

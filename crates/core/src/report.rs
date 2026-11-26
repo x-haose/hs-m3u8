@@ -423,6 +423,10 @@ pub struct UnrecordedTail {
     pub track: usize,
     /// 这个会话里录到的最后一个分片的媒体序号；一个也没录到时为 None
     pub after: Option<u64>,
+    /// 这条轨合并进输出的最后一个分片在输出时间轴上的结束时刻（从输出开头算，各组首尾相接）；按各分片声明的时长
+    /// （EXTINF）推算，与输出里实际的时刻差出各组声明与实际时长之差（通常不到一秒）。这个会话里没有分片合并进输出时为
+    /// None
+    pub at: Option<Duration>,
     /// 本次运行录制结束时判定的原因；之前的运行记下的、或只合并时为 None（原因不落盘）
     pub cause: Option<TailCause>,
 }

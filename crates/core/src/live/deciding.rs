@@ -67,6 +67,13 @@ impl Recorder<'_> {
         self.decide_if_complete().await
     }
 
+    /// 会话定下之前字幕轨 `track` 停滞（还没拿到候选）：这次不录（录制结束时报为尾部没录到），不使任务失败，不再等它。
+    pub(super) async fn drop_subtitles(&mut self, track: usize) -> Result<(), Error> {
+        self.tracks[track].end_undecided();
+        self.verdicts().conclude(track, Verdict::Ended);
+        self.decide_if_complete().await
+    }
+
     fn verdicts(&mut self) -> &mut Verdicts {
         match &mut self.phase {
             Phase::Deciding(verdicts) => verdicts,
