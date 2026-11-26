@@ -49,7 +49,7 @@ pub struct AVClass {
     pub item_name: ::std::option::Option<
         unsafe extern "C" fn(ctx: *mut ::std::os::raw::c_void) -> *const ::std::os::raw::c_char,
     >,
-    pub option: *const AVOption,
+    pub option: *mut AVOption,
     pub version: ::std::os::raw::c_int,
     pub log_level_offset_offset: ::std::os::raw::c_int,
     pub parent_log_context_offset: ::std::os::raw::c_int,
