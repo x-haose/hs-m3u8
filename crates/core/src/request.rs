@@ -200,18 +200,11 @@ impl JobRequest {
         if let Some(live) = self.live {
             live.validate()?;
         }
-        let subtitles = &self.output.subtitles;
-        if self.source.preference.subtitles != hls::Renditions::None
-            && self.output.target.hls().is_none()
-            && !subtitles.embed
-            && subtitles.files.is_none()
-        {
-            return Err(Error::InvalidInput(
-                "选了字幕却既不封进合并文件、也不另存为文件，又没有本地 HLS 输出：字幕下了也用不上"
-                    .to_owned(),
-            ));
+        let output = self.output.resolve()?;
+        if self.source.preference.subtitles != hls::Renditions::None {
+            output.require_subtitle_use()?;
         }
-        self.output.resolve()
+        Ok(output)
     }
 }
 

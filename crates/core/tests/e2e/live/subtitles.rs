@@ -2,7 +2,9 @@
 
 use hs_m3u8_core::hls::Renditions;
 use hs_m3u8_core::remux::{Container, Shape};
-use hs_m3u8_core::{LiveEnd, MergedFile, Target, TrackKind};
+use hs_m3u8_core::{
+    Error, LiveEnd, MergedFile, SubtitleFileFormat, SubtitleOutput, Target, TrackKind,
+};
 
 use super::{STALL, live_request};
 use crate::server::Server;
@@ -109,4 +111,75 @@ async fn the_recording_ends_without_waiting_for_the_subtitle_playlist() {
     let output = job.wait().await.unwrap();
 
     assert_eq!(output.live.unwrap().end, Some(LiveEnd::EndList));
+}
+
+/// 只合并记有字幕轨的录制：输出用不上字幕（不封、不另存、没有本地 HLS）时报参数错误，不把字幕悄悄丢掉；另存为 SRT
+/// 时照常合并。
+#[tokio::test(flavor = "multi_thread")]
+async fn merging_a_recording_with_subtitles_requires_a_use_for_them() {
+    let dir = test_dir("live_subtitles_merge_use");
+    let server = Server::start().await;
+    server.put("v/seg0.ts", fixture("ts_a/seg0.ts"));
+    server.put(
+        "v.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nv/seg0.ts\n",
+    );
+    server.put(
+        "subs/0.vtt",
+        "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:131280,LOCAL:00:00:00.000\n\n00:00.300 --> 00:00.800\n字幕\n",
+    );
+    server.put(
+        "subs.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nsubs/0.vtt\n",
+    );
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n\
+         #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"zh\",LANGUAGE=\"zh\",URI=\"subs.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=200000,SUBTITLES=\"subs\"\nv.m3u8\n",
+    );
+    let mut req = live_request(server.url("master.m3u8"), &dir, STALL);
+    req.source.preference.subtitles = Renditions::All;
+    req.output.target = Target::File(MergedFile {
+        path: dir.join("out.mkv"),
+        container: Container::Matroska,
+    });
+    req.output.keep_work_dir = true;
+    let job = engine().start(req.clone()).unwrap();
+    let mut progress = job.control().progress();
+    progress
+        .wait_for(|p| p.tracks.iter().map(|t| t.segments.done).eq([1, 1]))
+        .await
+        .unwrap();
+    job.control().stop();
+    job.wait().await.unwrap();
+    server.stop().await;
+
+    // 停止时已合并出 out.mkv，只合并写到另一个文件，任务目录照旧
+    req.output.work_dir = Some(dir.join("out.hsdl"));
+    req.output.target = Target::File(MergedFile {
+        path: dir.join("again.mkv"),
+        container: Container::Matroska,
+    });
+    let mut unused = req.output.clone();
+    unused.subtitles = SubtitleOutput {
+        embed: false,
+        files: None,
+    };
+    let failed = engine().merge_recorded(unused).unwrap().wait().await;
+    assert!(matches!(failed, Err(Error::InvalidInput(_))), "{failed:?}");
+
+    let mut files = req.output;
+    files.subtitles = SubtitleOutput {
+        embed: false,
+        files: Some(SubtitleFileFormat::Srt),
+    };
+    let output = engine()
+        .merge_recorded(files)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    assert_eq!(output.subtitle_files.len(), 1);
+    assert_eq!(output.subtitle_files[0].cues, 1);
 }

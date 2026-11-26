@@ -440,7 +440,9 @@ impl From<core::IntegrityFailure> for IntegrityFailure {
     fn from(integrity: core::IntegrityFailure) -> Self {
         use core::IntegrityFailure as I;
         match integrity {
-            I::NotWebVtt(_) => unreachable!("Python 的选轨偏好不要字幕，不会下字幕分片"),
+            I::NotWebVtt(_) => unreachable!(
+                "只在下载字幕分片时报：Python 的偏好不选字幕，记有字幕轨的目录开始时先报 PreferenceChanged（reselect 时为 TracksMismatch），只合并不下载"
+            ),
             I::Padding => IntegrityFailure::Padding {},
             I::CipherLength(length) => IntegrityFailure::CipherLength { length },
             I::RangeLength { expected, found } => IntegrityFailure::RangeLength { expected, found },

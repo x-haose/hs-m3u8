@@ -342,9 +342,9 @@ impl From<core::MissReason> for MissReason {
                 cause: cause.into(),
             },
             core::MissReason::Unmergeable => MissReason::Unmergeable {},
-            core::MissReason::NoMatchingDiscontinuity => {
-                unreachable!("Python 的选轨偏好不要字幕，点播没有字幕轨")
-            }
+            core::MissReason::NoMatchingDiscontinuity => unreachable!(
+                "只出在点播的字幕轨上：Python 的偏好不选字幕，记有字幕轨的点播目录开始时先报 PreferenceChanged（reselect 时为 TracksMismatch）"
+            ),
             core::MissReason::Gap => MissReason::Gap {},
             core::MissReason::Unknown => MissReason::Unknown {},
         }

@@ -17,7 +17,7 @@ use crate::subtitles::{self, Lane};
 use crate::timing::{MICROS, SampleClock, retime};
 use crate::{
     Cancel, Container, Error, FfmpegError, Label, MediaReport, Origin, Shape, StreamKind,
-    StreamReport, Unsupported,
+    StreamReport, Unsupported, UnusedStream,
 };
 
 /// 一路输出流：第 0 组决定其编码参数，写出过程中累计统计。`_us` 结尾的时刻为输出时间线上的微秒。
@@ -340,11 +340,12 @@ impl Muxer {
     }
 
     /// 写尾（MP4 的 moov 前置时在这里把数据整体后移，FFmpeg 读写文件时同样轮询取消），关闭输出并检查关闭的结果，再回读
-    /// `path` 核对每路流的包数。
+    /// `path` 核对每路流的包数。`unused` 为输入里没进输出的流（见 [`MediaReport::unused`]）。
     pub(crate) fn finish_verified(
         mut self,
         path: &str,
         cancel: &Cancel,
+        unused: Vec<UnusedStream>,
     ) -> Result<MediaReport, Error> {
         if let Err(e) = self.file.octx.write_trailer() {
             return Err(self.file.write_error(e));
@@ -355,6 +356,7 @@ impl Muxer {
         verify(Path::new(path), &self.outs, cancel)?;
         Ok(MediaReport {
             streams: self.outs.into_iter().map(OutStream::report).collect(),
+            unused,
         })
     }
 }

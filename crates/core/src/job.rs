@@ -261,8 +261,11 @@ pub(crate) async fn merge_recorded(
         });
     }
     let dir = WorkDir::open(root, record, lock, SelectionCheck::SameTracks).await?;
-    let output = with_subtitle_files(&output, &dir).await?;
     let streams = dir.record().streams();
+    if streams.contains(&Streams::Subtitles) {
+        output.require_subtitle_use()?;
+    }
+    let output = with_subtitle_files(&output, &dir).await?;
     let kinds = track_kinds(&streams);
     progress.send_modify(|p| p.set_tracks(&kinds));
     let stored = dir.scan(streams.len()).await?;

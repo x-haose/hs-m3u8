@@ -10,7 +10,9 @@ use crate::inband::{Inband, PacketCheck};
 use crate::input::Input;
 use crate::nal::Framing;
 use crate::source::Source;
-use crate::{Cancel, Container, Error, Origin, StreamKind, Streams, Unsupported, ffi, frame};
+use crate::{
+    Cancel, Container, Error, Origin, StreamKind, Streams, Unsupported, UnusedStream, ffi, frame,
+};
 
 /// 一条轨在某组中（或一个完整文件里）被选中的一路流。
 pub(crate) struct Selected {
@@ -29,7 +31,7 @@ pub(crate) struct Selected {
 }
 
 /// 按 `wanted` 选出 `input`（`at` 处的输入）里第一路视频与（或）第一路音频，并检查编码能否放进 `container`。
-pub(crate) fn select(
+fn select(
     input: &Input,
     wanted: Streams,
     container: Container,
@@ -95,6 +97,61 @@ pub(crate) struct OpenTrack {
     pub(crate) at: Origin,
     pub(crate) input: Input,
     pub(crate) selected: Vec<Selected>,
+    /// 要取的那类流里第一路之后的（见 [`unused_streams`]）
+    pub(crate) unused: Vec<UnusedStream>,
+}
+
+impl OpenTrack {
+    /// 打开的输入 `input`（`at` 处）按 `wanted` 选流（见 [`select`]）。
+    pub(crate) fn new(
+        input: Input,
+        wanted: Streams,
+        container: Container,
+        at: Origin,
+    ) -> Result<OpenTrack, Error> {
+        let selected = select(&input, wanted, container, at)?;
+        let unused = unused_streams(&input, wanted, at);
+        Ok(OpenTrack {
+            at,
+            input,
+            selected,
+            unused,
+        })
+    }
+}
+
+/// `input` 里 `wanted` 要的每类流第一路之后的几路（[`select`] 不取它们）。
+fn unused_streams(input: &Input, wanted: Streams, at: Origin) -> Vec<UnusedStream> {
+    [StreamKind::Video, StreamKind::Audio]
+        .into_iter()
+        .filter(|&kind| wanted.wants(kind))
+        .flat_map(|kind| {
+            input
+                .context()
+                .streams()
+                .filter(move |s| s.parameters().medium() == kind.medium())
+                .skip(1)
+                .map(move |s| UnusedStream {
+                    at,
+                    shape: ffi::shape(&s, kind),
+                    language: ffi::language(&s),
+                })
+        })
+        .collect()
+}
+
+/// 把 `found` 里还没列过的（同一条轨、参数与语言都相同的算列过）加进 `unused`。
+pub(crate) fn add_unused(unused: &mut Vec<UnusedStream>, found: &[OpenTrack]) {
+    for stream in found.iter().flat_map(|t| &t.unused) {
+        let listed = unused.iter().any(|u| {
+            u.at.index() == stream.at.index()
+                && u.shape == stream.shape
+                && u.language == stream.language
+        });
+        if !listed {
+            unused.push(stream.clone());
+        }
+    }
 }
 
 /// 打开第 `group` 组的各音视频轨并选流（见 [`select`]），字幕轨不打开。`layout` 为第 0 组各轨选中的流（见 [`layout_of`]
@@ -115,18 +172,14 @@ pub(crate) fn open_group(
         }
         let at = Origin::Track { group, track };
         let input = Input::open(segments, at, cancel)?;
-        let selected = select(&input, streams[track], container, at)?;
-        let found: Vec<&Desc> = selected.iter().map(|s| &s.desc).collect();
+        let track_opened = OpenTrack::new(input, streams[track], container, at)?;
+        let found: Vec<&Desc> = track_opened.selected.iter().map(|s| &s.desc).collect();
         if let Some(layout) = layout
             && let Some(kind) = same_streams(&found, &layout[track], at)?
         {
             unknown.get_or_insert((at, kind));
         }
-        opened.push(OpenTrack {
-            at,
-            input,
-            selected,
-        });
+        opened.push(track_opened);
     }
     check_timed(&opened)?;
     match unknown {

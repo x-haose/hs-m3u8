@@ -6,7 +6,7 @@ use ffmpeg::Rescale;
 use ffmpeg_next as ffmpeg;
 
 use crate::chain::ffmpeg_path;
-use crate::group::{layout_of, open_group, primed, references_of};
+use crate::group::{add_unused, layout_of, open_group, primed, references_of};
 use crate::source::Source;
 use crate::subtitles::{self, Lane};
 use crate::timing::{MICROS, group_offset, wrap_shifts_us};
@@ -126,6 +126,8 @@ fn write_groups(
     let streams: Vec<Streams> = tracks.iter().map(|t| t.streams).collect();
     let first = open_group(&streams, groups[0], None, container, cancel)?;
     let layout = layout_of(&first, tracks.len())?;
+    let mut unused = Vec::new();
+    add_unused(&mut unused, &first);
     let labels: Vec<&Label> = tracks.iter().map(|t| &t.label).collect();
     let subtitle_tracks: Vec<usize> = (0..tracks.len())
         .filter(|&t| read_subtitles && streams[t] == Streams::Subtitles)
@@ -164,6 +166,7 @@ fn write_groups(
     )?;
     for &numbered in &groups[1..] {
         let opened = open_group(&streams, numbered, Some(&layout), container, cancel)?;
+        add_unused(&mut unused, &opened);
         let sources = primed(opened, &layout, &references)?;
         write_group(
             &mut muxer,
@@ -179,7 +182,7 @@ fn write_groups(
             muxer.set_discarded_cues(output, lane.aligned_discarded + lane.packet_discarded);
         }
     }
-    let report = muxer.finish_verified(path, cancel)?;
+    let report = muxer.finish_verified(path, cancel, unused)?;
     Ok(Merged {
         report,
         subtitles: lanes

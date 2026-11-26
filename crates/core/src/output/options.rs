@@ -317,6 +317,22 @@ impl ResolvedOutput {
         })
     }
 
+    /// 有字幕轨时输出要用得上它：封进合并文件、另存为文件或有本地 HLS 输出，否则报参数错误（字幕不进任何输出）。
+    pub(crate) fn require_subtitle_use(&self) -> Result<(), Error> {
+        let used = self.get(OutputKind::Hls).is_some()
+            || self
+                .subtitles
+                .as_ref()
+                .is_some_and(|s| s.embed || s.files.is_some());
+        if used {
+            return Ok(());
+        }
+        Err(Error::InvalidInput(
+            "有字幕却既不封进合并文件、也不另存为文件，又没有本地 HLS 输出：字幕不会进任何输出"
+                .to_owned(),
+        ))
+    }
+
     /// 各另存的字幕文件，按字幕的轨号。
     pub(crate) fn subtitle_files(&self) -> impl Iterator<Item = &PendingOutput> {
         self.outputs

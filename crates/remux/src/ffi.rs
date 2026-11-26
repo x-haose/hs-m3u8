@@ -34,6 +34,11 @@ pub(crate) fn shape(stream: &Stream<'_>, kind: StreamKind) -> Shape {
     }
 }
 
+/// 流的元数据里的语言（TS 为 PMT 的 ISO 639 描述符，MP4 为轨的语言）；没有时为 None。
+pub(crate) fn language(stream: &Stream<'_>) -> Option<String> {
+    stream.metadata().get("language").map(str::to_owned)
+}
+
 /// 流的解码配置（codecpar 的 extradata，如 avcC、esds 里的 AudioSpecificConfig）；没有时为空。
 pub(crate) fn extradata(stream: &Stream<'_>) -> Vec<u8> {
     let params = stream.parameters();

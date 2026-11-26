@@ -4,7 +4,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::chain::ffmpeg_path;
-use crate::group::{OpenTrack, layout_of, select, sources};
+use crate::group::{OpenTrack, add_unused, layout_of, sources};
 use crate::input::Input;
 use crate::source::Source;
 use crate::write::Muxer;
@@ -164,6 +164,8 @@ fn write(
         sizes.push(size);
     }
     let layout = layout_of(&opened, inputs.len())?;
+    let mut unused = Vec::new();
+    add_unused(&mut unused, &opened);
     let mut muxer = Muxer::open(path, container, cancel, &opened, &layout, None, &[])?;
     let mut sources = sources(opened, &layout, &[]);
     for source in &mut sources {
@@ -183,10 +185,10 @@ fn write(
         control.progress.add(size.saturating_sub(done));
     }
     check_written(&muxer, &sources)?;
-    muxer.finish_verified(path, cancel)
+    muxer.finish_verified(path, cancel, unused)
 }
 
-/// 打开第 `input` 个输入 `file`、选流（见 [`select`]），另返回文件打开时的字节数。
+/// 打开第 `input` 个输入 `file`、选流（见 [`OpenTrack::new`]），另返回文件打开时的字节数。
 fn open_file(
     file: &FileInput,
     container: Container,
@@ -195,17 +197,12 @@ fn open_file(
 ) -> Result<(OpenTrack, u64), Error> {
     let at = Origin::Input(input);
     let (opened, size) = Input::file(&file.path, input, cancel)?;
-    let selected = select(&opened, file.streams, container, at)?;
+    let track = OpenTrack::new(opened, file.streams, container, at)?;
     for kind in [StreamKind::Video, StreamKind::Audio] {
-        if file.streams.wants(kind) && !selected.iter().any(|s| s.desc.shape.kind() == kind) {
+        if file.streams.wants(kind) && !track.selected.iter().any(|s| s.desc.shape.kind() == kind) {
             return Err(Error::MissingStream { at, kind });
         }
     }
-    let track = OpenTrack {
-        at,
-        input: opened,
-        selected,
-    };
     Ok((track, size))
 }
 

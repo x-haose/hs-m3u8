@@ -118,8 +118,9 @@ fn mp4(path: &PyPath) -> core::MergedFile {
 impl OutputOptions {
     pub(crate) fn to_core(&self) -> core::OutputOptions {
         let mut options = core::OutputOptions::new(self.target.to_core());
-        // Python 接口不选字幕，也表示不了合并文件里的字幕流：由 Rust 接口建立、记有字幕轨的任务目录交给 Python 只合并时，
-        // 字幕不进合并文件（本地 HLS 照样带上）
+        // Python 接口不选字幕，也表示不了合并文件里的字幕流：合并文件里一律不封字幕。由 Rust 接口建立、记有字幕轨的直播
+        // 录制交给 Python 只合并时，有本地 HLS 输出则字幕随它输出，没有则报参数错误（字幕不会进任何输出）；开始任务时
+        // Python 的偏好与这类目录记的不同，先报 PreferenceChanged（reselect 时为 TracksMismatch），不下载字幕
         options.subtitles = core::SubtitleOutput {
             embed: false,
             files: None,

@@ -285,7 +285,9 @@ fn unsupported_error(
             );
         }
         U::SubtitleFormat { .. } => {
-            unreachable!("Python 的选轨偏好不要字幕，不会读字幕的媒体播放列表")
+            unreachable!(
+                "只在开始任务时报：Python 的偏好不选字幕，记有字幕轨的目录开始时先报 PreferenceChanged（reselect 时不按记录选轨、不读字幕，报 TracksMismatch）"
+            )
         }
         U::Hls(reason) => {
             return instance(

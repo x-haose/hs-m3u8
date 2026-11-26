@@ -2,7 +2,7 @@
 
 use ffmpeg_next as ffmpeg;
 use hs_m3u8_remux::{
-    Control, Error, Origin, Shape, StreamKind, Streams, TrackSegments, Unsupported,
+    Control, Error, MediaReport, Origin, Shape, StreamKind, Streams, TrackSegments, Unsupported,
 };
 
 use crate::remux;
@@ -248,6 +248,38 @@ fn a_pid_change_within_a_group_is_rejected() {
         }
     }
     assert_eq!(report.streams[1].packets, packets);
+    // 另一路列进没取的流；两组里同样的一路只列一次
+    let unused = |report: &MediaReport| -> Vec<(Origin, &'static str, Option<String>)> {
+        report
+            .unused
+            .iter()
+            .map(|u| {
+                let Shape::Audio { codec, .. } = u.shape else {
+                    panic!("{u:?}");
+                };
+                (u.at, codec, u.language.clone())
+            })
+            .collect()
+    };
+    let at = Origin::Track { group: 0, track: 0 };
+    assert_eq!(unused(&report), [(at, "aac", None)]);
+    let twice = remux(
+        &[Streams::All],
+        &[group([two.clone()]), group([two.clone()])],
+        &output,
+        &Control::default(),
+    )
+    .unwrap();
+    assert_eq!(unused(&twice), [(at, "aac", None)]);
+    // 只要视频时音频不算没取
+    let video = remux(
+        &[Streams::Video],
+        &[group([two])],
+        &output,
+        &Control::default(),
+    )
+    .unwrap();
+    assert!(video.unused.is_empty());
 }
 
 /// 同一个 PID 中途从 AAC 换成 AC-3（漏标 EXT-X-DISCONTINUITY）：编码在组内变了。
