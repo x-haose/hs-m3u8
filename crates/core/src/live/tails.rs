@@ -9,7 +9,7 @@ use crate::Error;
 
 impl Recorder<'_> {
     /// 会话定下后，第 `track` 条字幕轨该不该记为尾部没录到：前后接不上而停了的记；出现了 ENDLIST 或录满的不记；否则
-    /// 停滞过而之后还没录到新分片的（见 `marked`）记。音视频轨不记。
+    /// 停滞过而之后还没有进展的（见 `marked`）记。音视频轨不记。
     fn wants_tail(&self, track: usize) -> bool {
         if self.media[track] {
             return false;
@@ -18,18 +18,22 @@ impl Recorder<'_> {
         if t.is_broken() {
             return true;
         }
-        !t.is_ended() && !t.is_full(self.max_us()) && self.marked[track]
+        !t.is_ended() && !t.is_full(self.max_us()) && self.marked[track].is_some()
     }
 
-    /// 此刻（`now`）已停滞（见 [`super::LiveTrack::stall_since`]）的字幕轨置上 `marked`。
+    /// 改 `marked`：置上之后有了进展的清掉，此刻（`now`）已停滞（见 [`super::LiveTrack::stall_since`]）而没置上的置上。
     fn mark_stalled(&mut self, now: Instant) {
-        for track in 0..self.tracks.len() {
-            let stalled = !self.media[track]
-                && self.tracks[track]
-                    .stall_since(self.options.stall_timeout)
-                    .is_some_and(|since| since <= now);
-            if stalled {
-                self.marked[track] = true;
+        for track in (0..self.tracks.len()).filter(|&t| !self.media[t]) {
+            let t = &self.tracks[track];
+            let marked = &mut self.marked[track];
+            if marked.is_some_and(|at| t.progress() != at) {
+                *marked = None;
+            }
+            let stalled = t
+                .stall_since(self.options.stall_timeout)
+                .is_some_and(|since| since <= now);
+            if stalled && marked.is_none() {
+                *marked = Some(t.progress());
             }
         }
     }

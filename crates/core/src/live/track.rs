@@ -96,8 +96,15 @@ pub(super) struct LiveTrack {
     last_refresh_error: Option<RefreshReason>,
     /// 服务器在最近一次失败的刷新里要求等到的时刻（Retry-After）；刷新成功即清空
     server_wait: Option<Instant>,
-    /// 字幕轨前后接不上而停了（见 [`LiveTrack::stop_broken`]）的原因
-    broken: Option<SourceBreak>,
+    /// 字幕轨前后接不上而停了（见 [`LiveTrack::stop_broken`]）的原因与时刻
+    broken: Option<(SourceBreak, Instant)>,
+    /// 字幕轨随画面另起会话、按新窗口重新开始的时刻（见 [`LiveTrack::rejoin`]）：在它之前发起的刷新与拉取的播放列表属于
+    /// 旧窗口，回来时丢掉（见 [`LiveTrack::is_stale`]）
+    renewed_at: Option<Instant>,
+    /// 字幕轨随画面进了新会话（见 [`LiveTrack::rejoin`]）而在新会话里还没录到分片
+    unrecorded_in_session: bool,
+    /// 见 [`LiveTrack::progress`]
+    progress: u64,
 }
 
 impl LiveTrack {
@@ -131,6 +138,9 @@ impl LiveTrack {
             last_refresh_error: None,
             server_wait: None,
             broken: None,
+            renewed_at: None,
+            unrecorded_in_session: false,
+            progress: 0,
         })
     }
 
@@ -395,11 +405,12 @@ impl LiveTrack {
         matches!(self.role, Role::Idle) || self.is_broken()
     }
 
-    /// 字幕轨前后接不上（原因 `cause`）：这次运行不再录它（同 [`LiveTrack::stop_processing`]），录制结束时报为尾部没录到。
-    /// 它不作对齐的证据，不另起会话。
-    pub(super) fn stop_broken(&mut self, cause: SourceBreak) {
+    /// 字幕轨在 `now` 前后接不上（原因 `cause`）：停下不再录它（同 [`LiveTrack::stop_processing`]），报为尾部没录到；它
+    /// 不作对齐的证据，不单独另起会话（同一会话里序号会重）。唯一的音视频轨随后另起会话时随它重新开始（见
+    /// [`LiveTrack::rejoin`]）。
+    pub(super) fn stop_broken(&mut self, cause: SourceBreak, now: Instant) {
         self.stop_processing();
-        self.broken = Some(cause);
+        self.broken = Some((cause, now));
     }
 
     /// 之后不再刷新、不再处理这条轨（接不上而结束录制，或字幕轨接不上而停了）。
@@ -424,15 +435,33 @@ impl LiveTrack {
         self.pending.push_front(fetched);
     }
 
-    /// 字幕轨随唯一的音视频轨另起的会话（见 [`LiveTrack::restart`]）接着录：它自己没有接不上，窗口不变（在途的刷新与
-    /// 准备照常由它处理，录过的不重录），之后处理的分片记进新会话，起点为已处理到的序号（见 [`Window::renew_session`]）。
-    /// 这个会话里不录的轨不变。简化：字幕的序号回退晚于画面（CDN 缓存、打包器滞后）时，回退前列出的旧时间线分片记进新
-    /// 会话，按 X-TIMESTAMP-MAP 对齐时多半落在新画面之外而丢掉；随后它自己的回退按接不上停掉，这次运行不再录它（报为尾部
-    /// 没录到）。要接上时，字幕轨在新会话里还没录到分片就遇到回退的，按新窗口重新开始。
-    pub(super) fn rejoin(&mut self) {
-        if let Role::Decided(window) = &mut self.role {
+    /// 字幕轨随唯一的音视频轨另起的会话（见 [`LiveTrack::restart`]）录，停滞从 `now` 起算。它自己没有接不上时窗口不变
+    /// （在途的刷新与准备照常由它处理，录过的不重录），之后处理的分片记进新会话，起点为已处理到的序号（见
+    /// [`Window::renew_session`]）；接不上而停了的（`rebuild` 为已由 [`LiveTrack::forgive_restart`] 取消的）按新窗口从
+    /// 窗口起点重新开始、重新刷新，之前发起的请求回来时丢掉。之后
+    /// 它在新会话里还没录到分片就接不上的，同样按新窗口重新开始（编码器重启时画面与字幕谁先被认出回退不一定）。这个
+    /// 会话里不录的轨不变。
+    pub(super) fn rejoin(&mut self, now: Instant, rebuild: bool) {
+        let Role::Decided(window) = &mut self.role else {
+            return;
+        };
+        if self.broken.take().is_some() || rebuild {
+            let recorded_us = window.recorded_us();
+            self.role = Role::Decided(Box::new(Window::new(
+                Start::New(SessionStart::Fresh),
+                recorded_us,
+            )));
+            self.pending.clear();
+            self.renewed_at = Some(now);
+            if matches!(self.refresh, Refresh::Ended) {
+                self.refresh = Refresh::Due(now);
+            }
+        } else {
             window.renew_session();
         }
+        self.unrecorded_in_session = true;
+        self.last_progress = now;
+        self.last_listed = now;
     }
 
     /// 按定下的会话处理一份播放列表并安排下次刷新；`started` 为这次拉取开始的时刻。见 [`Window::update`]。
@@ -459,6 +488,7 @@ impl LiveTrack {
         }
         if !update.gaps.is_empty() && update.items.is_empty() && update.init_failed.is_empty() {
             self.last_progress = now;
+            self.progress += 1;
         }
         if let Some(failure) = &update.init_failure {
             self.last_download_failure = Some(failure.clone());
@@ -472,6 +502,43 @@ impl LiveTrack {
     pub(super) fn segment_recorded(&mut self, now: Instant) {
         self.outstanding -= 1;
         self.last_progress = now;
+        self.progress += 1;
+        self.unrecorded_in_session = false;
+    }
+
+    /// 有进展的次数（录到分片，或列出的新分片全是 EXT-X-GAP）；会话定下、另起时重置停滞计时不算。
+    pub(super) fn progress(&self) -> u64 {
+        self.progress
+    }
+
+    /// 发起于 `started` 的刷新或拉到的播放列表属于按新窗口重新开始之前（见 `renewed_at`），回来时丢掉；丢掉的是刷新时
+    /// 安排下次刷新。
+    pub(super) fn is_stale(&mut self, started: Instant, now: Instant) -> bool {
+        let stale = self.renewed_at.is_some_and(|at| started < at);
+        if stale && matches!(self.refresh, Refresh::Waiting) {
+            self.refresh = Refresh::Due(now);
+        }
+        stale
+    }
+
+    /// 字幕轨因序号回退（[`SourceBreak::Restarted`]）而停了、之后唯一的音视频轨 `media` 再没有进展（见 `last_progress`）
+    /// 时取消这个状态，返回是否如此：画面随后也回退，是同一次重启，字幕停了之后画面也没再录到新内容，字幕没有丢，不记
+    /// 尾部。
+    pub(super) fn forgive_restart(&mut self, media: &LiveTrack) -> bool {
+        let same_restart = matches!(
+            self.broken,
+            Some((SourceBreak::Restarted, at)) if media.last_progress <= at
+        );
+        if same_restart {
+            self.broken = None;
+        }
+        same_restart
+    }
+
+    /// 字幕轨随画面进了新会话而还没在新会话里录到分片（见 [`LiveTrack::rejoin`]）：这时它自己接不上，按新窗口重新开始
+    /// 即可（新会话里没有它的分片，序号不会重）。
+    pub(super) fn is_unrecorded_in_session(&self) -> bool {
+        self.unrecorded_in_session
     }
 
     /// 本轨排入下载的一个分片取不到，记为缺失。
@@ -599,7 +666,7 @@ impl LiveTrack {
         now: Instant,
         others_live: impl Fn(Instant) -> bool,
     ) -> Option<TailCause> {
-        if let Some(cause) = self.broken {
+        if let Some((cause, _)) = self.broken {
             return Some(TailCause::Broken(cause));
         }
         if self.is_full(max_us) {

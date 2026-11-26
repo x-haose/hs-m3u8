@@ -160,9 +160,9 @@ pub struct TrackProgress {
     pub segments: SegmentCounts,
     /// 口径同 [`Progress::bytes`]，只算这条轨
     pub bytes: u64,
-    /// 直播的字幕轨：在录制中的会话里记为尾部没录到（停滞满了时限，或前后接不上而停了；之前的运行记下而本次还没录到它的
-    /// 新分片的也算；见 [`UnrecordedTail`]），已写进任务目录。录到新分片、出现 ENDLIST 或录满即为 false（接不上而停了的
-    /// 不变）。其余为 false
+    /// 直播的字幕轨：在录制中的会话里记为尾部没录到（停滞满了时限，或前后接不上而停了；之前的运行记下而本次还没有进展的
+    /// 也算；见 [`UnrecordedTail`]），已写进任务目录。有了进展（录到分片，或列出的新分片全是 EXT-X-GAP）、出现 ENDLIST
+    /// 或录满即为 false，接不上而停了的到随画面进新会话为止。其余为 false
     pub unrecorded_tail: bool,
 }
 
@@ -432,8 +432,9 @@ pub struct LiveReport {
 /// 结束只看音视频轨），在这里报出。
 ///
 /// 录制中它停滞（持续 [`crate::LiveOptions::stall_timeout`] 与 3 个目标时长中较长的那么久没录到新分片）或前后接不上而停了
-/// 时即记进任务目录（[`TrackProgress::unrecorded_tail`] 随之变为 true），录到新分片即去掉；所以取消、失败或进程退出后
-/// 只合并照样报出。录制结束时出现了 ENDLIST 或录满的去掉。简化：录制结束前停滞还不满时限的那一段不报。
+/// 时即记进任务目录（[`TrackProgress::unrecorded_tail`] 随之变为 true），之后有了进展（录到分片，或列出的新分片全是
+/// EXT-X-GAP）即去掉；所以取消、失败或进程退出后只合并照样报出。出现了 ENDLIST 或录满的去掉。因序号回退而停了、之后
+/// 画面没再录到新内容就也回退另起会话的，是同一次重启，不记。简化：录制结束前停滞还不满时限的那一段不报。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnrecordedTail {
     pub session: u32,
@@ -458,7 +459,7 @@ pub enum TailCause {
     /// 故障：刷新一直失败（字幕轨另含 401、403 这类不可重试的 HTTP 错误与不是播放列表的内容）、一直不返回，有新分片却
     /// 都取不到，或音视频轨还在出新分片而它不再出（[`StallReason::TrackStopped`]）
     Failed(StallReason),
-    /// 播放列表与之前刷新得到的接不上（多为字幕打包器重启）：这次运行不再录它
+    /// 播放列表与之前刷新得到的接不上（多为字幕打包器重启）：停下它，唯一的音视频轨随后另起会话时它跟着重新开始
     Broken(SourceBreak),
 }
 
@@ -489,9 +490,9 @@ pub enum SourceBreak {
     Inconsistent { sequence: u64 },
 }
 
-/// 录制中途另起的会话：只有一条音视频轨时，它的播放列表与之前刷新得到的接不上，不结束录制，另起会话接着录（字幕轨跟着
-/// 从窗口起点进新会话）。序号回退时
-/// 从新窗口的起点录；矛盾时跳过已处理到的序号，只录更新的分片。
+/// 录制中途另起的会话：只有一条音视频轨时，它的播放列表与之前刷新得到的接不上，不结束录制，另起会话接着录。序号回退时
+/// 从新窗口的起点录；矛盾时跳过已处理到的序号，只录更新的分片。字幕轨跟着进新会话：自己没接不上的接着已处理到的序号录，
+/// 接不上而停了的从新窗口的起点重新开始。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NewSession {
     /// 另起的会话编号

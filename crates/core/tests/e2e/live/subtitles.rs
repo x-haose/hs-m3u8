@@ -11,7 +11,7 @@ use hs_m3u8_core::{
     SubtitleFileFormat, SubtitleOutput, TailCause, Target, TrackKind, UnrecordedTail,
 };
 
-use super::{STALL, interrupt, live_request, playlist_in, put_long};
+use super::{STALL, interrupt, live_request, media_playlist, playlist_in, put_long};
 use crate::server::Server;
 use crate::{engine, fixture, test_dir};
 
@@ -664,4 +664,63 @@ async fn subtitles_are_not_recorded_when_no_media_track_is() {
     assert_eq!(output.segments, 1);
     assert_eq!(server.hits("subs/1.vtt"), 0);
     assert!(output.live.unwrap().unrecorded_tails.is_empty());
+}
+
+/// 编码器重启：画面与字幕都序号回退，谁先被认出不一定。两种先后下字幕都跟着进新会话接着录（新会话里录到它的第 0、1
+/// 片），不报尾部。
+#[tokio::test(flavor = "multi_thread")]
+async fn subtitles_follow_a_restart_whichever_track_notices_it_first() {
+    // 回退前多停 `lag` 次；回退后的窗口多停几次再结束，让另一条轨也走完回退、录到新会话的分片
+    let regressing = |lag: usize| {
+        let mut seq = vec![media_playlist("0.1", "", &[2, 3], false); 1 + lag];
+        seq.extend([
+            media_playlist("0.1", "", &[0], false),
+            media_playlist("0.1", "", &[0], false),
+        ]);
+        seq.extend(vec![media_playlist("0.1", "", &[0, 1], false); 8]);
+        seq.push(media_playlist("0.1", "", &[0, 1], true));
+        seq
+    };
+    for (name, video_lag, subtitle_lag) in [("video_first", 0, 2), ("subtitles_first", 2, 0)] {
+        let dir = test_dir(&format!("live_subtitles_restart_{name}"));
+        let server = Server::start().await;
+        put_long(&server, "v/", &[0, 1, 2, 3]);
+        for i in 0..4 {
+            server.put(&format!("s/seg{i}.ts"), "WEBVTT\n");
+        }
+        let prefixed = |dir: &str, playlists: Vec<String>| -> Vec<String> {
+            playlists
+                .into_iter()
+                .map(|p| p.replace("\nseg", &format!("\n{dir}seg")))
+                .collect()
+        };
+        server.put_sequence("v.m3u8", prefixed("v/", regressing(video_lag)));
+        server.put_sequence("subs.m3u8", prefixed("s/", regressing(subtitle_lag)));
+        server.put(
+            "master.m3u8",
+            "#EXTM3U\n\
+             #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"zh\",LANGUAGE=\"zh\",URI=\"subs.m3u8\"\n\
+             #EXT-X-STREAM-INF:BANDWIDTH=200000,SUBTITLES=\"subs\"\nv.m3u8\n",
+        );
+        let mut req = live_request(server.url("master.m3u8"), &dir, LONG_STALL);
+        req.source.preference.subtitles = Renditions::All;
+        req.output.target = Target::File(MergedFile {
+            path: dir.join("out.mkv"),
+            container: Container::Matroska,
+        });
+
+        let output = tokio::time::timeout(LONG_STALL / 3, engine().start(req).unwrap().wait())
+            .await
+            .expect("录制不等字幕")
+            .unwrap();
+
+        let live = output.live.unwrap();
+        assert_eq!(live.session_count, 2, "{name}");
+        assert!(
+            live.unrecorded_tails.is_empty(),
+            "{name}: {:?}",
+            live.unrecorded_tails
+        );
+        assert_eq!(server.hits("s/seg1.ts"), 1, "{name}");
+    }
 }
