@@ -498,12 +498,15 @@ impl LiveTrack {
         Ok(ControlFlow::Continue(update))
     }
 
-    /// 本轨排入下载的一个分片下载成功。
-    pub(super) fn segment_recorded(&mut self, now: Instant) {
+    /// 本轨排入下载的一个分片下载成功；`current` 为它属于录制中的会话（另起会话之前排进的、之后才下完的为 false：
+    /// 不算新会话里的进展，也不算新会话已录到）。
+    pub(super) fn segment_recorded(&mut self, now: Instant, current: bool) {
         self.outstanding -= 1;
         self.last_progress = now;
-        self.progress += 1;
-        self.unrecorded_in_session = false;
+        if current {
+            self.progress += 1;
+            self.unrecorded_in_session = false;
+        }
     }
 
     /// 有进展的次数（录到分片，或列出的新分片全是 EXT-X-GAP）；会话定下、另起时重置停滞计时不算。
@@ -521,13 +524,13 @@ impl LiveTrack {
         stale
     }
 
-    /// 字幕轨因序号回退（[`SourceBreak::Restarted`]）而停了、之后唯一的音视频轨 `media` 再没有进展（见 `last_progress`）
-    /// 时取消这个状态，返回是否如此：画面随后也回退，是同一次重启，字幕停了之后画面也没再录到新内容，字幕没有丢，不记
-    /// 尾部。
+    /// 字幕轨因序号回退（[`SourceBreak::Restarted`]）而停了、之后唯一的音视频轨 `media` 再没列出新分片（见
+    /// `last_listed`；停之前列出的在途分片何时下完不算）时取消这个状态，返回是否如此：画面随后也回退，是同一次重启，
+    /// 字幕停了之后画面也没有新内容，字幕没有丢，不记尾部。
     pub(super) fn forgive_restart(&mut self, media: &LiveTrack) -> bool {
         let same_restart = matches!(
             self.broken,
-            Some((SourceBreak::Restarted, at)) if media.last_progress <= at
+            Some((SourceBreak::Restarted, at)) if media.last_listed <= at
         );
         if same_restart {
             self.broken = None;

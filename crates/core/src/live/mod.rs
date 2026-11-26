@@ -131,9 +131,11 @@ struct Recorder<'a> {
     marked: Vec<Option<u64>>,
     /// 本次运行判出原因的尾部（会话, 轨号, 原因），见 [`Recorder::note_tail_causes`]
     tail_causes: Vec<(u32, usize, TailCause)>,
-    /// 另起会话之前的会话里在途、之后才录到的字幕分片所在的（会话, 轨号）：那个会话的尾部不再算，由
+    /// 另起会话之前的会话里在途、之后才录到的字幕分片所在的（会话, 轨号）：那个会话因停滞记下的尾部不再算，由
     /// [`Recorder::update_tails`] 撤掉
     recovered: Vec<(u32, usize)>,
+    /// 因接不上记下的旧会话尾部（会话, 轨号）：停之前排进的分片之后下完，不说明停之后的录到了，不撤
+    broken_tails: Vec<(u32, usize)>,
     /// 按轨号：已写进任务目录的尾部（见 [`crate::workdir::WorkDir::set_tail`]）；由 [`Recorder::update_tails`] 改
     tails_written: Vec<bool>,
 }
@@ -304,6 +306,7 @@ impl<'a> Recorder<'a> {
             marked,
             tail_causes: Vec::new(),
             recovered: Vec::new(),
+            broken_tails: Vec::new(),
             tails_written,
         }
     }
@@ -691,6 +694,10 @@ impl<'a> Recorder<'a> {
         let now = Instant::now();
         self.update_tails(now).await?;
         self.note_tail_causes(now);
+        let old = self.session();
+        for t in (0..self.tracks.len()).filter(|&t| self.tracks[t].is_broken()) {
+            self.broken_tails.push((old, t));
+        }
         self.decide(session);
         self.tracks[track].restart(cause, fetched);
         for ((t, &media), rebuild) in self.tracks.iter_mut().zip(&self.media).zip(rebuild) {
@@ -742,8 +749,9 @@ impl<'a> Recorder<'a> {
         let error = match result {
             Ok(len) => {
                 count_done(self.progress, id, len);
-                self.tracks[id.track].segment_recorded(Instant::now());
-                if !self.media[id.track] && id.name.session != self.session() {
+                let current = id.name.session == self.session();
+                self.tracks[id.track].segment_recorded(Instant::now(), current);
+                if !self.media[id.track] && !current {
                     self.recovered.push((id.name.session, id.track));
                 }
                 return Ok(());

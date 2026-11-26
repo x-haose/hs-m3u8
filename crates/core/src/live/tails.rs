@@ -63,6 +63,9 @@ impl Recorder<'_> {
             return Ok(());
         };
         for (old, track) in std::mem::take(&mut self.recovered) {
+            if self.broken_tails.contains(&(old, track)) {
+                continue;
+            }
             self.dir.set_tail(old, track, false).await?;
             self.tail_causes.retain(|&(s, t, _)| (s, t) != (old, track));
         }
