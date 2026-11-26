@@ -8,7 +8,8 @@
 //! 求再次运行：点播续传缺的分片（播放列表变了则拒绝），直播续录（见 [`LiveOptions`]）；不联网、只合并已录到的直播用
 //! [`Engine::merge_recorded`]。
 //!
-//! 参数错误由 [`Engine::start`]、[`Engine::merge_recorded`] 立即返回，其余失败经 [`Job::wait`] 的 `Err` 返回；任务失败
+//! 参数错误由 [`Engine::start`]、[`Engine::merge_recorded`] 立即返回（要读了任务目录才判得出的经 [`Job::wait`]，见
+//! [`Engine::merge_recorded`]），其余失败经 [`Job::wait`] 的 `Err` 返回；任务失败
 //! 或取消时不生成输出，任务目录保留以便续传。
 //!
 //! 结果与错误里的轨道编号（`track`）：第 0 条为所选变体（来源本身是媒体播放列表时即它），其后依次是所选的各独立音频
@@ -105,7 +106,7 @@ pub mod remux {
     pub use hs_m3u8_remux::fmp4::Problem as Fmp4Problem;
     pub use hs_m3u8_remux::{
         Codec, Container, Error, FfmpegError, FileInput, MediaReport, Origin, Shape, StreamKind,
-        StreamReport, Streams, Unsupported, WriteProgress,
+        StreamReport, Streams, Unsupported, UnusedStream, WriteProgress,
     };
 }
 
@@ -317,7 +318,8 @@ impl Engine {
     ///
     /// 任务目录见 [`OutputOptions::resolved_work_dir`]。目录里是点播的下载时报
     /// [`WorkDirProblem::NotLiveRecording`]（点播用同样的请求再次运行即可续传）；没有可合并的分片时报
-    /// [`Error::NothingRecorded`]。结果的 [`LiveReport::end`] 为 None。
+    /// [`Error::NothingRecorded`]。录到了字幕分片，而输出既不封进、也不另存字幕，又没有本地 HLS 时，经 [`Job::wait`] 报
+    /// [`Error::InvalidInput`]（要读了任务目录才知道）。结果的 [`LiveReport::end`] 为 None。
     pub fn merge_recorded(&self, output: OutputOptions) -> Result<Job, Error> {
         let output = output.resolve()?;
         let (progress_tx, progress) = watch::channel(Progress::default());

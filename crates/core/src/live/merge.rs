@@ -50,7 +50,7 @@ pub(crate) fn merge_plan(
                 .collect()
         })
         .unwrap_or_default();
-    let unmergeable = unmergeable(&by_group, streams, &media, &common);
+    let unmergeable = unmergeable(&by_group, streams, &common);
     let holes = files
         .iter()
         .enumerate()
@@ -74,13 +74,18 @@ pub(crate) fn merge_plan(
 }
 
 /// 所在组不是每条音视频轨都有（不在 `common` 里）的分片：有音视频轨有这一组的为 [`MissReason::Unmergeable`]；字幕轨的
-/// 组在音视频轨里都没有的为 [`MissReason::NoMatchingDiscontinuity`]。`media` 为各音视频轨的分组。
+/// 组在音视频轨里都没有的为 [`MissReason::NoMatchingDiscontinuity`]。
 fn unmergeable(
     by_group: &[ByGroup<'_>],
     streams: &[Streams],
-    media: &[&ByGroup<'_>],
     common: &BTreeSet<GroupKey>,
 ) -> Vec<Missed> {
+    let media: Vec<&ByGroup<'_>> = by_group
+        .iter()
+        .zip(streams)
+        .filter(|(_, s)| **s != Streams::Subtitles)
+        .map(|(g, _)| g)
+        .collect();
     let mut missed = Vec::new();
     for (track, groups) in by_group.iter().enumerate() {
         for (key, files) in groups {
@@ -293,10 +298,9 @@ mod tests {
             .map(group_files)
             .collect();
         let streams = [Streams::Video, Streams::Audio, Streams::Subtitles];
-        let media = [&by_group[0], &by_group[1]];
         let common = BTreeSet::from([(0, 0)]);
         assert_eq!(
-            unmergeable(&by_group, &streams, &media, &common),
+            unmergeable(&by_group, &streams, &common),
             vec![
                 missed(0, 0, (1, 1), MissReason::Unmergeable),
                 missed(0, 2, (1, 1), MissReason::Unmergeable),

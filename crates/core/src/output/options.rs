@@ -31,7 +31,8 @@ pub struct OutputOptions {
 
 /// 选了字幕（[`hs_m3u8_hls::Preference::subtitles`]）时合并文件怎样带上它们。时间按 X-TIMESTAMP-MAP 对齐到画面
 /// （RFC 8216 3.5），字幕分片按不连续段序号对到同号的那段画面上（见 [`crate::MissReason::NoMatchingDiscontinuity`]）。选了
-/// 字幕却既不封进也不另存、又没有本地 HLS 输出时，开始任务报参数错误（字幕下了也用不上）。
+/// 字幕却既不封进也不另存、又没有本地 HLS 输出时，开始任务报参数错误（字幕下了也用不上）；只合并录到了字幕分片的直播时
+/// 同样报（见 [`crate::Engine::merge_recorded`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubtitleOutput {
     /// 封进合并文件：Matroska 为 SubRip（保留粗体、斜体、下划线），MP4 为 mov_text（只有文字，同时显示的几条合成一段）
@@ -317,7 +318,8 @@ impl ResolvedOutput {
         })
     }
 
-    /// 有字幕轨时输出要用得上它：封进合并文件、另存为文件或有本地 HLS 输出，否则报参数错误（字幕不进任何输出）。
+    /// 字幕要进得了输出：封进合并文件、另存为文件或有本地 HLS 输出，否则报参数错误。开始任务时偏好选了字幕即调用（选轨
+    /// 之前，不论来源有没有字幕），只合并时任务目录里录到了字幕分片才调用。
     pub(crate) fn require_subtitle_use(&self) -> Result<(), Error> {
         let used = self.get(OutputKind::Hls).is_some()
             || self
@@ -328,8 +330,7 @@ impl ResolvedOutput {
             return Ok(());
         }
         Err(Error::InvalidInput(
-            "有字幕却既不封进合并文件、也不另存为文件，又没有本地 HLS 输出：字幕不会进任何输出"
-                .to_owned(),
+            "字幕不会进任何输出：要封进合并文件、另存为文件，或加上本地 HLS 输出".to_owned(),
         ))
     }
 
