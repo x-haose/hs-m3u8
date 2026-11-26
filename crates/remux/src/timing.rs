@@ -1,8 +1,6 @@
 //! 时间戳：同组各输入的回绕对齐、组间的偏移、平移到输出时间线、音频按采样点接续。
 
-use ffmpeg::{Packet, Rational, Rescale, Rounding};
-use ffmpeg_next as ffmpeg;
-
+use crate::ffi::{Packet, Rational, Rescale, Rounding};
 use crate::source::Source;
 
 /// 时间戳在组间换算时使用的公共时间基（微秒）。
@@ -110,7 +108,7 @@ impl SampleClock {
     /// 采样率为 `rate` 的音频从时间基 `in_tb` 换到 `out_tb` 要不要接续：输入时间基比一个采样点粗、输出时间基比输入
     /// 细时才要；输出与输入一样粗（如都是 Matroska 的 1 毫秒）时原样换算。
     pub(crate) fn applies(in_tb: Rational, out_tb: Rational, rate: u32) -> bool {
-        let tick = |tb: Rational| (i64::from(tb.numerator()), i64::from(tb.denominator()));
+        let tick = |tb: Rational| (i64::from(tb.0), i64::from(tb.1));
         let ((in_num, in_den), (out_num, out_den)) = (tick(in_tb), tick(out_tb));
         in_num * i64::from(rate) > in_den && out_num * in_den < in_num * out_den
     }

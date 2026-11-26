@@ -33,8 +33,6 @@ either 1.19.0  MIT OR Apache-2.0  https://github.com/rayon-rs/either
 encoding_rs 0.8.42  (Apache-2.0 OR MIT) AND BSD-3-Clause  https://github.com/hsivonen/encoding_rs
 equivalent 1.0.2  Apache-2.0 OR MIT  https://github.com/indexmap-rs/equivalent
 errno 0.3.15  MIT OR Apache-2.0  https://github.com/lambda-fairy/rust-errno
-ffmpeg-next 9.0.0  WTFPL  https://github.com/zmwangx/rust-ffmpeg
-ffmpeg-sys-next 9.0.0  WTFPL  https://github.com/zmwangx/rust-ffmpeg-sys
 fnv 1.0.7  Apache-2.0 / MIT  https://github.com/servo/rust-fnv
 form_urlencoded 1.2.3  MIT OR Apache-2.0  https://github.com/servo/rust-url
 fs4 1.1.0  MIT OR Apache-2.0  https://github.com/al8n/fs4
@@ -3233,23 +3231,6 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
-
---------------------------------------------------------------------------------
-ffmpeg-next 9.0.0：LICENSE
-ffmpeg-sys-next 9.0.0：LICENSE（本项目补的，出处见源码的 third_party/crate-licenses/README.md）
---------------------------------------------------------------------------------
-
-            DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
-                    Version 2, December 2004
-
- Everyone is permitted to copy and distribute verbatim or modified
- copies of this license document, and changing it is allowed as long
- as the name is changed.
-
-            DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE
-   TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
-
-  0. You just DO WHAT THE FUCK YOU WANT TO.
 
 --------------------------------------------------------------------------------
 fnv 1.0.7：LICENSE-MIT

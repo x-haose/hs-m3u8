@@ -2,21 +2,14 @@
 
 use std::path::Path;
 
-use ffmpeg_next as ffmpeg;
 use hs_m3u8_remux::{Control, Error, Origin, StreamKind, Streams, TrackSegments, Unsupported};
 
+use crate::media::{MediaFile, codecs};
 use crate::remux;
 
 use crate::{
     concat_track, group, packed_fixture, packed_segment, segs, timelines, track, work_dir,
 };
-
-/// 文件里各路流的编码名，按流的顺序。
-fn codecs(path: &Path) -> Vec<&'static str> {
-    ffmpeg::init().unwrap();
-    let ictx = ffmpeg::format::input(path).unwrap();
-    ictx.streams().map(|s| s.parameters().id().name()).collect()
-}
 
 /// fMP4 里的 AV1、VP9 视频与 Opus、FLAC、ALAC 音频原样复制，MP4 里的样本描述带各自的配置 box。
 #[test]
@@ -149,18 +142,12 @@ fn mp2_audio_in_ts_is_copied() {
     assert_eq!(report.streams[1].shape.codec(), "mp2");
     // MP4 里 MPEG 音频的对象类型不分 Layer（采样率高于 24 kHz 时为 0x6B，即 ISO/IEC 11172-3），FFmpeg 回读时按表认作
     // mp3；写进去的是 Layer II 的帧：帧头的 layer 位为 0b10
-    ffmpeg::init().unwrap();
-    let mut ictx = ffmpeg::format::input(&output).unwrap();
-    let audio = ictx
-        .streams()
-        .best(ffmpeg::media::Type::Audio)
-        .unwrap()
-        .index();
+    let mut file = MediaFile::open(&output).unwrap();
+    let audio = file.best(StreamKind::Audio).unwrap();
     let first = loop {
-        let mut packet = ffmpeg::Packet::empty();
-        packet.read(&mut ictx).unwrap();
-        if packet.stream() == audio {
-            break packet.data().unwrap().to_vec();
+        let packet = file.read().unwrap().unwrap();
+        if packet.stream == audio {
+            break packet.data;
         }
     };
     assert_eq!(

@@ -5,8 +5,6 @@ scripts/licenses.py 收录进 LICENSES/THIRD-PARTY-RUST.txt，在那里标为本
 
 Python 扩展模块依赖的：
 
-- ffmpeg-sys-next 9.0.0：包里与源码仓库都没有许可证文件，Cargo.toml 写的是 WTFPL；取同一作者的 ffmpeg-next 9.0.0
-  包里的 LICENSE（WTFPL 原文）
 - pyo3-stub-gen 0.23.1：Jij-Inc/pyo3-stub-gen@5c1f0ea0cc7c7bccbd32c600b6a0ffd30eeabf93
 - rustpython-ast、rustpython-parser、rustpython-parser-core、rustpython-parser-vendored 0.4.0：
   RustPython/Parser@8dd2aea26778d8d6917770f8e32bea1b9cdc0ae8

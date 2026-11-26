@@ -109,7 +109,7 @@ jobs=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)
 make -j"$jobs"
 make install
 
-# ffmpeg-sys-next 按这些文件名链接：MSVC 目标找 <名>.lib，其余找 lib<名>.a
+# crates/ffmpeg-sys/build.rs 按这些文件名链接：MSVC 目标找 <名>.lib，其余找 lib<名>.a
 if [[ $PLATFORM == windows ]]; then
   libs=(avformat.lib avcodec.lib avutil.lib)
 else

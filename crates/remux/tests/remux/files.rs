@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use ffmpeg_next as ffmpeg;
 use hs_m3u8_remux::{
     Cancel, Codec, Container, Control, Error, FileInput, MediaReport, Origin, StreamKind, Streams,
     Unsupported, WriteProgress, merge_files,
 };
 
+use crate::media::codecs;
 use crate::{Timeline, earliest, fixtures, span, timelines, track, work_dir};
 
 fn file(name: &str) -> PathBuf {
@@ -35,13 +35,6 @@ fn merge(dir: &Path, inputs: &[FileInput], container: Container) -> (PathBuf, Me
     let output = dir.join(format!("out.{}", extension(container)));
     let report = merge_files(inputs, &output, container, &Control::default()).unwrap();
     (output, report)
-}
-
-/// 文件里各路流的编码名，按流的顺序。
-fn codecs(path: &Path) -> Vec<&'static str> {
-    ffmpeg::init().unwrap();
-    let ictx = ffmpeg::format::input(path).unwrap();
-    ictx.streams().map(|s| s.parameters().id().name()).collect()
 }
 
 /// 输出的各路流（先视频后音频）与各输入里取的那路流包数相同，没有丢包，从 0 开始、时长与输入相同（差不过一帧）。

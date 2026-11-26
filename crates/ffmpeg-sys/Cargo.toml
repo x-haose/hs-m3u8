@@ -1,0 +1,28 @@
+[package]
+name = "hs-m3u8-ffmpeg-sys"
+version = "0.1.0"
+description = "Raw FFI bindings to the parts of FFmpeg 9.0 (libavformat, libavcodec, libavutil) used by hs-m3u8, linked statically"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# 链接方式：同一个程序里只能有一份静态 FFmpeg，Cargo 不许两个声明了同名 links 的包同时出现在依赖图里
+links = "ffmpeg"
+publish = false
+
+[features]
+# 构建时用 bindgen 从 FFMPEG_DIR 的头文件生成绑定，不用 src/bindings 下预生成的；要 libclang
+bindgen = ["dep:bindgen"]
+
+[dependencies]
+libc.workspace = true
+
+[build-dependencies]
+bindgen = { workspace = true, optional = true }
+
+[lints.rust]
+# 绑定是 extern 声明与按 C 布局的结构体
+unsafe_code = "allow"
+# 沿用 C 头文件里的名字：类型 av_format_control_message、宏 AVERROR
+non_camel_case_types = "allow"
+non_snake_case = "allow"

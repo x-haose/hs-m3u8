@@ -3,11 +3,8 @@
 //! 参数从帧头读出（见 [`crate::frame`]）；视频（H.264、HEVC）的画面宽高与像素格式取 FFmpeg 解复用器的解析器从参数集
 //! 得出的值。
 
-use ffmpeg::codec;
-use ffmpeg::format::stream::Stream;
-use ffmpeg_next as ffmpeg;
-
-use crate::{Container, ffi, frame};
+use crate::ffi::{CodecId, Stream};
+use crate::{Container, frame};
 
 /// 一路流在一组里的参数核对：编码不变，每个包的参数须与第一个包的相同。第 0 组之后的组从第 0 组的核对开始（见
 /// [`Inband::for_next_group`]），第一个包就与第 0 组的比较。
@@ -15,7 +12,7 @@ use crate::{Container, ffi, frame};
 pub(crate) struct Inband {
     /// 这路流开始时的编码。TS 的 PMT 中途改了这个 PID 的流类型时，FFmpeg 换掉流的编码并重建解析器
     /// （mpegts.c 的 mpegts_set_stream_info）
-    codec: codec::Id,
+    codec: CodecId,
     params: Params,
     /// 第一个包的参数取自第 0 组，这一组还没有核对过读得出的包
     leading: bool,
@@ -30,21 +27,21 @@ enum Params {
         first: Option<AudioParams>,
     },
     Video {
-        /// 画面的宽、高与像素格式值（见 [`ffi::parsed_picture`]）
+        /// 画面的宽、高与像素格式值（见 [`Stream::parsed_picture`]）
         first: Option<(u32, u32, i32)>,
     },
 }
 
 impl Inband {
     /// 编码 `id` 能逐帧读出参数。
-    pub(crate) fn readable(id: codec::Id) -> bool {
-        matches!(id, codec::Id::H264 | codec::Id::HEVC) || framing(id).is_some()
+    pub(crate) fn readable(id: CodecId) -> bool {
+        matches!(id, CodecId::H264 | CodecId::HEVC) || framing(id).is_some()
     }
 
     /// 编码 `id` 放进 `container` 的核对；不能逐帧读出参数的编码为 None。
-    pub(crate) fn of(id: codec::Id, container: Container) -> Option<Inband> {
+    pub(crate) fn of(id: CodecId, container: Container) -> Option<Inband> {
         let params = match id {
-            codec::Id::H264 | codec::Id::HEVC => Params::Video { first: None },
+            CodecId::H264 | CodecId::HEVC => Params::Video { first: None },
             _ => Params::Audio {
                 framing: framing(id)?,
                 first: None,
@@ -73,7 +70,7 @@ impl Inband {
         } else {
             Mismatch::Changed
         };
-        if stream.parameters().id() != self.codec {
+        if stream.codec_id() != self.codec {
             return Err(differs);
         }
         let same = match &mut self.params {
@@ -85,7 +82,7 @@ impl Inband {
                 }
                 *first.get_or_insert_with(|| params.clone()) == params
             }
-            Params::Video { first } => match ffi::parsed_picture(stream) {
+            Params::Video { first } => match stream.parsed_picture() {
                 Some(picture) => {
                     self.leading = false;
                     *first.get_or_insert(picture) == picture
@@ -98,11 +95,11 @@ impl Inband {
 }
 
 /// 音频编码 `id` 的帧头格式；不能逐帧读出参数的为 None。
-fn framing(id: codec::Id) -> Option<frame::Framing> {
+fn framing(id: CodecId) -> Option<frame::Framing> {
     match id {
-        codec::Id::AAC => Some(frame::Framing::Adts),
-        codec::Id::AC3 | codec::Id::EAC3 => Some(frame::Framing::Ac3),
-        codec::Id::MP2 | codec::Id::MP3 => Some(frame::Framing::Mpeg),
+        CodecId::AAC => Some(frame::Framing::Adts),
+        CodecId::AC3 | CodecId::EAC3 => Some(frame::Framing::Ac3),
+        CodecId::MP2 | CodecId::MP3 => Some(frame::Framing::Mpeg),
         _ => None,
     }
 }

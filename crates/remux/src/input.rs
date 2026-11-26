@@ -7,17 +7,15 @@ use std::io::{self, Read};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use ffmpeg::{Dictionary, Packet, format};
-use ffmpeg_next as ffmpeg;
-
 use crate::chain::{self, Halt, SegmentChain};
+use crate::ffi::{Dictionary, InputContext, Packet};
 use crate::packed::Packed;
 use crate::{Cancel, Error, Origin, Segment, TrackSegments, Unsupported, ffi, fmp4, standalone};
 
 pub(crate) enum Input {
     /// TS 与 fMP4：init 段与分片按字节相连，作为一个输入读；或一个完整文件
     Chain {
-        ictx: format::context::Input,
+        ictx: InputContext,
         /// 读分片文件出错时的路径与原因
         failure: chain::Failure,
         params: ParamsIn,
@@ -130,7 +128,7 @@ impl Input {
         let (chain, failure) = new_chain(vec![(path.to_path_buf(), 0..len)], cancel)?;
         let ictx = open_chain(chain, &failure, Probe::DEFAULT, at)?;
         // 打开时 FFmpeg 再探测一次，读的范围可能不同
-        let opened = ictx.format().name().to_owned();
+        let opened = ictx.format_name().to_owned();
         let Some(params) = accepted(&opened) else {
             return Err(unaccepted(Some(&opened)));
         };
@@ -143,7 +141,7 @@ impl Input {
         Ok((input, len))
     }
 
-    pub(crate) fn context(&self) -> &format::context::Input {
+    pub(crate) fn context(&self) -> &InputContext {
         match self {
             Input::Chain { ictx, .. } => ictx,
             Input::Packed(packed) => packed.context(),
@@ -252,7 +250,7 @@ impl SegmentMap {
     }
 
     /// 输入里第 `position` 字节所在的分片；位置未知（负数）或在第一个分片之前（fMP4 的 init 段里）时为 None。
-    pub(crate) fn segment_at(&self, position: isize) -> Option<usize> {
+    pub(crate) fn segment_at(&self, position: i64) -> Option<usize> {
         let position = u64::try_from(position).ok()?;
         self.starts
             .partition_point(|&start| start <= position)
@@ -372,7 +370,7 @@ impl Probe {
         }
     }
 
-    fn options(&self) -> Dictionary<'static> {
+    fn options(&self) -> Dictionary {
         let mut options = Dictionary::new();
         options.set("probesize", &self.bytes.to_string());
         options.set("analyzeduration", &self.duration_us.to_string());
@@ -386,28 +384,22 @@ pub(crate) fn open_chain(
     failure: &chain::Failure,
     probe: Probe,
     at: Origin,
-) -> Result<format::context::Input, Error> {
+) -> Result<InputContext, Error> {
     chain::open(chain, failure, Some(probe.options())).map_err(|halt| match halt {
         Halt::Stopped(stopped) => stopped.into_error("读取"),
-        Halt::Ffmpeg(cause) => Error::OpenInput {
-            at,
-            cause: cause.into(),
-        },
+        Halt::Ffmpeg(cause) => Error::OpenInput { at, cause },
     })
 }
 
 /// 读下一个包；读到末尾返回 false（见 [`chain::read`]）。
 pub(crate) fn read_packet(
-    ictx: &mut format::context::Input,
+    ictx: &mut InputContext,
     failure: &chain::Failure,
     packet: &mut Packet,
     at: Origin,
 ) -> Result<bool, Error> {
     chain::read(ictx, failure, packet).map_err(|halt| match halt {
         Halt::Stopped(stopped) => stopped.into_error("读取"),
-        Halt::Ffmpeg(cause) => Error::Read {
-            at,
-            cause: cause.into(),
-        },
+        Halt::Ffmpeg(cause) => Error::Read { at, cause },
     })
 }

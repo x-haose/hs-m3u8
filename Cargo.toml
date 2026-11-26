@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/hls", "crates/py", "crates/remux", "crates/subtitle", "crates/sysproxy"]
+members = ["crates/core", "crates/ffmpeg-sys", "crates/hls", "crates/py", "crates/remux", "crates/subtitle", "crates/sysproxy"]
 
 [workspace.package]
 # 发布的版本（SemVer）；Python 包的版本由 maturin 按 PEP 440 换写，如 1.0.0-dev.0 即 1.0.0.dev0
@@ -16,12 +16,13 @@ unsafe_code = "forbid"
 [workspace.dependencies]
 aes = "0.9.3"
 axum = "0.8.9"
+# 只在 hs-m3u8-ffmpeg-sys 开 bindgen 特性时用；runtime：运行时加载 libclang，不在构建时链接它
+bindgen = { version = "0.73.2", default-features = false, features = ["runtime"] }
 cbc = "0.2.1"
 # 文件任务开始前查任务目录所在卷的可用空间（available_space）；默认特性是文件锁，用不上
 fs4 = { version = "1.1.0", default-features = false }
 # 探测与开始任务时并发拉各条字幕的媒体播放列表（future::join_all）；reqwest 已依赖同一版本
 futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
-ffmpeg-next = { version = "9.0.0", default-features = false, features = ["format", "static"] }
 h2 = "0.4.20"
 http = "1.5.0"
 httpdate = "1.0.3"
@@ -47,7 +48,3 @@ tokio-rustls = "0.26.6"
 tokio-util = "0.7.20"
 url = "2.5.9"
 windows-registry = "0.6.1"
-
-[patch.crates-io]
-# 本地修改版，与上游的差异见 third_party/ffmpeg-sys-next/PATCHED.md
-ffmpeg-sys-next = { path = "third_party/ffmpeg-sys-next" }

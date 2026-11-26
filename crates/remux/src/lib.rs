@@ -55,11 +55,8 @@ mod write;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Once};
 use std::time::Duration;
-
-use ffmpeg::media;
-use ffmpeg_next as ffmpeg;
 
 pub use crate::codecs::{Codec, Container};
 pub use crate::error::{Error, FfmpegError, Origin, Unsupported};
@@ -97,16 +94,6 @@ pub enum StreamKind {
     Video,
     Audio,
     Subtitle,
-}
-
-impl StreamKind {
-    pub(crate) fn medium(self) -> media::Type {
-        match self {
-            StreamKind::Video => media::Type::Video,
-            StreamKind::Audio => media::Type::Audio,
-            StreamKind::Subtitle => media::Type::Subtitle,
-        }
-    }
 }
 
 impl fmt::Display for StreamKind {
@@ -374,15 +361,9 @@ pub(crate) fn sync(path: &Path) -> Result<(), Error> {
         })
 }
 
-pub(crate) fn init() -> Result<(), Error> {
-    static INIT: OnceLock<Result<(), FfmpegError>> = OnceLock::new();
-    INIT.get_or_init(|| {
-        ffmpeg::init()?;
-        // FFmpeg 的日志不输出：本库的失败经返回值上抛，带着出在哪一组哪条轨；FFmpeg 的消息里有的只是探测时的过程信息
-        // （如解码器在参数集出现之前的报错，或判断不了的情形），写到进程的标准错误里，调用方既控制不了、也用不上
-        ffmpeg::log::set_level(ffmpeg::log::Level::Quiet);
-        Ok(())
-    })
-    .clone()
-    .map_err(Error::Init)
+/// FFmpeg 的日志不输出：本库的失败经返回值上抛，带着出在哪一组哪条轨；FFmpeg 的消息里有的只是探测时的过程信息（如
+/// 解码器在参数集出现之前的报错，或判断不了的情形），写到进程的标准错误里，调用方既控制不了、也用不上。
+pub(crate) fn init() {
+    static INIT: Once = Once::new();
+    INIT.call_once(ffi::quiet_logs);
 }

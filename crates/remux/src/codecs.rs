@@ -2,9 +2,7 @@
 
 use std::fmt;
 
-use ffmpeg::codec;
-use ffmpeg_next as ffmpeg;
-
+use crate::ffi::CodecId;
 use crate::inband::Inband;
 use crate::{Origin, Shape, StreamKind, Unsupported};
 
@@ -90,26 +88,26 @@ impl Codec {
     }
 
     /// FFmpeg 的编码 ID。
-    fn id(self) -> codec::Id {
+    fn id(self) -> CodecId {
         match self {
-            Codec::H264 => codec::Id::H264,
-            Codec::Hevc => codec::Id::HEVC,
-            Codec::Vp9 => codec::Id::VP9,
-            Codec::Av1 => codec::Id::AV1,
-            Codec::Aac => codec::Id::AAC,
-            Codec::Opus => codec::Id::OPUS,
-            Codec::Mp3 => codec::Id::MP3,
-            Codec::Mp2 => codec::Id::MP2,
-            Codec::Ac3 => codec::Id::AC3,
-            Codec::Eac3 => codec::Id::EAC3,
-            Codec::Flac => codec::Id::FLAC,
-            Codec::Alac => codec::Id::ALAC,
-            Codec::Vorbis => codec::Id::VORBIS,
+            Codec::H264 => CodecId::H264,
+            Codec::Hevc => CodecId::HEVC,
+            Codec::Vp9 => CodecId::VP9,
+            Codec::Av1 => CodecId::AV1,
+            Codec::Aac => CodecId::AAC,
+            Codec::Opus => CodecId::OPUS,
+            Codec::Mp3 => CodecId::MP3,
+            Codec::Mp2 => CodecId::MP2,
+            Codec::Ac3 => CodecId::AC3,
+            Codec::Eac3 => CodecId::EAC3,
+            Codec::Flac => CodecId::FLAC,
+            Codec::Alac => CodecId::ALAC,
+            Codec::Vorbis => CodecId::VORBIS,
         }
     }
 
     /// FFmpeg 编码 ID 对应的编码；不在 [`Codec::ALL`] 里的为 None。
-    fn of(id: codec::Id) -> Option<Codec> {
+    fn of(id: CodecId) -> Option<Codec> {
         Codec::ALL.into_iter().find(|c| c.id() == id)
     }
 }
@@ -169,14 +167,14 @@ pub(crate) fn supported_codecs(container: Container) -> String {
 
 /// 编码能否放进 `container`；`standalone` 见 [`accepts`]。编码已知而不收的先报，参数探测不出（含编码也没认出）的再报。
 pub(crate) fn check_codec(
-    id: codec::Id,
+    id: CodecId,
     shape: &Shape,
     standalone: bool,
     container: Container,
     at: Origin,
 ) -> Result<(), Unsupported> {
     let kind = shape.kind();
-    if id != codec::Id::None
+    if id != CodecId::NONE
         && !Codec::of(id).is_some_and(|c| c.kind() == kind && accepts(c, container, standalone))
     {
         return Err(Unsupported::Codec {
@@ -186,13 +184,13 @@ pub(crate) fn check_codec(
             container,
         });
     }
-    if id == codec::Id::None || !shape.determined() {
+    if id == CodecId::NONE || !shape.determined() {
         return Err(Unsupported::ParamsUnknown { at, kind });
     }
     match *shape {
         Shape::Audio { sample_rate, .. }
             if container == Container::Mp4
-                && id == codec::Id::MP3
+                && id == CodecId::MP3
                 && sample_rate < MP3_MIN_SAMPLE_RATE =>
         {
             Err(Unsupported::Mp3SampleRate { at, sample_rate })

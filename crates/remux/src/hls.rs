@@ -2,10 +2,8 @@
 
 use std::path::Path;
 
-use ffmpeg::Rescale;
-use ffmpeg_next as ffmpeg;
-
 use crate::chain::ffmpeg_path;
+use crate::ffi::Rescale;
 use crate::group::{add_unused, layout_of, open_group, primed, references_of};
 use crate::source::Source;
 use crate::subtitles::{self, Lane};
@@ -34,7 +32,7 @@ pub fn remux(
     subtitles: SubtitleMode,
     control: &Control,
 ) -> Result<Merged, Error> {
-    init()?;
+    init();
     let streams: Vec<Streams> = tracks.iter().map(|t| t.streams).collect();
     let groups: Vec<Numbered<'_>> = groups.iter().enumerate().collect();
     validate(&streams, &groups)?;
@@ -62,7 +60,7 @@ pub fn check(
     groups: &[(usize, &DiscontinuityGroup)],
     container: Container,
 ) -> Result<(), Error> {
-    init()?;
+    init();
     validate(streams, groups)?;
     let cancel = Cancel::never();
     let tracks = streams.len();

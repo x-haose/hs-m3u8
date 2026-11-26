@@ -120,7 +120,7 @@ options = OutputOptions(
 
 ## 用法（Rust，API 未定型）
 
-Rust 库没有发布到 crates.io。在自己的项目里用 git 依赖（`hs-m3u8-core`）时，还要照抄本仓库根 `Cargo.toml` 的 `[patch.crates-io]`（指向本仓库 `third_party/ffmpeg-sys-next` 的本地修改版），并按 `third_party/ffmpeg/build.sh` 编译 FFmpeg、把 `FFMPEG_DIR` 设为它的安装目录。
+Rust 库没有发布到 crates.io。在自己的项目里用 git 依赖（`hs-m3u8-core`）时，要按 `third_party/ffmpeg/build.sh` 编译 FFmpeg、把 `FFMPEG_DIR` 设为它的安装目录。FFmpeg 的绑定（`hs-m3u8-ffmpeg-sys`）预生成在仓库里，目前只有 aarch64-apple-darwin 的；其他目标要开它的 `bindgen` 特性在构建时生成（要装 libclang）。
 
 ```rust no_run
 use std::num::NonZeroUsize;

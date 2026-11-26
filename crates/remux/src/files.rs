@@ -44,7 +44,7 @@ pub fn merge_files(
     container: Container,
     control: &Control,
 ) -> Result<MediaReport, Error> {
-    init()?;
+    init();
     if inputs.is_empty() {
         return Err(Error::NoInputs);
     }

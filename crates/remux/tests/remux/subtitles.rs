@@ -2,12 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-use ffmpeg_next as ffmpeg;
 use hs_m3u8_remux::{
-    Container, Control, DiscontinuityGroup, Label, Segment, Shape, Streams, SubtitleMode, Track,
-    TrackSegments,
+    Container, Control, DiscontinuityGroup, Label, Segment, Shape, StreamKind, Streams,
+    SubtitleMode, Track, TrackSegments,
 };
 
+use crate::media::MediaFile;
 use crate::{group, track, work_dir};
 
 /// ts_a 第 0 组最早的 PTS（音频的第一个包），90 kHz：字幕的 MPEGTS 写它时，本地时刻即输出时刻。
@@ -67,36 +67,21 @@ struct SubtitleStream {
 }
 
 fn subtitle_stream(path: &Path) -> SubtitleStream {
-    ffmpeg::init().unwrap();
-    let mut ictx = ffmpeg::format::input(path).unwrap();
-    let stream = ictx
-        .streams()
-        .find(|s| s.parameters().medium() == ffmpeg::media::Type::Subtitle)
-        .unwrap();
-    let (index, tb) = (stream.index(), stream.time_base());
-    let meta = |key| stream.metadata().get(key).unwrap_or_default().to_owned();
-    let (language, title) = (meta("language"), meta("title"));
-    let codec = stream.parameters().id().name().to_owned();
-    let default = stream
-        .disposition()
-        .contains(ffmpeg::format::stream::Disposition::DEFAULT);
-    let ms = |ts: i64| ts * 1000 * i64::from(tb.numerator()) / i64::from(tb.denominator());
-    let mut packets = Vec::new();
-    loop {
-        let mut packet = ffmpeg::Packet::empty();
-        if packet.read(&mut ictx).is_err() {
-            break;
-        }
-        if packet.stream() == index {
-            let data = packet.data().unwrap_or_default().to_vec();
-            packets.push((ms(packet.pts().unwrap()), ms(packet.duration()), data));
-        }
-    }
+    let file = MediaFile::open(path).unwrap();
+    let stream = file.first(StreamKind::Subtitle).unwrap();
+    let (num, den) = stream.time_base;
+    let ms = |ts: i64| ts * 1000 * i64::from(num) / i64::from(den);
+    let packets = file
+        .packets()
+        .into_iter()
+        .filter(|p| p.stream == stream.index)
+        .map(|p| (ms(p.pts.unwrap()), ms(p.duration), p.data))
+        .collect();
     SubtitleStream {
-        codec,
-        language,
-        title,
-        default,
+        codec: stream.codec.to_owned(),
+        language: stream.language,
+        title: stream.title,
+        default: stream.default,
         packets,
     }
 }
@@ -239,18 +224,12 @@ fn audio_tracks_carry_their_labels() {
     )
     .unwrap();
 
-    ffmpeg::init().unwrap();
-    let ictx = ffmpeg::format::input(&output).unwrap();
-    let labels: Vec<(String, String, bool)> = ictx
+    let labels: Vec<(String, String, bool)> = MediaFile::open(&output)
+        .unwrap()
         .streams()
-        .filter(|s| s.parameters().medium() == ffmpeg::media::Type::Audio)
-        .map(|s| {
-            let meta = |key| s.metadata().get(key).unwrap_or_default().to_owned();
-            let default = s
-                .disposition()
-                .contains(ffmpeg::format::stream::Disposition::DEFAULT);
-            (meta("language"), meta("title"), default)
-        })
+        .into_iter()
+        .filter(|s| s.kind == Some(StreamKind::Audio))
+        .map(|s| (s.language, s.title, s.default))
         .collect();
     assert_eq!(
         labels,
@@ -408,12 +387,12 @@ fn labels_in_mp4_and_forced_subtitles_in_matroska() {
         &Control::default(),
     )
     .unwrap();
-    ffmpeg::init().unwrap();
-    let ictx = ffmpeg::format::input(&mp4).unwrap();
-    let languages: Vec<String> = ictx
+    let languages: Vec<String> = MediaFile::open(&mp4)
+        .unwrap()
         .streams()
-        .filter(|s| s.parameters().medium() == ffmpeg::media::Type::Audio)
-        .map(|s| s.metadata().get("language").unwrap_or_default().to_owned())
+        .into_iter()
+        .filter(|s| s.kind == Some(StreamKind::Audio))
+        .map(|s| s.language)
         .collect();
     assert_eq!(languages, ["deu", "zho"]);
 
@@ -430,14 +409,6 @@ fn labels_in_mp4_and_forced_subtitles_in_matroska() {
         &Control::default(),
     )
     .unwrap();
-    let ictx = ffmpeg::format::input(&mkv).unwrap();
-    let subtitle = ictx
-        .streams()
-        .find(|s| s.parameters().medium() == ffmpeg::media::Type::Subtitle)
-        .unwrap();
-    assert!(
-        subtitle
-            .disposition()
-            .contains(ffmpeg::format::stream::Disposition::FORCED)
-    );
+    let file = MediaFile::open(&mkv).unwrap();
+    assert!(file.first(StreamKind::Subtitle).unwrap().forced);
 }

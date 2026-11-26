@@ -1,50 +1,11 @@
 //! 组开头解不出的视频：第一个关键帧之前的帧、开放 GOP 的前导帧，以及没有关键帧的组。
 
-use std::path::Path;
-
-use ffmpeg_next as ffmpeg;
 use hs_m3u8_remux::{Control, Error, Origin, Streams, TrackSegments, Unsupported};
 
+use crate::media::decode_video;
 use crate::remux;
 
 use crate::{check, concat_track, group, timelines, track, work_dir};
-
-/// 解码文件中的第一路视频：(送进解码器的包数, 解码器拒收的包数, 解出的帧数)。
-fn decode_video(path: &Path) -> (usize, usize, usize) {
-    ffmpeg::init().unwrap();
-    let mut ictx = ffmpeg::format::input(path).unwrap();
-    let stream = ictx.streams().best(ffmpeg::media::Type::Video).unwrap();
-    let index = stream.index();
-    let mut decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())
-        .unwrap()
-        .decoder()
-        .video()
-        .unwrap();
-    let mut frame = ffmpeg::frame::Video::empty();
-    let (mut packets, mut rejected, mut frames) = (0, 0, 0);
-    loop {
-        let mut packet = ffmpeg::Packet::empty();
-        match packet.read(&mut ictx) {
-            Ok(()) if packet.stream() == index => {
-                packets += 1;
-                if decoder.send_packet(&packet).is_err() {
-                    rejected += 1;
-                }
-                while decoder.receive_frame(&mut frame).is_ok() {
-                    frames += 1;
-                }
-            }
-            Ok(()) => {}
-            Err(ffmpeg::Error::Eof) => break,
-            Err(e) => panic!("读取 {} 失败: {e}", path.display()),
-        }
-    }
-    decoder.send_eof().unwrap();
-    while decoder.receive_frame(&mut frame).is_ok() {
-        frames += 1;
-    }
-    (packets, rejected, frames)
-}
 
 /// 从 GOP 中间开始的组：第一个关键帧之前的视频包参考的帧不在输出里，不写出、计数，输出的视频每个包都解得出。
 #[test]

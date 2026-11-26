@@ -7,6 +7,7 @@ mod files;
 mod fmp4;
 mod io;
 mod keyframes;
+mod media;
 mod merge;
 mod packed;
 mod params;
@@ -18,11 +19,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ffmpeg_next as ffmpeg;
 use hs_m3u8_remux::{
-    Cancel, Container, Control, DiscontinuityGroup, Error, Label, MediaReport, Segment, Streams,
-    SubtitleMode, Track, TrackSegments,
+    Cancel, Container, Control, DiscontinuityGroup, Error, Label, MediaReport, Segment, StreamKind,
+    Streams, SubtitleMode, Track, TrackSegments,
 };
+
+use crate::media::MediaFile;
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/media")
@@ -88,21 +90,16 @@ fn segs(paths: impl IntoIterator<Item = PathBuf>) -> Vec<Segment> {
 
 /// 文件里各路流从最早的呈现时刻到最晚的结束时刻，秒；打不开或读不出包时为 None。
 fn media_span(path: &Path) -> Option<f64> {
-    ffmpeg::init().unwrap();
-    let mut ictx = ffmpeg::format::input(path).ok()?;
-    let bases: Vec<f64> = ictx.streams().map(|s| f64::from(s.time_base())).collect();
+    let mut file = MediaFile::open(path).ok()?;
+    let bases: Vec<f64> = file.streams().iter().map(|s| s.seconds()).collect();
     let (mut start, mut end) = (f64::INFINITY, f64::NEG_INFINITY);
-    loop {
-        let mut packet = ffmpeg::Packet::empty();
-        if packet.read(&mut ictx).is_err() {
-            break;
-        }
-        let tb = bases[packet.stream()];
-        let Some(pts) = packet.pts().or(packet.dts()) else {
+    while let Ok(Some(packet)) = file.read() {
+        let tb = bases[packet.stream];
+        let Some(pts) = packet.pts.or(packet.dts) else {
             continue;
         };
         start = start.min(pts as f64 * tb);
-        end = end.max((pts + packet.duration()) as f64 * tb);
+        end = end.max((pts + packet.duration) as f64 * tb);
     }
     (end > start).then_some(end - start)
 }
@@ -158,34 +155,19 @@ type Timeline = Vec<(f64, f64)>;
 
 /// 文件中第一路视频与第一路音频的包时间线。
 fn timelines(path: &Path) -> (Timeline, Timeline) {
-    ffmpeg::init().unwrap();
-    let mut ictx = ffmpeg::format::input(path).unwrap();
-    let first = |medium| {
-        ictx.streams()
-            .find(|s| s.parameters().medium() == medium)
-            .map(|s| (s.index(), f64::from(s.time_base())))
-    };
-    let (video, audio) = (
-        first(ffmpeg::media::Type::Video),
-        first(ffmpeg::media::Type::Audio),
-    );
+    let file = MediaFile::open(path).unwrap();
+    let first = |kind| file.first(kind).map(|s| (s.index, s.seconds()));
+    let (video, audio) = (first(StreamKind::Video), first(StreamKind::Audio));
     let (mut v, mut a) = (Vec::new(), Vec::new());
-    loop {
-        let mut packet = ffmpeg::Packet::empty();
-        match packet.read(&mut ictx) {
-            Ok(()) => {
-                let target = match (video, audio) {
-                    (Some((i, tb)), _) if i == packet.stream() => Some((&mut v, tb)),
-                    (_, Some((i, tb))) if i == packet.stream() => Some((&mut a, tb)),
-                    _ => None,
-                };
-                if let Some((list, tb)) = target {
-                    let pts = packet.pts().or(packet.dts()).unwrap() as f64 * tb;
-                    list.push((pts, pts + packet.duration() as f64 * tb));
-                }
-            }
-            Err(ffmpeg::Error::Eof) => break,
-            Err(e) => panic!("读取 {} 失败: {e}", path.display()),
+    for packet in file.packets() {
+        let target = match (video, audio) {
+            (Some((i, tb)), _) if i == packet.stream => Some((&mut v, tb)),
+            (_, Some((i, tb))) if i == packet.stream => Some((&mut a, tb)),
+            _ => None,
+        };
+        if let Some((list, tb)) = target {
+            let pts = packet.pts.or(packet.dts).unwrap() as f64 * tb;
+            list.push((pts, pts + packet.duration as f64 * tb));
         }
     }
     (v, a)
@@ -260,17 +242,8 @@ fn first_frames(path: &Path, frames: usize) -> Vec<u8> {
 
 /// 文件里各包的字节数，按读出的顺序（裸音频样本里即各帧）。
 fn packet_sizes(path: &Path) -> Vec<usize> {
-    ffmpeg::init().unwrap();
-    let mut ictx = ffmpeg::format::input(path).unwrap();
-    let mut sizes = Vec::new();
-    loop {
-        let mut packet = ffmpeg::Packet::empty();
-        match packet.read(&mut ictx) {
-            Ok(()) => sizes.push(packet.size()),
-            Err(ffmpeg::Error::Eof) => return sizes,
-            Err(e) => panic!("{e}"),
-        }
-    }
+    let file = MediaFile::open(path).unwrap();
+    file.packets().iter().map(|p| p.data.len()).collect()
 }
 
 /// 时间线上最早的呈现时刻，秒。

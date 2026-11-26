@@ -5,7 +5,7 @@ set -euo pipefail
 
 # 每行：<包> <不得依赖的包>...，含传递依赖
 rules=(
-  "hs-m3u8-hls tokio reqwest ffmpeg-next ffmpeg-sys-next hs-m3u8-remux hs-m3u8-sysproxy hs-m3u8-core"
+  "hs-m3u8-hls tokio reqwest hs-m3u8-ffmpeg-sys hs-m3u8-remux hs-m3u8-sysproxy hs-m3u8-core"
   "hs-m3u8-remux tokio reqwest hs-m3u8-hls hs-m3u8-sysproxy hs-m3u8-core"
   "hs-m3u8-sysproxy tokio reqwest hs-m3u8-hls hs-m3u8-remux hs-m3u8-core"
   "hs-m3u8-core pyo3"

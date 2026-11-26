@@ -10,11 +10,8 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use ffmpeg::format::context::StreamIo;
-use ffmpeg::{Dictionary, Packet, format};
-use ffmpeg_next as ffmpeg;
-
-use crate::{Cancel, Error};
+use crate::ffi::{Dictionary, InputContext, Packet};
+use crate::{Cancel, Error, FfmpegError};
 
 /// 读取中止的原因：FFmpeg 只拿到错误码，这里留下供调用方报告。
 pub(crate) enum Stopped {
@@ -44,7 +41,7 @@ pub(crate) type Failure = Arc<Mutex<Option<Stopped>>>;
 /// 经分片链读的 FFmpeg 输入出错：分片链记下的中止原因，或 FFmpeg 自己的错误。
 pub(crate) enum Halt {
     Stopped(Stopped),
-    Ffmpeg(ffmpeg::Error),
+    Ffmpeg(FfmpegError),
 }
 
 /// 取走分片链记下的中止原因。
@@ -57,10 +54,9 @@ fn taken(failure: &Failure) -> Option<Stopped> {
 pub(crate) fn open(
     chain: SegmentChain,
     failure: &Failure,
-    options: Option<Dictionary<'static>>,
-) -> Result<format::context::Input, Halt> {
-    let opened =
-        StreamIo::from_read_seek(chain).and_then(|io| format::input_from_stream(io, None, options));
+    options: Option<Dictionary>,
+) -> Result<InputContext, Halt> {
+    let opened = InputContext::open(chain, options);
     if let Some(stopped) = taken(failure) {
         return Err(Halt::Stopped(stopped));
     }
@@ -68,22 +64,17 @@ pub(crate) fn open(
 }
 
 /// 读下一个包；读到末尾为 false。分片链记下的中止原因优先：FFmpeg 把一部分读错误报成读到末尾（如 TS 读到不足一个包的
-/// 数据时），只看它的结果会把读了一半的输入当作读完。用 `Packet::read` 而不是 ffmpeg-next 的 `packets()` 迭代器：后者
-/// 把读错误当作读到末尾，并静默跳过 `InvalidData` 的包。
+/// 数据时），只看它的结果会把读了一半的输入当作读完。
 pub(crate) fn read(
-    ictx: &mut format::context::Input,
+    ictx: &mut InputContext,
     failure: &Failure,
     packet: &mut Packet,
 ) -> Result<bool, Halt> {
-    let read = packet.read(ictx);
+    let read = ictx.read(packet);
     if let Some(stopped) = taken(failure) {
         return Err(Halt::Stopped(stopped));
     }
-    match read {
-        Ok(()) => Ok(true),
-        Err(ffmpeg::Error::Eof) => Ok(false),
-        Err(cause) => Err(Halt::Ffmpeg(cause)),
-    }
+    read.map_err(Halt::Ffmpeg)
 }
 
 pub(crate) struct SegmentChain {
@@ -220,7 +211,7 @@ impl Seek for SegmentChain {
     }
 }
 
-/// 路径能否交给 FFmpeg：ffmpeg-next 把路径转成 C 字符串，遇到非 UTF-8 或含 NUL 的路径会 panic。
+/// 路径能否交给 FFmpeg：要转成 NUL 结尾的 UTF-8 字符串，非 UTF-8 或含 NUL 的不行。
 pub(crate) fn ffmpeg_path(path: &Path) -> Option<&str> {
     path.to_str().filter(|s| !s.contains('\0'))
 }

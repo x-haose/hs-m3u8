@@ -3,15 +3,13 @@
 
 use std::collections::VecDeque;
 
-use ffmpeg::{Packet, Rational, Rescale};
-use ffmpeg_next as ffmpeg;
-
+use crate::ffi::{Packet, Rational, Rescale};
 use crate::group::Selected;
 use crate::inband::{Inband, Mismatch, PacketCheck};
 use crate::input::Input;
 use crate::nal::{self, Framing};
 use crate::timing::MICROS;
-use crate::{Error, Origin, StreamKind, Unsupported, ffi};
+use crate::{Error, Origin, StreamKind, Unsupported};
 
 /// 一路输入流对应的输出流。
 #[derive(Clone, Copy)]
@@ -70,7 +68,7 @@ impl Source {
         outputs: &[usize],
         references: &[Option<Inband>],
     ) -> Self {
-        let streams = input.context().nb_streams() as usize;
+        let streams = input.context().nb_streams();
         let mut map = vec![None; streams];
         let mut checks = vec![None; streams];
         let mut hevc = vec![None; streams];
@@ -265,16 +263,12 @@ impl Source {
     fn check_replaced(&self, index: usize) -> Result<(), Error> {
         let ictx = self.input.context();
         // TS 可能在文件中途出现新流，其下标超出建立映射时的流数
-        let medium = ictx
-            .stream(index)
-            .expect("包所属的流存在")
-            .parameters()
-            .medium();
+        let kind = ictx.stream(index).expect("包所属的流存在").kind();
         let replaced = self.map.iter().enumerate().find_map(|(selected, mapping)| {
             mapping.filter(|m| {
-                m.kind.medium() == medium
-                    && ffi::in_program(ictx, selected) == Some(false)
-                    && ffi::in_program(ictx, index) == Some(true)
+                Some(m.kind) == kind
+                    && ictx.in_program(selected) == Some(false)
+                    && ictx.in_program(index) == Some(true)
             })
         });
         match replaced {
@@ -347,8 +341,8 @@ impl Source {
         let ictx = self.input.context();
         let given = self.map.iter().enumerate().filter_map(|(index, mapping)| {
             let mapping = mapping.as_ref()?;
-            let start = ictx.stream(index)?.start_time();
-            (start != ffmpeg::ffi::AV_NOPTS_VALUE).then(|| start.rescale(mapping.time_base, MICROS))
+            let start = ictx.stream(index)?.start_time()?;
+            Some(start.rescale(mapping.time_base, MICROS))
         });
         given.min().or_else(|| {
             self.queue
@@ -384,7 +378,7 @@ impl DtsFill {
     fn new(mapped: &[bool]) -> DtsFill {
         DtsFill {
             waiting: mapped.to_vec(),
-            held: vec![Vec::new(); mapped.len()],
+            held: mapped.iter().map(|_| Vec::new()).collect(),
             ready: VecDeque::new(),
         }
     }

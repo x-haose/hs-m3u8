@@ -5,12 +5,10 @@ use std::io;
 use std::ops::Range;
 use std::path::PathBuf;
 
-use ffmpeg::{Packet, Rational, Rescale, format, media};
-use ffmpeg_next as ffmpeg;
-
+use crate::ffi::{InputContext, Packet, Rational, Rescale};
 use crate::input::{Probe, SegmentMap, new_chain, open_chain, read_packet};
 use crate::standalone::{Format, Head, Item, is_id3v1, item};
-use crate::{Cancel, Error, Origin, TrackSegments, chain, frame};
+use crate::{Cancel, Error, Origin, StreamKind, TrackSegments, chain, frame};
 
 /// 打包音频时间戳的时钟（90 kHz）。
 const CLOCK_90K: Rational = Rational(1, 90_000);
@@ -26,7 +24,7 @@ const CLOCK_90K: Rational = Rational(1, 90_000);
 /// 等采样率下每帧向下取整：有时间戳时每片重新对齐，误差不累积；按样本数接续时每小时约短 0.8 秒。遇到没有时间戳的
 /// 这类来源时改为按帧头里的采样点数计时。
 pub(crate) struct Packed {
-    ictx: format::context::Input,
+    ictx: InputContext,
     /// 读分片文件出错时的路径与原因
     failure: chain::Failure,
     /// 各分片的音频帧在相连之后的输入里的位置；第一片起点为 0
@@ -75,7 +73,7 @@ impl Packed {
         let ictx = open_chain(chain, &failure, probe, at)?;
         let audio = ictx
             .streams()
-            .find(|s| s.parameters().medium() == media::Type::Audio)
+            .find(|s| s.kind() == Some(StreamKind::Audio))
             .map(|s| s.index());
         Ok(Packed {
             ictx,
@@ -97,7 +95,7 @@ impl Packed {
         self.audio.map(|audio| (audio, self.discarded))
     }
 
-    pub(crate) fn context(&self) -> &format::context::Input {
+    pub(crate) fn context(&self) -> &InputContext {
         &self.ictx
     }
 

@@ -4,7 +4,7 @@ dynamic = ["version"]
 description = "HLS（m3u8）下载：并发拉取、AES-128 解密与校验、断点续传、直播录制，输出 MP4 或可直接播放的本地 HLS"
 authors = [{ name = "昊色居士", email = "xhrtxh@gmail.com" }]
 # 本项目、wheel 里静态链接的 FFmpeg 与各 Rust crate 的许可证，由 scripts/licenses.py 求出（make licenses）
-license = "MIT AND LGPL-2.1-or-later AND Apache-2.0 AND BSD-3-Clause AND ISC AND Unicode-3.0 AND Unicode-DFS-2016 AND WTFPL"
+license = "MIT AND LGPL-2.1-or-later AND Apache-2.0 AND BSD-3-Clause AND ISC AND Unicode-3.0 AND Unicode-DFS-2016"
 license-files = ["LICENSE", "LICENSES/*"]
 readme = "README.md"
 requires-python = ">=3.12"
@@ -59,10 +59,10 @@ module-name = "hs_m3u8._native"
 python-source = "python"
 # 去掉扩展模块的符号表，减小 wheel 的体积
 strip = true
-# 从 sdist 构建要用的：替换上游的 ffmpeg-sys-next、FFMPEG_DIR 与工具链的设置、编译 FFmpeg 的脚本，以及 FFmpeg 的
-# 源码包（build.sh 先用它，不再下载；LGPL 要求源码与二进制在同一处提供，见 LICENSES/NOTICE.txt）
+# 从 sdist 构建要用的：FFMPEG_DIR 与工具链的设置、编译 FFmpeg 的脚本，以及 FFmpeg 的源码包（build.sh 先用它，不再下载；
+# LGPL 要求源码与二进制在同一处提供，见 LICENSES/NOTICE.txt）。各 crate（含 hs-m3u8-ffmpeg-sys 与它预生成的绑定）由
+# maturin 按路径依赖收录
 include = [
-    { path = "third_party/ffmpeg-sys-next/**/*", format = "sdist" },
     { path = ".cargo/config.toml", format = "sdist" },
     { path = "rust-toolchain.toml", format = "sdist" },
     { path = "third_party/ffmpeg/build.sh", format = "sdist" },
@@ -109,6 +109,8 @@ ignore = [
 "scripts/licenses.py" = ["S603", "S607"]
 # 运行 PATH 里的 git，参数是写死的与 git 列出的标签
 "scripts/check_compat.py" = ["S603", "S607"]
+# 运行 PATH 里的 rustc 与 cargo，参数是写死的
+"scripts/ffmpeg_bindings.py" = ["S603", "S607"]
 
 [tool.mypy]
 strict = true

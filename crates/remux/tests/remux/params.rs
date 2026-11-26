@@ -1,10 +1,10 @@
 //! 组间、组内的变化：编码参数与解码配置（MP4 的一条轨只有一个样本描述），以及流布局（PID、分片格式）。
 
-use ffmpeg_next as ffmpeg;
 use hs_m3u8_remux::{
     Control, Error, MediaReport, Origin, Shape, StreamKind, Streams, TrackSegments, Unsupported,
 };
 
+use crate::media::MediaFile;
 use crate::remux;
 
 use crate::{check, group, packed_fixture, packed_segment, segs, track, work_dir};
@@ -231,22 +231,13 @@ fn a_pid_change_within_a_group_is_rejected() {
         &Control::default(),
     )
     .unwrap();
-    ffmpeg::init().unwrap();
-    let mut ictx = ffmpeg::format::input(&two.segments[0].path).unwrap();
-    let first_audio = ictx
-        .streams()
-        .find(|s| s.parameters().medium() == ffmpeg::media::Type::Audio)
-        .unwrap()
-        .index();
-    let mut packets = 0;
-    loop {
-        let mut packet = ffmpeg::Packet::empty();
-        match packet.read(&mut ictx) {
-            Ok(()) => packets += u64::from(packet.stream() == first_audio),
-            Err(ffmpeg::Error::Eof) => break,
-            Err(e) => panic!("{e}"),
-        }
-    }
+    let file = MediaFile::open(&two.segments[0].path).unwrap();
+    let first_audio = file.first(StreamKind::Audio).unwrap().index;
+    let packets = file
+        .packets()
+        .iter()
+        .filter(|p| p.stream == first_audio)
+        .count() as u64;
     assert_eq!(report.streams[1].packets, packets);
     // 另一路列进没取的流；两组里同样的一路只列一次
     let unused = |report: &MediaReport| -> Vec<(Origin, usize, &'static str, Option<String>)> {

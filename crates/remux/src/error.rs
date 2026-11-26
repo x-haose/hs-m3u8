@@ -4,8 +4,6 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
-use ffmpeg_next as ffmpeg;
-
 use crate::codecs::{MP3_MIN_SAMPLE_RATE, supported_codecs};
 use crate::{Container, Shape, StreamKind, fmp4};
 
@@ -15,15 +13,6 @@ use crate::{Container, Shape, StreamKind, fmp4};
 pub struct FfmpegError {
     pub code: i32,
     pub message: String,
-}
-
-impl From<ffmpeg::Error> for FfmpegError {
-    fn from(error: ffmpeg::Error) -> Self {
-        FfmpegError {
-            message: error.to_string(),
-            code: i32::from(error),
-        }
-    }
 }
 
 /// 出错的输入在哪里。
@@ -57,8 +46,6 @@ impl fmt::Display for Origin {
 /// 第几个输入。只关乎一组的（如 [`Error::TrackCount`]）只带组号。
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("FFmpeg 初始化失败：{0}")]
-    Init(FfmpegError),
     #[error("至少需要一个不连续段组")]
     NoGroups,
     #[error("指定了 {found} 条轨的取流方式，第 0 组有 {expected} 条轨")]

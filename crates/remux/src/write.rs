@@ -4,13 +4,12 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ffmpeg::{Dictionary, Packet, Rational, Rescale, Rounding, codec, encoder, format, media};
-use ffmpeg_next as ffmpeg;
-
 use crate::chain::{self, Halt, SegmentChain};
 use crate::compare::Desc;
 use crate::error::file_error;
-use crate::ffi::{self, OpenFailure, OutputFile};
+use crate::ffi::{
+    CodecId, Dictionary, OpenFailure, OutputFile, Packet, Rational, Rescale, Rounding,
+};
 use crate::group::OpenTrack;
 use crate::source::{Dropped, Mapping, Source};
 use crate::subtitles::{self, Lane};
@@ -78,17 +77,14 @@ impl Muxer {
         labels: Option<&[&Label]>,
         subtitles: &[usize],
     ) -> Result<Muxer, Error> {
-        let mut file = ffi::open_output(path, container, cancel)
+        let mut file = OutputFile::open(path, container, cancel)
             .map_err(|failure| open_error(failure, path, cancel))?;
-        add_streams(&mut file.octx, container, first)?;
+        add_streams(&mut file, container, first)?;
         let codec = subtitles::Codec::of(container);
         for _ in subtitles {
-            let mut ost = file
-                .octx
-                .add_stream(encoder::find(codec::Id::None))
-                .map_err(|e| Error::Mux(e.into()))?;
-            ffi::set_subtitle_parameters(&mut ost, codec);
-            ost.set_time_base(SUBTITLE_TIME_BASE);
+            let out = file.add_stream().map_err(Error::Mux)?;
+            set_subtitle_parameters(&mut file, out, codec);
+            file.set_time_base(out, SUBTITLE_TIME_BASE);
         }
         if let Some(labels) = labels {
             let owners: Vec<usize> = layout
@@ -97,13 +93,12 @@ impl Muxer {
                 .flat_map(|(track, descs)| std::iter::repeat_n(track, descs.len()))
                 .chain(subtitles.iter().copied())
                 .collect();
-            label_streams(&mut file.octx, container, &owners, labels);
+            label_streams(&mut file, container, &owners, labels);
         }
         write_header(&mut file, container)?;
         let media_outputs: usize = layout.iter().map(Vec::len).sum();
         for n in 0..subtitles.len() {
             let tb = file
-                .octx
                 .stream(media_outputs + n)
                 .expect("输出流已创建")
                 .time_base();
@@ -126,7 +121,7 @@ impl Muxer {
                 blank_samples: matches!(shape, Shape::Subtitle { .. })
                     && codec == subtitles::Codec::MovText,
                 discarded_cues: 0,
-                time_base: file.octx.stream(out).expect("输出流已创建").time_base(),
+                time_base: file.stream(out).expect("输出流已创建").time_base(),
                 written: 0,
                 dropped: Dropped::default(),
                 start_us: None,
@@ -286,7 +281,7 @@ impl Muxer {
         o.last_dts_us = Some(t.dts_us);
         packet.set_position(-1);
         packet.set_stream(out);
-        if let Err(e) = packet.write_interleaved(&mut self.file.octx) {
+        if let Err(e) = self.file.write_interleaved(&mut packet) {
             return Err(self.file.write_error(e));
         }
         self.outs[out].written += 1;
@@ -317,7 +312,7 @@ impl Muxer {
         packet.set_dts(Some(dts));
         packet.set_pts(Some(dts));
         packet.set_duration(duration);
-        packet.set_flags(ffmpeg::packet::Flags::KEY);
+        packet.set_key();
         packet.set_stream(out);
         o.last_dts = Some(dts);
         o.start_us = Some(
@@ -327,7 +322,7 @@ impl Muxer {
         let end_us = subtitle.start_us + subtitle.duration_us;
         o.end_us = Some(o.end_us.map_or(end_us, |e| e.max(end_us)));
         o.last_dts_us = Some(subtitle.start_us);
-        if let Err(e) = packet.write_interleaved(&mut self.file.octx) {
+        if let Err(e) = self.file.write_interleaved(&mut packet) {
             return Err(self.file.write_error(e));
         }
         self.outs[out].written += 1;
@@ -347,7 +342,7 @@ impl Muxer {
         cancel: &Cancel,
         unused: Vec<UnusedStream>,
     ) -> Result<MediaReport, Error> {
-        if let Err(e) = self.file.octx.write_trailer() {
+        if let Err(e) = self.file.write_trailer() {
             return Err(self.file.write_error(e));
         }
         if let Err(e) = self.file.close() {
@@ -365,10 +360,9 @@ impl Muxer {
 /// [`Error::OpenOutput`]。
 fn open_error(failure: OpenFailure, path: &str, cancel: &Cancel) -> Error {
     let cause = match failure {
-        OpenFailure::Muxer(cause) => FfmpegError::from(cause),
+        OpenFailure::Muxer(cause) => cause,
         OpenFailure::File(_) if cancel.is_cancelled() => return Error::Cancelled,
         OpenFailure::File(cause) => {
-            let cause = FfmpegError::from(cause);
             if let Some(cause) = file_error(&cause) {
                 return Error::Io {
                     action: "创建",
@@ -388,29 +382,26 @@ fn open_error(failure: OpenFailure, path: &str, cancel: &Cancel) -> Error {
 impl OutputFile {
     /// FFmpeg 写这个输出时的错误：取消了为 [`Error::Cancelled`]；输出的读写上下文记着写文件的错误（如盘满）为
     /// [`Error::Io`]；其余为封装器的错误 [`Error::Mux`]。
-    fn write_error(&self, error: ffmpeg::Error) -> Error {
+    fn write_error(&self, error: FfmpegError) -> Error {
         if self.cancel.is_cancelled() {
             return Error::Cancelled;
         }
-        let written = ffi::output_io_error(&self.octx)
-            .and_then(|code| file_error(&FfmpegError::from(ffmpeg::Error::from(code))));
-        match written {
+        match self.io_error().and_then(|written| file_error(&written)) {
             Some(cause) => Error::Io {
                 action: "写入",
                 path: self.path.clone(),
                 cause,
             },
-            None => Error::Mux(error.into()),
+            None => Error::Mux(error),
         }
     }
 
     /// 关闭这个输出时的错误（见 [`OutputFile::close`]）：取消了为 [`Error::Cancelled`]；errno 型的为 [`Error::Io`]；
     /// 其余为 [`Error::Mux`]。
-    fn close_error(&self, error: ffmpeg::Error) -> Error {
+    fn close_error(&self, error: FfmpegError) -> Error {
         if self.cancel.is_cancelled() {
             return Error::Cancelled;
         }
-        let error = FfmpegError::from(error);
         match file_error(&error) {
             Some(cause) => Error::Io {
                 action: "关闭",
@@ -422,9 +413,11 @@ impl OutputFile {
     }
 }
 
-/// 按第 0 组（或各完整文件）选中的流建立输出流，创建顺序即输出流下标（见 [`crate::group::layout_of`]）。
+/// 按第 0 组（或各完整文件）选中的流建立输出流，创建顺序即输出流下标（见 [`crate::group::layout_of`]）。编码参数照
+/// 输入流复制；编码标签除 MP4 里的 HEVC 标 `hvc1`（QuickTime/Safari 不播 `hev1`）外置 0，由封装器按编码选择：从输入
+/// 复制来的标签（如 MP4 的 `mp4a`）可能不在另一种封装器的标签表里，写头时报不兼容。
 fn add_streams(
-    octx: &mut format::context::Output,
+    file: &mut OutputFile,
     container: Container,
     first: &[OpenTrack],
 ) -> Result<(), Error> {
@@ -435,14 +428,30 @@ fn add_streams(
                 .context()
                 .stream(s.index)
                 .expect("select 返回的下标有效");
-            let mut ost = octx
-                .add_stream(encoder::find(codec::Id::None))
-                .map_err(|e| Error::Mux(e.into()))?;
-            ost.set_parameters(stream.parameters());
-            ffi::set_codec_tag(&mut ost, s.id, container);
+            let out = file.add_stream().map_err(Error::Mux)?;
+            file.copy_parameters(out, stream).map_err(Error::Mux)?;
+            let tag = if container == Container::Mp4 && s.id == CodecId::HEVC {
+                u32::from_le_bytes(*b"hvc1")
+            } else {
+                0
+            };
+            file.set_codec_tag(out, tag);
         }
     }
     Ok(())
+}
+
+/// 把新建的输出流 `out` 设成本库生成的字幕流：SubRip 不带解码配置；mov_text 带 tx3g 的样本描述
+/// （[`hs_m3u8_subtitle::MOV_TEXT_SAMPLE_ENTRY`]），封装器原样写进样本项。
+fn set_subtitle_parameters(file: &mut OutputFile, out: usize, codec: subtitles::Codec) {
+    match codec {
+        subtitles::Codec::Subrip => file.set_subtitle_parameters(out, CodecId::SUBRIP, &[]),
+        subtitles::Codec::MovText => file.set_subtitle_parameters(
+            out,
+            CodecId::MOV_TEXT,
+            &hs_m3u8_subtitle::MOV_TEXT_SAMPLE_ENTRY,
+        ),
+    }
 }
 
 /// 字幕流的时间基，一个 tick 为 [`subtitles::TICK_US`]。
@@ -450,27 +459,25 @@ const SUBTITLE_TIME_BASE: Rational = Rational(1, 1000);
 
 /// 给各输出流写上标注：第 i 路流属于第 `owners[i]` 条轨，标注为 `labels[owners[i]]`（见 [`Label`]）。每类流里都没有标默认
 /// 的时，第一路视频与第一路音频为默认。
-fn label_streams(
-    octx: &mut format::context::Output,
-    container: Container,
-    owners: &[usize],
-    labels: &[&Label],
-) {
-    let kinds: Vec<media::Type> = octx.streams().map(|s| s.parameters().medium()).collect();
-    let flagged = |kind: media::Type| {
+fn label_streams(file: &mut OutputFile, container: Container, owners: &[usize], labels: &[&Label]) {
+    let kinds: Vec<Option<StreamKind>> = (0..file.nb_streams())
+        .map(|index| file.stream(index).expect("下标在流数以内").kind())
+        .collect();
+    let flagged = |kind: Option<StreamKind>| {
         kinds
             .iter()
             .zip(owners)
             .any(|(&k, &owner)| k == kind && labels[owner].default)
     };
-    let mut first_seen: Vec<media::Type> = Vec::new();
+    let mut first_seen: Vec<Option<StreamKind>> = Vec::new();
     for (index, (&kind, &owner)) in kinds.iter().zip(owners).enumerate() {
         let label = labels[owner];
         let first = !first_seen.contains(&kind);
         if first {
             first_seen.push(kind);
         }
-        let default = label.default || (first && kind != media::Type::Subtitle && !flagged(kind));
+        let default =
+            label.default || (first && kind != Some(StreamKind::Subtitle) && !flagged(kind));
         let mut metadata = Dictionary::new();
         let code = label
             .language
@@ -484,9 +491,8 @@ fn label_streams(
         if let Some(title) = label.name.as_deref().or(label.language.as_deref()) {
             metadata.set("title", title);
         }
-        let mut ost = octx.stream_mut(index).expect("下标在流数以内");
-        ost.set_metadata(metadata);
-        ffi::set_disposition(&mut ost, default, label.forced);
+        file.set_metadata(index, metadata);
+        file.set_disposition(index, default, label.forced);
     }
 }
 
@@ -496,13 +502,9 @@ fn write_header(file: &mut OutputFile, container: Container) -> Result<(), Error
     if container == Container::Mp4 {
         options.set("movflags", "+faststart");
     }
-    let written = file.octx.write_header_with(options).map(|rejected| {
-        rejected
-            .iter()
-            .map(|(k, v)| (k.to_owned(), v.to_owned()))
-            .collect::<Vec<(String, String)>>()
-    });
-    let rejected = written.map_err(|e| file.write_error(e))?;
+    file.write_header(&mut options)
+        .map_err(|e| file.write_error(e))?;
+    let rejected = options.entries();
     if rejected.is_empty() {
         Ok(())
     } else {
@@ -549,11 +551,11 @@ fn count_packets(path: &Path, skip_blank: &[bool], cancel: &Cancel) -> Result<Ve
         Halt::Stopped(stopped) => stopped.into_error("回读"),
         Halt::Ffmpeg(cause) => Error::Reread {
             path: path.to_path_buf(),
-            cause: cause.into(),
+            cause,
         },
     };
     let mut ictx = chain::open(chain, &failure, None).map_err(halted)?;
-    let mut counts = vec![0u64; ictx.nb_streams() as usize];
+    let mut counts = vec![0u64; ictx.nb_streams()];
     loop {
         if cancel.is_cancelled() {
             return Err(Error::Cancelled);

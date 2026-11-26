@@ -29,7 +29,6 @@ allow = [
     "ISC",
     "MIT",
     "Unicode-3.0",
-    "WTFPL", # ffmpeg-next、ffmpeg-sys-next
 ]
 # 只对下列包放行白名单之外的宽松许可证
 exceptions = [

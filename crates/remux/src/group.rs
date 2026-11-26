@@ -1,24 +1,22 @@
 //! 选出一条轨（或一个完整文件）里要取的流，打开 HLS 一组的各轨，再换成读包的输入。
 
-use ffmpeg::{Rational, codec};
-use ffmpeg_next as ffmpeg;
-
 use crate::codecs::check_codec;
 use crate::compare::{Config, Desc, same_streams};
+use crate::ffi::{CodecId, Rational};
 use crate::hls::Numbered;
 use crate::inband::{Inband, PacketCheck};
 use crate::input::Input;
 use crate::nal::Framing;
 use crate::source::Source;
 use crate::{
-    Cancel, Container, Error, Origin, StreamKind, Streams, Unsupported, UnusedStream, ffi, frame,
+    Cancel, Container, Error, Origin, StreamKind, Streams, Unsupported, UnusedStream, frame,
 };
 
 /// 一条轨在某组中（或一个完整文件里）被选中的一路流。
 pub(crate) struct Selected {
     pub(crate) index: usize,
     pub(crate) time_base: Rational,
-    pub(crate) id: codec::Id,
+    pub(crate) id: CodecId,
     pub(crate) desc: Desc,
     /// HEVC 视频：包里 NAL 单元的排法，用于认出参考上一个 GOP 的前导帧（见 [`crate::nal::hevc_rasl`]）；其余流，及 MP4
     /// 的解码配置太短读不出排法时为 None
@@ -42,39 +40,34 @@ fn select(
         if !wanted.wants(kind) {
             continue;
         }
-        let Some(stream) = input
-            .context()
-            .streams()
-            .find(|s| s.parameters().medium() == kind.medium())
-        else {
+        let Some(stream) = input.context().streams().find(|s| s.kind() == Some(kind)) else {
             continue;
         };
-        let id = stream.parameters().id();
-        let shape = ffi::shape(&stream, kind);
+        let id = stream.codec_id();
+        let shape = stream.shape(kind);
         check_codec(id, &shape, input.standalone(), container, at).map_err(Error::Unsupported)?;
         let config = if input.standalone() {
             Config::Inband
         } else {
-            let extradata = ffi::extradata(&stream);
-            if id == codec::Id::AAC && frame::audio_object_type(&extradata) != Some(frame::AOT_USAC)
-            {
+            let extradata = stream.extradata();
+            if id == CodecId::AAC && frame::audio_object_type(&extradata) != Some(frame::AOT_USAC) {
                 Config::InitAac {
                     config: extradata,
-                    decoded: ffi::decoded_aac(&stream),
+                    decoded: stream.decoded_aac(),
                 }
             } else {
                 Config::Init(extradata)
             }
         };
         let hevc = match (&config, id) {
-            (Config::Inband, codec::Id::HEVC) => Some(Framing::AnnexB),
-            (Config::Init(hvcc), codec::Id::HEVC) => Framing::of_hvcc(hvcc),
+            (Config::Inband, CodecId::HEVC) => Some(Framing::AnnexB),
+            (Config::Init(hvcc), CodecId::HEVC) => Framing::of_hvcc(hvcc),
             _ => None,
         };
         let check = if input.standalone() {
             let inband = Inband::of(id, container).expect("check_codec 只收能逐帧读出参数的编码");
             Some(PacketCheck::Inband(inband))
-        } else if container == Container::Mp4 && id == codec::Id::EAC3 {
+        } else if container == Container::Mp4 && id == CodecId::EAC3 {
             Some(PacketCheck::Eac3ForMp4)
         } else {
             None
@@ -86,7 +79,7 @@ fn select(
             desc: Desc { shape, config },
             hevc,
             check,
-            frame_samples: ffi::frame_samples(&stream).filter(|_| kind == StreamKind::Audio),
+            frame_samples: stream.frame_samples().filter(|_| kind == StreamKind::Audio),
         });
     }
     Ok(selected)
@@ -129,13 +122,13 @@ fn unused_streams(input: &Input, wanted: Streams, at: Origin) -> Vec<UnusedStrea
             input
                 .context()
                 .streams()
-                .filter(move |s| s.parameters().medium() == kind.medium())
+                .filter(move |s| s.kind() == Some(kind))
                 .skip(1)
                 .map(move |s| UnusedStream {
                     at,
                     index: s.index(),
-                    shape: ffi::shape(&s, kind),
-                    language: ffi::language(&s),
+                    shape: s.shape(kind),
+                    language: s.language(),
                 })
         })
         .collect()
