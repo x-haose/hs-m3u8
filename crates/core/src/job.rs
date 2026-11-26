@@ -61,7 +61,7 @@ pub(crate) async fn run(
     // ENDLIST（中断期间直播结束了）。没开启直播时按点播运行，由 WorkDir::open 报类型不符；记录的是文件任务时同样由它
     // 报：本次是点播还是直播要拉了播放列表才知道
     let recorded = match read_resumable(root.clone()).await? {
-        Some(Recorded::Hls(record)) => Some(*record),
+        Some(Recorded::Hls { record, .. }) => Some(*record),
         Some(Recorded::File(_)) | None => None,
     };
     if !request.reselect
@@ -76,7 +76,7 @@ pub(crate) async fn run(
     }
     let continuing_live = recorded
         .as_ref()
-        .is_some_and(|r| matches!(r.kind, RecordKind::Live { .. }));
+        .is_some_and(|r| matches!(r.kind, RecordKind::Live));
     let selection = recorded
         .as_ref()
         .filter(|_| !request.reselect)
@@ -153,7 +153,7 @@ async fn run_live(
         preference_digest,
         url_digest: url_digest(&task.request.source.url),
         selection: resolved.selection_record(),
-        kind: RecordKind::Live { tails: Vec::new() },
+        kind: RecordKind::Live,
     };
     let dir = WorkDir::open(
         task.output.work_dir.clone(),
@@ -244,7 +244,7 @@ pub(crate) async fn merge_recorded(
     let root = output.work_dir.clone();
     let record = match read_resumable(root.clone()).await? {
         None => return Err(Error::NothingRecorded),
-        Some(Recorded::Hls(record)) => *record,
+        Some(Recorded::Hls { record, .. }) => *record,
         Some(Recorded::File(_)) => {
             return Err(Error::WorkDir {
                 path: root,

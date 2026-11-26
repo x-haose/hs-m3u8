@@ -7,11 +7,11 @@ use hs_m3u8_core::hls::Renditions;
 use hs_m3u8_core::remux::{Container, Shape};
 use hs_m3u8_core::{
     Error, FetchErrorKind, HttpErrorKind, HttpFailure, JobRequest, LiveEnd, MergedFile, MissReason,
-    Missed, Progress, RefreshReason, SourceBreak, StallCause, StallReason, SubtitleFileFormat,
-    SubtitleOutput, TailCause, Target, TrackKind, UnrecordedTail,
+    Missed, NewSession, Progress, RefreshReason, SourceBreak, StallCause, StallReason,
+    SubtitleFileFormat, SubtitleOutput, TailCause, Target, TrackKind, UnrecordedTail,
 };
 
-use super::{STALL, interrupt, live_request};
+use super::{STALL, interrupt, live_request, playlist_in, put_long};
 use crate::server::Server;
 use crate::{engine, fixture, test_dir};
 
@@ -581,4 +581,51 @@ async fn subtitle_failures_only_affect_the_subtitle_track() {
         "{:?}",
         tail.cause
     );
+}
+
+/// 一条视频加一条字幕时视频编码器重启（序号回退）：字幕轨不算进轨数，同不选字幕时一样另起会话接着录，字幕轨跟着进新
+/// 会话。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_of_the_only_media_track_starts_a_new_session_with_subtitles() {
+    let dir = test_dir("live_subtitles_restart");
+    let server = Server::start().await;
+    put_long(&server, "v/", &[0, 1, 2, 3]);
+    server.put_sequence(
+        "v.m3u8",
+        vec![
+            playlist_in("v/", &[2, 3], false),
+            playlist_in("v/", &[0], false),
+            playlist_in("v/", &[0], false),
+            playlist_in("v/", &[0, 1], true),
+        ],
+    );
+    server.put("subs.m3u8", "#EXTM3U\n#EXT-X-TARGETDURATION:1\n");
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n\
+         #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"zh\",LANGUAGE=\"zh\",URI=\"subs.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=200000,SUBTITLES=\"subs\"\nv.m3u8\n",
+    );
+    let mut req = live_request(server.url("master.m3u8"), &dir, LONG_STALL);
+    req.source.preference.subtitles = Renditions::All;
+    req.output.target = Target::File(MergedFile {
+        path: dir.join("out.mkv"),
+        container: Container::Matroska,
+    });
+
+    let output = tokio::time::timeout(LONG_STALL / 3, engine().start(req).unwrap().wait())
+        .await
+        .expect("录制不等字幕")
+        .unwrap();
+
+    let live = output.live.unwrap();
+    assert_eq!(live.end, Some(LiveEnd::EndList));
+    assert_eq!(
+        live.new_sessions,
+        [NewSession {
+            session: 1,
+            cause: SourceBreak::Restarted,
+        }]
+    );
+    assert_eq!(live.session_count, 2);
 }

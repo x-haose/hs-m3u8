@@ -134,8 +134,8 @@ pub(crate) struct WorkDir {
     pending: Option<Pending>,
     /// `pending` 已核对上、已改记（见 [`WorkDir::adopt_record`]）
     adopted: AtomicBool,
-    /// 直播尾部没录到的字幕轨（会话, 轨号），升序、不重复；录制中随时改记（见 [`WorkDir::set_tail`]）。`record` 与
-    /// `pending` 里的尾部在打开时移到这里、留空，写 `job.json` 时用这里的
+    /// 直播尾部没录到的字幕轨（会话, 轨号），升序、不重复，与生效的记录一起写在 `job.json` 里；录制中随时改记（见
+    /// [`WorkDir::set_tail`]）。`Recorder` 只拿到 `&WorkDir`，所以用锁
     tails: Mutex<Vec<(u32, usize)>>,
     lock: Lock,
 }
@@ -212,7 +212,7 @@ impl WorkDir {
     pub(crate) async fn adopt_record(&self) -> Result<(), Error> {
         let pending = self.pending.as_ref().expect("只在有须核对的差别时改记");
         let path = self.layout.root.join(JOB_FILE);
-        let bytes = encode_hls(&with_tails(&pending.record, &self.tails()));
+        let bytes = encode_hls(&pending.record, &self.tails());
         blocking(move || write_atomic(&path, &bytes)).await??;
         self.adopted.store(true, Ordering::Relaxed);
         Ok(())
@@ -241,8 +241,9 @@ impl WorkDir {
                 }
                 (Ok(_), true) | (Err(_), false) => return Ok(()),
             }
-            encode_hls(&with_tails(self.record(), &tails))
+            encode_hls(self.record(), &tails)
         };
+        // 锁外写文件：调用方（录制循环）按顺序等每次写完，写出的不会被更早的那次覆盖
         let path = self.layout.root.join(JOB_FILE);
         blocking(move || write_atomic(&path, &bytes)).await?
     }
@@ -323,7 +324,7 @@ fn read_saved(root: &Path) -> Result<Option<Saved>, Error> {
     }
     let record = match read_job(root)? {
         None => return Ok(None),
-        Some(Recorded::Hls(record)) => record,
+        Some(Recorded::Hls { record, .. }) => record,
         Some(Recorded::File(record)) => {
             let ranges = match record.length {
                 Some(length) => read_ranges_within(root, length)?,
@@ -349,7 +350,7 @@ fn read_saved(root: &Path) -> Result<Option<Saved>, Error> {
         })
         .collect();
     Ok(Some(Saved::Hls(HlsSaved {
-        live: matches!(record.kind, RecordKind::Live { .. }),
+        live: matches!(record.kind, RecordKind::Live),
         segments: tracks
             .iter()
             .filter(|t| t.kind != TrackKind::Subtitles)
@@ -409,8 +410,11 @@ fn open(
     let previous = match &recorded {
         None => None,
         Some(recorded) if !has_completed(&root, recorded)? => None,
-        Some(Recorded::Hls(recorded)) => match recorded.conflict(&record, check) {
-            None => Some(*recorded.clone()),
+        Some(Recorded::Hls {
+            record: recorded,
+            tails,
+        }) => match recorded.conflict(&record, check) {
+            None => Some((*recorded.clone(), tails.clone())),
             Some(problem) => return Err(conflict(problem)),
         },
         Some(Recorded::File(_)) => {
@@ -420,34 +424,29 @@ fn open(
             }));
         }
     };
-    let (record, pending) = match previous {
+    // 沿用目录时尾部照原有的（它描述已录到的内容），新建或清空时没有
+    let (record, pending, tails) = match previous {
         None => {
             clear_content(&root, recorded.as_ref())?;
-            write_atomic(&job_path, &encode_hls(&record))?;
-            (record, None)
+            write_atomic(&job_path, &encode_hls(&record, &[]))?;
+            (record, None, Vec::new())
         }
-        Some(previous) => {
+        Some((previous, tails)) => {
             let record = record.keeping_attributes_of(&previous);
             let change = SourceChange {
                 url: previous.url_digest != record.url_digest,
                 tracks: previous.changed_tracks(&record),
             };
             if change.url || change.tracks.contains(&true) {
-                (previous, Some(Pending { record, change }))
+                (previous, Some(Pending { record, change }), tails)
             } else {
                 if previous != record {
-                    write_atomic(&job_path, &encode_hls(&record))?;
+                    write_atomic(&job_path, &encode_hls(&record, &tails))?;
                 }
-                (record, None)
+                (record, None, tails)
             }
         }
     };
-    // 生效的记录（写在 job.json 里的）带着尾部：新建的没有，沿用的为原有的（keeping_attributes_of 已带上）
-    let (record, tails) = take_tails(record);
-    let pending = pending.map(|p| Pending {
-        record: take_tails(p.record).0,
-        change: p.change,
-    });
     Ok(WorkDir {
         layout,
         record,
@@ -456,24 +455,6 @@ fn open(
         tails: Mutex::new(tails),
         lock,
     })
-}
-
-/// 记录与它的直播尾部，取出后记录里的为空。
-fn take_tails(mut record: HlsRecord) -> (HlsRecord, Vec<(u32, usize)>) {
-    let tails = match &mut record.kind {
-        RecordKind::Live { tails } => std::mem::take(tails),
-        RecordKind::Vod { .. } => Vec::new(),
-    };
-    (record, tails)
-}
-
-/// 带上直播尾部 `tails` 的记录，用于写 `job.json`。
-fn with_tails(record: &HlsRecord, tails: &[(u32, usize)]) -> HlsRecord {
-    let mut record = record.clone();
-    if let RecordKind::Live { tails: kept } = &mut record.kind {
-        *kept = tails.to_vec();
-    }
-    record
 }
 
 /// 删掉任务目录里之前的任务留下的内容，换成当前任务：HLS 的分片与 init 段，与 `job.json` 记着的 `recorded` 是文件任务时
@@ -549,7 +530,7 @@ fn ensure_empty(root: &Path) -> Result<(), Error> {
 /// 文件任务已完成的范围。
 fn has_completed(root: &Path, recorded: &Recorded) -> Result<bool, Error> {
     match recorded {
-        Recorded::Hls(_) => has_completed_segments(root),
+        Recorded::Hls { .. } => has_completed_segments(root),
         Recorded::File(_) => Ok(!read_ranges(root)?.is_empty()),
     }
 }
@@ -610,7 +591,7 @@ pub(crate) async fn read_file_resume(root: PathBuf) -> Result<Option<FileResume>
         let record = match read_job(&root)? {
             None => return Ok(None),
             Some(Recorded::File(record)) => record,
-            Some(hls @ Recorded::Hls(_)) => {
+            Some(hls @ Recorded::Hls { .. }) => {
                 if !has_completed(&root, &hls)? {
                     return Ok(None);
                 }
@@ -668,7 +649,7 @@ impl FileDir {
                 && has_completed(&root, recorded)?
             {
                 return Err(problem(match recorded {
-                    Recorded::Hls(hls) => WorkDirProblem::KindMismatch {
+                    Recorded::Hls { record: hls, .. } => WorkDirProblem::KindMismatch {
                         recorded: hls.job_type(),
                         current: JobType::File,
                     },
@@ -1126,13 +1107,16 @@ mod tests {
             preference_digest: "p".into(),
             url_digest: "u".into(),
             selection: None,
-            kind: RecordKind::Live { tails: Vec::new() },
+            kind: RecordKind::Live,
         };
-        let job = encode_hls(&record);
+        let job = encode_hls(&record, &[]);
         fs::write(root.join(JOB_FILE), &job).unwrap();
         std::os::unix::fs::symlink(&elsewhere, root.join(TRACKS_DIR)).unwrap();
 
-        let recorded = Recorded::Hls(Box::new(record.clone()));
+        let recorded = Recorded::Hls {
+            record: Box::new(record.clone()),
+            tails: Vec::new(),
+        };
         assert!(is_not_empty(has_completed(&root, &recorded)));
         assert!(is_not_empty(read_saved(&root)));
         assert!(is_not_empty(open(

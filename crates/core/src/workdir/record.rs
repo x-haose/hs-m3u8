@@ -42,14 +42,18 @@ const TRACKS_JOB_FORMAT_VERSION: u32 = 16;
 /// job.json 里记录的任务。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Recorded {
-    Hls(Box<HlsRecord>),
+    Hls {
+        record: Box<HlsRecord>,
+        /// 直播尾部没录到的字幕轨（会话, 轨号），升序、不重复，都是所选的字幕轨（见 [`crate::UnrecordedTail`]）；点播为空
+        tails: Vec<(u32, usize)>,
+    },
     File(FileRecord),
 }
 
 impl Recorded {
     pub(crate) fn job_type(&self) -> JobType {
         match self {
-            Recorded::Hls(record) => record.job_type(),
+            Recorded::Hls { record, .. } => record.job_type(),
             Recorded::File(_) => JobType::File,
         }
     }
@@ -97,12 +101,10 @@ pub(crate) enum SelectionCheck {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RecordKind {
     /// 点播：计划摘要（见 [`crate::vod::Plan::digest`]）相同才能续传
-    Vod { plan_digest: String },
-    Live {
-        /// 尾部没录到的字幕轨：（会话, 轨号），按会话、轨号排列、不重复（见 [`crate::UnrecordedTail`]）；录制中随时改记
-        /// （见 [`super::WorkDir::set_tail`]）
-        tails: Vec<(u32, usize)>,
+    Vod {
+        plan_digest: String,
     },
+    Live,
 }
 
 impl HlsRecord {
@@ -114,7 +116,7 @@ impl HlsRecord {
     pub(crate) fn job_type(&self) -> JobType {
         match self.kind {
             RecordKind::Vod { .. } => JobType::Vod,
-            RecordKind::Live { .. } => JobType::Live,
+            RecordKind::Live => JobType::Live,
         }
     }
 
@@ -145,8 +147,7 @@ impl HlsRecord {
     }
 
     /// `self` 里与 `recorded` 是同一条（见 [`HlsRecord::changed_tracks`]）的轨，属性换成 `recorded` 里的：同一条轨沿用
-    /// 首次记下的属性（见 [`SelectionRecord`]）；直播尾部没录到的字幕轨照 `recorded` 的（它描述已录到的内容）。两者轨道
-    /// 结构相同时才调用。
+    /// 首次记下的属性（见 [`SelectionRecord`]）。两者轨道结构相同时才调用。
     pub(super) fn keeping_attributes_of(mut self, recorded: &HlsRecord) -> HlsRecord {
         if let (Some(current), Some(recorded)) = (&mut self.selection, &recorded.selection) {
             if recorded.variant.same_as(&current.variant) {
@@ -162,11 +163,6 @@ impl HlsRecord {
                     *current = recorded.clone();
                 }
             }
-        }
-        if let (RecordKind::Live { tails }, RecordKind::Live { tails: recorded }) =
-            (&mut self.kind, &recorded.kind)
-        {
-            tails.clone_from(recorded);
         }
         self
     }
@@ -419,7 +415,8 @@ pub(super) fn check_version(
     Ok(version.format_version)
 }
 
-pub(super) fn encode_hls(record: &HlsRecord) -> Vec<u8> {
+/// `record` 与直播尾部没录到的字幕轨 `tails`（点播为空）写成 job.json。
+pub(super) fn encode_hls(record: &HlsRecord, tails: &[(u32, usize)]) -> Vec<u8> {
     let format_version = JOB_FORMAT_VERSION;
     let preference_digest = record.preference_digest.clone();
     let url_digest = record.url_digest.clone();
@@ -428,6 +425,7 @@ pub(super) fn encode_hls(record: &HlsRecord) -> Vec<u8> {
         .as_ref()
         .map(|s| AnySelectionFile::Current(SelectionFile::from(s)));
     let file = match &record.kind {
+        RecordKind::Vod { .. } if !tails.is_empty() => panic!("点播没有直播尾部"),
         RecordKind::Vod { plan_digest } => JobFile::Vod {
             format_version,
             preference_digest,
@@ -435,7 +433,7 @@ pub(super) fn encode_hls(record: &HlsRecord) -> Vec<u8> {
             selection,
             plan_digest: plan_digest.clone(),
         },
-        RecordKind::Live { tails } => JobFile::Live {
+        RecordKind::Live => JobFile::Live {
             format_version,
             preference_digest,
             url_digest,
@@ -470,7 +468,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Recorded, WorkDirProblem> {
         OLDEST_JOB_FORMAT_VERSION,
         JOB_FORMAT_VERSION,
     )?;
-    let (preference_digest, url_digest, selection, kind) =
+    let (preference_digest, url_digest, selection, kind, tails) =
         match serde_json::from_slice(bytes).map_err(unreadable)? {
             JobFile::Vod {
                 preference_digest,
@@ -483,6 +481,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Recorded, WorkDirProblem> {
                 url_digest,
                 selection,
                 RecordKind::Vod { plan_digest },
+                Vec::new(),
             ),
             JobFile::Live {
                 unrecorded_tails, ..
@@ -511,7 +510,8 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Recorded, WorkDirProblem> {
                     preference_digest,
                     url_digest,
                     selection,
-                    RecordKind::Live { tails },
+                    RecordKind::Live,
+                    tails,
                 )
             }
             JobFile::File { .. } if version < FILE_JOB_FORMAT_VERSION => {
@@ -564,18 +564,19 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Recorded, WorkDirProblem> {
         selection,
         kind,
     };
-    if let RecordKind::Live { tails } = &record.kind {
-        let streams = record.streams();
-        if let Some(&(session, track)) = tails
-            .iter()
-            .find(|(_, track)| streams.get(*track) != Some(&Streams::Subtitles))
-        {
-            return Err(WorkDirProblem::Corrupt(format!(
-                "job.json 的 unrecorded_tails 记了会话 {session} 的第 {track} 条轨，它不是所选的字幕轨"
-            )));
-        }
+    let streams = record.streams();
+    if let Some(&(session, track)) = tails
+        .iter()
+        .find(|(_, track)| streams.get(*track) != Some(&Streams::Subtitles))
+    {
+        return Err(WorkDirProblem::Corrupt(format!(
+            "job.json 的 unrecorded_tails 记了会话 {session} 的第 {track} 条轨，它不是所选的字幕轨"
+        )));
     }
-    Ok(Recorded::Hls(Box::new(record)))
+    Ok(Recorded::Hls {
+        record: Box::new(record),
+        tails,
+    })
 }
 
 impl From<&SelectionRecord> for SelectionFile {
@@ -852,34 +853,30 @@ mod tests {
             preference_digest: "ab".into(),
             url_digest: "cd".into(),
             selection: Some(selection(variant_key(), stable_audio_key())),
-            kind: RecordKind::Live { tails: Vec::new() },
+            kind: RecordKind::Live,
         };
-        let bytes = encode_hls(&live);
+        let hls = |record: &HlsRecord, tails: &[(u32, usize)]| Recorded::Hls {
+            record: Box::new(record.clone()),
+            tails: tails.to_vec(),
+        };
+        let bytes = encode_hls(&live, &[]);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
             r#"{"kind":"live","format_version":16,"preference_digest":"ab","url_digest":"cd","selection":{"variant":{"key":{"attributes":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020","mp4a.40.2"],"audio_group":"aud","occurrence":1}},"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"]},"muxed_audio":false,"audio":[{"key":{"stable":{"id":"Audio-37262","occurrence":0}},"name":"Eng\n\"lish\"","language":"en","default":true,"forced":false}],"subtitles":[{"key":{"stable":{"id":"sub-zh","occurrence":0}},"name":null,"language":"zh-Hans","default":false,"forced":true}]}}"#
         );
-        assert_eq!(decode(&bytes), Ok(Recorded::Hls(Box::new(live.clone()))));
+        assert_eq!(decode(&bytes), Ok(hls(&live, &[])));
         // 尾部没录到的字幕轨有才写
-        let tailed = HlsRecord {
-            kind: RecordKind::Live {
-                tails: vec![(0, 2), (1, 2)],
-            },
-            ..live.clone()
-        };
-        let bytes = encode_hls(&tailed);
+        let tails = [(0, 2), (1, 2)];
+        let bytes = encode_hls(&live, &tails);
         assert!(String::from_utf8(bytes.clone()).unwrap().ends_with(
             r#","unrecorded_tails":[{"session":0,"track":2},{"session":1,"track":2}]}"#
         ));
-        assert_eq!(decode(&bytes), Ok(Recorded::Hls(Box::new(tailed))));
+        assert_eq!(decode(&bytes), Ok(hls(&live, &tails)));
         let stable = HlsRecord {
             selection: Some(selection(stable_variant_key(), audio_key())),
             ..live
         };
-        assert_eq!(
-            decode(&encode_hls(&stable)),
-            Ok(Recorded::Hls(Box::new(stable)))
-        );
+        assert_eq!(decode(&encode_hls(&stable, &[])), Ok(hls(&stable, &[])));
         let vod = HlsRecord {
             preference_digest: "ab".into(),
             url_digest: "cd".into(),
@@ -888,7 +885,7 @@ mod tests {
                 plan_digest: "ef".into(),
             },
         };
-        assert_eq!(decode(&encode_hls(&vod)), Ok(Recorded::Hls(Box::new(vod))));
+        assert_eq!(decode(&encode_hls(&vod, &[])), Ok(hls(&vod, &[])));
         let file = FileRecord {
             url_digest: "cd".into(),
             length: Some(1 << 40),
@@ -913,7 +910,7 @@ mod tests {
         ));
         // 1.0 写的格式版本 13 照样读
         let v13 = r#"{"kind":"vod","format_version":13,"preference_digest":"a","url_digest":"u","selection":null,"plan_digest":"p"}"#;
-        assert!(matches!(decode(v13.as_bytes()), Ok(Recorded::Hls(_))));
+        assert!(matches!(decode(v13.as_bytes()), Ok(Recorded::Hls { .. })));
         // 15 及以前的选轨记录：至多一条音频，没有时用变体里混着的
         let old = |audio: &str| {
             format!(
@@ -921,7 +918,7 @@ mod tests {
             )
         };
         let read = |text: String| match decode(text.as_bytes()) {
-            Ok(Recorded::Hls(record)) => record.selection.unwrap(),
+            Ok(Recorded::Hls { record, .. }) => record.selection.unwrap(),
             other => panic!("{other:?}"),
         };
         let muxed = read(old("null"));
@@ -977,7 +974,7 @@ mod tests {
             preference_digest: "a".into(),
             url_digest: "u".into(),
             selection: Some(selection(variant_key(), audio_key())),
-            kind: RecordKind::Live { tails: Vec::new() },
+            kind: RecordKind::Live,
         };
         let other = HlsRecord {
             preference_digest: "b".into(),
@@ -1167,7 +1164,7 @@ mod released {
                 let record = decode(&bytes).unwrap_or_else(|e| panic!("{}：{e}", path.display()));
                 if *version == JOB_FORMAT_VERSION {
                     let rewritten = match &record {
-                        Recorded::Hls(record) => encode_hls(record),
+                        Recorded::Hls { record, tails } => encode_hls(record, tails),
                         Recorded::File(record) => encode_file(record),
                     };
                     assert_eq!(rewritten, bytes, "{}", path.display());

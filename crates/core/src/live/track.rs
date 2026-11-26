@@ -412,6 +412,21 @@ impl LiveTrack {
         self.pending.push_front(fetched);
     }
 
+    /// 字幕轨随唯一的音视频轨另起的会话（见 [`LiveTrack::restart`]）从窗口起点重新录：它靠 X-TIMESTAMP-MAP 对齐，不接着
+    /// 旧窗口；之前接不上而停了的重新刷新，停滞从 `now` 起算。已录到的时长沿用。
+    pub(super) fn rejoin(&mut self, now: Instant) {
+        let recorded_us = self.window().map_or(self.recorded_us, Window::recorded_us);
+        self.role = Role::Decided(Box::new(Window::new(
+            Start::New(SessionStart::Fresh),
+            recorded_us,
+        )));
+        if self.broken.take().is_some() {
+            self.refresh = Refresh::Due(now);
+        }
+        self.last_progress = now;
+        self.last_listed = now;
+    }
+
     /// 按定下的会话处理一份播放列表并安排下次刷新；`started` 为这次拉取开始的时刻。见 [`Window::update`]。
     pub(super) fn apply(
         &mut self,
