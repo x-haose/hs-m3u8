@@ -162,8 +162,8 @@ pub struct JobRequest {
     /// 内容而记录找不回、或偏好的写法变了（如重新探测后再选）；换清晰度另开任务目录。选出的轨与记录的身份不同时（含来源
     /// 从主播放列表换成某一档的媒体播放列表，或反过来），与地址变了一样先核对已下载的是同一份内容（见 [`Source::url`]、
     /// [`LiveOptions`]），核对上才沿用目录、改记，否则报 [`crate::WorkDirProblem::SourceUnverified`]、记录不变；身份相
-    /// 同只差偏好时直接改记。轨道结构（各轨的取流方式：独立音频、字幕的条数）与记录的不同仍报 [`crate::WorkDirProblem::TracksMismatch`]，点播的
-    /// 分片与记录的不一致仍报 [`crate::WorkDirProblem::PlanChanged`]
+    /// 同只差偏好时直接改记。轨道结构（各轨的取流方式：独立音频、字幕的条数）与记录的不同仍报
+    /// [`crate::WorkDirProblem::TracksMismatch`]，点播的分片与记录的不一致仍报 [`crate::WorkDirProblem::PlanChanged`]
     pub reselect: bool,
 }
 
@@ -199,6 +199,17 @@ impl JobRequest {
         self.source.validate()?;
         if let Some(live) = self.live {
             live.validate()?;
+        }
+        let subtitles = &self.output.subtitles;
+        if self.source.preference.subtitles != hls::Renditions::None
+            && self.output.target.hls().is_none()
+            && !subtitles.embed
+            && subtitles.files.is_none()
+        {
+            return Err(Error::InvalidInput(
+                "选了字幕却既不封进合并文件、也不另存为文件，又没有本地 HLS 输出：字幕下了也用不上"
+                    .to_owned(),
+            ));
         }
         self.output.resolve()
     }

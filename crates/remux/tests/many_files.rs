@@ -5,7 +5,8 @@
 use std::path::{Path, PathBuf};
 
 use hs_m3u8_remux::{
-    Container, Control, DiscontinuityGroup, Label, Segment, Streams, Track, TrackSegments, remux,
+    Container, Control, DiscontinuityGroup, Label, Segment, Streams, SubtitleMode, Track,
+    TrackSegments, remux,
 };
 
 fn fixtures() -> PathBuf {
@@ -77,7 +78,7 @@ fn many_segments_in_one_group_stay_within_the_descriptor_limit() {
         &single_group(originals),
         &expected,
         Container::Mp4,
-        true,
+        SubtitleMode::Embed,
         &Control::default(),
     )
     .unwrap();
@@ -92,7 +93,7 @@ fn many_segments_in_one_group_stay_within_the_descriptor_limit() {
         &single_group(chunks),
         &output,
         Container::Mp4,
-        true,
+        SubtitleMode::Embed,
         &Control::default(),
     )
     .unwrap();

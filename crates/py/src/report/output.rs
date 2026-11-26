@@ -225,7 +225,7 @@ impl From<core::remux::StreamKind> for StreamKind {
             core::remux::StreamKind::Video => StreamKind::Video {},
             core::remux::StreamKind::Audio => StreamKind::Audio {},
             core::remux::StreamKind::Subtitle => {
-                unreachable!("Python 的选轨偏好不要字幕，合并文件里没有字幕流")
+                unreachable!("Python 的输出选项不把字幕封进合并文件（见 OutputOptions::to_core）")
             }
         }
     }
@@ -235,7 +235,7 @@ impl From<core::remux::Shape> for Shape {
     fn from(shape: core::remux::Shape) -> Self {
         match shape {
             core::remux::Shape::Subtitle { .. } => {
-                unreachable!("Python 的选轨偏好不要字幕，合并文件里没有字幕流")
+                unreachable!("Python 的输出选项不把字幕封进合并文件（见 OutputOptions::to_core）")
             }
             core::remux::Shape::Video {
                 codec,

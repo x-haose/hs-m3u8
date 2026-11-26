@@ -122,11 +122,6 @@ pub enum Error {
         path: PathBuf,
         cause: hs_m3u8_subtitle::Error,
     },
-    #[error("{at}的{cause}")]
-    SubtitleTooLong {
-        at: Origin,
-        cause: hs_m3u8_subtitle::TooLong,
-    },
     /// 输出只能有一路视频；音频、字幕可以有多路
     #[error("{at}的视频流与前面的重复：输出只能有一路视频")]
     DuplicateVideo { at: Origin },
@@ -199,9 +194,12 @@ pub enum Unsupported {
         "{at}的{kind}流探测不出编码参数或解码配置（分片的这一组第一个分片、或文件开头探测的范围里没有能解的数据），判断不了能否放进输出"
     )]
     ParamsUnknown { at: Origin, kind: StreamKind },
-    #[error("{at}的流种类与第 0 组不同，无法放进同一个 MP4")]
+    /// mov_text 的一个样本最多放 65535 字节：同时显示的几条字幕的文字合计超过了它（只出在 MP4 里，Matroska 放得下）
+    #[error("{at}同时显示的字幕有 {bytes} 字节，超出 MP4 字幕样本的上限 65535，可改存 MKV")]
+    SubtitleTooLong { at: Origin, bytes: usize },
+    #[error("{at}的流种类与第 0 组不同，无法放进同一个输出")]
     LayoutChanged { at: Origin },
-    #[error("{at}的{kind}参数 {found:?} 与第 0 组 {first:?} 不同，无法放进同一条 MP4 轨")]
+    #[error("{at}的{kind}参数 {found:?} 与第 0 组 {first:?} 不同，无法放进输出的同一条轨")]
     ParamsChanged {
         at: Origin,
         kind: StreamKind,
@@ -211,9 +209,9 @@ pub enum Unsupported {
     },
     /// 编码参数相同而解码配置与第 0 组不同：fMP4 的为 init 段里的（如 H.264 的参数集），TS 与打包音频里的音频为帧头
     /// （如 AAC 的 profile 与采样率下标，LC 与 HE-AAC 的采样率都可以是 48 kHz）；或一组是 fMP4 而另一组是 TS 或打包
-    /// 音频。MP4 的样本描述由第 0 组的写成，用在后面的组上解不出
+    /// 音频。输出里一条轨的样本描述（解码配置）由第 0 组的写成，用在后面的组上解不出
     #[error(
-        "{at}的{kind}解码配置（如 AAC 的 profile、H.264 的参数集，或分片封装）与第 0 组不同，无法放进同一条 MP4 轨"
+        "{at}的{kind}解码配置（如 AAC 的 profile、H.264 的参数集，或分片封装）与第 0 组不同，无法放进输出的同一条轨"
     )]
     ConfigChanged { at: Origin, kind: StreamKind },
     /// TS 的一条轨在组内（或一个 TS 文件中途）换了要取的那一路的 PID：PMT 更新后原来那路不再列出、换成了另一路
@@ -227,7 +225,7 @@ pub enum Unsupported {
     /// 没有 init 段的一条轨在组内换了分片格式（TS 与打包音频，或打包音频的格式之间）：读取时只认开头那一种，其余的
     /// 分片被当作杂字节跳过
     #[error(
-        "{at}的分片格式在组内变了（TS 与打包音频，或打包音频的格式之间），无法放进同一条 MP4 轨"
+        "{at}的分片格式在组内变了（TS 与打包音频，或打包音频的格式之间），无法放进输出的同一条轨"
     )]
     FormatChangedInGroup { at: Origin },
     /// E-AC-3 每帧不足 6 块，输出为 MP4：MP4 封装器把几帧并成一个 6 块（1536 个采样点）的样本，末尾凑不满的帧不写出
@@ -244,7 +242,7 @@ pub enum Unsupported {
     /// 声明时长（见 [`crate::Segment::duration_us`]）还长：多为来源在时间戳重新开始处漏标了 `EXT-X-DISCONTINUITY`。
     /// 一路流单独中断不算；其间有缺片时不核对
     #[error(
-        "{at}的{kind}时间戳在第 {segment} 个分片里往前跳，输出里会留下至少 {jump_us} 微秒的空档，无法放进同一条 MP4 轨"
+        "{at}的{kind}时间戳在第 {segment} 个分片里往前跳，输出里会留下至少 {jump_us} 微秒的空档，无法放进输出的同一条轨"
     )]
     TimestampJump {
         at: Origin,
@@ -274,6 +272,7 @@ impl Unsupported {
             U::Codec { at, .. }
             | U::Mp3SampleRate { at, .. }
             | U::ParamsUnknown { at, .. }
+            | U::SubtitleTooLong { at, .. }
             | U::LayoutChanged { at }
             | U::ParamsChanged { at, .. }
             | U::ConfigChanged { at, .. }

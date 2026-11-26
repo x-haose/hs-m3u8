@@ -166,7 +166,7 @@ fn audio_rendition_is_chosen_by_default_flag_or_language() {
         select(&m, &missing).unwrap_err(),
         SelectError::LanguageNotFound {
             kind: RenditionKind::Audio,
-            group: "aud".into(),
+            group: Some("aud".into()),
             language: "ja".into(),
             available: vec!["en".into(), "zh".into()],
         }
@@ -624,4 +624,40 @@ fn subtitles_without_uri_and_muxed_audio() {
         ..Preference::default()
     };
     assert!(!select(&m, &none).unwrap().muxed_audio);
+}
+
+/// 变体引用的音频组在主播放列表里没有（来源写错了组名）：与没有引用一样用变体里混着的音频，不把音频丢掉。
+#[test]
+fn a_variant_referencing_a_missing_audio_group_keeps_its_muxed_audio() {
+    let m = master("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO=\"aud\"\nv.m3u8\n");
+    let selection = select(&m, &Preference::default()).unwrap();
+    assert!(selection.muxed_audio && selection.audio.is_empty());
+}
+
+/// 按语言点名的字幕在变体没有字幕组时报找不到，不静默不选；空的逐个指定报错。
+#[test]
+fn named_subtitles_without_a_group_and_empty_choices_are_errors() {
+    let m = master("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nv.m3u8\n");
+    let zh = Preference {
+        subtitles: Renditions::These(vec![RenditionChoice::Language("zh".into())]),
+        ..Preference::default()
+    };
+    assert!(matches!(
+        select(&m, &zh).unwrap_err(),
+        SelectError::LanguageNotFound {
+            kind: RenditionKind::Subtitles,
+            group: None,
+            ..
+        }
+    ));
+    let empty = Preference {
+        audio: Renditions::These(Vec::new()),
+        ..Preference::default()
+    };
+    assert_eq!(
+        select(&m, &empty).unwrap_err(),
+        SelectError::NoChoices {
+            kind: RenditionKind::Audio
+        }
+    );
 }

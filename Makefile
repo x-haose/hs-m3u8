@@ -18,16 +18,18 @@ README_EXAMPLES := target/readme-examples
 
 check: rs_check py_check py_cov compat
 
-# 播放列表与字幕解析器的模糊测试（fuzz/），每个目标跑 FUZZ_SECONDS 秒；cargo-fuzz 要 nightly，版本固定在这里，CI 同此。
-# 找到的输入在 fuzz/artifacts/<目标>/，运行中积累的语料在 fuzz/corpus/<目标>/，种子语料在 fuzz/seeds/<目标>/
-FUZZ_TOOLCHAIN := nightly-2026-11-25
+# 播放列表与字幕解析器的模糊测试（fuzz/，独立的工作区）：先查它的依赖安全公告与 clippy，再每个目标跑 FUZZ_SECONDS 秒。
+# 工具链为 fuzz/rust-toolchain.toml 固定的 nightly（cargo-fuzz 要它），在 fuzz/ 下运行即用它。找到的输入在
+# fuzz/artifacts/<目标>/，运行中积累的语料在 fuzz/corpus/<目标>/，种子语料在 fuzz/seeds/<目标>/
 FUZZ_SECONDS ?= 60
 FUZZ_TARGETS := hls webvtt
 fuzz:
-	@cargo +$(FUZZ_TOOLCHAIN) fuzz --version >/dev/null 2>&1 || { echo "缺少 $(FUZZ_TOOLCHAIN) 或 cargo-fuzz，版本见 .github/workflows/rust.yml"; exit 1; }
+	@cd fuzz && cargo fuzz --version >/dev/null 2>&1 || { echo "缺少 fuzz/rust-toolchain.toml 的工具链或 cargo-fuzz，版本见 .github/workflows/rust.yml"; exit 1; }
+	cargo deny --manifest-path fuzz/Cargo.toml --locked check advisories
+	cd fuzz && cargo clippy --locked --all-targets -- -D warnings
 	cd fuzz && for target in $(FUZZ_TARGETS); do \
 		mkdir -p corpus/$$target && \
-		cargo +$(FUZZ_TOOLCHAIN) fuzz run $$target corpus/$$target seeds/$$target -- -max_total_time=$(FUZZ_SECONDS) || exit 1; \
+		cargo fuzz run $$target corpus/$$target seeds/$$target -- -max_total_time=$(FUZZ_SECONDS) || exit 1; \
 	done
 
 # 对外契约（Python 接口、任务目录格式）与最近的发布比较；要完整的提交历史与标签

@@ -1,10 +1,9 @@
 //! 字幕的纯计算部分，不做文件与网络 IO：解析 HLS 的分段 WebVTT（含 X-TIMESTAMP-MAP，RFC 8216 3.5），把 cue 换到媒体
-//! 时间线上，写成 SRT、WebVTT 文件，或 MP4 的 mov_text（3GPP TS 26.245）样本；另有 BCP 47 语言标签到 ISO 639-2 的换算。
+//! 时间线上，写成 SRT、WebVTT 文件，或 MP4 的 mov_text（3GPP TS 26.245）样本。
 //!
 //! 时刻一律为微秒。解析出的 cue 时刻是 WebVTT 文件自己的时间（「本地时间」）；[`TimestampMap::media_us`] 换到媒体时间线
 //! （MPEG-TS 90 kHz 时钟上的微秒，回绕由调用方按媒体的起点展开）；写出的 cue 时刻是输出时间线上的，不能为负。
 
-mod iso639;
 mod markup;
 mod webvtt;
 mod write;
@@ -45,36 +44,9 @@ pub fn dedup(cues: &mut Vec<Cue>) {
     *cues = kept;
 }
 
-/// 语言标签（BCP 47，如 `en`、`zh-Hans`、`pt-BR`）的主标签对应的 ISO 639-2 代码：(书目代码 639-2/B, 术语代码 639-2/T)，
-/// 两者多数相同（不同的如德语 `ger` / `deu`、中文 `chi` / `zho`）。Matroska 的 Language 用书目代码，MP4 的 mdhd 用术语
-/// 代码。主标签是 ISO 639-1 两字母代码或 639-2 三字母代码（不分大小写）时认得；ISO 639-3 才有的（如 `yue`）、私用与
-/// 认不出的为 None。
-pub fn iso639_2(tag: &str) -> Option<(&'static str, &'static str)> {
-    let primary = tag.split(['-', '_']).next()?.to_ascii_lowercase();
-    iso639::CODES
-        .iter()
-        .find(|(b, t, a2)| match primary.len() {
-            2 => *a2 == primary,
-            3 => *b == primary || *t == primary,
-            _ => false,
-        })
-        .map(|&(b, t, _)| (b, t))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn language_tags_map_to_both_iso_639_2_forms() {
-        assert_eq!(iso639_2("en"), Some(("eng", "eng")));
-        assert_eq!(iso639_2("zh-Hans"), Some(("chi", "zho")));
-        assert_eq!(iso639_2("DE-at"), Some(("ger", "deu")));
-        assert_eq!(iso639_2("deu"), Some(("ger", "deu")));
-        assert_eq!(iso639_2("yue"), None);
-        assert_eq!(iso639_2("x-klingon"), None);
-        assert_eq!(iso639_2(""), None);
-    }
 
     fn cue(start_us: i64, end_us: i64, text: &str) -> Cue {
         Cue {

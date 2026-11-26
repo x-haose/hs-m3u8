@@ -14,14 +14,15 @@ use crate::live::{self, Context, Outcome};
 use crate::output::{self, Content, ResolvedOutput};
 use crate::request::JobRequest;
 use crate::resolve::{self, Resolved, SubtitleScope};
+use crate::selection::track_kinds;
 use crate::vod::{self, Plan};
 use crate::workdir::{
     self, HlsRecord, Lock, RecordKind, Recorded, SelectionCheck, Stored, WorkDir,
     preference_digest, read_resumable, url_digest,
 };
 use crate::{
-    Error, JobType, Leftover, LeftoverKind, LiveReport, Output, Progress, Stage, TrackKind,
-    Unsettled, WorkDirProblem, blocking,
+    Error, JobType, Leftover, LeftoverKind, LiveReport, Output, Progress, Stage, Unsettled,
+    WorkDirProblem, blocking,
 };
 
 /// 一次运行用到的共享对象。
@@ -116,18 +117,6 @@ pub(crate) async fn prepare(output: &ResolvedOutput) -> Result<Option<Lock>, Err
     Ok(lock)
 }
 
-/// 各轨的种类，按取流方式（见 [`crate::selection::track_streams`]）。
-fn track_kinds(streams: &[Streams]) -> Vec<TrackKind> {
-    streams
-        .iter()
-        .map(|s| match s {
-            Streams::All | Streams::Video => TrackKind::Video,
-            Streams::Audio => TrackKind::Audio,
-            Streams::Subtitles => TrackKind::Subtitles,
-        })
-        .collect()
-}
-
 /// 按任务目录记录的选轨加上另存的字幕文件（见 [`ResolvedOutput::with_subtitle_files`]），并在下载之前核对它们（见
 /// [`output::check_more`]）。
 async fn with_subtitle_files(
@@ -203,7 +192,7 @@ async fn run_vod(
 ) -> Result<Output, Error> {
     let streams = resolved.streams();
     let selection = resolved.selection_record();
-    let plan = Plan::new(resolved.tracks, task.request.key.is_some())?;
+    let plan = Plan::new(resolved.tracks, &streams, task.request.key.is_some())?;
     let record = HlsRecord {
         preference_digest,
         url_digest: url_digest(&task.request.source.url),
@@ -325,7 +314,7 @@ fn merge_live(
     streams: Vec<Streams>,
     recording: Option<Outcome>,
 ) -> Result<Content, Error> {
-    let plan = live::merge_plan(&stored.segments, dir.layout())?;
+    let plan = live::merge_plan(&stored.segments, &dir.record().streams(), dir.layout())?;
     if plan.groups.is_empty() {
         return Err(Error::NothingRecorded);
     }
@@ -388,7 +377,7 @@ async fn finish(
         return Err(Error::Cancelled);
     }
     progress.send_modify(|p| p.stage = Stage::Writing);
-    let bytes = progress.borrow().bytes;
+    let bytes = progress.borrow().all_bytes();
     let output = output::write(dir, content, options, bytes, cancel, progress).await?;
     progress.send_modify(|p| p.stage = Stage::Done);
     Ok(output)

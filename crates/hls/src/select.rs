@@ -45,14 +45,16 @@ pub enum Renditions {
     Default,
     /// 组里全部，按出现顺序
     All,
-    /// 逐个指定，按给出的顺序成轨；两项选到同一条时报 [`SelectError::Duplicate`]
+    /// 逐个指定，按给出的顺序成轨；两项选到同一条时报 [`SelectError::Duplicate`]。至少一项，空的报
+    /// [`SelectError::NoChoices`]：一条也不要用 [`Renditions::None`]
     These(Vec<RenditionChoice>),
 }
 
 /// 指定一条音频或字幕 rendition。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenditionChoice {
-    /// 组内第一个 LANGUAGE 与它相同（不区分大小写）的；变体没有引用这类组时不起作用（音频用变体里混着的）
+    /// 组内第一个 LANGUAGE 与它相同（不区分大小写）的。变体没有引用音频组时音频的不起作用（用变体里混着的）；字幕的报
+    /// [`SelectError::LanguageNotFound`]
     Language(String),
     /// 主播放列表里第几个这类 rendition（音频只数 TYPE=AUDIO 的，字幕只数 TYPE=SUBTITLES 的，按出现顺序，从 0 起）；
     /// 须在所选变体的组里。只对同一份主播放列表有效，同 [`VariantChoice::Index`]
@@ -67,7 +69,8 @@ pub struct Selection {
     /// 所选变体在 `MasterPlaylist::variants` 中的下标
     pub variant_index: usize,
     pub variant: Variant,
-    /// 用变体流里混着的音频：变体没有引用音频组而音频不为 [`Renditions::None`]，或选中的音频里有没写 URI 的
+    /// 用变体流里混着的音频：音频不为 [`Renditions::None`]，而变体没有引用音频组、引用的组在主播放列表里没有一条，或选中
+    /// 的音频里有没写 URI 的
     pub muxed_audio: bool,
     /// 选中的、有独立媒体播放列表的音频，按选的顺序
     pub audio: Vec<SelectedRendition>,
@@ -94,10 +97,11 @@ pub enum SelectError {
     /// 主播放列表里没有身份与 [`VariantChoice::Matching`] 相同的变体
     #[error("主播放列表里没有身份相同的变体")]
     VariantNotFound,
-    #[error("{} 组 {group} 中没有语言为 {language} 的 rendition，可选：{available:?}", kind_name(*kind))]
+    /// `group` 为所选变体引用的组，没有引用时为 None
+    #[error("{}组 {} 中没有语言为 {language} 的 rendition，可选：{available:?}", kind_name(*kind), group.as_deref().unwrap_or("（变体没有引用）"))]
     LanguageNotFound {
         kind: RenditionKind,
-        group: String,
+        group: Option<String>,
         language: String,
         available: Vec<String>,
     },
@@ -121,6 +125,9 @@ pub enum SelectError {
     /// [`Renditions::These`] 里两项选到了同一条（`index` 口径同 [`RenditionChoice::Index`]）
     #[error("第 {index} 个{}被选了两次", kind_name(*kind))]
     Duplicate { kind: RenditionKind, index: usize },
+    /// [`Renditions::These`] 是空的
+    #[error("指定{}时一项也没给", kind_name(*kind))]
+    NoChoices { kind: RenditionKind },
     /// 选中的字幕没写 URI（RFC 8216 4.3.4.1 要求 SUBTITLES 必须有）
     #[error("第 {index} 个字幕没有 URI")]
     SubtitlesWithoutUri { index: usize },
@@ -160,10 +167,14 @@ pub fn select(master: &MasterPlaylist, preference: &Preference) -> Result<Select
         variant.subtitles.as_deref(),
         &preference.subtitles,
     )?;
-    let muxed_audio = match (&preference.audio, &variant.audio) {
-        (Renditions::None, _) => false,
-        (_, None) => true,
-        (_, Some(_)) => audio.iter().any(|(_, r)| r.uri.is_none()),
+    // 变体引用的音频组在主播放列表里没有一条 rendition 时（来源写错了组名）与没有引用一样，用混着的音频
+    let group_listed = variant.audio.as_deref().is_some_and(|group| {
+        renditions(master, RenditionKind::Audio).any(|(_, r)| r.group == group)
+    });
+    let muxed_audio = match &preference.audio {
+        Renditions::None => false,
+        _ if !group_listed => true,
+        _ => audio.iter().any(|(_, r)| r.uri.is_none()),
     };
     let subtitles = subtitles
         .into_iter()
@@ -203,10 +214,14 @@ fn pick<'a>(
                 (None, _) => Vec::new(),
             })
         }
+        Renditions::These(choices) if choices.is_empty() => Err(SelectError::NoChoices { kind }),
         Renditions::These(choices) => {
             let mut picked: Vec<(usize, &Rendition)> = Vec::with_capacity(choices.len());
             for choice in choices {
-                if group.is_none() && matches!(choice, RenditionChoice::Language(_)) {
+                if kind == RenditionKind::Audio
+                    && group.is_none()
+                    && matches!(choice, RenditionChoice::Language(_))
+                {
                     continue;
                 }
                 let found = one(master, kind, group, choice)?;
@@ -263,7 +278,7 @@ fn one<'a>(
                 })
                 .ok_or_else(|| SelectError::LanguageNotFound {
                     kind,
-                    group: group.expect("没有组时不按语言找").to_owned(),
+                    group: group.map(str::to_owned),
                     language: language.to_owned(),
                     available: in_group().filter_map(|(_, r)| r.language.clone()).collect(),
                 })

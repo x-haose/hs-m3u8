@@ -61,14 +61,16 @@ pub(crate) async fn download(
             .groups
             .iter()
             .flat_map(|ranges| ranges.iter().enumerate())
+            .filter(|(_, range)| !range.is_empty())
             .filter_map(|(track, range)| items[track][range.start].take())
             .collect();
         fetch(fetcher, heads, progress).await?;
-        let groups: Vec<(usize, Vec<GroupTrack>)> =
-            group_input(plan, &names, layout, |range| range.start..range.start + 1)
-                .into_iter()
-                .enumerate()
-                .collect();
+        let groups: Vec<(usize, Vec<GroupTrack>)> = group_input(plan, &names, layout, |range| {
+            range.start..range.end.min(range.start + 1)
+        })
+        .into_iter()
+        .enumerate()
+        .collect();
         let streams = streams.to_vec();
         let root = layout.root().to_path_buf();
         blocking(move || output::check_merge(&streams, &groups, container, &root)).await??;

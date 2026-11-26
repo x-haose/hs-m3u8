@@ -202,6 +202,9 @@ impl From<core::MergeUnsupported> for Mp4Unsupported {
         // NoStreams 不带位置，它的分支不用组号与轨号
         let (group, track) = unsupported.at().map_or((0, 0), hls_track);
         match unsupported {
+            U::SubtitleTooLong { .. } => {
+                unreachable!("Python 的输出选项不把字幕封进合并文件（见 OutputOptions::to_core）")
+            }
             // HLS 只合并成 MP4，容器恒为 MP4
             U::Codec { kind, codec, .. } => Mp4Unsupported::Codec {
                 group,

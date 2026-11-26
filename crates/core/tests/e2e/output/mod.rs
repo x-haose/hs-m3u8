@@ -13,7 +13,8 @@ use std::path::Path;
 use hs_m3u8_core::{JobRequest, Target, Url};
 use hs_m3u8_hls::{MediaPlaylist, Playlist, RenditionKind, parse};
 use hs_m3u8_remux::{
-    Container, Control, DiscontinuityGroup, Label, Segment, Streams, Track, TrackSegments,
+    Container, Control, DiscontinuityGroup, Label, Segment, Streams, SubtitleMode, Track,
+    TrackSegments,
 };
 
 use crate::{both_targets, request};
@@ -93,7 +94,7 @@ fn assert_hls_matches(hls: &Path, mp4: &Path) {
         &groups,
         &merged,
         Container::Mp4,
-        true,
+        SubtitleMode::Embed,
         &Control::default(),
     )
     .unwrap();

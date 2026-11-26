@@ -16,6 +16,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
+use hs_m3u8_hls::RenditionKind;
 use hs_m3u8_remux::standalone::{self, Format};
 use hs_m3u8_remux::{Streams, fmp4};
 use tokio_util::sync::CancellationToken;
@@ -135,15 +136,21 @@ fn fill(
     cancel: &CancellationToken,
     placed: &dyn Fn(usize),
 ) -> Result<(), Error> {
+    // 各组的声明时长（第 0 条轨，即变体的），字幕轨在一组里没有分片时用它补一个空分片
+    let durations: Vec<u64> = groups
+        .iter()
+        .map(|g| g[0].segments.iter().map(|s| s.duration_us).sum())
+        .collect();
     let mut tracks = Vec::with_capacity(streams.len());
     for (track, &kind) in streams.iter().enumerate() {
         let dir = stage.join(track.to_string());
         fs::create_dir(&dir).map_err(io_error("创建", &dir))?;
+        let blank = (kind == Streams::Subtitles).then_some(durations.as_slice());
         tracks.push(fill_track(
             &dir,
             work_dir,
             track,
-            kind == Streams::Subtitles,
+            blank,
             groups.iter().map(|g| &g[track]),
             cancel,
             placed,
@@ -189,12 +196,14 @@ struct TrackFiles {
     peak_bps: Option<u64>,
 }
 
-/// 放好第 `track` 条轨各组的分片与 init 段；`placed` 见 [`stage`]。
+/// 放好第 `track` 条轨各组的分片与 init 段；`placed` 见 [`stage`]。字幕轨的 `blank` 为各组的声明时长：一组里没有字幕
+/// 分片时放一个只有文件头的 WebVTT 分片占住这段时长，各 rendition 的不连续段才对得上（RFC 8216 6.2.4）；音视频轨为
+/// None。
 fn fill_track<'a>(
     dir: &Path,
     work_dir: &Path,
     track: usize,
-    subtitles: bool,
+    blank: Option<&[u64]>,
     groups: impl Iterator<Item = &'a GroupTrack>,
     cancel: &CancellationToken,
     placed: &dyn Fn(usize),
@@ -226,9 +235,21 @@ fn fill_track<'a>(
                 placed(1);
                 (Some(name), Content::Fmp4(trex))
             }
-            None if subtitles => (None, Content::WebVtt),
+            None if blank.is_some() => (None, Content::WebVtt),
             None => (None, Content::Standalone(None)),
         };
+        if let Some(durations) = blank
+            && group.segments.is_empty()
+        {
+            let name = format!("{index}.{VTT}");
+            write_file(&dir.join(&name), "WEBVTT\n")?;
+            written.groups.push(PlaylistGroup {
+                init: None,
+                segments: vec![(name, durations[group_index])],
+            });
+            index += 1;
+            continue;
+        }
         let mut segments = Vec::with_capacity(group.segments.len());
         for segment in &group.segments {
             if cancel.is_cancelled() {
@@ -382,10 +403,15 @@ fn master_playlist(selection: &SelectionRecord, bandwidth: u64) -> String {
     let mut media = String::new();
     let mut track = 1;
     let groups = [
-        ("AUDIO", "audio", &selection.audio),
-        ("SUBTITLES", "subs", &selection.subtitles),
+        (RenditionKind::Audio, "AUDIO", "audio", &selection.audio),
+        (
+            RenditionKind::Subtitles,
+            "SUBTITLES",
+            "subs",
+            &selection.subtitles,
+        ),
     ];
-    for (kind, group, renditions) in groups {
+    for (kind, tag, group, renditions) in groups {
         let any_default = renditions.iter().any(|r| r.default);
         let mut names: Vec<String> = Vec::new();
         for (n, rendition) in renditions.iter().enumerate() {
@@ -400,16 +426,17 @@ fn master_playlist(selection: &SelectionRecord, bandwidth: u64) -> String {
                 name = format!("{name} ({})", n + 1);
             }
             names.push(name.clone());
-            let default = rendition.default || (kind == "AUDIO" && !any_default && n == 0);
+            let default =
+                rendition.default || (kind == RenditionKind::Audio && !any_default && n == 0);
             let yes = |flag: bool| if flag { "YES" } else { "NO" };
             media.push_str(&format!(
-                "#EXT-X-MEDIA:TYPE={kind},GROUP-ID=\"{group}\",NAME=\"{name}\""
+                "#EXT-X-MEDIA:TYPE={tag},GROUP-ID=\"{group}\",NAME=\"{name}\""
             ));
             if let Some(language) = language {
                 media.push_str(&format!(",LANGUAGE=\"{language}\""));
             }
             media.push_str(&format!(",DEFAULT={},AUTOSELECT=YES", yes(default)));
-            if kind == "SUBTITLES" {
+            if kind == RenditionKind::Subtitles {
                 media.push_str(&format!(",FORCED={}", yes(rendition.forced)));
             }
             media.push_str(&format!(",URI=\"{track}/index.m3u8\"\n"));

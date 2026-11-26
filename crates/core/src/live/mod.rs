@@ -115,7 +115,7 @@ struct Recorder<'a> {
     /// 定下的结束原因：不再刷新，处理完暂存的播放列表即结束
     ending: Option<LiveEnd>,
     /// 输出含合并文件 时录制中的核对；不输出合并文件 时为 None
-    mp4: Option<MergeCheck>,
+    merge: Option<MergeCheck>,
     /// 已察觉的停滞（见 [`Recorder::observe_stall`]）
     stall: Option<Stall>,
 }
@@ -135,7 +135,7 @@ pub(crate) async fn record(
     count_stored(&stored, ctx.progress);
     let now = Instant::now();
     let phase = initial_phase(&stored, dir)?;
-    let (mp4, batches) = match merge {
+    let (merge, batches) = match merge {
         Some((streams, container)) => {
             let (check, batches) = merge_check(streams, container, &stored, dir)?;
             (Some(check), batches)
@@ -143,7 +143,7 @@ pub(crate) async fn record(
         None => (None, Vec::new()),
     };
     let states = live_tracks(&tracks, &stored, now)?;
-    let mut recorder = Recorder::new(&ctx, options, states, phase, mp4);
+    let mut recorder = Recorder::new(&ctx, options, states, phase, merge);
     recorder.start_merge_check(batches);
     recorder.announce_recording();
     let first = tracks
@@ -185,7 +185,7 @@ fn merge_check(
     stored: &Stored,
     dir: &WorkDir,
 ) -> Result<(MergeCheck, Vec<Batch>), Error> {
-    let plan = merge_plan(&stored.segments, dir.layout())?;
+    let plan = merge_plan(&stored.segments, &streams, dir.layout())?;
     Ok(MergeCheck::new(streams, container, &plan, stored))
 }
 
@@ -237,7 +237,7 @@ impl<'a> Recorder<'a> {
         options: LiveOptions,
         tracks: Vec<LiveTrack>,
         phase: Phase,
-        mp4: Option<MergeCheck>,
+        merge: Option<MergeCheck>,
     ) -> Recorder<'a> {
         if let Phase::Decided { session } = phase {
             ctx.progress.send_modify(|p| p.session = Some(session));
@@ -255,14 +255,14 @@ impl<'a> Recorder<'a> {
             direct: ctx.fetcher.direct(),
             phase,
             ending: None,
-            mp4,
+            merge,
             stall: None,
         }
     }
 
     /// 在后台按顺序核对目录里已录齐的组（`batches`，见 [`MergeCheck::new`]）；不输出合并文件 或没有录齐的组时什么也不做。
     fn start_merge_check(&mut self, batches: Vec<Batch>) {
-        if let Some(check) = &self.mp4
+        if let Some(check) = &self.merge
             && !batches.is_empty()
         {
             let root = self.dir.layout().root().to_path_buf();
@@ -310,9 +310,9 @@ impl<'a> Recorder<'a> {
                 Event::Downloaded((id, result)) => {
                     let recorded = result.is_ok();
                     self.on_finished(id, result)?;
-                    if let (true, Some(check)) = (recorded, &mut self.mp4) {
+                    if let (true, Some(check)) = (recorded, &mut self.merge) {
                         let reason = check.recorded(id, self.dir.layout()).await?;
-                        self.report_mp4(reason);
+                        self.report_merge(reason);
                     }
                 }
             }
@@ -460,16 +460,16 @@ impl<'a> Recorder<'a> {
             }
             Done::Checked { track, result } => self.checked(track, result?).await,
             Done::MergeChecked { result } => {
-                let check = self.mp4.as_mut().expect("只在输出 MP4 时派出");
+                let check = self.merge.as_mut().expect("只在输出合并文件时派出");
                 let reason = check.judged(result)?;
-                self.report_mp4(reason);
+                self.report_merge(reason);
                 Ok(())
             }
         }
     }
 
-    /// 核对出的放不进 MP4 的原因放进进度；已有的不换。
-    fn report_mp4(&self, reason: Option<MergeUnsupported>) {
+    /// 核对出的放不进合并文件的原因放进进度；已有的不换。
+    fn report_merge(&self, reason: Option<MergeUnsupported>) {
         if let Some(reason) = reason {
             self.progress.send_modify(|p| {
                 p.merge_unsupported.get_or_insert(reason);

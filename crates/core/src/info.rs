@@ -8,7 +8,7 @@ use hs_m3u8_hls::{
     VariantChoice, VariantKey, renditions,
 };
 
-use crate::HttpFailure;
+use crate::FetchFailure;
 use crate::resolve::{self, Chosen};
 
 /// 一个变体的属性。
@@ -80,8 +80,8 @@ pub struct SubtitleInfo {
     pub autoselect: bool,
     /// FORCED=YES：只含画面里外语对白等必须显示的内容
     pub forced: bool,
-    /// 能不能下：要读它的媒体播放列表才知道，只有所选变体的字幕组里的才读；不在那一组里的（选不到）为 None
-    pub support: Option<Result<(), SubtitleProblem>>,
+    /// 能不能下：要读它的媒体播放列表才知道
+    pub support: SubtitleSupport,
     /// 身份，开始任务按它选（[`SubtitleInfo::choice`]）
     pub key: RenditionKey,
 }
@@ -93,18 +93,29 @@ impl SubtitleInfo {
     }
 }
 
-/// 字幕下不了的原因。
+/// 一条字幕能不能下（[`SubtitleInfo::support`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubtitleSupport {
+    /// 没读它的媒体播放列表：不在所选变体的字幕组里（选不到），或没写 URI（不合 RFC 8216，选到时报错）；开始任务时只读选
+    /// 到的，其余的也是这样
+    NotRead,
+    /// 分段的 WebVTT 文本，下得了
+    Supported,
+    /// 本库不处理的格式：自动选到的跳过，点名的报 [`crate::Unsupported::SubtitleFormat`]
+    Unsupported(SubtitleFormat),
+    /// 读不了它的媒体播放列表（探测时；开始任务时选到的这样会使任务以那次的错误失败）
+    Unreadable(SubtitleProblem),
+}
+
+/// 探测时读不了字幕的媒体播放列表的原因。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SubtitleProblem {
-    /// 不是本库能处理的格式（只处理分段的 WebVTT 文本）
-    #[error("字幕格式不支持：{0}")]
-    Format(SubtitleFormat),
-    /// 拉不到它的媒体播放列表（重试之后），原因如实给出
+    /// 拉不到（重试之后）：404/410、临时故障或内容没写完，可否重试见其中
     #[error("拉不到字幕的媒体播放列表：{0}")]
-    Fetch(HttpFailure),
-    /// 它的媒体播放列表写坏了，或用了不支持的特性
-    #[error("字幕的媒体播放列表不能用：{0}")]
-    Playlist(String),
+    Fetch(FetchFailure),
+    /// 拉到了而用不了：播放列表写坏、用了不支持的特性、回调出错等，值为错误说明
+    #[error("字幕的媒体播放列表用不了：{0}")]
+    Unusable(String),
 }
 
 /// 本库不处理的字幕格式。
@@ -275,7 +286,7 @@ fn subtitle_info(chosen: &Chosen, index: usize) -> SubtitleInfo {
             .subtitle_support
             .iter()
             .find(|(i, _)| *i == index)
-            .map(|(_, support)| support.clone()),
+            .map_or(SubtitleSupport::NotRead, |(_, support)| support.clone()),
         key: RenditionKey::of(master, RenditionKind::Subtitles, index).expect("下标在范围内"),
     }
 }

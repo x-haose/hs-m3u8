@@ -121,7 +121,8 @@ impl Tasks {
         });
     }
 
-    /// 核对之前录齐的组能否放进合并文件：按顺序核对 `batches`（见 [`super::merge_check::MergeCheck::new`]）；`root` 为任务目录。
+    /// 核对之前录齐的组能否放进合并文件：按顺序核对 `batches`（见 [`super::merge_check::MergeCheck::new`]）；`root` 为
+    /// 任务目录。
     pub(super) fn check_merge(
         &mut self,
         streams: Vec<Streams>,

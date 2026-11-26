@@ -1,7 +1,7 @@
-//! HLS 下载引擎：选轨、并发拉取分片、AES-128 解密与校验、可续传的任务目录、直播录制，输出为 MP4 或 Matroska、可直接播放的本地 HLS
-//! 目录，或两者都要。另有单个文件的分段下载（[`Engine::start_file`]），与 HLS 共用客户端、引擎的请求名额、重试与任务目
-//! 录；先认出地址是播放列表、网页还是文件用 [`Engine::identify`]，按同样的请求设置取回一个小资源（如 tracker 列表）用
-//! [`Engine::fetch`]，调用接口（如网盘的 JSON 接口，任何状态都拿回整个响应）用 [`Engine::call`]。
+//! HLS 下载引擎：选轨、并发拉取分片、AES-128 解密与校验、可续传的任务目录、直播录制，输出为 MP4 或 Matroska、可直接播放
+//! 的本地 HLS 目录，或两者都要。另有单个文件的分段下载（[`Engine::start_file`]），与 HLS 共用客户端、引擎的请求名额、重
+//! 试与任务目录；先认出地址是播放列表、网页还是文件用 [`Engine::identify`]，按同样的请求设置取回一个小资源（如 tracker
+//! 列表）用 [`Engine::fetch`]，调用接口（如网盘的 JSON 接口，任何状态都拿回整个响应）用 [`Engine::call`]。
 //!
 //! 一个任务把一个播放列表地址变成它的输出（[`Target`]）。任务目录（默认与输出同级、名为输出的主名加 `.hsdl`）保存
 //! `job.json` 与已完成的分片；分片先写 `.part`、落盘后原子改名，因此「最终文件存在」即「该分片完整」。中断后用同样的请
@@ -79,8 +79,8 @@ pub use hooks::{HookError, HookKind, Hooks, NoHooks, Purpose, RequestParts};
 pub use hs_m3u8_remux::Unsupported as MergeUnsupported;
 pub use ident::bare_url;
 pub use info::{
-    AudioInfo, MasterInfo, Selected, SubtitleFormat, SubtitleInfo, SubtitleProblem, TrackInfo,
-    VariantInfo,
+    AudioInfo, MasterInfo, Selected, SubtitleFormat, SubtitleInfo, SubtitleProblem,
+    SubtitleSupport, TrackInfo, VariantInfo,
 };
 pub use output::{
     FileOutputOptions, MergedFile, OutputOptions, SubtitleFileFormat, SubtitleOutput, Target,
@@ -90,8 +90,8 @@ pub use proxy::{Bypass, ProxySource, SystemProxy, system_proxy};
 pub use report::{
     FileCount, FileOutput, FileProgress, FileSaved, HlsSaved, Leftover, LeftoverKind, LiveEnd,
     LiveReport, MergedOutput, MissReason, Missed, NewSession, Output, Progress, RefreshReason,
-    Retrying, Saved, SegmentCounts, SourceBreak, Stage, StallCause, Throttled, TrackKind,
-    TrackProgress, Writing,
+    Retrying, Saved, SegmentCounts, SourceBreak, Stage, StallCause, SubtitleFile, Throttled,
+    TrackKind, TrackProgress, Writing,
 };
 pub use request::{
     Body, Call, HttpOptions, JobRequest, KeyOverride, LiveOptions, Method, Proxy, RetryPolicy,

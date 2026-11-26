@@ -12,20 +12,24 @@ use crate::subtitles::{self, Lane};
 use crate::timing::{MICROS, group_offset, wrap_shifts_us};
 use crate::write::Muxer;
 use crate::{
-    Cancel, Container, Control, DiscontinuityGroup, Error, Label, Merged, Origin, Streams, Track,
-    TrackSegments, Unsupported, WriteProgress, init, sync,
+    Cancel, Container, Control, DiscontinuityGroup, Error, Label, Merged, Origin, Streams,
+    SubtitleCues, SubtitleMode, Track, TrackSegments, Unsupported, WriteProgress, init, sync,
 };
 
 /// 把各不连续段组的分片复制进 `output`（`container` 的格式，MP4 时 moov 前置），写完回读核对每路流的包数并落盘。失败
 /// 或取消时 `output` 上可能留有写了一半的文件，由调用方删除；已存在的 `output` 会被替换。`tracks[i]` 为第 i 条轨贡献的流
-/// 与它的标注；字幕轨（[`Streams::Subtitles`]）的对齐见 `subtitles` 模块，`embed_subtitles` 为真时封进输出（Matroska 为
-/// SubRip，MP4 为 mov_text），否则只在结果里给出对齐后的 cue。输出流的顺序：各音视频轨的流按轨号依次排开，其后是各字幕轨。
+/// 与它的标注。输出流的顺序：各音视频轨的流按轨号依次排开，其后是各字幕轨（封进输出时）。
+///
+/// 字幕轨（[`Streams::Subtitles`]）不经 FFmpeg 读，不参与组间的偏移；一组里可以没有字幕分片。各组的字幕按
+/// X-TIMESTAMP-MAP 对齐到这一组的画面（RFC 8216 3.5：cue 的媒体时刻为 MPEGTS + (cue − LOCAL)，没有映射时本地 0 即媒体
+/// 0，33 位回绕按本组起点展开），截到这一组的时间范围里（从起点到起点加上音视频各轨声明时长里最长的），起止换到 1 毫秒；
+/// 跨分片重复的 cue 只留一条。丢掉的计入 [`crate::StreamReport::discarded_cues`]。`subtitles` 定字幕怎样进输出。
 pub fn remux(
     tracks: &[Track],
     groups: &[DiscontinuityGroup],
     output: &Path,
     container: Container,
-    embed_subtitles: bool,
+    subtitles: SubtitleMode,
     control: &Control,
 ) -> Result<Merged, Error> {
     init()?;
@@ -35,7 +39,7 @@ pub fn remux(
     let Some(path) = ffmpeg_path(output) else {
         return Err(Error::NonUtf8Path(output.to_path_buf()));
     };
-    let merged = write_groups(tracks, &groups, path, container, embed_subtitles, control)?;
+    let merged = write_groups(tracks, &groups, path, container, subtitles, control)?;
     sync(output)?;
     Ok(merged)
 }
@@ -111,10 +115,11 @@ fn write_groups(
     groups: &[Numbered<'_>],
     path: &str,
     container: Container,
-    embed_subtitles: bool,
+    mode: SubtitleMode,
     control: &Control,
 ) -> Result<Merged, Error> {
     let cancel = &control.cancel;
+    let embed_subtitles = mode == SubtitleMode::Embed;
     let streams: Vec<Streams> = tracks.iter().map(|t| t.streams).collect();
     let first = open_group(&streams, groups[0], None, container, cancel)?;
     let layout = layout_of(&first, tracks.len())?;
@@ -134,7 +139,7 @@ fn write_groups(
         cancel,
         &first,
         &layout,
-        &labels,
+        Some(&labels),
         &subtitle_tracks[..embedded],
     )?;
     let media_outputs: usize = layout.iter().map(Vec::len).sum();
@@ -166,10 +171,21 @@ fn write_groups(
             &control.progress,
         )?;
     }
+    for lane in &lanes {
+        if let Some((output, _)) = lane.output {
+            muxer.set_discarded_cues(output, lane.discarded);
+        }
+    }
     let report = muxer.finish_verified(path, cancel)?;
     Ok(Merged {
         report,
-        subtitles: lanes.into_iter().map(|lane| lane.cues).collect(),
+        subtitles: lanes
+            .into_iter()
+            .map(|lane| SubtitleCues {
+                cues: lane.cues,
+                discarded_cues: lane.discarded,
+            })
+            .collect(),
     })
 }
 
@@ -189,8 +205,23 @@ fn write_group(
     for (source, wrap_us) in sources.iter_mut().zip(wraps) {
         source.offset_us = wrap_us + offset_us;
     }
+    // 本组的声明时长：音视频各轨 EXTINF 之和里最长的（字幕截到它，见 remux 的说明）
+    let declared_us = sources
+        .iter()
+        .map(|s| {
+            let segments = &tracks[s.at.index()].segments;
+            segments.iter().map(|seg| seg.duration_us).sum::<u64>()
+        })
+        .max()
+        .map_or(0, |us| i64::try_from(us).unwrap_or(i64::MAX));
     for lane in lanes.iter_mut() {
-        lane.load_group(group, &tracks[lane.track], reference_us, offset_us)?;
+        lane.load_group(
+            group,
+            &tracks[lane.track],
+            reference_us,
+            offset_us,
+            declared_us,
+        )?;
     }
     // 全组已写出的最大 DTS，输出时间线上的微秒
     let mut clock_us: Option<i64> = None;
@@ -266,7 +297,8 @@ fn validate(streams: &[Streams], groups: &[Numbered<'_>]) -> Result<(), Error> {
             });
         }
         for (track, t) in g.tracks.iter().enumerate() {
-            if t.segments.is_empty() {
+            // 字幕轨在一组里可以没有分片：这一组就没有字幕
+            if t.segments.is_empty() && streams[track] != Streams::Subtitles {
                 return Err(Error::EmptyTrack {
                     at: Origin::Track { group, track },
                 });

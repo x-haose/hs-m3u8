@@ -22,7 +22,8 @@ use hs_m3u8_core::{
     Engine, Error, JobRequest, MergedFile, Output, OutputOptions, RetryPolicy, Source, Target, Url,
 };
 use hs_m3u8_remux::{
-    Container, Control, DiscontinuityGroup, Label, Segment, Streams, Track, TrackSegments,
+    Container, Control, DiscontinuityGroup, Label, Segment, Streams, SubtitleMode, Track,
+    TrackSegments,
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -91,7 +92,7 @@ fn expected(dir: &Path, tracks: &[Track], groups: &[DiscontinuityGroup]) -> Vec<
         groups,
         &path,
         Container::Mp4,
-        true,
+        SubtitleMode::Embed,
         &Control::default(),
     )
     .unwrap();

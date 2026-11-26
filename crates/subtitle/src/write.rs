@@ -4,20 +4,24 @@ use std::fmt::Write as _;
 
 use crate::{Cue, plain_text, srt_text};
 
-/// SRT 文件：从 1 起编号，时刻 `HH:MM:SS,mmm`（毫秒向下取整），正文见 [`srt_text`]；正文为空的 cue 写一个空格，空行在
-/// SRT 里是 cue 的分隔。
+/// SRT 文件：从 1 起编号，时刻 `HH:MM:SS,mmm`（毫秒向下取整），正文见 [`srt_text`]。空行在 SRT 里是 cue 的分隔：正文
+/// 去掉标签后只剩空白的行不写，一行都不剩的 cue 写一个空格。
 pub fn srt(cues: &[Cue]) -> String {
     let mut out = String::new();
     for (n, cue) in cues.iter().enumerate() {
         let text = srt_text(&cue.text);
-        let text = if text.trim().is_empty() { " " } else { &text };
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        let text = if lines.is_empty() {
+            " ".to_owned()
+        } else {
+            lines.join("\n")
+        };
         writeln!(
             out,
-            "{}\n{} --> {}\n{}\n",
+            "{}\n{} --> {}\n{text}\n",
             n + 1,
             clock(cue.start_us, ','),
-            clock(cue.end_us, ','),
-            text.replace("\n\n", "\n")
+            clock(cue.end_us, ',')
         )
         .expect("写进 String 不会失败");
     }
@@ -147,10 +151,19 @@ mod tests {
         let mut first = cue(1_234_567, 3_723_000_999, "<b>a</b>\n\n<c.x>b</c>");
         first.id = Some("x".into());
         first.settings = "line:0".into();
-        let cues = [first, cue(4_000_000_000, 4_000_001_000, "<v A></v>")];
+        let cues = [
+            first,
+            cue(4_000_000_000, 4_000_001_000, "<v A></v>"),
+            cue(
+                4_000_002_000,
+                4_000_003_000,
+                "<c.x></c>\n你好\n<c></c>\n<c></c>\n再见",
+            ),
+        ];
         assert_eq!(
             srt(&cues),
-            "1\n00:00:01,234 --> 01:02:03,000\n<b>a</b>\nb\n\n2\n01:06:40,000 --> 01:06:40,001\n \n\n"
+            "1\n00:00:01,234 --> 01:02:03,000\n<b>a</b>\nb\n\n2\n01:06:40,000 --> 01:06:40,001\n \n\n\
+             3\n01:06:40,002 --> 01:06:40,003\n你好\n再见\n\n"
         );
         assert_eq!(
             webvtt(&cues[..1]),

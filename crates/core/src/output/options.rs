@@ -153,9 +153,13 @@ impl OutputOptions {
         if let Some(hls) = self.target.hls() {
             targets.push((OutputKind::Hls, hls));
         }
-        let mut resolved = resolve(work_dir, &targets, self.overwrite, self.keep_work_dir)?;
-        resolved.subtitles = self.subtitles.clone();
-        Ok(resolved)
+        resolve(
+            work_dir,
+            &targets,
+            self.overwrite,
+            self.keep_work_dir,
+            Some(self.subtitles.clone()),
+        )
     }
 }
 
@@ -202,6 +206,7 @@ impl FileOutputOptions {
             &targets,
             self.overwrite,
             self.keep_work_dir,
+            None,
         )
     }
 }
@@ -225,14 +230,15 @@ fn work_dir_as_given(
     }
 }
 
-/// 校验并补全为绝对路径：文件（合并文件、另存的字幕文件、文件任务的输出）路径不以分隔符结尾，各路径见 [`absolute_path`]、互不相同也不互相
-/// 包含，输出路径补全后是 UTF-8（任务目录记下正在写的输出，记录的写法要求 UTF-8；Unix 上的文件名、Windows 上含孤立
-/// 代理项的路径可以不是）。只按字面判断，不访问文件系统：输出能否写在任务开头查。
+/// 校验并补全为绝对路径：文件（合并文件、另存的字幕文件、文件任务的输出）路径不以分隔符结尾，各路径见 [`absolute_path`]
+/// 、互不相同也不互相包含，输出路径补全后是 UTF-8（任务目录记下正在写的输出，记录的写法要求 UTF-8；Unix 上的文件名、
+/// Windows 上含孤立代理项的路径可以不是）。只按字面判断，不访问文件系统：输出能否写在任务开头查。
 fn resolve(
     work_dir: PathBuf,
     targets: &[(OutputKind, &Path)],
     overwrite: bool,
     keep_work_dir: bool,
+    subtitles: Option<SubtitleOutput>,
 ) -> Result<ResolvedOutput, Error> {
     let invalid = |reason: &str, path: &Path| {
         Err(Error::InvalidInput(format!("{reason}：{}", path.display())))
@@ -281,10 +287,7 @@ fn resolve(
         work_dir,
         overwrite,
         keep_work_dir,
-        subtitles: SubtitleOutput {
-            embed: false,
-            files: None,
-        },
+        subtitles,
     })
 }
 
@@ -296,8 +299,8 @@ pub(crate) struct ResolvedOutput {
     pub work_dir: PathBuf,
     pub overwrite: bool,
     pub keep_work_dir: bool,
-    /// 文件任务不用
-    pub subtitles: SubtitleOutput,
+    /// 选了字幕时怎样输出；文件任务为 None
+    pub subtitles: Option<SubtitleOutput>,
 }
 
 impl ResolvedOutput {
@@ -326,7 +329,8 @@ impl ResolvedOutput {
         &self,
         subtitles: &[(Option<&str>, bool)],
     ) -> Result<ResolvedOutput, Error> {
-        let (Some(format), Some((merged, _))) = (self.subtitles.files, self.merged()) else {
+        let format = self.subtitles.as_ref().and_then(|s| s.files);
+        let (Some(format), Some((merged, _))) = (format, self.merged()) else {
             return Ok(self.clone());
         };
         if subtitles.is_empty() {
@@ -351,18 +355,18 @@ impl ResolvedOutput {
         for (n, path) in paths.iter().enumerate() {
             targets.push((OutputKind::Subtitles(n), path));
         }
-        let mut resolved = resolve(
+        resolve(
             self.work_dir.clone(),
             &targets,
             self.overwrite,
             self.keep_work_dir,
-        )?;
-        resolved.subtitles = self.subtitles.clone();
-        Ok(resolved)
+            self.subtitles.clone(),
+        )
     }
 }
 
-/// 另存的字幕文件名（见 [`SubtitleOutput::files`]）：`subtitles` 为各字幕的语言与是否强制。
+/// 另存的字幕文件名（见 [`SubtitleOutput::files`]）：`subtitles` 为各字幕的语言与是否强制。同名按不分 ASCII 大小写比：
+/// macOS 与 Windows 上的文件名默认不分大小写，`en` 与 `EN` 是同一个文件。
 fn subtitle_file_names(
     stem: &str,
     subtitles: &[(Option<&str>, bool)],
@@ -377,7 +381,7 @@ fn subtitle_file_names(
         let base = format!("{stem}.{language}{forced}");
         let mut name = format!("{base}.{extension}");
         let mut n = 2;
-        while names.contains(&name) {
+        while names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
             name = format!("{base}.{n}.{extension}");
             n += 1;
         }
@@ -450,18 +454,14 @@ fn lexical(absolute: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
-    fn mp4(path: &str) -> Target {
-        Target::File(MergedFile {
-            path: path.into(),
-            container: Container::Mp4,
-        })
-    }
-
     /// 另存的字幕文件与合并文件同级，名字按语言与是否强制，同名的从第二个起加序号；语言不合文件名时为 und。只输出本地
     /// HLS 而要另存时报参数错误。
     #[test]
     fn subtitle_files_are_named_after_the_merged_file() {
-        let mut options = OutputOptions::new(mp4("/v/movie.mkv"));
+        let mut options = OutputOptions::new(Target::File(MergedFile {
+            path: "/v/movie.mkv".into(),
+            container: Container::Matroska,
+        }));
         options.subtitles.files = Some(SubtitleFileFormat::Srt);
         let resolved = options.resolve().unwrap();
         let subtitles = [
@@ -470,6 +470,7 @@ mod tests {
             (Some("zh-Hans"), false),
             (Some("a/b"), false),
             (None, false),
+            (Some("EN"), true),
         ];
         let extended = resolved.with_subtitle_files(&subtitles).unwrap();
         let names: Vec<String> = extended
@@ -489,10 +490,11 @@ mod tests {
                 "movie.en.forced.srt",
                 "movie.zh-Hans.2.srt",
                 "movie.und.srt",
-                "movie.und.2.srt"
+                "movie.und.2.srt",
+                "movie.EN.forced.2.srt"
             ]
         );
-        assert_eq!(extended.outputs.len(), 6);
+        assert_eq!(extended.outputs.len(), 7);
 
         let mut hls_only = OutputOptions::new(Target::Hls("/v/movie".into()));
         hls_only.subtitles.files = Some(SubtitleFileFormat::WebVtt);
@@ -526,6 +528,12 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn paths_whose_name_changes_when_completed_are_rejected() {
+        let mp4 = |path: &str| {
+            Target::File(MergedFile {
+                path: path.into(),
+                container: Container::Mp4,
+            })
+        };
         for path in [r"D:\...", r"D:\x\...", r"D:\x\a.", r"D:\x\a "] {
             let mut options = OutputOptions::new(mp4(path));
             options.work_dir = Some(r"C:\work".into());

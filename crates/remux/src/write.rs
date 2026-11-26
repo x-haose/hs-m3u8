@@ -23,6 +23,10 @@ use crate::{
 /// 一路输出流：第 0 组决定其编码参数，写出过程中累计统计。`_us` 结尾的时刻为输出时间线上的微秒。
 struct OutStream {
     shape: Shape,
+    /// mov_text：回读时不数封装器自己补的清屏空样本（见 [`count_packets`]）
+    blank_samples: bool,
+    /// 见 [`StreamReport::discarded_cues`]；字幕写完后由调用方计入
+    discarded_cues: u64,
     /// 写头之后由封装器确定
     time_base: Rational,
     written: u64,
@@ -44,6 +48,7 @@ impl OutStream {
             skipped_without_dts: self.dropped.without_dts,
             skipped_before_keyframe: self.dropped.before_keyframe,
             discarded_corrupt_bytes: self.dropped.corrupt_bytes,
+            discarded_cues: self.discarded_cues,
             duration: match (self.start_us, self.end_us) {
                 (Some(start), Some(end)) => {
                     Duration::from_micros(u64::try_from(end - start).unwrap_or(0))
@@ -63,14 +68,14 @@ pub(crate) struct Muxer {
 
 impl Muxer {
     /// 以 `container` 的格式打开输出，按第 0 组（或各完整文件）`first`（各轨选中的流为 `layout`）建立音视频输出流，其后
-    /// 为 `subtitles` 里各轨（轨号）的字幕流，写上 `labels`（按轨号；合并完整文件时为空，不写）并写头。
+    /// 为 `subtitles` 里各轨（轨号）的字幕流，写上 `labels`（按轨号；合并完整文件时为 None，不写）并写头。
     pub(crate) fn open(
         path: &str,
         container: Container,
         cancel: &Cancel,
         first: &[OpenTrack],
         layout: &[Vec<Desc>],
-        labels: &[&Label],
+        labels: Option<&[&Label]>,
         subtitles: &[usize],
     ) -> Result<Muxer, Error> {
         let mut file = ffi::open_output(path, container, cancel)
@@ -85,7 +90,7 @@ impl Muxer {
             ffi::set_subtitle_parameters(&mut ost, codec);
             ost.set_time_base(SUBTITLE_TIME_BASE);
         }
-        if !labels.is_empty() {
+        if let Some(labels) = labels {
             let owners: Vec<usize> = layout
                 .iter()
                 .enumerate()
@@ -95,6 +100,18 @@ impl Muxer {
             label_streams(&mut file.octx, container, &owners, labels);
         }
         write_header(&mut file, container)?;
+        let media_outputs: usize = layout.iter().map(Vec::len).sum();
+        for n in 0..subtitles.len() {
+            let tb = file
+                .octx
+                .stream(media_outputs + n)
+                .expect("输出流已创建")
+                .time_base();
+            assert_eq!(
+                tb, SUBTITLE_TIME_BASE,
+                "链接的 FFmpeg 的 matroska 与 mov 封装器沿用字幕流设的时间基"
+            );
+        }
         let shapes = layout
             .iter()
             .flatten()
@@ -106,6 +123,9 @@ impl Muxer {
             .enumerate()
             .map(|(out, shape)| OutStream {
                 shape,
+                blank_samples: matches!(shape, Shape::Subtitle { .. })
+                    && codec == subtitles::Codec::MovText,
+                discarded_cues: 0,
                 time_base: file.octx.stream(out).expect("输出流已创建").time_base(),
                 written: 0,
                 dropped: Dropped::default(),
@@ -287,14 +307,13 @@ impl Muxer {
         let mut packet = Packet::copy(&subtitle.data);
         let dts = subtitle.start_us.rescale(MICROS, o.time_base);
         let duration = subtitle.duration_us.rescale(MICROS, o.time_base);
-        if o.last_dts
-            .is_some_and(|last| dts < last || (self.container == Container::Mp4 && dts == last))
-        {
-            return Err(Error::Unsupported(Unsupported::DtsNotIncreasing {
-                at,
-                kind: StreamKind::Subtitle,
-            }));
-        }
+        // 字幕通道的时刻都在 1 毫秒的网格上，换到写头后的时间基（见 open 里的核对）不舍入，且起点不往回走（MP4 严格递增）
+        let strict = self.container == Container::Mp4;
+        assert!(
+            o.last_dts
+                .is_none_or(|last| dts > last || (!strict && dts == last)),
+            "{at}的字幕包起点往回走了：字幕通道保证不会"
+        );
         packet.set_dts(Some(dts));
         packet.set_pts(Some(dts));
         packet.set_duration(duration);
@@ -313,6 +332,11 @@ impl Muxer {
         }
         self.outs[out].written += 1;
         Ok(())
+    }
+
+    /// 字幕流 `output` 在对齐与生成包时丢掉的 cue 数（见 [`StreamReport::discarded_cues`]）。
+    pub(crate) fn set_discarded_cues(&mut self, output: usize, cues: u64) {
+        self.outs[output].discarded_cues = cues;
     }
 
     /// 写尾（MP4 的 moov 前置时在这里把数据整体后移，FFmpeg 读写文件时同样轮询取消），关闭输出并检查关闭的结果，再回读
@@ -419,7 +443,7 @@ fn add_streams(
     Ok(())
 }
 
-/// 字幕流的时间基：WebVTT 的精度为毫秒，Matroska 的时间基也是。
+/// 字幕流的时间基，一个 tick 为 [`subtitles::TICK_US`]。
 const SUBTITLE_TIME_BASE: Rational = Rational(1, 1000);
 
 /// 给各输出流写上标注：第 i 路流属于第 `owners[i]` 条轨，标注为 `labels[owners[i]]`（见 [`Label`]）。每类流里都没有标默认
@@ -449,7 +473,7 @@ fn label_streams(
         let code = label
             .language
             .as_deref()
-            .and_then(hs_m3u8_subtitle::iso639_2)
+            .and_then(crate::iso639::iso639_2)
             .map_or("und", |(bibliographic, terminology)| match container {
                 Container::Matroska => bibliographic,
                 Container::Mp4 => terminology,
@@ -486,10 +510,7 @@ fn write_header(file: &mut OutputFile, container: Container) -> Result<(), Error
 
 /// 回读输出，核对每路流的包数与写入的一致。
 fn verify(path: &Path, outs: &[OutStream], cancel: &Cancel) -> Result<(), Error> {
-    let blanks: Vec<bool> = outs
-        .iter()
-        .map(|o| o.shape == Shape::Subtitle { codec: "mov_text" })
-        .collect();
+    let blanks: Vec<bool> = outs.iter().map(|o| o.blank_samples).collect();
     let found = count_packets(path, &blanks, cancel)?;
     if found.len() != outs.len() {
         return Err(Error::VerifyStreams {
@@ -509,9 +530,10 @@ fn verify(path: &Path, outs: &[OutStream], cancel: &Cancel) -> Result<(), Error>
     Ok(())
 }
 
-/// 回读文件，按流下标统计包数；`skip_blank[i]` 为真的流（mov_text）不数清屏的空样本：链接的 FFmpeg 的 movenc 在字幕
-/// 样本之间与末尾自己补上（mov_write_packet 与 mov_write_trailer），补几个取决于各路流的包的先后，本库写出的都有文字。经分片链读（见 [`crate::chain`]）：读文件出错照原样报为 [`Error::Io`]，取消为
-/// [`Error::Cancelled`]，其余为 [`Error::Reread`]（输出本身读不懂）。
+/// 回读文件，按流下标统计包数；`skip_blank[i]` 为真的流（mov_text）不数清屏的空样本：链接的 FFmpeg 的 movenc 在字幕样本
+/// 之间与末尾自己补上（mov_write_packet 与 mov_write_trailer），补几个取决于各路流的包的先后，本库写出的都有文字。经分
+/// 片链读（见 [`crate::chain`]）：读文件出错照原样报为 [`Error::Io`]，取消为 [`Error::Cancelled`]，其余为
+/// [`Error::Reread`]（输出本身读不懂）。
 fn count_packets(path: &Path, skip_blank: &[bool], cancel: &Cancel) -> Result<Vec<u64>, Error> {
     let file_failed = |cause| Error::Io {
         action: "回读",
@@ -538,7 +560,8 @@ fn count_packets(path: &Path, skip_blank: &[bool], cancel: &Cancel) -> Result<Ve
         if !chain::read(&mut ictx, &failure, &mut packet).map_err(halted)? {
             return Ok(counts);
         }
-        let blank = skip_blank.get(packet.stream()).copied().unwrap_or(false)
+        // 回读出的流比写出的多时没有这一项，照常计数，由 verify 报流数不符
+        let blank = skip_blank.get(packet.stream()).is_some_and(|&skip| skip)
             && packet
                 .data()
                 .is_none_or(|data| data.iter().all(|&b| b == 0) && data.len() <= 2);

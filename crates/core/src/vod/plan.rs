@@ -6,6 +6,8 @@ use hs_m3u8_hls::{InitSection, Segment};
 use sha2::{Digest, Sha256};
 
 use crate::ident::{Fingerprint, hex};
+use hs_m3u8_remux::Streams;
+
 use crate::resolve::{self, ResolvedTrack};
 use crate::{Error, MissReason, Missed, Unsupported};
 
@@ -55,6 +57,56 @@ impl Track {
         (track, ranges)
     }
 
+    /// 字幕轨：分片 `segments` 按所在的段（`runs`，不连续段序号与分片下标范围）落进音视频轨同号的段（序号为 `numbers`，
+    /// 能否合并为 `mergeable`）；另返回各可合并段里这条轨的分片在 `segments` 中的下标范围，没有时为空。
+    fn subtitles(
+        segments: &[Segment],
+        runs: &[(u64, Range<usize>)],
+        numbers: &[u64],
+        mergeable: &[bool],
+    ) -> (Self, Vec<Range<usize>>) {
+        let mut track = Track {
+            segments: Vec::new(),
+            skipped: Vec::new(),
+            inits: Vec::new(),
+        };
+        let mut ranges = Vec::new();
+        for (&number, &mergeable) in numbers.iter().zip(mergeable) {
+            if !mergeable {
+                continue;
+            }
+            let start = track.segments.len();
+            for (_, run) in runs.iter().filter(|(d, _)| *d == number) {
+                for s in &segments[run.clone()] {
+                    if s.gap {
+                        track.skipped.push((s.sequence, MissReason::Gap));
+                    } else {
+                        track.segments.push(s.clone());
+                    }
+                }
+            }
+            ranges.push(start..track.segments.len());
+        }
+        let used = |d: &u64| numbers.iter().zip(mergeable).any(|(n, &m)| m && n == d);
+        for (_, run) in runs.iter().filter(|(d, _)| !used(d)) {
+            for s in &segments[run.clone()] {
+                let reason = if s.gap {
+                    MissReason::Gap
+                } else {
+                    MissReason::Unmergeable
+                };
+                track.skipped.push((s.sequence, reason));
+            }
+        }
+        track.skipped.sort_by_key(|(sequence, _)| *sequence);
+        for init in track.segments.iter().filter_map(|s| s.init.as_ref()) {
+            if !track.inits.contains(init) {
+                track.inits.push(init.clone());
+            }
+        }
+        (track, ranges)
+    }
+
     /// 分片所用 init 段在 `inits` 中的下标；无 init 段时为 None。
     pub(crate) fn init_index(&self, segment: &Segment) -> Option<usize> {
         let init = segment.init.as_ref()?;
@@ -65,36 +117,58 @@ impl Track {
 
 pub(crate) struct Plan {
     pub tracks: Vec<Track>,
-    /// 不连续段组，按播放顺序；每组为各轨在组内的分片下标范围（轨道顺序同 `tracks`），范围都不为空
+    /// 不连续段组，按播放顺序；每组为各轨在组内的分片下标范围（轨道顺序同 `tracks`）。音视频轨的范围都不为空，字幕轨在
+    /// 这一组里没有分片时为空
     pub groups: Vec<Vec<Range<usize>>>,
     /// 见 [`Plan::digest`]
     digest: String,
 }
 
 impl Plan {
-    /// 点播计划。各轨的不连续段序列须相同（含标了 EXT-X-GAP 的分片），否则报
-    /// [`Unsupported::DiscontinuityMismatch`]；有轨在某段里只有 GAP 分片时这段合并不了，各轨在这段的分片都不下载；
-    /// 没有一段合并得了时报 [`Unsupported::NoMergeableGroup`]。要下载的分片取不到 key（见
-    /// [`resolve::require_key_uris`]，`custom_key` 为请求给了自定义 key）时报 [`Unsupported::KeyWithoutUri`]。
-    pub(crate) fn new(tracks: Vec<ResolvedTrack>, custom_key: bool) -> Result<Self, Error> {
-        if let Some(t) = tracks.iter().find(|t| t.playlist.segments.is_empty()) {
+    /// 点播计划；`streams` 为各轨的取流方式，字幕轨（[`Streams::Subtitles`]）不参与分组。音视频各轨的不连续段序列须相同
+    /// （含标了 EXT-X-GAP 的分片），否则报 [`Unsupported::DiscontinuityMismatch`]；有音视频轨在某段里只有 GAP 分片时这段
+    /// 合并不了，各轨在这段的分片都不下载；没有一段合并得了时报 [`Unsupported::NoMergeableGroup`]；音视频轨的播放列表没有
+    /// 分片时报 [`Unsupported::EmptyPlaylist`]。字幕轨的分片按不连续段序号落进同号的组：所在的段不在可合并的组里的不下载
+    /// （[`MissReason::Unmergeable`]），一组里没有字幕分片的这一组就没有字幕，字幕播放列表为空也可以。要下载的分片取不到
+    /// key（见 [`resolve::require_key_uris`]，`custom_key` 为请求给了自定义 key）时报 [`Unsupported::KeyWithoutUri`]。
+    pub(crate) fn new(
+        tracks: Vec<ResolvedTrack>,
+        streams: &[Streams],
+        custom_key: bool,
+    ) -> Result<Self, Error> {
+        assert_eq!(tracks.len(), streams.len(), "每条轨一种取流方式");
+        let is_media = |track: usize| streams[track] != Streams::Subtitles;
+        let media: Vec<usize> = (0..tracks.len()).filter(|&t| is_media(t)).collect();
+        if let Some(&t) = media
+            .iter()
+            .find(|&&t| tracks[t].playlist.segments.is_empty())
+        {
             return Err(Error::Unsupported(Unsupported::EmptyPlaylist(Box::new(
-                t.url.clone(),
+                tracks[t].url.clone(),
             ))));
         }
         let all: Vec<&[Segment]> = tracks.iter().map(|t| &t.playlist.segments[..]).collect();
-        let runs = check_discontinuities(&all)?;
-        let mergeable = mergeable(&tracks, &runs)?;
+        let runs: Vec<Vec<(u64, Range<usize>)>> = all.iter().map(|s| runs(s)).collect();
+        check_discontinuities(&runs, &media)?;
+        let media_runs: Vec<&[(u64, Range<usize>)]> = media.iter().map(|&t| &runs[t][..]).collect();
+        let media_tracks: Vec<&ResolvedTrack> = media.iter().map(|&t| &tracks[t]).collect();
+        let mergeable = mergeable(&media_tracks, &media_runs)?;
+        let numbers: Vec<u64> = media_runs[0].iter().map(|(d, _)| *d).collect();
         let mut planned = Vec::with_capacity(tracks.len());
         let mut ranges = Vec::with_capacity(tracks.len());
-        for (t, runs) in tracks.iter().zip(&runs) {
-            let (track, track_ranges) = Track::new(&t.playlist.segments, runs, &mergeable);
+        for (index, (t, runs)) in tracks.iter().zip(&runs).enumerate() {
+            let (track, track_ranges) = if is_media(index) {
+                let runs: Vec<Range<usize>> = runs.iter().map(|(_, r)| r.clone()).collect();
+                Track::new(&t.playlist.segments, &runs, &mergeable)
+            } else {
+                Track::subtitles(&t.playlist.segments, runs, &numbers, &mergeable)
+            };
             resolve::require_key_uris(&t.url, &track.segments, custom_key)?;
             planned.push(track);
             ranges.push(track_ranges);
         }
-        // 各轨的可合并段数相同（共用 mergeable），转置成按组排
-        let groups = (0..ranges[0].len())
+        // 各轨的组数相同（都按音视频轨的可合并段），转置成按组排
+        let groups = (0..ranges[media[0]].len())
             .map(|group| ranges.iter().map(|r| r[group].clone()).collect())
             .collect();
         Ok(Plan {
@@ -129,7 +203,10 @@ impl Plan {
                 let track = &self.tracks[index];
                 let content = |s: &Segment| track.init_index(s).map(|i| inits[index][i]);
                 let segments = &track.segments[range.clone()];
-                let first = content(&segments[0]);
+                let Some(first) = segments.first() else {
+                    continue;
+                };
+                let first = content(first);
                 if segments.iter().any(|s| content(s) != first) {
                     return Err(Error::Unsupported(Unsupported::InitChangesWithinGroup {
                         track: index,
@@ -178,11 +255,14 @@ impl Plan {
     }
 }
 
-/// 各段（`runs` 为各轨各段的分片下标范围）合并得了：每条轨在这段里都有没标 EXT-X-GAP 的分片。没有一段合并得了时
-/// 报 [`Unsupported::NoMergeableGroup`]，带第一段里只有 GAP 的那条轨的地址。
-fn mergeable(tracks: &[ResolvedTrack], runs: &[Vec<Range<usize>>]) -> Result<Vec<bool>, Error> {
+/// 各段（`runs` 为音视频各轨各段的不连续段序号与分片下标范围）合并得了：每条轨在这段里都有没标 EXT-X-GAP 的分片。
+/// 没有一段合并得了时报 [`Unsupported::NoMergeableGroup`]，带第一段里只有 GAP 的那条轨的地址。
+fn mergeable(
+    tracks: &[&ResolvedTrack],
+    runs: &[&[(u64, Range<usize>)]],
+) -> Result<Vec<bool>, Error> {
     let has_content = |track: usize, group: usize| {
-        tracks[track].playlist.segments[runs[track][group].clone()]
+        tracks[track].playlist.segments[runs[track][group].1.clone()]
             .iter()
             .any(|s| !s.gap)
     };
@@ -223,13 +303,13 @@ fn digest(tracks: &[&[Segment]]) -> String {
     hex(&hasher.finalize())
 }
 
-/// 各轨按不连续段序号切成的连续区间（分片下标）；各轨的不连续段序列须相同。
-fn check_discontinuities(tracks: &[&[Segment]]) -> Result<Vec<Vec<Range<usize>>>, Error> {
-    let runs: Vec<Vec<(u64, Range<usize>)>> = tracks.iter().map(|s| runs(s)).collect();
+/// 音视频各轨（轨号为 `media`）的不连续段序列须相同；`runs` 为各轨按不连续段序号切成的连续区间。报错里的第 0 条轨为
+/// 第一条音视频轨（即变体）。
+fn check_discontinuities(runs: &[Vec<(u64, Range<usize>)>], media: &[usize]) -> Result<(), Error> {
     let numbers = |runs: &[(u64, Range<usize>)]| runs.iter().map(|(d, _)| *d).collect::<Vec<_>>();
-    let first = numbers(&runs[0]);
-    for (track, track_runs) in runs.iter().enumerate().skip(1) {
-        let found = numbers(track_runs);
+    let first = numbers(&runs[media[0]]);
+    for &track in &media[1..] {
+        let found = numbers(&runs[track]);
         if found != first {
             return Err(Error::Unsupported(Unsupported::DiscontinuityMismatch {
                 track,
@@ -238,10 +318,7 @@ fn check_discontinuities(tracks: &[&[Segment]]) -> Result<Vec<Vec<Range<usize>>>
             }));
         }
     }
-    Ok(runs
-        .into_iter()
-        .map(|runs| runs.into_iter().map(|(_, range)| range).collect())
-        .collect())
+    Ok(())
 }
 
 /// 一条轨按不连续段序号切成的连续区间。播放列表中的不连续段序号只增不减，所以各区间的序号互不相同。
@@ -280,6 +357,7 @@ mod tests {
                 url: url.clone(),
                 playlist,
             }],
+            &[Streams::All],
             false,
         )
         .unwrap();
@@ -297,7 +375,9 @@ mod tests {
                 url: url.clone(),
                 playlist,
             };
-            Plan::new(vec![track], false).unwrap().digest()
+            Plan::new(vec![track], &[Streams::All], false)
+                .unwrap()
+                .digest()
         };
         let plain =
             "#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\nseg0.ts\n#EXTINF:10,\nseg1.ts\n";

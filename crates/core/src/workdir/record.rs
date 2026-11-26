@@ -1048,20 +1048,19 @@ mod tests {
             ]),
             subtitles: Renditions::These(vec![RenditionChoice::Language("zh-Hans".into())]),
         };
+        // "variant best\naudio these 2\naudio language de\naudio index 1\nsubtitles these 1\nsubtitles language zh-hans\n"
         assert_eq!(
             preference_digest(&preference),
-            digest_hex(
-                "variant best\naudio these 2\naudio language de\naudio index 1\n\
-                 subtitles these 1\nsubtitles language zh-hans\n"
-            )
+            "d5530def81f9637b8eb00ec1b2bc7f5c115e0d481c1bfd9955329aa2e0bf91f1"
         );
         let all = Preference {
             subtitles: Renditions::All,
             ..Preference::default()
         };
+        // "variant best\naudio default\nsubtitles all\n"
         assert_eq!(
             preference_digest(&all),
-            digest_hex("variant best\naudio default\nsubtitles all\n")
+            "d4a4b713d923808efce6617c0012c0b8fb5e73be0b8fbce5c36a81c64617b895"
         );
         assert_ne!(
             preference_digest(&all),

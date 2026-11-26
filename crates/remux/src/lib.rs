@@ -9,7 +9,8 @@
 //! - 组间：整组使用同一个时间偏移，保留组内各轨（如视频与独立音频 rendition）原有的相对时序；
 //!   各组首尾相接，下一组从上一组所有流的最晚结束时刻之后开始。
 //! - 每条轨按调用方指定的 [`Streams`] 贡献第一路视频和（或）第一路音频，没有这类流的轨不贡献（各轨合起来至少
-//!   一路），未指定种类的流不进输出、不检查编码；视频只能来自一条轨，音频可以来自几条轨、各成一路；字幕轨见
+//!   一路）。简化：一条轨里有几路音频（如 TS 里带多种语言）时只取第一路；要按语言或声道从变体自带的几路里挑时，改为按
+//!   流选取。未指定种类的流不进输出、不检查编码；视频只能来自一条轨，音频可以来自几条轨、各成一路；字幕轨见
 //!   [`Streams::Subtitles`] 与 [`remux`]；编码参数须探测得出；后续组的流布局、编码
 //!   参数与解码配置必须与第一组一致，参数随帧携带的（TS 与打包音频）在组内也不能变，分片格式与 PID 也不能换；每路流
 //!   的解码时间戳必须严格递增（组内不能往回跳或重复），相邻分片之间也不能往前跳得比声明的时长多出一截。TS 里损坏的
@@ -22,9 +23,9 @@
 //! 音频的输入时间基比一个采样点粗（如 Matroska 与部分 fMP4 的 1 毫秒）、输出时间基更细时，帧长已知的编码（链接的
 //! FFmpeg 里为 AAC）按采样点接续，每个样本的时长都是整帧（同 ffmpeg 命令行复制音频时的做法），HLS 与合并文件都如此。
 //!
-//! 输出写完回读核对每路流的包数（mov_text 不数封装器自己补的清屏空样本）并落盘。[`remux`] 失败或取消（见 [`Cancel`]）时输出上可能留有写了一半的文件，输出
-//! 要么完整、要么不存在由调用方写到临时路径、成功后改名、失败时删除来保证；[`merge_files`] 自己写临时文件、成功后
-//! 换上。错误信息已包含原因，不经 `source()` 重复给出。
+//! 输出写完回读核对每路流的包数（mov_text 不数封装器自己补的清屏空样本）并落盘。[`remux`] 失败或取消（见 [`Cancel`]）时
+//! 输出上可能留有写了一半的文件，输出要么完整、要么不存在由调用方写到临时路径、成功后改名、失败时删除来保证；
+//! [`merge_files`] 自己写临时文件、成功后换上。错误信息已包含原因，不经 `source()` 重复给出。
 //!
 //! 依照链接的 FFmpeg 的这些内部行为（各处注释写作「链接的 FFmpeg …」）：movenc 的 mov_init（MP3 最低采样率）与
 //! handle_eac3（E-AC-3 的帧结构），mov 解复用器的 mov_read_tfhd、mov_read_trun（fMP4 样本的位置），mp3dec 的
@@ -43,6 +44,7 @@ mod group;
 mod hls;
 mod inband;
 mod input;
+mod iso639;
 mod nal;
 mod packed;
 mod source;
@@ -162,16 +164,33 @@ pub struct Label {
     pub forced: bool,
 }
 
+/// 字幕轨怎样进 [`remux`] 的输出。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubtitleMode {
+    /// 封进输出：Matroska 为 SubRip，MP4 为 mov_text
+    Embed,
+    /// 不封进输出，只在结果里给出对齐后的 cue（[`Merged::subtitles`]）
+    CuesOnly,
+}
+
 /// [`remux`] 的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Merged {
     pub report: MediaReport,
-    /// 各字幕轨（[`Streams::Subtitles`]，按轨号）换到输出时间线上的 cue，与封进输出的字幕（若封）对齐，用于另存为
-    /// SRT / WebVTT 文件
-    pub subtitles: Vec<Vec<hs_m3u8_subtitle::Cue>>,
+    /// 各字幕轨（[`Streams::Subtitles`]，按轨号）换到输出时间线上的结果，用于另存为 SRT / WebVTT 文件
+    pub subtitles: Vec<SubtitleCues>,
 }
 
-/// 一路流的编码参数；放进同一条 MP4 轨的内容必须前后一致，不同不连续段组的同一条轨之间按此比较。
+/// 一条字幕轨对齐后的 cue。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubtitleCues {
+    /// 截到各组的时间范围里、去重之后的，按起点排列（见 [`remux`]）
+    pub cues: Vec<hs_m3u8_subtitle::Cue>,
+    /// 口径同 [`StreamReport::discarded_cues`]
+    pub discarded_cues: u64,
+}
+
+/// 一路流的编码参数；放进输出的同一条轨的内容必须前后一致，不同不连续段组的同一条轨之间按此比较。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shape {
     Video {
@@ -243,6 +262,9 @@ pub struct StreamReport {
     /// 的包），打包音频里切帧时跳过的不完整的帧或标签、认不出的字节，以及片内损坏之后定不了时刻（这一片是最后一片，
     /// 或下一片之前缺了分片）的帧。视频包照常写入，由解码器做错误隐藏
     pub discarded_corrupt_bytes: u64,
+    /// 字幕：解析时按 WebVTT 的规则丢弃的块（时间写坏的 cue 等），对齐后落在所在组的时间范围外或不足 1 毫秒的 cue，与因
+    /// 前一组延续过来的 cue 推后而没了长度的（见 [`remux`]）。音视频为 0
+    pub discarded_cues: u64,
     /// 输出时间线上从最早的呈现时刻到最晚的结束时刻；含组内时间戳间断（如缺失的分片）留下的空档
     pub duration: Duration,
 }

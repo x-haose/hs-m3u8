@@ -50,7 +50,7 @@ impl MergeCheck {
                     .iter()
                     .map(|t| GroupTrack {
                         init: t.init.clone(),
-                        segments: t.segments[..1].to_vec(),
+                        segments: t.segments.iter().take(1).cloned().collect(),
                         gaps: Vec::new(),
                     })
                     .collect()
@@ -59,7 +59,11 @@ impl MergeCheck {
             .collect();
         let complete: BTreeSet<GroupKey> = plan.keys.iter().copied().collect();
         let mut pending: HashMap<GroupKey, Vec<Option<SegmentName>>> = HashMap::new();
+        let media = |track: usize| streams[track] != Streams::Subtitles;
         for (track, files) in stored.segments.iter().enumerate() {
+            if !media(track) {
+                continue;
+            }
             for file in files.iter().filter(|f| !complete.contains(&f.name.group())) {
                 pending
                     .entry(file.name.group())
@@ -104,14 +108,16 @@ impl MergeCheck {
         self.container
     }
 
-    /// 分片 `id` 录到了任务目录；它所在的组各轨都有分片时核对这一组，放不进合并文件时返回原因（见 [`MergeCheck::judged`]）。
+    /// 分片 `id` 录到了任务目录；它所在的组各条音视频轨都有分片时核对这一组，放不进合并文件时返回原因（见
+    /// [`MergeCheck::judged`]）。字幕轨的分片不核对。
     pub(super) async fn recorded(
         &mut self,
         id: ItemInfo,
         layout: &Layout,
     ) -> Result<Option<MergeUnsupported>, Error> {
         let key = id.name.group();
-        if self.unsupported || self.complete.contains(&key) {
+        let media = |track: usize| self.streams[track] != Streams::Subtitles;
+        if self.unsupported || self.complete.contains(&key) || !media(id.track) {
             return Ok(None);
         }
         let heads = self
@@ -119,17 +125,15 @@ impl MergeCheck {
             .entry(key)
             .or_insert_with(|| vec![None; self.streams.len()]);
         heads[id.track].get_or_insert(id.name);
-        if heads.iter().any(Option::is_none) {
+        if (0..heads.len()).any(|t| media(t) && heads[t].is_none()) {
             return Ok(None);
         }
-        let group: Vec<GroupTrack> = self
-            .pending
-            .remove(&key)
-            .into_iter()
-            .flatten()
-            .flatten()
+        let heads = self.pending.remove(&key).expect("刚插入");
+        // 字幕轨不核对（合并时不经 FFmpeg 读），给空的
+        let group: Vec<GroupTrack> = heads
+            .iter()
             .enumerate()
-            .map(|(track, name)| GroupTrack::of(layout, track, [&name]))
+            .map(|(track, name)| GroupTrack::of(layout, track, name.iter()))
             .collect();
         self.complete.insert(key);
         // 合并时的组号：各轨都有分片的组按键排列。新录齐的组排在原来的第 0 组前面时（续录接上的会话里，之前没录齐

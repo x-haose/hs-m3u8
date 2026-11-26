@@ -1,7 +1,8 @@
-//! ISO 639-2 代码表：取自美国国会图书馆的 ISO-639-2_utf-8.txt（不含保留区间 qaa-qtz）。由该文件生成，不手改。
+//! 语言标签到 ISO 639-2 代码的换算。代码表取自美国国会图书馆的 ISO-639-2_utf-8.txt（不含保留区间 qaa-qtz），由
+//! scripts/iso639.py 生成，不手改。
 
 /// (639-2/B, 639-2/T, 639-1；没有两字母代码时为空串)，按 639-2/B 排序。
-pub(crate) const CODES: &[(&str, &str, &str)] = &[
+const CODES: &[(&str, &str, &str)] = &[
     ("aar", "aar", "aa"),
     ("abk", "abk", "ab"),
     ("ace", "ace", ""),
@@ -489,3 +490,35 @@ pub(crate) const CODES: &[(&str, &str, &str)] = &[
     ("zxx", "zxx", ""),
     ("zza", "zza", ""),
 ];
+
+/// 语言标签（BCP 47，如 `en`、`zh-Hans`、`pt-BR`）的主标签对应的 ISO 639-2 代码：(书目代码 639-2/B, 术语代码 639-2/T)，
+/// 两者多数相同（不同的如德语 `ger` / `deu`、中文 `chi` / `zho`）。Matroska 的 Language 用书目代码，MP4 的 mdhd 用术语
+/// 代码。主标签是 ISO 639-1 两字母代码或 639-2 三字母代码（不分大小写）时认得；ISO 639-3 才有的（如 `yue`）、私用与
+/// 认不出的为 None。
+pub(crate) fn iso639_2(tag: &str) -> Option<(&'static str, &'static str)> {
+    let primary = tag.split(['-', '_']).next()?.to_ascii_lowercase();
+    CODES
+        .iter()
+        .find(|(b, t, a2)| match primary.len() {
+            2 => *a2 == primary,
+            3 => *b == primary || *t == primary,
+            _ => false,
+        })
+        .map(|&(b, t, _)| (b, t))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn language_tags_map_to_both_iso_639_2_forms() {
+        assert_eq!(iso639_2("en"), Some(("eng", "eng")));
+        assert_eq!(iso639_2("zh-Hans"), Some(("chi", "zho")));
+        assert_eq!(iso639_2("DE-at"), Some(("ger", "deu")));
+        assert_eq!(iso639_2("deu"), Some(("ger", "deu")));
+        assert_eq!(iso639_2("yue"), None);
+        assert_eq!(iso639_2("x-klingon"), None);
+        assert_eq!(iso639_2(""), None);
+    }
+}

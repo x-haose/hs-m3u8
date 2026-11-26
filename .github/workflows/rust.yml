@@ -83,6 +83,10 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo fmt --all --check
 
+      - name: 格式，fuzz/（Windows）
+        if: runner.os == 'Windows'
+        run: cargo fmt --manifest-path fuzz/Cargo.toml --check
+
       - name: clippy（Windows）
         if: runner.os == 'Windows'
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -117,14 +121,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # 与 Makefile 的 FUZZ_TOOLCHAIN 相同
+      # fuzz/rust-toolchain.toml 固定的 nightly
       - name: nightly 工具链
-        run: rustup toolchain install nightly-2026-11-25 --profile minimal
+        working-directory: fuzz
+        run: rustup toolchain install
 
-      - name: 安装 cargo-fuzz
+      - name: 安装 cargo-fuzz 与 cargo-deny
         uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
-          tool: cargo-fuzz@0.13.2
+          tool: cargo-fuzz@0.13.2,cargo-deny@0.20.2
 
       - name: 模糊测试
         run: make fuzz

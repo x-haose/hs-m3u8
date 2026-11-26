@@ -341,7 +341,13 @@ async fn fetch_segment(
         Some(path) => Container::Fmp4 {
             trex: stored_trex(&ctx.work_dir, path).await?,
         },
-        None if ctx.subtitles.get(track).copied().unwrap_or(false) => Container::WebVtt,
+        None if *ctx
+            .subtitles
+            .get(track)
+            .expect("分片的轨号在选轨的轨数以内") =>
+        {
+            Container::WebVtt
+        }
         None => Container::Standalone,
     };
     ctx.http

@@ -164,7 +164,7 @@ fn write(
         sizes.push(size);
     }
     let layout = layout_of(&opened, inputs.len())?;
-    let mut muxer = Muxer::open(path, container, cancel, &opened, &layout, &[], &[])?;
+    let mut muxer = Muxer::open(path, container, cancel, &opened, &layout, None, &[])?;
     let mut sources = sources(opened, &layout, &[]);
     for source in &mut sources {
         start(source)?;

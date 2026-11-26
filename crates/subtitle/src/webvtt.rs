@@ -16,14 +16,14 @@ const WRAP_TICKS: u64 = 1 << 33;
 
 impl TimestampMap {
     /// 本地时刻 `cue_us` 在媒体时间线上的时刻（90 kHz 时钟上的微秒，四舍五入；MPEGTS 取 33 位以内的值，回绕未展开）。没有
-    /// X-TIMESTAMP-MAP 时（`map` 为 None）本地 0 即媒体 0（RFC 8216 3.5）。
-    pub fn media_us(map: Option<&TimestampMap>, cue_us: i64) -> i64 {
+    /// X-TIMESTAMP-MAP 时（`map` 为 None）本地 0 即媒体 0（RFC 8216 3.5）。超出 i64 时为 None（只出在时刻写得离谱时）。
+    pub fn media_us(map: Option<&TimestampMap>, cue_us: i64) -> Option<i64> {
         match map {
-            None => cue_us,
+            None => Some(cue_us),
             Some(map) => {
                 // 四舍五入到微秒，与 FFmpeg 换算媒体时间戳（av_rescale）相同
                 let ticks = i64::try_from(map.mpegts % WRAP_TICKS).expect("33 位以内");
-                (ticks * 200 + 9) / 18 + (cue_us - map.local_us)
+                ((ticks * 200 + 9) / 18).checked_add(cue_us.checked_sub(map.local_us)?)
             }
         }
     }
@@ -231,9 +231,9 @@ mod tests {
         assert_eq!(parsed.cues[1].start_us, 3_600_000_000);
         assert_eq!(
             TimestampMap::media_us(parsed.map.as_ref(), 1_000_000),
-            11_000_000
+            Some(11_000_000)
         );
-        assert_eq!(TimestampMap::media_us(None, 1_000_000), 1_000_000);
+        assert_eq!(TimestampMap::media_us(None, 1_000_000), Some(1_000_000));
     }
 
     /// 写坏的 cue 与认不出的块按规则丢弃并计数；没有空行隔开的下一个时间行另起一条 cue。
@@ -271,6 +271,10 @@ mod tests {
             mpegts: (1 << 33) + 90_000,
             local_us: 500_000,
         };
-        assert_eq!(TimestampMap::media_us(Some(&map), 1_500_000), 2_000_000);
+        assert_eq!(
+            TimestampMap::media_us(Some(&map), 1_500_000),
+            Some(2_000_000)
+        );
+        assert_eq!(TimestampMap::media_us(Some(&map), i64::MIN), None);
     }
 }

@@ -387,7 +387,7 @@ impl From<core::hls::SelectError> for SelectFailure {
                 language,
                 available,
             } => SelectFailure::AudioLanguageNotFound {
-                group,
+                group: group.expect("按语言找的音频只在变体引用了音频组时报找不到"),
                 language,
                 available: Seq(available),
             },

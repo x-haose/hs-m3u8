@@ -7,6 +7,8 @@ use hs_m3u8_hls::{
 };
 use hs_m3u8_remux::{Label, Streams};
 
+use crate::TrackKind;
+
 /// 一次选轨。属性是首次选出这些轨时来源写的，之后身份相同即沿用、不随拉到的主播放列表更新：身份相同的轨内容相同。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SelectionRecord {
@@ -171,6 +173,18 @@ pub(crate) fn track_streams(selection: Option<&SelectionRecord>) -> Vec<Streams>
     std::iter::once(first)
         .chain(selection.audio.iter().map(|_| Streams::Audio))
         .chain(selection.subtitles.iter().map(|_| Streams::Subtitles))
+        .collect()
+}
+
+/// 各轨的种类，按取流方式（见 [`track_streams`]）。
+pub(crate) fn track_kinds(streams: &[Streams]) -> Vec<TrackKind> {
+    streams
+        .iter()
+        .map(|s| match s {
+            Streams::All | Streams::Video => TrackKind::Video,
+            Streams::Audio => TrackKind::Audio,
+            Streams::Subtitles => TrackKind::Subtitles,
+        })
         .collect()
 }
 

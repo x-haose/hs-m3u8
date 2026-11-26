@@ -2,21 +2,25 @@
 //! 输出的字幕包（Matroska 为 SubRip，MP4 为 mov_text），并留下对齐后的 cue 供另存为文件。
 //!
 //! 对齐规则（RFC 8216 3.5，与 hls.js 相同）：cue 的媒体时刻为 MPEGTS + (cue − LOCAL)，没有 X-TIMESTAMP-MAP 时本地 0 即
-//! 媒体 0；33 位回绕按离本组最早的呈现时刻最近的一种展开。本组之前的部分截掉：开始早于本组起点的从起点开始，结束不晚于
-//! 起点的丢掉。各组的 cue 去重（见 [`hs_m3u8_subtitle::dedup`]）。
+//! 媒体 0；33 位回绕按离本组最早的呈现时刻最近的一种展开（同 [`crate::timing`] 对齐各输入的做法）。每组的 cue 截到本组的
+//! 时间范围里：从本组起点到起点加上本组的声明时长（音视频各轨 EXTINF 之和里最长的；都为 0 时不截结尾），全在范围外的
+//! 丢掉；起止换到字幕流的时间基（1 毫秒，四舍五入），再去重（见 [`hs_m3u8_subtitle::dedup`]）。丢掉的 cue 与解析时跳过
+//! 的块计入 [`crate::StreamReport::discarded_cues`]。
 //!
-//! 简化：结束晚于本组媒体结尾的 cue 不截短，可能延续到下一组的开头（只出在字幕比画面长的组上）；要截时在组写完、知道
-//! 结尾之后再生成这一组的字幕包。
+//! 封进输出时每路字幕流的起点不往回走：SubRip 后一条的起点不早于前一条的（Matroska 允许重叠），mov_text 的段不早于
+//! 前一段的结尾（MP4 同一时刻只有一个样本，起点严格递增）。只有前一组的 cue 延续到下一组的范围里才会推后，推到没有长度
+//! 的同样计入丢掉的。另存的文件用截到各组范围、去重之后的 cue，不随封进输出时的推后而变。
 
 use std::collections::VecDeque;
 use std::path::Path;
 
 use hs_m3u8_subtitle::{self as subtitle, Cue, TimestampMap};
 
-use crate::{Container, Error, Origin, TrackSegments};
+use crate::timing::wrap_shift_us;
+use crate::{Container, Error, Origin, TrackSegments, Unsupported};
 
-/// 33 位 90 kHz 时钟的回绕周期，微秒（2^33 × 100 / 9，四舍五入）。
-const WRAP_US: i128 = ((1i128 << 33) * 100 + 4) / 9;
+/// 字幕流的时间基的一个 tick，微秒：WebVTT 的精度为 1 毫秒，Matroska 的时间基也是；cue 的起止先换到它，写出时不再舍入。
+pub(crate) const TICK_US: i64 = 1000;
 
 /// 封进输出的字幕编码。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,11 +47,20 @@ impl Codec {
     }
 }
 
-/// 一个待写的字幕包，时刻为输出时间线上的微秒。
+/// 一个待写的字幕包，时刻为输出时间线上的微秒，都是 [`TICK_US`] 的整数倍。
 pub(crate) struct Packet {
     pub(crate) start_us: i64,
+    /// 大于 0
     pub(crate) duration_us: i64,
     pub(crate) data: Vec<u8>,
+}
+
+/// 一组在输出时间线上的范围，微秒。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Window {
+    start_us: i64,
+    /// 声明时长都为 0 时为 None：不截结尾
+    end_us: Option<i64>,
 }
 
 /// 一条字幕轨在各组间的状态。
@@ -63,6 +76,8 @@ pub(crate) struct Lane {
     last: Option<(i64, i64)>,
     /// 对齐后的 cue，各组依次相接
     pub(crate) cues: Vec<Cue>,
+    /// 见 [`crate::StreamReport::discarded_cues`]
+    pub(crate) discarded: u64,
 }
 
 impl Lane {
@@ -74,35 +89,35 @@ impl Lane {
             queue: VecDeque::new(),
             last: None,
             cues: Vec::new(),
+            discarded: 0,
         }
     }
 
-    /// 读第 `group` 组这条轨的分片 `segments`，换到输出时间线并排进队列。`reference_us` 为本组各输入里最早的呈现时刻
-    /// （输入时间线，已按回绕对齐），`offset_us` 为本组的偏移：输出时间线上本组从 `reference_us + offset_us` 开始。
+    /// 读第 `group` 组这条轨的分片 `segments`（可以没有），换到输出时间线并排进队列。`reference_us` 为本组各输入里最早的
+    /// 呈现时刻（输入时间线，已按回绕对齐），`offset_us` 为本组的偏移，`declared_us` 为本组的声明时长（见模块说明）。
     pub(crate) fn load_group(
         &mut self,
         group: usize,
         segments: &TrackSegments,
         reference_us: i64,
         offset_us: i64,
+        declared_us: i64,
     ) -> Result<(), Error> {
         self.group = group;
         let at = self.at();
         let start_us = reference_us + offset_us;
+        let window = Window {
+            start_us,
+            end_us: (declared_us > 0).then(|| start_us.saturating_add(declared_us)),
+        };
         let mut cues = Vec::new();
         for segment in &segments.segments {
             let parsed = read(&segment.path, at)?;
-            for mut cue in parsed.cues {
-                let media = |us| {
-                    unwrap(
-                        TimestampMap::media_us(parsed.map.as_ref(), us),
-                        reference_us,
-                    )
-                };
-                cue.start_us = (media(cue.start_us) + offset_us).max(start_us);
-                cue.end_us = media(cue.end_us) + offset_us;
-                if cue.end_us > cue.start_us {
-                    cues.push(cue);
+            self.discarded += parsed.skipped as u64;
+            for cue in parsed.cues {
+                match align(cue, parsed.map.as_ref(), reference_us, offset_us, window) {
+                    Some(cue) => cues.push(cue),
+                    None => self.discarded += 1,
                 }
             }
         }
@@ -114,17 +129,16 @@ impl Lane {
         Ok(())
     }
 
-    /// 本组对齐后的 `cues`（按起点排序）生成字幕包排进队列。起点不早于上一个包的起点（MP4 还要严格晚于它）：上一组延续
-    /// 过来的 cue 与本组的重叠时，本组的往后推。
+    /// 本组对齐后的 `cues`（按起点排序）生成字幕包排进队列，起点不往回走（见模块说明）。
     fn queue_packets(&mut self, cues: &[Cue], codec: Codec, at: Origin) -> Result<(), Error> {
         match codec {
             Codec::Subrip => {
                 for cue in cues {
-                    let start_us = match self.last {
-                        Some((last_start, _)) => cue.start_us.max(last_start),
-                        None => cue.start_us,
-                    };
+                    let start_us = self
+                        .last
+                        .map_or(cue.start_us, |(last_start, _)| cue.start_us.max(last_start));
                     if cue.end_us <= start_us {
+                        self.discarded += 1;
                         continue;
                     }
                     self.push(Packet {
@@ -138,15 +152,26 @@ impl Lane {
                 // 空档不写空样本：链接的 FFmpeg 的 movenc 在任何一路的包越过上一个字幕样本的结尾时自己补一个清屏的空样本
                 // （mov_write_packet 与 mov_write_trailer），自己再写会多出一个
                 for slice in subtitle::slices(cues) {
-                    let free_us = self.last.map_or(i64::MIN, |(_, end)| end);
-                    let start_us = slice.start_us.max(free_us);
-                    if slice.end_us <= start_us || slice.text.is_empty() {
+                    if slice.text.is_empty() {
                         continue;
                     }
+                    let start_us = self
+                        .last
+                        .map_or(slice.start_us, |(_, end)| slice.start_us.max(end));
+                    if slice.end_us <= start_us {
+                        self.discarded += 1;
+                        continue;
+                    }
+                    let data = subtitle::mov_text_sample(&slice.text).map_err(|too_long| {
+                        Error::Unsupported(Unsupported::SubtitleTooLong {
+                            at,
+                            bytes: too_long.0,
+                        })
+                    })?;
                     self.push(Packet {
                         start_us,
                         duration_us: slice.end_us - start_us,
-                        data: mov_text(at, &slice.text)?,
+                        data,
                     });
                 }
             }
@@ -173,8 +198,39 @@ impl Lane {
     }
 }
 
-fn mov_text(at: Origin, text: &str) -> Result<Vec<u8>, Error> {
-    subtitle::mov_text_sample(text).map_err(|cause| Error::SubtitleTooLong { at, cause })
+/// 一条 cue 换到输出时间线：媒体时刻（见模块说明）展开回绕、加上 `offset_us`，截到 `window` 里，起止换到 [`TICK_US`]
+/// 的整数倍（四舍五入）。全在范围外、截后没有长度或时刻超出 i64 时为 None。
+fn align(
+    mut cue: Cue,
+    map: Option<&TimestampMap>,
+    reference_us: i64,
+    offset_us: i64,
+    window: Window,
+) -> Option<Cue> {
+    let output = |us| {
+        let media = TimestampMap::media_us(map, us)?;
+        let unwrapped = media.checked_add(wrap_shift_us(media.checked_sub(reference_us)?))?;
+        unwrapped.checked_add(offset_us)
+    };
+    let start = output(cue.start_us)?.max(window.start_us);
+    let mut end = output(cue.end_us)?;
+    if let Some(window_end) = window.end_us {
+        end = end.min(window_end);
+    }
+    let (start, end) = (to_tick(start)?, to_tick(end)?);
+    if end <= start {
+        return None;
+    }
+    cue.start_us = start;
+    cue.end_us = end;
+    Some(cue)
+}
+
+/// 微秒换成 [`TICK_US`] 的整数倍，四舍五入；超出 i64 时为 None。
+fn to_tick(us: i64) -> Option<i64> {
+    us.checked_add(TICK_US / 2)?
+        .div_euclid(TICK_US)
+        .checked_mul(TICK_US)
 }
 
 /// 读并解析一个字幕分片：文件出错为 [`Error::Io`]，内容不是 WebVTT 为 [`Error::Subtitle`]。
@@ -191,23 +247,49 @@ fn read(path: &Path, at: Origin) -> Result<subtitle::WebVtt, Error> {
     })
 }
 
-/// 媒体时刻 `media_us`（33 位回绕未展开）加上整数个回绕周期，取离 `reference_us` 最近的。
-fn unwrap(media_us: i64, reference_us: i64) -> i64 {
-    let distance = i128::from(reference_us) - i128::from(media_us);
-    let periods = (2 * distance + WRAP_US).div_euclid(2 * WRAP_US);
-    i64::try_from(i128::from(media_us) + periods * WRAP_US).expect("展开后与参照相距不到半个周期")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn cue(start_us: i64, end_us: i64) -> Cue {
+        Cue {
+            start_us,
+            end_us,
+            id: None,
+            settings: String::new(),
+            text: "x".into(),
+        }
+    }
+
+    /// 截到组的范围里并换到毫秒：跨过起点的从起点开始，起点落在毫秒中间时四舍五入，截后不足一个 tick 的丢掉；跨过结尾的
+    /// 截到结尾；全在范围外的、换算溢出的丢掉；33 位回绕按参照展开。
     #[test]
-    fn media_times_are_unwrapped_next_to_the_reference() {
-        let wrap = i64::try_from(WRAP_US).unwrap();
-        assert_eq!(unwrap(10, 20), 10);
-        assert_eq!(unwrap(10, wrap + 20), wrap + 10);
-        assert_eq!(unwrap(wrap - 10, 5), -10);
-        assert_eq!(unwrap(wrap / 2 - 1, 0), wrap / 2 - 1);
+    fn cues_are_clipped_to_the_group_and_snapped_to_milliseconds() {
+        let window = Window {
+            start_us: 9_999_600,
+            end_us: Some(20_000_000),
+        };
+        let aligned = |c: Cue| align(c, None, 0, 0, window).map(|c| (c.start_us, c.end_us));
+        assert_eq!(aligned(cue(9_000_000, 10_000_000)), None);
+        assert_eq!(aligned(cue(9_000_000, 10_000_400)), None);
+        assert_eq!(
+            aligned(cue(9_000_000, 10_500_000)),
+            Some((10_000_000, 10_500_000))
+        );
+        assert_eq!(
+            aligned(cue(19_000_000, 25_000_000)),
+            Some((19_000_000, 20_000_000))
+        );
+        assert_eq!(aligned(cue(20_000_000, 21_000_000)), None);
+        assert_eq!(aligned(cue(i64::MAX - 10, i64::MAX)), None);
+
+        // 2^33 × 100 / 9 微秒，四舍五入
+        let wrap = 95_443_717_689;
+        let unbounded = Window {
+            start_us: 0,
+            end_us: None,
+        };
+        let near_wrap = align(cue(wrap - 1_000, wrap + 2_000), None, 1_000, 0, unbounded);
+        assert_eq!(near_wrap.map(|c| (c.start_us, c.end_us)), Some((0, 2_000)));
     }
 }

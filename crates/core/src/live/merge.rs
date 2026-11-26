@@ -1,7 +1,10 @@
-//! 合并输入与缺失报告：任务目录中各会话的分片按（会话, 不连续段）分组，只合并各轨都有的组；
+//! 合并输入与缺失报告：任务目录中各会话的分片按（会话, 不连续段）分组，只合并各条音视频轨都有的组（字幕轨不参与：
+//! 一组里没录到字幕分片的这一组就没有字幕）；
 //! 不在输出中的分片汇总成区间。
 
 use std::collections::{BTreeMap, BTreeSet};
+
+use hs_m3u8_remux::Streams;
 
 use crate::output::GroupTrack;
 use crate::workdir::{GroupKey, Layout, SegmentFile};
@@ -17,7 +20,7 @@ pub(crate) struct MergePlan {
     pub segments: usize,
     /// 合并进输出的会话数
     pub sessions: usize,
-    /// 所在组不是每条轨都有、无法合并的分片
+    /// 所在组不是每条音视频轨都有、无法合并的分片
     pub unmergeable: Vec<Missed>,
     /// 同一会话、同一轨相邻两个已完成分片之间缺的序号，原因待定
     pub holes: Vec<Missed>,
@@ -26,15 +29,25 @@ pub(crate) struct MergePlan {
 /// 一条轨的分片按组归类。
 type ByGroup<'a> = BTreeMap<GroupKey, Vec<&'a SegmentFile>>;
 
-/// 由任务目录中的分片（各轨按（会话, 序号）排列）得出合并计划。
-pub(crate) fn merge_plan(files: &[Vec<SegmentFile>], layout: &Layout) -> Result<MergePlan, Error> {
+/// 由任务目录中的分片（各轨按（会话, 序号）排列）得出合并计划；`streams` 为各轨的取流方式。
+pub(crate) fn merge_plan(
+    files: &[Vec<SegmentFile>],
+    streams: &[Streams],
+    layout: &Layout,
+) -> Result<MergePlan, Error> {
     let by_group: Vec<ByGroup<'_>> = files.iter().map(|track| group_files(track)).collect();
-    let common: BTreeSet<GroupKey> = by_group
+    let media: Vec<&ByGroup<'_>> = by_group
+        .iter()
+        .zip(streams)
+        .filter(|(_, s)| **s != Streams::Subtitles)
+        .map(|(g, _)| g)
+        .collect();
+    let common: BTreeSet<GroupKey> = media
         .first()
         .map(|first| {
             first
                 .keys()
-                .filter(|k| by_group.iter().all(|g| g.contains_key(k)))
+                .filter(|k| media.iter().all(|g| g.contains_key(k)))
                 .copied()
                 .collect()
         })
@@ -89,7 +102,8 @@ fn group_files(files: &[SegmentFile]) -> ByGroup<'_> {
     groups
 }
 
-/// 各轨都有的一组换成合并输入；组内的分片引用了不同的 init 段时目录内容矛盾。
+/// 各条音视频轨都有的一组换成合并输入（字幕轨在这一组里没有分片时为空）；组内的分片引用了不同的 init 段时目录内容
+/// 矛盾。
 fn merge_group(
     key: GroupKey,
     by_group: &[ByGroup<'_>],
@@ -97,8 +111,8 @@ fn merge_group(
 ) -> Result<Vec<GroupTrack>, Error> {
     let mut tracks = Vec::with_capacity(by_group.len());
     for (track, groups) in by_group.iter().enumerate() {
-        let files = &groups[&key];
-        let init = files[0].name.init;
+        let files: &[&SegmentFile] = groups.get(&key).map_or(&[], Vec::as_slice);
+        let init = files.first().and_then(|f| f.name.init);
         if files.iter().any(|f| f.name.init != init) {
             return Err(Error::WorkDir {
                 path: layout.root().to_path_buf(),

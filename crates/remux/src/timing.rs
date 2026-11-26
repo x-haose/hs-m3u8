@@ -28,7 +28,7 @@ pub(crate) fn wrap_shifts_us(sources: &[Source]) -> Vec<i64> {
 }
 
 /// 相距 `distance_us` 的两个时刻要相距不超过半个回绕周期，后者要加的整数个 33 位回绕周期（90 kHz），微秒。
-fn wrap_shift_us(distance_us: i64) -> i64 {
+pub(crate) fn wrap_shift_us(distance_us: i64) -> i64 {
     // 周期 2^33 / 90000 秒，即 2^33 × 100 / 9 微秒，按分数算：周期数四舍五入，平移量四舍五入到微秒
     let (num, den) = (i128::from(1i64 << 33) * 100, 9i128);
     let periods = (2 * i128::from(distance_us) * den + num).div_euclid(2 * num);

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use futures_util::StreamExt;
 use hs_m3u8_hls::{
     self as hls, CodecKind, MasterPlaylist, MediaPlaylist, Playlist, Renditions, Segment,
     Selection, renditions,
@@ -12,10 +13,10 @@ use url::Url;
 
 use crate::hooks::{HookKind, Hooks, Purpose, run_hook};
 use crate::http::{Http, Permit};
-use crate::info::{SubtitleFormat, SubtitleProblem};
+use crate::info::{SubtitleFormat, SubtitleProblem, SubtitleSupport};
 use crate::request::Source;
 use crate::selection::{SelectionRecord, track_streams};
-use crate::{Error, HttpFailure, Unsupported};
+use crate::{Error, Unsupported};
 
 /// 解析得到的一条轨：媒体播放列表的地址与首次拉到的内容。轨号见 [`crate::Selected`]。
 pub(crate) struct ResolvedTrack {
@@ -39,7 +40,7 @@ pub(crate) struct Chosen {
     pub record: SelectionRecord,
     /// 读过媒体播放列表的字幕能不能下，按字幕的位置（口径同 [`hls::RenditionChoice::Index`]）：开始任务时为选到的，探测
     /// 时为所选变体字幕组里的全部
-    pub subtitle_support: Vec<(usize, Result<(), SubtitleProblem>)>,
+    pub subtitle_support: Vec<(usize, SubtitleSupport)>,
     /// 自动选到、下不了而没选上的字幕的位置，按选的顺序
     pub skipped_subtitles: Vec<usize>,
 }
@@ -50,9 +51,12 @@ impl Resolved {
         self.master.as_ref().map(|m| m.record.clone())
     }
 
-    /// 有任一条轨的播放列表没有 EXT-X-ENDLIST 即为直播。
+    /// 有任一条音视频轨的播放列表没有 EXT-X-ENDLIST 即为直播；字幕播放列表写没写不算。
     pub(crate) fn is_live(&self) -> bool {
-        self.tracks.iter().any(|t| !t.playlist.ended)
+        self.tracks
+            .iter()
+            .zip(self.streams())
+            .any(|(t, streams)| streams != Streams::Subtitles && !t.playlist.ended)
     }
 
     /// 各轨的取流方式。
@@ -85,9 +89,10 @@ pub(crate) async fn resolve(
 
 /// 同 [`resolve`]，来源的播放列表已拉到并解析为 `first`。
 ///
-/// 字幕：点名的（[`Renditions::These`]）与记录里的下不了时报错——拉不到报那次请求的错误，格式不支持报
-/// [`Unsupported::SubtitleFormat`]；自动选到的（[`Renditions::Default`]、[`Renditions::All`]）下不了的去掉，原因记在
-/// [`Chosen::subtitle_support`]。各条字幕的媒体播放列表并发拉取。
+/// 字幕：选到的拉不到或播放列表不能用时报那次的错误（外部故障如实上抛）；格式不支持（见 [`subtitle_format`]）时，点名
+/// 的（[`Renditions::These`]）与记录里的报 [`Unsupported::SubtitleFormat`]，自动选到的（[`Renditions::Default`]、
+/// [`Renditions::All`]）去掉，记在 [`Chosen::skipped_subtitles`]。探测时组里其余的读不了只记在
+/// [`Chosen::subtitle_support`]，不让探测失败。
 pub(crate) async fn resolve_playlist(
     http: &Http,
     source: &Source,
@@ -129,68 +134,46 @@ pub(crate) async fn resolve_playlist(
         });
     }
 
-    // 要读的字幕：选到的在前（按选的顺序），探测时再加上组里其余的
-    let mut wanted: Vec<(usize, Url)> = selection
-        .subtitles
-        .iter()
-        .map(|s| (s.index, s.uri.clone()))
-        .collect();
-    if scope == SubtitleScope::Group
-        && let Some(group) = &selection.variant.subtitles
-    {
-        for (index, rendition) in renditions(&master, hls::RenditionKind::Subtitles) {
-            if rendition.group == *group
-                && !wanted.iter().any(|(i, _)| *i == index)
-                && let Some(uri) = &rendition.uri
-            {
-                wanted.push((index, uri.clone()));
-            }
-        }
-    }
-    let fetched = futures_util::future::join_all(
-        wanted
-            .iter()
-            .map(|(_, url)| fetch_media(http, hooks, url, Attempts::Retrying, cancel)),
-    )
-    .await;
-    let subtitle_codecs: Vec<String> = selection
-        .variant
-        .codecs
-        .iter()
-        .filter(|c| CodecKind::of(c) == CodecKind::Subtitles)
-        .cloned()
-        .collect();
-    let selected = selection.subtitles.len();
+    let read = read_subtitles(http, hooks, &master, &selection, scope, cancel).await?;
     let mut kept = Vec::new();
     let mut skipped_subtitles = Vec::new();
     let mut subtitle_support = Vec::new();
-    for (n, ((index, url), result)) in wanted.into_iter().zip(fetched).enumerate() {
-        let checked =
-            result.and_then(
-                |playlist| match subtitle_format(&playlist, &subtitle_codecs) {
-                    Some(format) => Err(Error::Unsupported(Unsupported::SubtitleFormat {
-                        url: Box::new(url.clone()),
-                        format,
-                    })),
-                    None => Ok(playlist),
-                },
-            );
-        let is_selected = n < selected;
-        match checked {
-            Err(Error::Cancelled) => return Err(Error::Cancelled),
-            Err(e) if is_selected && explicit => return Err(e),
-            Err(e) => {
-                if is_selected {
-                    skipped_subtitles.push(index);
+    for subtitle in read {
+        let support = match subtitle.read {
+            Ok(playlist) => match subtitle_format(&playlist, &selection.variant.codecs) {
+                Some(format) => Err(format),
+                None => {
+                    if subtitle.selected {
+                        kept.push(subtitle.index);
+                        tracks.push(ResolvedTrack {
+                            url: subtitle.url.clone(),
+                            playlist,
+                        });
+                    }
+                    Ok(())
                 }
-                subtitle_support.push((index, Err(problem(e))));
+            },
+            // 选到的拉不到、播放列表不能用时照原样报出：拉取的失败是外部故障，不能当成「下不了」去掉
+            Err(error) if subtitle.selected => return Err(error),
+            Err(error) => {
+                subtitle_support
+                    .push((subtitle.index, SubtitleSupport::Unreadable(problem(error)?)));
+                continue;
             }
-            Ok(playlist) => {
-                subtitle_support.push((index, Ok(())));
-                if is_selected {
-                    kept.push(index);
-                    tracks.push(ResolvedTrack { url, playlist });
+        };
+        match support {
+            Ok(()) => subtitle_support.push((subtitle.index, SubtitleSupport::Supported)),
+            Err(format) if subtitle.selected && explicit => {
+                return Err(Error::Unsupported(Unsupported::SubtitleFormat {
+                    url: Box::new(subtitle.url),
+                    format,
+                }));
+            }
+            Err(format) => {
+                if subtitle.selected {
+                    skipped_subtitles.push(subtitle.index);
                 }
+                subtitle_support.push((subtitle.index, SubtitleSupport::Unsupported(format)));
             }
         }
     }
@@ -211,12 +194,78 @@ pub(crate) async fn resolve_playlist(
     }))
 }
 
+/// 同时拉取的字幕媒体播放列表数：字幕组常有几十种语言，一起发会被限流。
+const SUBTITLE_PLAYLISTS_AT_ONCE: usize = 4;
+
+/// 读过的一条字幕的媒体播放列表。
+struct ReadSubtitle {
+    /// 第几个字幕 rendition（口径同 [`hls::RenditionChoice::Index`]）
+    index: usize,
+    url: Url,
+    /// 是选到的（否则是探测时顺带读的组里其余的）
+    selected: bool,
+    read: Result<MediaPlaylist, Error>,
+}
+
+/// 拉取选到的字幕的媒体播放列表（按选的顺序），探测时（[`SubtitleScope::Group`]）再加上所选变体字幕组里其余有 URI 的，
+/// 至多 [`SUBTITLE_PLAYLISTS_AT_ONCE`] 个同时。各自的失败随结果返回，只有取消中止。
+async fn read_subtitles(
+    http: &Http,
+    hooks: &Arc<dyn Hooks>,
+    master: &MasterPlaylist,
+    selection: &Selection,
+    scope: SubtitleScope,
+    cancel: &CancellationToken,
+) -> Result<Vec<ReadSubtitle>, Error> {
+    let mut wanted: Vec<(usize, Url, bool)> = selection
+        .subtitles
+        .iter()
+        .map(|s| (s.index, s.uri.clone(), true))
+        .collect();
+    if scope == SubtitleScope::Group
+        && let Some(group) = &selection.variant.subtitles
+    {
+        for (index, rendition) in renditions(master, hls::RenditionKind::Subtitles) {
+            if rendition.group == *group
+                && !wanted.iter().any(|(i, _, _)| *i == index)
+                && let Some(uri) = &rendition.uri
+            {
+                wanted.push((index, uri.clone(), false));
+            }
+        }
+    }
+    let reads =
+        futures_util::stream::iter(wanted.into_iter().map(|(index, url, selected)| async move {
+            let read = fetch_media(http, hooks, &url, Attempts::Retrying, cancel).await;
+            ReadSubtitle {
+                index,
+                url,
+                selected,
+                read,
+            }
+        }))
+        .buffered(SUBTITLE_PLAYLISTS_AT_ONCE)
+        .collect::<Vec<_>>()
+        .await;
+    if reads
+        .iter()
+        .any(|r| matches!(r.read, Err(Error::Cancelled)))
+    {
+        return Err(Error::Cancelled);
+    }
+    Ok(reads)
+}
+
 /// 字幕的媒体播放列表表明它不是分段的 WebVTT 文本时为它的格式：有 EXT-X-MAP 的是 fMP4（wvtt 或 stpp）；分片地址的扩展名
-/// 是 TTML 的。`codecs` 为所选变体 CODECS 里的字幕编码。
+/// 是 TTML 的。`codecs` 为所选变体的 CODECS，其中的字幕编码写进格式里。
 fn subtitle_format(playlist: &MediaPlaylist, codecs: &[String]) -> Option<SubtitleFormat> {
     if playlist.segments.iter().any(|s| s.init.is_some()) {
         return Some(SubtitleFormat::Fmp4 {
-            codecs: codecs.to_vec(),
+            codecs: codecs
+                .iter()
+                .filter(|c| CodecKind::of(c) == CodecKind::Subtitles)
+                .cloned()
+                .collect(),
         });
     }
     const TTML: [&str; 4] = ["ttml", "xml", "dfxp", "ttml2"];
@@ -229,17 +278,16 @@ fn subtitle_format(playlist: &MediaPlaylist, codecs: &[String]) -> Option<Subtit
     })
 }
 
-/// 下不了的字幕的原因。
-fn problem(error: Error) -> SubtitleProblem {
-    match error {
-        Error::Unsupported(Unsupported::SubtitleFormat { format, .. }) => {
-            SubtitleProblem::Format(format)
-        }
-        Error::Http {
-            kind, retry_after, ..
-        } => SubtitleProblem::Fetch(HttpFailure { kind, retry_after }),
-        other => SubtitleProblem::Playlist(other.to_string()),
+/// 探测时读不了的字幕的原因：拉不到的保留可否重试（见 [`crate::FetchFailure`]），其余（播放列表写坏、用了不支持的特性、回调
+/// 出错等）为错误说明；取消上抛。
+fn problem(error: Error) -> Result<SubtitleProblem, Error> {
+    if matches!(error, Error::Cancelled) {
+        return Err(error);
     }
+    Ok(match error.missable() {
+        Some(failure) => SubtitleProblem::Fetch(failure),
+        None => SubtitleProblem::Unusable(error.to_string()),
+    })
 }
 
 /// 拉取播放列表的请求失败时再不再试。

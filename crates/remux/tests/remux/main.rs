@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ffmpeg_next as ffmpeg;
 use hs_m3u8_remux::{
     Cancel, Container, Control, DiscontinuityGroup, Error, Label, MediaReport, Segment, Streams,
-    Track, TrackSegments,
+    SubtitleMode, Track, TrackSegments,
 };
 
 fn fixtures() -> PathBuf {
@@ -125,7 +125,15 @@ fn remux(
     control: &Control,
 ) -> Result<MediaReport, Error> {
     let tracks = unlabeled(streams);
-    hs_m3u8_remux::remux(&tracks, groups, output, Container::Mp4, true, control).map(|m| m.report)
+    hs_m3u8_remux::remux(
+        &tracks,
+        groups,
+        output,
+        Container::Mp4,
+        SubtitleMode::Embed,
+        control,
+    )
+    .map(|m| m.report)
 }
 
 /// 不带标注的各轨。

@@ -51,6 +51,7 @@ use self::removal::{remove_steps, remove_tracks_of};
 use crate::entries::{self, is_canonical_number};
 use crate::error::io_error;
 use crate::ident::Fingerprint;
+use crate::selection::track_kinds;
 use crate::{
     Error, FileSaved, HlsSaved, JobType, Leftover, Saved, WorkDirProblem, blocking, busy, volume,
 };
@@ -311,6 +312,7 @@ fn read_saved(root: &Path) -> Result<Option<Saved>, Error> {
     let stored = scan(&layout, record.streams().len())?;
     Ok(Some(Saved::Hls(HlsSaved {
         live: matches!(record.kind, RecordKind::Live),
+        tracks: track_kinds(&record.streams()),
         segments: stored.segments.iter().map(Vec::len).sum(),
         bytes: stored.bytes(),
         duration: Duration::from_micros(stored.duration_us(0)),

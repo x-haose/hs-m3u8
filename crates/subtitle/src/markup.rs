@@ -32,7 +32,7 @@ fn convert(text: &str, keep_style: bool) -> String {
             let name = name
                 .split(['.', ' ', '\t', '\n'])
                 .next()
-                .unwrap_or_default();
+                .expect("split 至少给出一段");
             if keep_style && matches!(name, "b" | "i" | "u") {
                 out.push('<');
                 if closing {

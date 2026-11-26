@@ -1,0 +1,5 @@
+# cargo-fuzz 要 nightly（-Z sanitizer）；固定日期，Makefile 的 fuzz 目标与 CI 都在 fuzz/ 下运行、读它
+[toolchain]
+channel = "nightly-2026-11-25"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

@@ -16,14 +16,16 @@ pub enum Saved {
     File(FileSaved),
 }
 
-/// HLS 任务目录里已完成的内容；各量的含义同 [`Progress`] 里同名的。
+/// HLS 任务目录里已完成的内容。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HlsSaved {
     /// 目录里是直播的录制
     pub live: bool,
-    /// 已完成的分片数，各轨合计
+    /// 各轨的种类，按轨号（见 [`crate::Selected`]）
+    pub tracks: Vec<TrackKind>,
+    /// 已完成的分片数，各轨合计，含字幕轨（同 [`Output::segments`]）
     pub segments: usize,
-    /// 已完成的分片与 init 段的字节数（解密后）
+    /// 已完成的分片与 init 段的字节数（解密后），各轨合计，含字幕轨（同 [`Output::bytes`]）
     pub bytes: u64,
     /// 第 0 条轨已完成分片的声明时长之和；直播即已录时长
     pub duration: Duration,
@@ -179,30 +181,33 @@ impl Progress {
             .collect();
     }
 
-    /// 改第 `track` 条轨的分片数，视频与音频轨同样改合计。还没建出 `tracks` 时只改合计。
+    /// 改第 `track` 条轨的分片数，视频与音频轨同样改合计。计数之前已建出 `tracks`（见 [`Progress::set_tracks`]）。
     pub(crate) fn segments_of(&mut self, track: usize, change: impl Fn(&mut SegmentCounts)) {
-        match self.tracks.get_mut(track) {
-            Some(t) => {
-                change(&mut t.segments);
-                if t.kind.counted() {
-                    change(&mut self.segments);
-                }
-            }
-            None => change(&mut self.segments),
+        let t = self
+            .tracks
+            .get_mut(track)
+            .expect("计数之前已按选轨建出各轨的进度");
+        change(&mut t.segments);
+        if t.kind.counted() {
+            change(&mut self.segments);
         }
     }
 
-    /// 第 `track` 条轨又有 `len` 字节落盘，视频与音频轨同样计入合计。
+    /// 第 `track` 条轨又有 `len` 字节落盘，视频与音频轨同样计入合计。计数之前已建出 `tracks`。
     pub(crate) fn add_bytes(&mut self, track: usize, len: u64) {
-        match self.tracks.get_mut(track) {
-            Some(t) => {
-                t.bytes += len;
-                if t.kind.counted() {
-                    self.bytes += len;
-                }
-            }
-            None => self.bytes += len,
+        let t = self
+            .tracks
+            .get_mut(track)
+            .expect("计数之前已按选轨建出各轨的进度");
+        t.bytes += len;
+        if t.kind.counted() {
+            self.bytes += len;
         }
+    }
+
+    /// 各轨的分片与 init 段的字节数合计，含字幕轨（[`Output::bytes`] 的口径）。
+    pub(crate) fn all_bytes(&self) -> u64 {
+        self.tracks.iter().map(|t| t.bytes).sum()
     }
 
     /// 计入一个已完成的分片：第 `track` 条轨、声明时长 `duration_us`、`len` 字节。
@@ -305,11 +310,11 @@ pub struct Output {
     /// init 段与这条轨的 `index.m3u8` 在 `<轨道编号>/` 下，字幕为原 WebVTT 分片（`.vtt`）。内容与合并文件相同：只放各轨
     /// 都有的不连续段组，组内缺失的分片不标出、保留原时间戳
     pub hls: Option<PathBuf>,
-    /// 另存的字幕文件（绝对路径），按所选字幕的顺序（见 [`crate::SubtitleOutput::files`]）；不另存或没选字幕时为空
-    pub subtitle_files: Vec<PathBuf>,
+    /// 另存的字幕文件，按所选字幕的顺序（见 [`crate::SubtitleOutput::files`]）；不另存或没选字幕时为空
+    pub subtitle_files: Vec<SubtitleFile>,
     /// 输出的分片数，各轨合计（含字幕轨）
     pub segments: usize,
-    /// 同 [`Progress::bytes`]
+    /// 任务目录中已完成的分片与 init 段的字节数（解密后），各轨合计，含字幕轨（与 [`Progress::bytes`] 不同）
     pub bytes: u64,
     /// 收尾没删掉的东西：被替换的旧输出、没删干净的任务目录等；输出不受影响。都删干净时为空
     pub leftovers: Vec<Leftover>,
@@ -364,6 +369,17 @@ impl fmt::Display for Leftover {
             LeftoverKind::WorkDir => write!(f, "任务目录 {path} 没删干净：{cause}"),
         }
     }
+}
+
+/// 另存的一个字幕文件。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubtitleFile {
+    /// 绝对路径
+    pub path: PathBuf,
+    /// 写进去的 cue 数
+    pub cues: usize,
+    /// 丢掉的 cue 数，口径同 [`hs_m3u8_remux::StreamReport::discarded_cues`]
+    pub discarded_cues: u64,
 }
 
 /// 生成的合并文件。

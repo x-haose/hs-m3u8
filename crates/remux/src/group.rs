@@ -97,8 +97,8 @@ pub(crate) struct OpenTrack {
     pub(crate) selected: Vec<Selected>,
 }
 
-/// 打开第 `group` 组的各音视频轨并选流（见 [`select`]），字幕轨不打开。`layout` 为第 0 组各轨选中的流（见 [`layout_of`]），其余组的流种类、
-/// 参数与解码配置须与它相同（见 [`same_streams`]），各轨都没有确定的不同、而有项只有一边探测出时报
+/// 打开第 `group` 组的各音视频轨并选流（见 [`select`]），字幕轨不打开。`layout` 为第 0 组各轨选中的流（见 [`layout_of`]
+/// ），其余组的流种类、参数与解码配置须与它相同（见 [`same_streams`]），各轨都没有确定的不同、而有项只有一边探测出时报
 /// [`Unsupported::ParamsUnknown`]；打开第 0 组时为 None。
 pub(crate) fn open_group(
     streams: &[Streams],

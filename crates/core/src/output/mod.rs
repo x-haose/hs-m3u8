@@ -1,4 +1,5 @@
-//! 输出：合并为 MP4 或 Matroska（另可把字幕另存为文件）、写出可直接播放的本地 HLS，或两者都要；按选项替换已有的输出，成功后删除任务目录。
+//! 输出：合并为 MP4 或 Matroska（另可把字幕另存为文件）、写出可直接播放的本地 HLS，或两者都要；按选项替换已有的输出，成
+//! 功后删除任务目录。
 
 mod commit;
 mod hls;
@@ -9,10 +10,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use hs_m3u8_remux::{
-    Cancel, Container, Control, DiscontinuityGroup, MediaReport, Merged, Segment, Streams, Track,
-    TrackSegments, WriteProgress,
+    Cancel, Container, Control, DiscontinuityGroup, Merged, Segment, Streams, SubtitleCues,
+    SubtitleMode, Track, TrackSegments, WriteProgress,
 };
-use hs_m3u8_subtitle::Cue;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -28,7 +28,7 @@ use crate::selection::{SelectionRecord, track_labels};
 use crate::workdir::{FileDir, Layout, OutputKind, PendingOutput, SegmentName, WorkDir};
 use crate::{
     Error, FileCount, Leftover, LeftoverKind, LiveReport, MergedOutput, Missed, Output, Progress,
-    WorkDirProblem, Writing, blocking,
+    SubtitleFile, WorkDirProblem, Writing, blocking,
 };
 
 /// 交给输出的内容。
@@ -117,13 +117,12 @@ pub(crate) fn prepare(options: &ResolvedOutput) -> Result<(), Error> {
     create_dirs(options)
 }
 
-/// 任务开头之后才定下的输出（另存的字幕文件，见 [`ResolvedOutput::with_subtitle_files`]）在下载之前核对：路径建不建得
-/// 出来、能否写，再建出所在的目录（见 [`prepare`]）。已有的输出照样再查一遍。要读写文件系统，在阻塞线程池中调用；
-/// 调用方已给任务目录加锁。
+/// 任务开头之后才定下的输出（另存的字幕文件，见 [`ResolvedOutput::with_subtitle_files`]）在下载之前与开头时一样处理：
+/// 路径建不建得出来（见 [`check_creatable`]），再按 [`prepare`] 收拾输出旁没有记录的保留名、检查能否写、建出所在的目录。
+/// 已有的输出照样再查一遍。要读写文件系统，在阻塞线程池中调用；调用方已给任务目录加锁。
 pub(crate) fn check_more(options: &ResolvedOutput) -> Result<(), Error> {
     check_creatable(options)?;
-    check_all(options)?;
-    create_dirs(options)
+    prepare(options)
 }
 
 /// 建出各输出所在的目录，已有的不动：根存在而中间建不出（没有写权限，如 macOS 上外置盘卸载后的 /Volumes）时报出。
@@ -204,7 +203,11 @@ pub(crate) async fn write(
     let advance = Advance(progress.clone());
     let files = options.clone();
     let cancel = cancel.clone();
-    let (merged, mut leftovers) = blocking(move || {
+    let Written {
+        merged,
+        subtitle_files,
+        mut leftovers,
+    } = blocking(move || {
         write_files(
             &streams,
             &groups,
@@ -223,10 +226,7 @@ pub(crate) async fn write(
         hls: options
             .get(OutputKind::Hls)
             .map(|o| o.target().to_path_buf()),
-        subtitle_files: options
-            .subtitle_files()
-            .map(|o| o.target().to_path_buf())
-            .collect(),
+        subtitle_files,
         segments,
         bytes,
         leftovers,
@@ -331,22 +331,45 @@ fn write_files(
     options: &ResolvedOutput,
     cancel: &CancellationToken,
     advance: &Advance,
-) -> Result<(Option<MergedOutput>, Vec<Leftover>), Error> {
+) -> Result<Written, Error> {
     if options.get(OutputKind::Hls).is_some() {
         hls::check_content(streams, groups, selection)?;
     }
-    let (report, leftovers) = commit_outputs(options, cancel, || {
+    let (merged, leftovers) = commit_outputs(options, cancel, || {
         write_temps(streams, groups, selection, options, cancel, advance)
     })?;
-    let merged = options
-        .merged()
-        .zip(report)
-        .map(|((merged, container), report)| MergedOutput {
-            path: merged.target().to_path_buf(),
-            container,
-            report,
-        });
-    Ok((merged, leftovers))
+    let (merged, subtitles) = match (options.merged(), merged) {
+        (Some((file, container)), Some(merged)) => {
+            let subtitle_files = options
+                .subtitle_files()
+                .zip(&merged.subtitles)
+                .map(|(file, cues)| SubtitleFile {
+                    path: file.target().to_path_buf(),
+                    cues: cues.cues.len(),
+                    discarded_cues: cues.discarded_cues,
+                })
+                .collect();
+            let output = MergedOutput {
+                path: file.target().to_path_buf(),
+                container,
+                report: merged.report,
+            };
+            (Some(output), subtitle_files)
+        }
+        _ => (None, Vec::new()),
+    };
+    Ok(Written {
+        merged,
+        subtitle_files: subtitles,
+        leftovers,
+    })
+}
+
+/// 写出的结果，见 [`Output`] 的同名字段。
+struct Written {
+    merged: Option<MergedOutput>,
+    subtitle_files: Vec<SubtitleFile>,
+    leftovers: Vec<Leftover>,
 }
 
 /// 写出各临时输出，写好一个文件报给 `advance`；失败时可能留有写了一半的，由调用方删除。
@@ -357,8 +380,8 @@ fn write_temps(
     options: &ResolvedOutput,
     cancel: &CancellationToken,
     advance: &Advance,
-) -> Result<Option<MediaReport>, Error> {
-    let report = match options.merged() {
+) -> Result<Option<Merged>, Error> {
+    let merged = match options.merged() {
         Some((merged, container)) => {
             let tracks: Vec<Track> = streams
                 .iter()
@@ -375,7 +398,7 @@ fn write_temps(
                 advance,
             )?;
             write_subtitle_files(options, &written.subtitles)?;
-            Some(written.report)
+            Some(written)
         }
         None => None,
     };
@@ -390,7 +413,7 @@ fn write_temps(
             &|files| advance.hls(files),
         )?;
     }
-    Ok(report)
+    Ok(merged)
 }
 
 /// 合并为 `container` 写到 `temp`，字幕按 `options.subtitles` 封进去与否，写完输入文件报给 `advance`（见
@@ -414,14 +437,18 @@ fn write_merged(
             advance.merged(usize::try_from(files).expect("文件个数在 usize 范围内"))
         }),
     };
-    let embed = options.subtitles.embed;
-    hs_m3u8_remux::remux(tracks, &groups, temp, container, embed, &control)
+    let mode = if options.subtitles.as_ref().is_some_and(|s| s.embed) {
+        SubtitleMode::Embed
+    } else {
+        SubtitleMode::CuesOnly
+    };
+    hs_m3u8_remux::remux(tracks, &groups, temp, container, mode, &control)
         .map_err(|e| remux_error(e, &options.work_dir))
 }
 
 /// 把对齐后的字幕（按字幕的轨号，见 [`Merged::subtitles`]）写到各另存的字幕文件的临时名。
-fn write_subtitle_files(options: &ResolvedOutput, subtitles: &[Vec<Cue>]) -> Result<(), Error> {
-    let Some(format) = options.subtitles.files else {
+fn write_subtitle_files(options: &ResolvedOutput, subtitles: &[SubtitleCues]) -> Result<(), Error> {
+    let Some(format) = options.subtitles.as_ref().and_then(|s| s.files) else {
         return Ok(());
     };
     let files: Vec<&PendingOutput> = options.subtitle_files().collect();
@@ -430,10 +457,10 @@ fn write_subtitle_files(options: &ResolvedOutput, subtitles: &[Vec<Cue>]) -> Res
         subtitles.len(),
         "另存的字幕文件按所选的字幕建出，与合并给出的字幕轨一一对应"
     );
-    for (file, cues) in files.into_iter().zip(subtitles) {
+    for (file, subtitle) in files.into_iter().zip(subtitles) {
         let text = match format {
-            SubtitleFileFormat::Srt => hs_m3u8_subtitle::srt(cues),
-            SubtitleFileFormat::WebVtt => hs_m3u8_subtitle::webvtt(cues),
+            SubtitleFileFormat::Srt => hs_m3u8_subtitle::srt(&subtitle.cues),
+            SubtitleFileFormat::WebVtt => hs_m3u8_subtitle::webvtt(&subtitle.cues),
         };
         hls::write_file(file.temp(), &text)?;
     }
