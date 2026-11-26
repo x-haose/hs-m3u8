@@ -171,22 +171,25 @@ pub enum SubtitleMode {
     Embed,
     /// 不封进输出，只在结果里给出对齐后的 cue（[`Merged::subtitles`]）
     CuesOnly,
+    /// 字幕轨整个不读：不封进输出，结果里也没有
+    Omit,
 }
 
 /// [`remux`] 的结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Merged {
     pub report: MediaReport,
-    /// 各字幕轨（[`Streams::Subtitles`]，按轨号）换到输出时间线上的结果，用于另存为 SRT / WebVTT 文件
+    /// 各字幕轨（[`Streams::Subtitles`]，按轨号）换到输出时间线上的结果，用于另存为 SRT / WebVTT 文件；
+    /// [`SubtitleMode::Omit`] 时为空
     pub subtitles: Vec<SubtitleCues>,
 }
 
 /// 一条字幕轨对齐后的 cue。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubtitleCues {
-    /// 截到各组的时间范围里、去重之后的，按起点排列（见 [`remux`]）
+    /// 对齐、去重之后的，按起点排列（见 [`remux`]）
     pub cues: Vec<hs_m3u8_subtitle::Cue>,
-    /// 口径同 [`StreamReport::discarded_cues`]
+    /// 解析时按 WebVTT 的规则跳过的块（时间写坏的 cue 等），与对齐后不剩长度（结束不晚于所在组的起点）的 cue
     pub discarded_cues: u64,
 }
 
@@ -262,8 +265,8 @@ pub struct StreamReport {
     /// 的包），打包音频里切帧时跳过的不完整的帧或标签、认不出的字节，以及片内损坏之后定不了时刻（这一片是最后一片，
     /// 或下一片之前缺了分片）的帧。视频包照常写入，由解码器做错误隐藏
     pub discarded_corrupt_bytes: u64,
-    /// 字幕：解析时按 WebVTT 的规则丢弃的块（时间写坏的 cue 等），对齐后落在所在组的时间范围外或不足 1 毫秒的 cue，与因
-    /// 前一组延续过来的 cue 推后而没了长度的（见 [`remux`]）。音视频为 0
+    /// 字幕：[`SubtitleCues::discarded_cues`] 里的，加上封进输出时被前一个包挡住、推到没有长度的（前一组延续过来的 cue
+    /// 推后了下一组的；mov_text 按切出的段计）。音视频为 0
     pub discarded_cues: u64,
     /// 输出时间线上从最早的呈现时刻到最晚的结束时刻；含组内时间戳间断（如缺失的分片）留下的空档
     pub duration: Duration,

@@ -91,7 +91,7 @@ pub use report::{
     FileCount, FileOutput, FileProgress, FileSaved, HlsSaved, Leftover, LeftoverKind, LiveEnd,
     LiveReport, MergedOutput, MissReason, Missed, NewSession, Output, Progress, RefreshReason,
     Retrying, Saved, SegmentCounts, SourceBreak, Stage, StallCause, SubtitleFile, Throttled,
-    TrackKind, TrackProgress, Writing,
+    TrackKind, TrackProgress, TrackSaved, Writing,
 };
 pub use request::{
     Body, Call, HttpOptions, JobRequest, KeyOverride, LiveOptions, Method, Proxy, RetryPolicy,

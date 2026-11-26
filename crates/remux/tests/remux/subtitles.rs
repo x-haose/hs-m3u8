@@ -262,12 +262,12 @@ fn audio_tracks_carry_their_labels() {
     );
 }
 
-/// 两个不连续段组：每组的字幕按自己的 X-TIMESTAMP-MAP 对齐到这一组的画面，第二组的 cue 落在第二组的起点之后；超出这一组
-/// 声明时长的 cue 截到结尾，整条在组外的丢掉并计数，时间行写坏的块同样计数。
+/// 两个不连续段组：每组的字幕按自己的 X-TIMESTAMP-MAP 对齐到这一组的画面，第二组的 cue 落在第二组的起点之后。第一组里结束
+/// 晚于画面的 cue 不截短；延续到第二组的那条挡住了第二组的 cue：Matroska 里第二组的推后到它的起点之后（可以重叠），MP4
+/// 里推到它结束之后、没了长度的丢掉，计入字幕流的丢弃数，另存的 cue 不受影响。时间行写坏的块在两种容器里都计数。
 #[test]
 fn subtitles_follow_each_discontinuity_group() {
     let dir = work_dir("sub_groups");
-    let output = dir.join("groups.mkv");
     let vtt = |name: &str, body: &str| {
         let path = dir.join(name);
         let header = format!("WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:{TS_A_START},LOCAL:00:00:00.000\n\n");
@@ -282,46 +282,57 @@ fn subtitles_follow_each_discontinuity_group() {
         }
     };
     let video = track("ts_a");
-    let declared_us: u64 = video.segments.iter().map(|s| s.duration_us).sum();
-    let last = declared_us / 1000;
-    let clip_from = last - 100;
     let first = vtt(
         "g0.vtt",
-        &format!(
-            "00:00.500 --> 00:00.900\n一\n\n00:{:02}.{:03} --> 00:09.000\n截到结尾\n\n\
-             00:09.000 --> 00:09.500\n组外\n\n00:01.000 --> 写坏了\n坏\n",
-            clip_from / 1000,
-            clip_from % 1000
-        ),
+        "00:00.500 --> 00:00.900\n一\n\n00:01.900 --> 00:09.000\n比画面长\n\n00:01.000 --> 写坏了\n坏\n",
     );
     let second = vtt("g1.vtt", "00:00.500 --> 00:00.900\n二\n");
     let groups = vec![group([video.clone(), first]), group([video, second])];
-    let merged = hs_m3u8_remux::remux(
-        &tracks(),
-        &groups,
-        &output,
-        Container::Matroska,
-        SubtitleMode::Embed,
-        &Control::default(),
-    )
-    .unwrap();
+    let merge = |container: Container, name: &str| {
+        hs_m3u8_remux::remux(
+            &tracks(),
+            &groups,
+            &dir.join(name),
+            container,
+            SubtitleMode::Embed,
+            &Control::default(),
+        )
+        .unwrap()
+    };
 
-    let subtitles = &merged.subtitles[0];
+    let mkv = merge(Container::Matroska, "groups.mkv");
+    let subtitles = &mkv.subtitles[0];
     let times: Vec<(i64, i64, &str)> = subtitles
         .cues
         .iter()
         .map(|c| (c.start_us / 1000, c.end_us / 1000, c.text.as_str()))
         .collect();
-    let last = i64::try_from(last).unwrap();
     assert_eq!(times[0], (500, 900, "一"));
-    assert_eq!(times[1], (last - 100, last, "截到结尾"));
+    assert_eq!(times[1], (1900, 9000, "比画面长"));
     assert_eq!(times[2].2, "二");
-    // 第二组从第一组的画面结尾开始（组间首尾相接；ts_a 的画面比声明的时长略短），字幕与它一起平移
+    // 第二组从第一组的画面结尾开始（组间首尾相接），字幕与它一起平移
     let second_start = times[2].0 - 500;
-    assert!((2000..last).contains(&second_start), "{times:?}");
+    assert!((2000..2100).contains(&second_start), "{times:?}");
     assert_eq!(times.len(), 3);
-    assert_eq!(subtitles.discarded_cues, 2);
-    assert_eq!(merged.report.streams[2].discarded_cues, 2);
+    assert_eq!(subtitles.discarded_cues, 1);
+    assert_eq!(
+        (
+            mkv.report.streams[2].packets,
+            mkv.report.streams[2].discarded_cues
+        ),
+        (3, 1)
+    );
+
+    let mp4 = merge(Container::Mp4, "groups.mp4");
+    assert_eq!(mp4.subtitles[0].cues.len(), 3);
+    assert_eq!(mp4.subtitles[0].discarded_cues, 1);
+    assert_eq!(
+        (
+            mp4.report.streams[2].packets,
+            mp4.report.streams[2].discarded_cues
+        ),
+        (2, 2)
+    );
 }
 
 /// MP4 里几条音频各成一路：语言写 ISO 639-2 的术语代码；Matroska 的字幕写强制标志。

@@ -53,8 +53,8 @@ pub enum Renditions {
 /// 指定一条音频或字幕 rendition。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenditionChoice {
-    /// 组内第一个 LANGUAGE 与它相同（不区分大小写）的。变体没有引用音频组时音频的不起作用（用变体里混着的）；字幕的报
-    /// [`SelectError::LanguageNotFound`]
+    /// 组内第一个 LANGUAGE 与它相同（不区分大小写）的。变体没有引用音频组（或引用的组在主播放列表里没有）时音频的不起作用
+    /// （用变体里混着的）；字幕的报 [`SelectError::NoGroup`]
     Language(String),
     /// 主播放列表里第几个这类 rendition（音频只数 TYPE=AUDIO 的，字幕只数 TYPE=SUBTITLES 的，按出现顺序，从 0 起）；
     /// 须在所选变体的组里。只对同一份主播放列表有效，同 [`VariantChoice::Index`]
@@ -97,11 +97,10 @@ pub enum SelectError {
     /// 主播放列表里没有身份与 [`VariantChoice::Matching`] 相同的变体
     #[error("主播放列表里没有身份相同的变体")]
     VariantNotFound,
-    /// `group` 为所选变体引用的组，没有引用时为 None
-    #[error("{}组 {} 中没有语言为 {language} 的 rendition，可选：{available:?}", kind_name(*kind), group.as_deref().unwrap_or("（变体没有引用）"))]
+    #[error("{}组 {group} 中没有语言为 {language} 的 rendition，可选：{available:?}", kind_name(*kind))]
     LanguageNotFound {
         kind: RenditionKind,
-        group: Option<String>,
+        group: String,
         language: String,
         available: Vec<String>,
     },
@@ -125,6 +124,9 @@ pub enum SelectError {
     /// [`Renditions::These`] 里两项选到了同一条（`index` 口径同 [`RenditionChoice::Index`]）
     #[error("第 {index} 个{}被选了两次", kind_name(*kind))]
     Duplicate { kind: RenditionKind, index: usize },
+    /// 按语言点名了字幕，所选变体却没有引用字幕组（或引用的组在主播放列表里没有一条）
+    #[error("所选变体没有{}组，按语言点名的找不到", kind_name(*kind))]
+    NoGroup { kind: RenditionKind },
     /// [`Renditions::These`] 是空的
     #[error("指定{}时一项也没给", kind_name(*kind))]
     NoChoices { kind: RenditionKind },
@@ -155,26 +157,23 @@ pub fn select(master: &MasterPlaylist, preference: &Preference) -> Result<Select
         VariantChoice::Best => best_variant(master).ok_or(SelectError::NoVariants)?,
     };
     let variant = &master.variants[variant_index];
-    let audio = pick(
-        master,
-        RenditionKind::Audio,
-        variant.audio.as_deref(),
-        &preference.audio,
-    )?;
-    let subtitles = pick(
+    let audio_group = listed(master, RenditionKind::Audio, variant.audio.as_deref());
+    let subtitle_group = listed(
         master,
         RenditionKind::Subtitles,
         variant.subtitles.as_deref(),
+    );
+    let audio = pick(master, RenditionKind::Audio, audio_group, &preference.audio)?;
+    let subtitles = pick(
+        master,
+        RenditionKind::Subtitles,
+        subtitle_group,
         &preference.subtitles,
     )?;
-    // 变体引用的音频组在主播放列表里没有一条 rendition 时（来源写错了组名）与没有引用一样，用混着的音频
-    let group_listed = variant.audio.as_deref().is_some_and(|group| {
-        renditions(master, RenditionKind::Audio).any(|(_, r)| r.group == group)
-    });
-    let muxed_audio = match &preference.audio {
-        Renditions::None => false,
-        _ if !group_listed => true,
-        _ => audio.iter().any(|(_, r)| r.uri.is_none()),
+    let muxed_audio = match (&preference.audio, audio_group) {
+        (Renditions::None, _) => false,
+        (_, None) => true,
+        (_, Some(_)) => audio.iter().any(|(_, r)| r.uri.is_none()),
     };
     let subtitles = subtitles
         .into_iter()
@@ -192,6 +191,15 @@ pub fn select(master: &MasterPlaylist, preference: &Preference) -> Result<Select
             .collect(),
         subtitles,
     })
+}
+
+/// 变体引用的 `kind` 类组 `group`；主播放列表里没有一条这一组的 rendition 时（来源写错了组名）与没有引用一样，为 None。
+fn listed<'a>(
+    master: &MasterPlaylist,
+    kind: RenditionKind,
+    group: Option<&'a str>,
+) -> Option<&'a str> {
+    group.filter(|group| renditions(master, kind).any(|(_, r)| r.group == *group))
 }
 
 /// 按 `choice` 从 `group` 组里选出 `kind` 类 rendition，与它们的位置（口径同 [`RenditionChoice::Index`]）。
@@ -267,9 +275,10 @@ fn one<'a>(
         RenditionChoice::Matching(key) => group
             .and_then(|group| key.find(master, kind, group))
             .ok_or(SelectError::NotFound { kind }),
+        RenditionChoice::Language(_) if group.is_none() => Err(SelectError::NoGroup { kind }),
         RenditionChoice::Language(language) => {
-            let in_group =
-                || renditions(master, kind).filter(|(_, r)| Some(r.group.as_str()) == group);
+            let group = group.expect("上一分支排除了没有组的");
+            let in_group = || renditions(master, kind).filter(|(_, r)| r.group == group);
             in_group()
                 .find(|(_, r)| {
                     r.language
@@ -278,7 +287,7 @@ fn one<'a>(
                 })
                 .ok_or_else(|| SelectError::LanguageNotFound {
                     kind,
-                    group: group.map(str::to_owned),
+                    group: group.to_owned(),
                     language: language.to_owned(),
                     available: in_group().filter_map(|(_, r)| r.language.clone()).collect(),
                 })

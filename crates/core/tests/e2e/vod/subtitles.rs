@@ -5,8 +5,8 @@ use axum::http::StatusCode;
 use hs_m3u8_core::hls::{RenditionChoice, Renditions};
 use hs_m3u8_core::remux::{Container, Shape, StreamKind};
 use hs_m3u8_core::{
-    Error, FetchFailure, HttpErrorKind, MergedFile, Output, SubtitleFileFormat, SubtitleFormat,
-    SubtitleProblem, SubtitleSupport, Target, TrackKind, Unsupported,
+    Error, FetchFailure, HttpErrorKind, MergedFile, MissReason, Missed, Output, SubtitleFileFormat,
+    SubtitleFormat, SubtitleProblem, SubtitleSupport, Target, TrackKind, Unsupported,
 };
 
 use crate::server::Server;
@@ -306,4 +306,79 @@ async fn subtitle_playlists_do_not_decide_the_groups() {
     let subs = std::fs::read_to_string(dir.join("out/1/index.m3u8")).unwrap();
     assert_eq!(subs.matches("#EXT-X-DISCONTINUITY").count(), 1, "{subs}");
     assert_eq!(subs.matches(".vtt").count(), 2, "{subs}");
+}
+
+/// 默认选到的字幕的媒体播放列表取不到：探测只标出它、列为跳过，变体与其余照常给出；开始任务时以那次的错误失败。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_default_subtitle_that_cannot_be_fetched_is_only_marked_by_probe() {
+    let dir = test_dir("subtitles_probe_default");
+    let server = Server::start().await;
+    server.put("v/seg0.ts", fixture("ts_a/seg0.ts"));
+    server.put(
+        "v.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nv/seg0.ts\n#EXT-X-ENDLIST\n",
+    );
+    server.status("zh.m3u8", StatusCode::NOT_FOUND);
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n\
+         #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"s\",NAME=\"中文\",LANGUAGE=\"zh\",DEFAULT=YES,URI=\"zh.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=200000,SUBTITLES=\"s\"\nv.m3u8\n",
+    );
+    let mut req = request(server.url("master.m3u8"), &dir);
+    req.source.preference.subtitles = Renditions::Default;
+
+    let probe = engine().probe(&req.source).await.unwrap();
+    let master = probe.master.unwrap();
+    assert!(matches!(
+        master.subtitles[0].support,
+        SubtitleSupport::Unreadable(SubtitleProblem::Fetch(_))
+    ));
+    assert!(master.selected.subtitles.is_empty());
+    assert_eq!(master.selected.skipped_subtitles.len(), 1);
+    assert_eq!(probe.tracks.len(), 1);
+
+    let started = run(req).await.unwrap_err();
+    assert!(matches!(started, Error::Http { .. }), "{started:?}");
+}
+
+/// 字幕播放列表的不连续段序号与画面的对不上（DISCONTINUITY-SEQUENCE 的起点不同）：那些字幕分片不下载，在结果里按
+/// NoMatchingDiscontinuity 列出，画面照常输出。
+#[tokio::test(flavor = "multi_thread")]
+async fn subtitles_whose_discontinuities_do_not_match_are_reported() {
+    let dir = test_dir("subtitles_unmatched");
+    let server = Server::start().await;
+    server.put("v/seg0.ts", fixture("ts_a/seg0.ts"));
+    server.put(
+        "v.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nv/seg0.ts\n#EXT-X-ENDLIST\n",
+    );
+    server.put("s/0.vtt", "WEBVTT\n\n00:00.100 --> 00:00.500\nx\n");
+    server.put(
+        "subs.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-DISCONTINUITY-SEQUENCE:5\n#EXTINF:1,\ns/0.vtt\n#EXT-X-ENDLIST\n",
+    );
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n\
+         #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"s\",NAME=\"中文\",LANGUAGE=\"zh\",URI=\"subs.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=200000,SUBTITLES=\"s\"\nv.m3u8\n",
+    );
+    let mut req = request(server.url("master.m3u8"), &dir);
+    req.source.preference.subtitles = Renditions::All;
+
+    let output = run(req).await.unwrap();
+
+    assert_eq!(
+        output.missed,
+        [Missed {
+            session: 0,
+            track: 1,
+            first: 0,
+            last: 0,
+            reason: MissReason::NoMatchingDiscontinuity,
+        }]
+    );
+    assert_eq!(server.hits("s/0.vtt"), 0);
+    assert_eq!(output.merged.unwrap().report.streams.len(), 3);
 }

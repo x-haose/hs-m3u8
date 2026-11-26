@@ -30,7 +30,8 @@ pub struct OutputOptions {
 }
 
 /// 选了字幕（[`hs_m3u8_hls::Preference::subtitles`]）时合并文件怎样带上它们。时间按 X-TIMESTAMP-MAP 对齐到画面
-/// （RFC 8216 3.5）。
+/// （RFC 8216 3.5），字幕分片按不连续段序号对到同号的那段画面上（见 [`crate::MissReason::NoMatchingDiscontinuity`]）。选了
+/// 字幕却既不封进也不另存、又没有本地 HLS 输出时，开始任务报参数错误（字幕下了也用不上）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubtitleOutput {
     /// 封进合并文件：Matroska 为 SubRip（保留粗体、斜体、下划线），MP4 为 mov_text（只有文字，同时显示的几条合成一段）

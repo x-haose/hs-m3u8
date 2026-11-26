@@ -16,11 +16,13 @@ FIELDS = 5
 
 
 def codes(table: Path) -> list[tuple[str, str, str]]:
-    """代码表里的 (书目代码, 术语代码, 两字母代码)，按书目代码排序。"""
+    """代码表里的 (书目代码, 术语代码, 两字母代码)，按书目代码排序；有一行字段数不对即退出。"""
     rows: list[tuple[str, str, str]] = []
-    for line in table.read_text(encoding="utf-8-sig").splitlines():
+    for number, line in enumerate(table.read_text(encoding="utf-8-sig").splitlines(), 1):
         fields = line.split("|")
-        if len(fields) < FIELDS or "-" in fields[0]:
+        if len(fields) != FIELDS:
+            sys.exit(f"{table} 第 {number} 行不是 {FIELDS} 个字段，代码表的格式变了")
+        if "-" in fields[0]:
             continue
         rows.append((fields[0], fields[1] or fields[0], fields[2]))
     return sorted(rows)

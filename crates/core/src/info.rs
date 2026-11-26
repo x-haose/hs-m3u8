@@ -103,7 +103,7 @@ pub enum SubtitleSupport {
     Supported,
     /// 本库不处理的格式：自动选到的跳过，点名的报 [`crate::Unsupported::SubtitleFormat`]
     Unsupported(SubtitleFormat),
-    /// 读不了它的媒体播放列表（探测时；开始任务时选到的这样会使任务以那次的错误失败）
+    /// 读不了它的媒体播放列表（只在探测时出现：开始任务时选到的读不了，任务以那次的错误失败；没选到的不读）
     Unreadable(SubtitleProblem),
 }
 
@@ -152,7 +152,9 @@ pub struct Selected {
     pub audio: Vec<AudioInfo>,
     /// 字幕，按选的顺序
     pub subtitles: Vec<SubtitleInfo>,
-    /// 按 [`hs_m3u8_hls::Renditions::Default`] 或 [`hs_m3u8_hls::Renditions::All`] 自动选到、但下不了而没选上的字幕
+    /// 选到而没选上的字幕，原因见各自的 [`SubtitleInfo::support`]：按 [`hs_m3u8_hls::Renditions::Default`] 或
+    /// [`hs_m3u8_hls::Renditions::All`] 自动选到而格式不支持的；探测时另有读不了的与点名而格式不支持的（开始任务时这两种
+    /// 使任务失败）
     pub skipped_subtitles: Vec<SubtitleInfo>,
 }
 

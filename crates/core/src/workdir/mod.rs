@@ -53,7 +53,8 @@ use crate::error::io_error;
 use crate::ident::Fingerprint;
 use crate::selection::track_kinds;
 use crate::{
-    Error, FileSaved, HlsSaved, JobType, Leftover, Saved, WorkDirProblem, blocking, busy, volume,
+    Error, FileSaved, HlsSaved, JobType, Leftover, Saved, TrackKind, TrackSaved, WorkDirProblem,
+    blocking, busy, volume,
 };
 
 const JOB_FILE: &str = "job.json";
@@ -91,11 +92,6 @@ impl Stored {
             .iter()
             .map(|f| f.name.duration_us)
             .fold(0u64, u64::saturating_add)
-    }
-
-    /// 分片与 init 段的字节数之和，各轨合计。
-    pub(crate) fn bytes(&self) -> u64 {
-        (0..self.segments.len()).map(|t| self.track_bytes(t)).sum()
     }
 
     /// 第 `track` 条轨的分片与 init 段的字节数之和。
@@ -310,11 +306,28 @@ fn read_saved(root: &Path) -> Result<Option<Saved>, Error> {
         root: root.to_path_buf(),
     };
     let stored = scan(&layout, record.streams().len())?;
+    let tracks: Vec<TrackSaved> = track_kinds(&record.streams())
+        .into_iter()
+        .enumerate()
+        .map(|(track, kind)| TrackSaved {
+            kind,
+            segments: stored.segments[track].len(),
+            bytes: stored.track_bytes(track),
+        })
+        .collect();
     Ok(Some(Saved::Hls(HlsSaved {
         live: matches!(record.kind, RecordKind::Live),
-        tracks: track_kinds(&record.streams()),
-        segments: stored.segments.iter().map(Vec::len).sum(),
-        bytes: stored.bytes(),
+        segments: tracks
+            .iter()
+            .filter(|t| t.kind != TrackKind::Subtitles)
+            .map(|t| t.segments)
+            .sum(),
+        bytes: tracks
+            .iter()
+            .filter(|t| t.kind != TrackKind::Subtitles)
+            .map(|t| t.bytes)
+            .sum(),
+        tracks,
         duration: Duration::from_micros(stored.duration_us(0)),
     })))
 }
@@ -830,7 +843,16 @@ mod released {
                 let Some(Saved::Hls(saved)) = super::read_saved(&work).unwrap() else {
                     panic!("{} 应为 HLS 任务", work.display());
                 };
-                assert_eq!(saved.segments, complete, "{}", work.display());
+                // 合计只计音视频轨，各轨的明细含字幕轨
+                let per_track: usize = saved.tracks.iter().map(|t| t.segments).sum();
+                assert_eq!(per_track, complete, "{}", work.display());
+                let media = saved
+                    .tracks
+                    .iter()
+                    .filter(|t| t.kind != crate::TrackKind::Subtitles)
+                    .map(|t| t.segments)
+                    .sum::<usize>();
+                assert_eq!(saved.segments, media, "{}", work.display());
                 assert!(saved.segments > 0 && saved.bytes > 0, "{}", work.display());
                 assert_eq!(saved.live, name.starts_with("live"), "{}", work.display());
             }

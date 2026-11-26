@@ -41,7 +41,7 @@ pub(crate) struct Chosen {
     /// 读过媒体播放列表的字幕能不能下，按字幕的位置（口径同 [`hls::RenditionChoice::Index`]）：开始任务时为选到的，探测
     /// 时为所选变体字幕组里的全部
     pub subtitle_support: Vec<(usize, SubtitleSupport)>,
-    /// 自动选到、下不了而没选上的字幕的位置，按选的顺序
+    /// 选到而没选上的字幕的位置，按选的顺序：自动选到而格式不支持的，探测时另有读不了的与点名而格式不支持的
     pub skipped_subtitles: Vec<usize>,
 }
 
@@ -89,10 +89,11 @@ pub(crate) async fn resolve(
 
 /// 同 [`resolve`]，来源的播放列表已拉到并解析为 `first`。
 ///
-/// 字幕：选到的拉不到或播放列表不能用时报那次的错误（外部故障如实上抛）；格式不支持（见 [`subtitle_format`]）时，点名
-/// 的（[`Renditions::These`]）与记录里的报 [`Unsupported::SubtitleFormat`]，自动选到的（[`Renditions::Default`]、
-/// [`Renditions::All`]）去掉，记在 [`Chosen::skipped_subtitles`]。探测时组里其余的读不了只记在
-/// [`Chosen::subtitle_support`]，不让探测失败。
+/// 字幕：开始任务时（[`SubtitleScope::Selected`]）选到的拉不到或播放列表不能用，报那次的错误（外部故障如实上抛）；格式不
+/// 支持（见 [`subtitle_format`]）时，点名的（[`Renditions::These`]）与记录里的报 [`Unsupported::SubtitleFormat`]，自动选到
+/// 的（[`Renditions::Default`]、[`Renditions::All`]）去掉，记在 [`Chosen::skipped_subtitles`]。探测时
+/// （[`SubtitleScope::Group`]）字幕的问题都不让探测失败：选到而读不了或格式不支持的（点名的也是）去掉、记下；能不能下都记
+/// 在 [`Chosen::subtitle_support`]。
 pub(crate) async fn resolve_playlist(
     http: &Http,
     source: &Source,
@@ -139,43 +140,29 @@ pub(crate) async fn resolve_playlist(
     let mut skipped_subtitles = Vec::new();
     let mut subtitle_support = Vec::new();
     for subtitle in read {
-        let support = match subtitle.read {
-            Ok(playlist) => match subtitle_format(&playlist, &selection.variant.codecs) {
-                Some(format) => Err(format),
-                None => {
-                    if subtitle.selected {
-                        kept.push(subtitle.index);
-                        tracks.push(ResolvedTrack {
-                            url: subtitle.url.clone(),
-                            playlist,
-                        });
-                    }
-                    Ok(())
+        let (support, usable) = classify(subtitle.read, &selection.variant.codecs);
+        if subtitle.selected {
+            match (usable, &support) {
+                (Ok(playlist), _) => {
+                    kept.push(subtitle.index);
+                    tracks.push(ResolvedTrack {
+                        url: subtitle.url.clone(),
+                        playlist,
+                    });
                 }
-            },
-            // 选到的拉不到、播放列表不能用时照原样报出：拉取的失败是外部故障，不能当成「下不了」去掉
-            Err(error) if subtitle.selected => return Err(error),
-            Err(error) => {
-                subtitle_support
-                    .push((subtitle.index, SubtitleSupport::Unreadable(problem(error)?)));
-                continue;
-            }
-        };
-        match support {
-            Ok(()) => subtitle_support.push((subtitle.index, SubtitleSupport::Supported)),
-            Err(format) if subtitle.selected && explicit => {
-                return Err(Error::Unsupported(Unsupported::SubtitleFormat {
-                    url: Box::new(subtitle.url),
-                    format,
-                }));
-            }
-            Err(format) => {
-                if subtitle.selected {
-                    skipped_subtitles.push(subtitle.index);
+                (Err(Some(error)), _) if scope == SubtitleScope::Selected => return Err(error),
+                (Err(_), SubtitleSupport::Unsupported(format))
+                    if explicit && scope == SubtitleScope::Selected =>
+                {
+                    return Err(Error::Unsupported(Unsupported::SubtitleFormat {
+                        url: Box::new(subtitle.url),
+                        format: format.clone(),
+                    }));
                 }
-                subtitle_support.push((subtitle.index, SubtitleSupport::Unsupported(format)));
+                (Err(_), _) => skipped_subtitles.push(subtitle.index),
             }
         }
+        subtitle_support.push((subtitle.index, support));
     }
     selection.subtitles.retain(|s| kept.contains(&s.index));
     let record = match recorded {
@@ -278,16 +265,26 @@ fn subtitle_format(playlist: &MediaPlaylist, codecs: &[String]) -> Option<Subtit
     })
 }
 
-/// 探测时读不了的字幕的原因：拉不到的保留可否重试（见 [`crate::FetchFailure`]），其余（播放列表写坏、用了不支持的特性、回调
-/// 出错等）为错误说明；取消上抛。
-fn problem(error: Error) -> Result<SubtitleProblem, Error> {
-    if matches!(error, Error::Cancelled) {
-        return Err(error);
+/// 读过的一条字幕能不能下，与能下时它的媒体播放列表；读不了时另带那次的错误（开始任务时照原样上抛），格式不支持时没有。
+/// `codecs` 为所选变体的 CODECS。读不了的原因：拉不到的保留可否重试（见 [`crate::FetchFailure`]），其余（播放列表写坏、
+/// 用了不支持的特性、回调出错等）为错误说明。
+fn classify(
+    read: Result<MediaPlaylist, Error>,
+    codecs: &[String],
+) -> (SubtitleSupport, Result<MediaPlaylist, Option<Error>>) {
+    match read {
+        Ok(playlist) => match subtitle_format(&playlist, codecs) {
+            Some(format) => (SubtitleSupport::Unsupported(format), Err(None)),
+            None => (SubtitleSupport::Supported, Ok(playlist)),
+        },
+        Err(error) => {
+            let problem = match error.missable() {
+                Some(failure) => SubtitleProblem::Fetch(failure),
+                None => SubtitleProblem::Unusable(error.to_string()),
+            };
+            (SubtitleSupport::Unreadable(problem), Err(Some(error)))
+        }
     }
-    Ok(match error.missable() {
-        Some(failure) => SubtitleProblem::Fetch(failure),
-        None => SubtitleProblem::Unusable(error.to_string()),
-    })
 }
 
 /// 拉取播放列表的请求失败时再不再试。

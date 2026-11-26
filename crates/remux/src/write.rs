@@ -176,7 +176,7 @@ impl Muxer {
             .expect("至少有一路输出流")
     }
 
-    /// 按加上各输入 [`Source::offset_us`] 之后的 DTS 交错写出各输入的包与各字幕通道（`lanes`，合并完整文件时为空）里封进
+    /// 按加上各输入 [`Source::offset_us`] 之后的 DTS 交错写出各输入的包与各字幕轨的待写队列（`lanes`，合并完整文件时为空）里封进
     /// 输出的字幕包，直到都写完，时刻相同时先写音视频；`before` 在每个音视频包写出之前调用，参数为它所在的输入、包、映射
     /// 与输出时间线上的 DTS（微秒），返回错误时中止。读完后把各输入丢弃的包计入输出流。
     pub(crate) fn interleave(
@@ -307,12 +307,12 @@ impl Muxer {
         let mut packet = Packet::copy(&subtitle.data);
         let dts = subtitle.start_us.rescale(MICROS, o.time_base);
         let duration = subtitle.duration_us.rescale(MICROS, o.time_base);
-        // 字幕通道的时刻都在 1 毫秒的网格上，换到写头后的时间基（见 open 里的核对）不舍入，且起点不往回走（MP4 严格递增）
+        // 字幕轨的待写包的时刻都在 1 毫秒的网格上，换到写头后的时间基（见 open 里的核对）不舍入，且起点不往回走（MP4 严格递增）
         let strict = self.container == Container::Mp4;
         assert!(
             o.last_dts
                 .is_none_or(|last| dts > last || (!strict && dts == last)),
-            "{at}的字幕包起点往回走了：字幕通道保证不会"
+            "{at}的字幕包起点往回走了：生成字幕包时保证不会（见 subtitles 模块）"
         );
         packet.set_dts(Some(dts));
         packet.set_pts(Some(dts));

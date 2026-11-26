@@ -16,8 +16,6 @@ pub(crate) struct MergePlan {
     pub groups: Vec<Vec<GroupTrack>>,
     /// 各组的键，与 `groups` 一一对应
     pub keys: Vec<GroupKey>,
-    /// 合并进输出的分片数，各轨合计
-    pub segments: usize,
     /// 合并进输出的会话数
     pub sessions: usize,
     /// 所在组不是每条音视频轨都有、无法合并的分片
@@ -63,7 +61,6 @@ pub(crate) fn merge_plan(
         .map(|key| merge_group(*key, &by_group, layout))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(MergePlan {
-        segments: groups.iter().flatten().map(|t| t.segments.len()).sum(),
         sessions: common
             .iter()
             .map(|(session, _)| session)

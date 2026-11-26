@@ -342,6 +342,9 @@ impl From<core::MissReason> for MissReason {
                 cause: cause.into(),
             },
             core::MissReason::Unmergeable => MissReason::Unmergeable {},
+            core::MissReason::NoMatchingDiscontinuity => {
+                unreachable!("Python 的选轨偏好不要字幕，点播没有字幕轨")
+            }
             core::MissReason::Gap => MissReason::Gap {},
             core::MissReason::Unknown => MissReason::Unknown {},
         }

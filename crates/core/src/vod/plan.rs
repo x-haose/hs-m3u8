@@ -15,95 +15,67 @@ use crate::{Error, MissReason, Missed, Unsupported};
 pub(crate) struct Track {
     /// 要下载的分片，按播放顺序
     pub segments: Vec<Segment>,
-    /// 不下载的分片的序号与原因，按播放顺序：来源标了 EXT-X-GAP 的（[`MissReason::Gap`]），所在的不连续段有轨只有
-    /// GAP 分片、合并不进输出的（[`MissReason::Unmergeable`]）
+    /// 不下载的分片的序号与原因，按播放顺序：来源标了 EXT-X-GAP 的（[`MissReason::Gap`]），所在的不连续段有音视频轨只有
+    /// GAP 分片、合并不进输出的（[`MissReason::Unmergeable`]），字幕轨所在的不连续段在音视频轨里没有的
+    /// （[`MissReason::NoMatchingDiscontinuity`]）
     pub skipped: Vec<(u64, MissReason)>,
     /// 要下载的分片用到的 init 段，按首次出现排序、不重复
     pub inits: Vec<InitSection>,
 }
 
+/// 一条轨的一段（不连续段）分片去哪里。
+enum Placement {
+    /// 进第几个可合并的组
+    Group(usize),
+    /// 不下载，原因为它（标了 EXT-X-GAP 的分片仍记为 [`MissReason::Gap`]）
+    Skip(MissReason),
+}
+
 impl Track {
-    /// 一条轨的分片 `segments` 按所在的段（`runs`，分片下标范围）能否合并（`mergeable`）分拣；另返回各可合并段的分片
-    /// 在 `segments` 中的下标范围，都不为空（可合并的段里每条轨都有没标 GAP 的分片）。
+    /// 一条轨的分片 `segments` 按所在的段（`runs`，不连续段序号与分片下标范围）分拣，每段去哪里由 `place` 按序号定；另返回
+    /// `groups` 个可合并组里这条轨的分片在 `segments` 中的下标范围，没有分片的组为空范围。
     fn new(
         segments: &[Segment],
-        runs: &[Range<usize>],
-        mergeable: &[bool],
-    ) -> (Self, Vec<Range<usize>>) {
-        let mut track = Track {
-            segments: Vec::new(),
-            skipped: Vec::new(),
-            inits: Vec::new(),
-        };
-        let mut ranges = Vec::new();
-        for (run, &mergeable) in runs.iter().zip(mergeable) {
-            let start = track.segments.len();
-            for s in &segments[run.clone()] {
-                match (s.gap, mergeable) {
-                    (true, _) => track.skipped.push((s.sequence, MissReason::Gap)),
-                    (false, false) => track.skipped.push((s.sequence, MissReason::Unmergeable)),
-                    (false, true) => track.segments.push(s.clone()),
-                }
-            }
-            if mergeable {
-                ranges.push(start..track.segments.len());
-            }
-        }
-        for init in track.segments.iter().filter_map(|s| s.init.as_ref()) {
-            if !track.inits.contains(init) {
-                track.inits.push(init.clone());
-            }
-        }
-        (track, ranges)
-    }
-
-    /// 字幕轨：分片 `segments` 按所在的段（`runs`，不连续段序号与分片下标范围）落进音视频轨同号的段（序号为 `numbers`，
-    /// 能否合并为 `mergeable`）；另返回各可合并段里这条轨的分片在 `segments` 中的下标范围，没有时为空。
-    fn subtitles(
-        segments: &[Segment],
         runs: &[(u64, Range<usize>)],
-        numbers: &[u64],
-        mergeable: &[bool],
+        groups: usize,
+        place: impl Fn(u64) -> Placement,
     ) -> (Self, Vec<Range<usize>>) {
         let mut track = Track {
             segments: Vec::new(),
             skipped: Vec::new(),
             inits: Vec::new(),
         };
-        let mut ranges = Vec::new();
-        for (&number, &mergeable) in numbers.iter().zip(mergeable) {
-            if !mergeable {
-                continue;
-            }
+        let mut ranges: Vec<Option<Range<usize>>> = vec![None; groups];
+        // 各段按播放顺序，可合并的组也按播放顺序：段落进的组号递增，分片下标随之递增
+        for (number, run) in runs {
+            let placement = place(*number);
             let start = track.segments.len();
-            for (_, run) in runs.iter().filter(|(d, _)| *d == number) {
-                for s in &segments[run.clone()] {
-                    if s.gap {
-                        track.skipped.push((s.sequence, MissReason::Gap));
-                    } else {
-                        track.segments.push(s.clone());
-                    }
+            for s in &segments[run.clone()] {
+                match &placement {
+                    _ if s.gap => track.skipped.push((s.sequence, MissReason::Gap)),
+                    Placement::Skip(reason) => track.skipped.push((s.sequence, reason.clone())),
+                    Placement::Group(_) => track.segments.push(s.clone()),
                 }
             }
-            ranges.push(start..track.segments.len());
-        }
-        let used = |d: &u64| numbers.iter().zip(mergeable).any(|(n, &m)| m && n == d);
-        for (_, run) in runs.iter().filter(|(d, _)| !used(d)) {
-            for s in &segments[run.clone()] {
-                let reason = if s.gap {
-                    MissReason::Gap
-                } else {
-                    MissReason::Unmergeable
-                };
-                track.skipped.push((s.sequence, reason));
+            if let Placement::Group(group) = placement {
+                ranges[group] = Some(start..track.segments.len());
             }
         }
-        track.skipped.sort_by_key(|(sequence, _)| *sequence);
         for init in track.segments.iter().filter_map(|s| s.init.as_ref()) {
             if !track.inits.contains(init) {
                 track.inits.push(init.clone());
             }
         }
+        // 没有分片落进的组给空范围，起点接着前一组
+        let mut next = 0;
+        let ranges = ranges
+            .into_iter()
+            .map(|range| {
+                let range = range.unwrap_or(next..next);
+                next = range.end;
+                range
+            })
+            .collect();
         (track, ranges)
     }
 
@@ -128,8 +100,9 @@ impl Plan {
     /// 点播计划；`streams` 为各轨的取流方式，字幕轨（[`Streams::Subtitles`]）不参与分组。音视频各轨的不连续段序列须相同
     /// （含标了 EXT-X-GAP 的分片），否则报 [`Unsupported::DiscontinuityMismatch`]；有音视频轨在某段里只有 GAP 分片时这段
     /// 合并不了，各轨在这段的分片都不下载；没有一段合并得了时报 [`Unsupported::NoMergeableGroup`]；音视频轨的播放列表没有
-    /// 分片时报 [`Unsupported::EmptyPlaylist`]。字幕轨的分片按不连续段序号落进同号的组：所在的段不在可合并的组里的不下载
-    /// （[`MissReason::Unmergeable`]），一组里没有字幕分片的这一组就没有字幕，字幕播放列表为空也可以。要下载的分片取不到
+    /// 分片时报 [`Unsupported::EmptyPlaylist`]。字幕轨的分片按不连续段序号落进同号的组：同号的段合并不了的不下载
+    /// （[`MissReason::Unmergeable`]），音视频轨里没有这个序号的不下载（[`MissReason::NoMatchingDiscontinuity`]）；一组里
+    /// 没有字幕分片的这一组就没有字幕，字幕播放列表为空也可以。要下载的分片取不到
     /// key（见 [`resolve::require_key_uris`]，`custom_key` 为请求给了自定义 key）时报 [`Unsupported::KeyWithoutUri`]。
     pub(crate) fn new(
         tracks: Vec<ResolvedTrack>,
@@ -153,15 +126,33 @@ impl Plan {
         let media_runs: Vec<&[(u64, Range<usize>)]> = media.iter().map(|&t| &runs[t][..]).collect();
         let media_tracks: Vec<&ResolvedTrack> = media.iter().map(|&t| &tracks[t]).collect();
         let mergeable = mergeable(&media_tracks, &media_runs)?;
+        // 音视频轨的第 i 段（序号 numbers[i]）可合并时进第 groups_of[i] 个组
         let numbers: Vec<u64> = media_runs[0].iter().map(|(d, _)| *d).collect();
+        let mut groups = 0;
+        let groups_of: Vec<Option<usize>> = mergeable
+            .iter()
+            .map(|&m| {
+                m.then(|| {
+                    groups += 1;
+                    groups - 1
+                })
+            })
+            .collect();
+        let group_of = |number: u64| {
+            let at = numbers.iter().position(|&n| n == number)?;
+            Some(groups_of[at].map_or(Placement::Skip(MissReason::Unmergeable), Placement::Group))
+        };
         let mut planned = Vec::with_capacity(tracks.len());
         let mut ranges = Vec::with_capacity(tracks.len());
         for (index, (t, runs)) in tracks.iter().zip(&runs).enumerate() {
             let (track, track_ranges) = if is_media(index) {
-                let runs: Vec<Range<usize>> = runs.iter().map(|(_, r)| r.clone()).collect();
-                Track::new(&t.playlist.segments, &runs, &mergeable)
+                let place = |number| group_of(number).expect("音视频轨的不连续段序列相同");
+                Track::new(&t.playlist.segments, runs, groups, place)
             } else {
-                Track::subtitles(&t.playlist.segments, runs, &numbers, &mergeable)
+                let place = |number| {
+                    group_of(number).unwrap_or(Placement::Skip(MissReason::NoMatchingDiscontinuity))
+                };
+                Track::new(&t.playlist.segments, runs, groups, place)
             };
             resolve::require_key_uris(&t.url, &track.segments, custom_key)?;
             planned.push(track);
@@ -176,11 +167,6 @@ impl Plan {
             tracks: planned,
             groups,
         })
-    }
-
-    /// 要下载的分片数，各轨合计。
-    pub(crate) fn segment_count(&self) -> usize {
-        self.tracks.iter().map(|t| t.segments.len()).sum()
     }
 
     /// 各轨要下载的分片数与来源标了 EXT-X-GAP 的分片数，按轨号。

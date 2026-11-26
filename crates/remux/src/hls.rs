@@ -22,8 +22,10 @@ use crate::{
 ///
 /// 字幕轨（[`Streams::Subtitles`]）不经 FFmpeg 读，不参与组间的偏移；一组里可以没有字幕分片。各组的字幕按
 /// X-TIMESTAMP-MAP 对齐到这一组的画面（RFC 8216 3.5：cue 的媒体时刻为 MPEGTS + (cue − LOCAL)，没有映射时本地 0 即媒体
-/// 0，33 位回绕按本组起点展开），截到这一组的时间范围里（从起点到起点加上音视频各轨声明时长里最长的），起止换到 1 毫秒；
-/// 跨分片重复的 cue 只留一条。丢掉的计入 [`crate::StreamReport::discarded_cues`]。`subtitles` 定字幕怎样进输出。
+/// 0，33 位回绕按本组起点展开），开始早于本组起点的从起点开始，起止换到 1 毫秒；跨分片重复的 cue 只留一条。丢掉的计入
+/// [`crate::StreamReport::discarded_cues`] 与 [`SubtitleCues::discarded_cues`]。简化：结束晚于本组画面结尾的 cue 不截短，
+/// 可能延续到下一组的开头、或把最后一组的字幕流拉得比画面长；要截时先读完一组得出结尾再生成它的字幕包。`subtitles` 定字幕
+/// 怎样进输出。
 pub fn remux(
     tracks: &[Track],
     groups: &[DiscontinuityGroup],
@@ -120,12 +122,13 @@ fn write_groups(
 ) -> Result<Merged, Error> {
     let cancel = &control.cancel;
     let embed_subtitles = mode == SubtitleMode::Embed;
+    let read_subtitles = mode != SubtitleMode::Omit;
     let streams: Vec<Streams> = tracks.iter().map(|t| t.streams).collect();
     let first = open_group(&streams, groups[0], None, container, cancel)?;
     let layout = layout_of(&first, tracks.len())?;
     let labels: Vec<&Label> = tracks.iter().map(|t| &t.label).collect();
     let subtitle_tracks: Vec<usize> = (0..tracks.len())
-        .filter(|&t| streams[t] == Streams::Subtitles)
+        .filter(|&t| read_subtitles && streams[t] == Streams::Subtitles)
         .collect();
     let embedded = if embed_subtitles {
         subtitle_tracks.len()
@@ -173,7 +176,7 @@ fn write_groups(
     }
     for lane in &lanes {
         if let Some((output, _)) = lane.output {
-            muxer.set_discarded_cues(output, lane.discarded);
+            muxer.set_discarded_cues(output, lane.aligned_discarded + lane.packet_discarded);
         }
     }
     let report = muxer.finish_verified(path, cancel)?;
@@ -183,7 +186,7 @@ fn write_groups(
             .into_iter()
             .map(|lane| SubtitleCues {
                 cues: lane.cues,
-                discarded_cues: lane.discarded,
+                discarded_cues: lane.aligned_discarded,
             })
             .collect(),
     })
@@ -205,23 +208,8 @@ fn write_group(
     for (source, wrap_us) in sources.iter_mut().zip(wraps) {
         source.offset_us = wrap_us + offset_us;
     }
-    // 本组的声明时长：音视频各轨 EXTINF 之和里最长的（字幕截到它，见 remux 的说明）
-    let declared_us = sources
-        .iter()
-        .map(|s| {
-            let segments = &tracks[s.at.index()].segments;
-            segments.iter().map(|seg| seg.duration_us).sum::<u64>()
-        })
-        .max()
-        .map_or(0, |us| i64::try_from(us).unwrap_or(i64::MAX));
     for lane in lanes.iter_mut() {
-        lane.load_group(
-            group,
-            &tracks[lane.track],
-            reference_us,
-            offset_us,
-            declared_us,
-        )?;
+        lane.load_group(group, &tracks[lane.track], reference_us, offset_us)?;
     }
     // 全组已写出的最大 DTS，输出时间线上的微秒
     let mut clock_us: Option<i64> = None;

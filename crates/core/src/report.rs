@@ -21,14 +21,24 @@ pub enum Saved {
 pub struct HlsSaved {
     /// 目录里是直播的录制
     pub live: bool,
-    /// 各轨的种类，按轨号（见 [`crate::Selected`]）
-    pub tracks: Vec<TrackKind>,
-    /// 已完成的分片数，各轨合计，含字幕轨（同 [`Output::segments`]）
+    /// 已完成的分片数，视频与音频轨合计（同 [`Progress::segments`] 的口径）
     pub segments: usize,
-    /// 已完成的分片与 init 段的字节数（解密后），各轨合计，含字幕轨（同 [`Output::bytes`]）
+    /// 已完成的分片与 init 段的字节数（解密后），视频与音频轨合计
     pub bytes: u64,
+    /// 各轨的，按轨号（见 [`crate::Selected`]），含字幕轨
+    pub tracks: Vec<TrackSaved>,
     /// 第 0 条轨已完成分片的声明时长之和；直播即已录时长
     pub duration: Duration,
+}
+
+/// 任务目录里一条轨已完成的内容。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackSaved {
+    pub kind: TrackKind,
+    /// 已完成的分片数
+    pub segments: usize,
+    /// 已完成的分片与 init 段的字节数（解密后）
+    pub bytes: u64,
 }
 
 /// 文件任务目录里已完成的内容。
@@ -205,11 +215,6 @@ impl Progress {
         }
     }
 
-    /// 各轨的分片与 init 段的字节数合计，含字幕轨（[`Output::bytes`] 的口径）。
-    pub(crate) fn all_bytes(&self) -> u64 {
-        self.tracks.iter().map(|t| t.bytes).sum()
-    }
-
     /// 计入一个已完成的分片：第 `track` 条轨、声明时长 `duration_us`、`len` 字节。
     pub(crate) fn count_segment(&mut self, track: usize, duration_us: u64, len: u64) {
         self.segments_of(track, |s| s.done += 1);
@@ -312,9 +317,9 @@ pub struct Output {
     pub hls: Option<PathBuf>,
     /// 另存的字幕文件，按所选字幕的顺序（见 [`crate::SubtitleOutput::files`]）；不另存或没选字幕时为空
     pub subtitle_files: Vec<SubtitleFile>,
-    /// 输出的分片数，各轨合计（含字幕轨）
+    /// 输出的分片数，视频与音频轨合计（同 [`Progress::segments`] 的口径；字幕见 [`Output::subtitle_files`]）
     pub segments: usize,
-    /// 任务目录中已完成的分片与 init 段的字节数（解密后），各轨合计，含字幕轨（与 [`Progress::bytes`] 不同）
+    /// 同 [`Progress::bytes`]：视频与音频轨的
     pub bytes: u64,
     /// 收尾没删掉的东西：被替换的旧输出、没删干净的任务目录等；输出不受影响。都删干净时为空
     pub leftovers: Vec<Leftover>,
@@ -475,8 +480,12 @@ pub enum MissReason {
     Failed(FetchErrorKind),
     /// 列出了，但它的 init 段取不到（同上）
     InitFailed(FetchErrorKind),
-    /// 所在不连续段不是每条轨都有内容（直播为有轨没录到，点播为有轨只有标了 EXT-X-GAP 的分片），无法合并
+    /// 所在不连续段不是每条音视频轨都有内容（直播为有音视频轨没录到，点播为有音视频轨只有标了 EXT-X-GAP 的分片），无法
+    /// 合并
     Unmergeable,
+    /// 点播的字幕分片：所在不连续段的序号在音视频轨里没有（字幕播放列表的不连续段没跟着画面标，或 DISCONTINUITY-SEQUENCE
+    /// 的起点不同），不知道该对到哪一段画面上。简化：只按序号对组；要支持这类来源时改为按 cue 的媒体时刻落进时间相符的组
+    NoMatchingDiscontinuity,
     /// 来源标了 EXT-X-GAP：这一片没有内容，不取
     Gap,
     /// 之前的运行中缺失，原因没有记录

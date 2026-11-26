@@ -198,7 +198,7 @@ struct TrackFiles {
 
 /// 放好第 `track` 条轨各组的分片与 init 段；`placed` 见 [`stage`]。字幕轨的 `blank` 为各组的声明时长：一组里没有字幕
 /// 分片时放一个只有文件头的 WebVTT 分片占住这段时长，各 rendition 的不连续段才对得上（RFC 8216 6.2.4）；音视频轨为
-/// None。
+/// None。字幕分片照来源的 EXTINF 写，一组字幕的时长可以与画面的不同，播放器按不连续段与 X-TIMESTAMP-MAP 对齐。
 fn fill_track<'a>(
     dir: &Path,
     work_dir: &Path,

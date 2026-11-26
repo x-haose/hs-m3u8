@@ -226,7 +226,6 @@ async fn run_vod(
     let input = Content {
         streams,
         groups,
-        segments: plan.segment_count(),
         selection: dir.record().selection.clone(),
         missed: plan.missed(),
         live: None,
@@ -329,7 +328,6 @@ fn merge_live(
     };
     Ok(Content {
         streams,
-        segments: plan.segments,
         missed: live::report_missed(&plan, known),
         groups: plan.groups,
         selection: dir.record().selection.clone(),
@@ -377,7 +375,7 @@ async fn finish(
         return Err(Error::Cancelled);
     }
     progress.send_modify(|p| p.stage = Stage::Writing);
-    let bytes = progress.borrow().all_bytes();
+    let bytes = progress.borrow().bytes;
     let output = output::write(dir, content, options, bytes, cancel, progress).await?;
     progress.send_modify(|p| p.stage = Stage::Done);
     Ok(output)

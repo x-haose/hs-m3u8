@@ -17,7 +17,7 @@ pub struct Probe {
     pub master: Option<MasterInfo>,
     /// 所选各轨的概况，按轨号：第 0 条为所选变体（或来源本身），其后是各独立音频、各字幕（见 [`crate::Selected`]）
     pub tracks: Vec<TrackInfo>,
-    /// 是否直播：有任一条轨没有 EXT-X-ENDLIST。新开的下载按同一判定走直播或点播；探测不读任务目录，续录中途
+    /// 是否直播：有任一条音视频轨没有 EXT-X-ENDLIST（字幕播放列表写没写不算）。新开的下载按同一判定走直播或点播；探测不读任务目录，续录中途
     /// 直播已结束的，下载仍按直播继续
     pub live: bool,
 }

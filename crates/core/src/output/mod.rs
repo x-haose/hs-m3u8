@@ -37,8 +37,6 @@ pub(crate) struct Content {
     pub streams: Vec<Streams>,
     /// 各不连续段组，每组各轨一项，轨道顺序与 `streams` 一致；至少一组，每项至少一个分片
     pub groups: Vec<Vec<GroupTrack>>,
-    /// 输出的分片数，各轨合计
-    pub segments: usize,
     /// 记进任务目录的选轨；来源本身是媒体播放列表时为 None
     pub selection: Option<SelectionRecord>,
     /// 见 [`Output::missed`]
@@ -193,11 +191,16 @@ pub(crate) async fn write(
     let Content {
         streams,
         groups,
-        segments,
         selection,
         missed,
         live,
     } = content;
+    let segments = groups
+        .iter()
+        .flat_map(|g| g.iter().zip(&streams))
+        .filter(|(_, s)| **s != Streams::Subtitles)
+        .map(|(t, _)| t.segments.len())
+        .sum();
     let writing = writing(&groups, options);
     progress.send_modify(|p| p.writing = Some(writing));
     let advance = Advance(progress.clone());
@@ -356,7 +359,12 @@ fn write_files(
             };
             (Some(output), subtitle_files)
         }
-        _ => (None, Vec::new()),
+        (None, None) => (None, Vec::new()),
+        (file, merged) => unreachable!(
+            "有合并文件才合并：输出里有 {}，写出了 {}",
+            file.is_some(),
+            merged.is_some()
+        ),
     };
     Ok(Written {
         merged,
@@ -437,10 +445,10 @@ fn write_merged(
             advance.merged(usize::try_from(files).expect("文件个数在 usize 范围内"))
         }),
     };
-    let mode = if options.subtitles.as_ref().is_some_and(|s| s.embed) {
-        SubtitleMode::Embed
-    } else {
-        SubtitleMode::CuesOnly
+    let mode = match options.subtitles.as_ref() {
+        Some(s) if s.embed => SubtitleMode::Embed,
+        Some(s) if s.files.is_some() => SubtitleMode::CuesOnly,
+        _ => SubtitleMode::Omit,
     };
     hs_m3u8_remux::remux(tracks, &groups, temp, container, mode, &control)
         .map_err(|e| remux_error(e, &options.work_dir))
