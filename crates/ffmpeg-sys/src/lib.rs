@@ -27,6 +27,8 @@ const fn fferrtag(tag: [u8; 4]) -> c_int {
 pub const AVERROR_EOF: c_int = fferrtag(*b"EOF ");
 /// 中断回调要求中止。
 pub const AVERROR_EXIT: c_int = fferrtag(*b"EXIT");
+/// 处理输入时遇到不合法的数据。
+pub const AVERROR_INVALIDDATA: c_int = fferrtag(*b"INDA");
 
 #[cfg(test)]
 mod tests {
@@ -51,6 +53,10 @@ mod tests {
     fn handwritten_error_codes_are_ffmpegs() {
         assert_eq!(message(AVERROR_EOF), "End of file");
         assert_eq!(message(AVERROR_EXIT), "Immediate exit requested");
+        assert_eq!(
+            message(AVERROR_INVALIDDATA),
+            "Invalid data found when processing input"
+        );
         assert_eq!(message(AVERROR(libc::EINVAL)), "Invalid argument");
     }
 }

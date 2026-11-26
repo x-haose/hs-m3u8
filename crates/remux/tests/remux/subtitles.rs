@@ -173,6 +173,59 @@ fn subtitles_are_sliced_into_mov_text_for_mp4() {
     );
 }
 
+/// 没有文字的 cue 不封进输出、计入丢掉的 cue：只有时间行的 cue 两种容器都不写；只有样式标签的，SubRip 保留标签照写，
+/// mov_text 只留纯文字、不写。另存用的 cue 不受影响。
+#[test]
+fn cues_without_text_are_not_embedded() {
+    let dir = work_dir("sub_blank");
+    let header = format!("WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:{TS_A_START},LOCAL:00:00:00.000\n\n");
+    let body = "00:00.500 --> 00:00.700\n\n00:00.800 --> 00:01.000\n<i></i>\n\n00:01.200 --> 00:01.500\n五\n";
+    let path = dir.join("blank.vtt");
+    std::fs::write(&path, format!("{header}{body}")).unwrap();
+    let subtitles = TrackSegments {
+        init: None,
+        segments: vec![Segment {
+            path,
+            duration_us: 1_000_000,
+        }],
+        gaps: Vec::new(),
+    };
+    let groups = vec![group([track("ts_a"), subtitles])];
+    for (container, name, written, discarded) in [
+        (Container::Matroska, "blank.mkv", 2, 1),
+        (Container::Mp4, "blank.mp4", 1, 2),
+    ] {
+        let output = dir.join(name);
+        let merged = hs_m3u8_remux::remux(
+            &tracks(),
+            &groups,
+            &output,
+            container,
+            SubtitleMode::Embed,
+            &Control::default(),
+        )
+        .unwrap();
+        let report = &merged.report.streams[2];
+        assert_eq!(
+            (report.packets, report.discarded_cues),
+            (written, discarded),
+            "{name}"
+        );
+        assert_eq!(merged.subtitles[0].cues.len(), 3, "{name}");
+        let texts: Vec<Vec<u8>> = subtitle_stream(&output)
+            .packets
+            .into_iter()
+            .map(|(_, _, data)| data)
+            .filter(|data| data.len() > 2)
+            .collect();
+        let expected: Vec<Vec<u8>> = match container {
+            Container::Matroska => vec![b"<i></i>".to_vec(), "五".as_bytes().to_vec()],
+            Container::Mp4 => vec![[&[0, 3], "五".as_bytes()].concat()],
+        };
+        assert_eq!(texts, expected, "{name}");
+    }
+}
+
 /// 不封进输出时只给出对齐后的 cue，输出里没有字幕流。
 #[test]
 fn subtitles_can_be_left_out_of_the_output() {

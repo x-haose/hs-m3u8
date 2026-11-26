@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# 依赖方向检查：各 crate 的正常依赖与构建依赖（全部目标平台）中不得出现
-# 所列的包。测试依赖不在此列。命中时打印依赖路径并以 1 退出。
+# 边界检查，命中时打印位置并以 1 退出：
+# - 依赖方向：各 crate 的正常依赖与构建依赖（全部目标平台）中不得出现所列的包。测试依赖不在此列。
+# - hs-m3u8-remux 的 unsafe 只在 src/ffi 下（FFmpeg 的薄封装）；测试不在此列。
 set -euo pipefail
 
 # 每行：<包> <不得依赖的包>...，含传递依赖
 rules=(
   "hs-m3u8-hls tokio reqwest hs-m3u8-ffmpeg-sys hs-m3u8-remux hs-m3u8-sysproxy hs-m3u8-core"
   "hs-m3u8-remux tokio reqwest hs-m3u8-hls hs-m3u8-sysproxy hs-m3u8-core"
-  "hs-m3u8-sysproxy tokio reqwest hs-m3u8-hls hs-m3u8-remux hs-m3u8-core"
+  "hs-m3u8-sysproxy tokio reqwest hs-m3u8-hls hs-m3u8-remux hs-m3u8-core hs-m3u8-ffmpeg-sys"
+  "hs-m3u8-ffmpeg-sys hs-m3u8-hls hs-m3u8-remux hs-m3u8-subtitle hs-m3u8-sysproxy hs-m3u8-core hs-m3u8-py"
   "hs-m3u8-core pyo3"
 )
 
@@ -44,4 +46,12 @@ for rule in "${direct_rules[@]}"; do
     fi
   done
 done
+# unsafe 块、函数、impl、trait 与 extern 块；注释里的「unsafe」一词不算
+unsafe_outside=$(git grep --untracked -nE '(^|[^[:alnum:]_])unsafe[[:space:]]*(\{|fn|impl|trait|extern)' -- \
+  'crates/remux/src/*.rs' ':!crates/remux/src/ffi/*' || [[ $? == 1 ]])
+if [[ -n $unsafe_outside ]]; then
+  echo "$unsafe_outside" >&2
+  echo "以上位置在 crates/remux/src/ffi 之外用了 unsafe" >&2
+  status=1
+fi
 exit "$status"

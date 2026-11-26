@@ -99,6 +99,11 @@ impl Packet {
         self.raw_mut().flags = sys::AV_PKT_FLAG_KEY;
     }
 
+    /// 有数据或附加数据（side data）。都没有的包 FFmpeg 的封装器不当作样本：MP4 封装器丢掉它而不报错。
+    pub(crate) fn has_payload(&self) -> bool {
+        self.raw().size > 0 || self.raw().side_data_elems > 0
+    }
+
     /// 包的数据；没有数据时为 None。
     pub(crate) fn data(&self) -> Option<&[u8]> {
         let raw = self.raw();

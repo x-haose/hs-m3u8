@@ -7,8 +7,9 @@
 //! 解析时跳过的块与丢掉的 cue 记在 [`Lane::aligned_discarded`]。
 //!
 //! 封进输出时每路字幕流的起点不往回走：SubRip 后一条的起点不早于前一条的（Matroska 允许重叠），mov_text 的段不早于
-//! 前一段的结尾（MP4 同一时刻只有一个样本，起点严格递增）。推到没有长度的记在 [`Lane::packet_discarded`]（mov_text 按切出
-//! 的段计）。另存的文件用对齐、去重之后的 cue，不随封进输出时的推后而变。
+//! 前一段的结尾（MP4 同一时刻只有一个样本，起点严格递增）。推到没有长度的（mov_text 按切出的段计）与没有文字的
+//! cue（换成这种编码的文字后为空：SubRip 保留样式标签，mov_text 只留纯文字）不封进输出，记在
+//! [`Lane::packet_discarded`]。另存的文件用对齐、去重之后的 cue，不随封进输出时的推后而变。
 //!
 //! 简化：结束晚于本组画面结尾的 cue 不截短：可能延续到下一组的开头（封进输出时下一组开头的字幕因而推后，只出在字幕比画
 //! 面长的组上；另存的文件里按起点排列、可以重叠），最后一组的会把字幕流拉得比画面长（MP4 的总时长随之变长）。组的实际结
@@ -73,7 +74,7 @@ pub(crate) struct Lane {
     cues: Vec<Cue>,
     /// 解析时按 WebVTT 的规则跳过的块，与对齐后不剩长度或时刻超出范围的 cue
     pub(crate) aligned_discarded: u64,
-    /// 封进输出时被前一个包挡住、推到没有长度的包（SubRip 为 cue，mov_text 为切出的段）
+    /// 封进输出时没有文字的 cue，与被前一个包挡住、推到没有长度的包（SubRip 为 cue，mov_text 为切出的段）
     pub(crate) packet_discarded: u64,
 }
 
@@ -123,32 +124,35 @@ impl Lane {
         Ok(())
     }
 
-    /// 本组对齐后的 `cues`（按起点排序）生成字幕包排进队列，起点不往回走（见模块说明）。
+    /// 本组对齐后的 `cues`（按起点排序）生成字幕包排进队列，起点不往回走、没有文字的不写（见模块说明）。
     fn queue_packets(&mut self, cues: &[Cue], codec: Codec, at: Origin) -> Result<(), Error> {
         match codec {
             Codec::Subrip => {
                 for cue in cues {
+                    let text = subtitle::srt_text(&cue.text);
                     let start_us = self
                         .last
                         .map_or(cue.start_us, |(last_start, _)| cue.start_us.max(last_start));
-                    if cue.end_us <= start_us {
+                    if text.is_empty() || cue.end_us <= start_us {
                         self.packet_discarded += 1;
                         continue;
                     }
                     self.push(Packet {
                         start_us,
                         duration_us: cue.end_us - start_us,
-                        data: subtitle::srt_text(&cue.text).into_bytes(),
+                        data: text.into_bytes(),
                     });
                 }
             }
             Codec::MovText => {
+                let (texted, blank): (Vec<Cue>, Vec<Cue>) = cues
+                    .iter()
+                    .cloned()
+                    .partition(|cue| !subtitle::plain_text(&cue.text).is_empty());
+                self.packet_discarded += blank.len() as u64;
                 // 空档不写空样本：链接的 FFmpeg 的 movenc 在任何一路的包越过上一个字幕样本的结尾时自己补一个清屏的空样本
-                // （mov_write_packet 与 mov_write_trailer），自己再写会多出一个
-                for slice in subtitle::slices(cues) {
-                    if slice.text.is_empty() {
-                        continue;
-                    }
+                // （mov_write_packet 与 mov_write_trailer），自己再写会多出一个；slices 不给空档出段
+                for slice in subtitle::slices(&texted) {
                     let start_us = self
                         .last
                         .map_or(slice.start_us, |(_, end)| slice.start_us.max(end));

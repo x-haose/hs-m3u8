@@ -9,7 +9,7 @@ use crate::inband::{Inband, Mismatch, PacketCheck};
 use crate::input::Input;
 use crate::nal::{self, Framing};
 use crate::timing::MICROS;
-use crate::{Error, Origin, StreamKind, Unsupported};
+use crate::{Error, Origin, StreamKind, Unsupported, ffi};
 
 /// 一路输入流对应的输出流。
 #[derive(Clone, Copy)]
@@ -117,9 +117,11 @@ impl Source {
         self.last_segment
     }
 
-    /// 读下一个要写出的包。跳过未映射流的包；没有 DTS 的包、组开头解不出的视频包（见 [`Source::decodable`]）与损坏（读
-    /// 不出帧头或帧长与包长对不上）的音频包记入 `dropped`；参数随帧携带的包核对参数，要放进 MP4 的 E-AC-3 核对帧结构。读到末尾返回 `None` 并记下
-    /// `finished`，打包音频丢弃的损坏字节这时才是全部（见 [`Input::discarded`]），一并记入 `dropped`；之后不再调用。
+    /// 读下一个要写出的包。跳过未映射流的包；进输出的流里既没有数据也没有附加数据的包报 [`Error::Read`]（见
+    /// [`crate::ffi::empty_packet`]）：输出为 MP4 时封装器丢掉它而不报错，写出的包数与回读的对不上；链接的 FFmpeg 的
+    /// mov 与 matroska 解复用器读到大小为 0 的样本即报错，不给出这样的包。没有 DTS 的包、组开头解不出的视频包（见
+    /// [`Source::decodable`]）与损坏（读不出帧头或帧长与包长对不上）的音频包记入 `dropped`；参数随帧携带的包核对参数，要
+    /// 放进 MP4 的 E-AC-3 核对帧结构。读到末尾返回 `None` 并记下 `finished`，打包音频丢弃的损坏字节这时才是全部（见 [`Input::discarded`]），一并记入 `dropped`；之后不再调用。
     pub(crate) fn read_next(&mut self) -> Result<Option<(Packet, Mapping)>, Error> {
         loop {
             let mut packet = Packet::empty();
@@ -134,6 +136,12 @@ impl Source {
                 self.check_replaced(packet.stream())?;
                 continue;
             };
+            if !packet.has_payload() {
+                return Err(Error::Read {
+                    at: self.at,
+                    cause: ffi::empty_packet(),
+                });
+            }
             if packet.dts().is_none() {
                 self.dropped[packet.stream()].without_dts += 1;
                 continue;

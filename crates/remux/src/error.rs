@@ -121,6 +121,7 @@ pub enum Error {
     OpenOutput { path: PathBuf, cause: FfmpegError },
     #[error("封装器不接受选项 {0:?}")]
     RejectedOptions(Vec<(String, String)>),
+    /// 读取输入出错：FFmpeg 读包的错误；进输出的流里读到既没有数据也没有附加数据的包时 `cause` 为 AVERROR_INVALIDDATA
     #[error("读取{at}失败：{cause}")]
     Read { at: Origin, cause: FfmpegError },
     #[error("写入输出失败：{0}")]

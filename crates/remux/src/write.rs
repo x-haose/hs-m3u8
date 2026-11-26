@@ -282,7 +282,7 @@ impl Muxer {
         packet.set_position(-1);
         packet.set_stream(out);
         if let Err(e) = self.file.write_interleaved(&mut packet) {
-            return Err(self.file.write_error(e));
+            return Err(write_error(&self.file, e));
         }
         self.outs[out].written += 1;
         Ok(())
@@ -323,7 +323,7 @@ impl Muxer {
         o.end_us = Some(o.end_us.map_or(end_us, |e| e.max(end_us)));
         o.last_dts_us = Some(subtitle.start_us);
         if let Err(e) = self.file.write_interleaved(&mut packet) {
-            return Err(self.file.write_error(e));
+            return Err(write_error(&self.file, e));
         }
         self.outs[out].written += 1;
         Ok(())
@@ -343,10 +343,10 @@ impl Muxer {
         unused: Vec<UnusedStream>,
     ) -> Result<MediaReport, Error> {
         if let Err(e) = self.file.write_trailer() {
-            return Err(self.file.write_error(e));
+            return Err(write_error(&self.file, e));
         }
         if let Err(e) = self.file.close() {
-            return Err(self.file.close_error(e));
+            return Err(close_error(&self.file, e));
         }
         verify(Path::new(path), &self.outs, cancel)?;
         Ok(MediaReport {
@@ -379,37 +379,35 @@ fn open_error(failure: OpenFailure, path: &str, cancel: &Cancel) -> Error {
     }
 }
 
-impl OutputFile {
-    /// FFmpeg 写这个输出时的错误：取消了为 [`Error::Cancelled`]；输出的读写上下文记着写文件的错误（如盘满）为
-    /// [`Error::Io`]；其余为封装器的错误 [`Error::Mux`]。
-    fn write_error(&self, error: FfmpegError) -> Error {
-        if self.cancel.is_cancelled() {
-            return Error::Cancelled;
-        }
-        match self.io_error().and_then(|written| file_error(&written)) {
-            Some(cause) => Error::Io {
-                action: "写入",
-                path: self.path.clone(),
-                cause,
-            },
-            None => Error::Mux(error),
-        }
+/// FFmpeg 写输出 `file` 时的错误：取消了为 [`Error::Cancelled`]；输出的读写上下文记着写文件的错误（如盘满）为
+/// [`Error::Io`]；其余为封装器的错误 [`Error::Mux`]。
+fn write_error(file: &OutputFile, error: FfmpegError) -> Error {
+    if file.cancel.is_cancelled() {
+        return Error::Cancelled;
     }
+    match file.io_error().and_then(|written| file_error(&written)) {
+        Some(cause) => Error::Io {
+            action: "写入",
+            path: file.path.clone(),
+            cause,
+        },
+        None => Error::Mux(error),
+    }
+}
 
-    /// 关闭这个输出时的错误（见 [`OutputFile::close`]）：取消了为 [`Error::Cancelled`]；errno 型的为 [`Error::Io`]；
-    /// 其余为 [`Error::Mux`]。
-    fn close_error(&self, error: FfmpegError) -> Error {
-        if self.cancel.is_cancelled() {
-            return Error::Cancelled;
-        }
-        match file_error(&error) {
-            Some(cause) => Error::Io {
-                action: "关闭",
-                path: self.path.clone(),
-                cause,
-            },
-            None => Error::Mux(error),
-        }
+/// 关闭输出 `file` 时的错误（见 [`OutputFile::close`]）：取消了为 [`Error::Cancelled`]；errno 型的为 [`Error::Io`]；
+/// 其余为 [`Error::Mux`]。
+fn close_error(file: &OutputFile, error: FfmpegError) -> Error {
+    if file.cancel.is_cancelled() {
+        return Error::Cancelled;
+    }
+    match file_error(&error) {
+        Some(cause) => Error::Io {
+            action: "关闭",
+            path: file.path.clone(),
+            cause,
+        },
+        None => Error::Mux(error),
     }
 }
 
@@ -503,7 +501,7 @@ fn write_header(file: &mut OutputFile, container: Container) -> Result<(), Error
         options.set("movflags", "+faststart");
     }
     file.write_header(&mut options)
-        .map_err(|e| file.write_error(e))?;
+        .map_err(|e| write_error(file, e))?;
     let rejected = options.entries();
     if rejected.is_empty() {
         Ok(())

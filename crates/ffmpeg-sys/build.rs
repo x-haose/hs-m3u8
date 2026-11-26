@@ -48,8 +48,14 @@ fn bindings(target: &str) -> PathBuf {
 /// 绑定文件的路径（见模块说明）。
 #[cfg(feature = "bindgen")]
 fn bindings(target: &str) -> PathBuf {
+    let Some(dir) = env::var_os("FFMPEG_DIR") else {
+        panic!(
+            "bindgen 特性要从 FFMPEG_DIR 读头文件：把它设为用 hs-m3u8 仓库的 third_party/ffmpeg/build.sh 编译安装的 \
+             FFmpeg 目录"
+        );
+    };
     let out = PathBuf::from(env::var("OUT_DIR").expect("cargo 设了 OUT_DIR")).join("bindings.rs");
-    generate::write(&ffmpeg_dir().join("include"), target, &out);
+    generate::write(&PathBuf::from(dir).join("include"), target, &out);
     out
 }
 
@@ -238,6 +244,8 @@ mod generate {
         let mut builder = bindgen::Builder::default()
             .header("wrapper.h")
             .clang_arg(format!("-I{}", include.display()))
+            // 按目标的布局生成（交叉编译时不是本机的）
+            .clang_arg(format!("--target={target}"))
             .rust_edition(bindgen::RustEdition::Edition2024)
             .default_enum_style(bindgen::EnumVariation::Consts)
             .prepend_enum_name(false)

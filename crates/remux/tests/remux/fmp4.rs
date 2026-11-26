@@ -1,6 +1,6 @@
 //! fMP4 分片的结构核对：没写完与最后一个 box 的长度写 0。
 
-use hs_m3u8_remux::{Control, Error, Streams, TrackSegments};
+use hs_m3u8_remux::{Control, Error, Origin, Streams, TrackSegments};
 
 use crate::remux;
 
@@ -87,4 +87,39 @@ fn fmp4_structure_is_checked() {
         };
         assert!(expected, "{name}：实际 {err:?}");
     }
+}
+
+/// fMP4 分片的 trun 里有大小为 0 的样本：链接的 FFmpeg 解析 trun 时即报 AVERROR_INVALIDDATA（mov.c 的 mov_read_trun），
+/// 按打开输入失败报出，不会读出没有数据的包交给封装器（MP4 封装器会丢掉它，写出的包数与回读的对不上）。
+#[test]
+fn empty_samples_are_reported_as_invalid_input() {
+    let dir = work_dir("fmp4_empty_sample");
+    let video = track("fmp4_a/video");
+    let mut data = std::fs::read(&video.segments[0].path).unwrap();
+    // 样本的 trun：flags 为 0xA05（data_offset、第一个样本的标志，各样本的长度与 CTS 偏移），其后每个样本 8 字节、长度
+    // 在前；最后一个的长度改为 0
+    let trun = data.windows(4).position(|w| w == b"trun").unwrap();
+    assert_eq!(data[trun + 5..trun + 8], [0x00, 0x0A, 0x05]);
+    let count = u32::from_be_bytes(data[trun + 8..trun + 12].try_into().unwrap()) as usize;
+    let last = trun + 20 + (count - 1) * 8;
+    data[last..last + 4].fill(0);
+    let path = dir.join("empty_sample.m4s");
+    std::fs::write(&path, data).unwrap();
+    let segments = TrackSegments {
+        init: video.init.clone(),
+        segments: vec![declared(video.init.as_deref(), path)],
+        gaps: Vec::new(),
+    };
+    let err = remux(
+        &[Streams::Video],
+        &[group([segments])],
+        &dir.join("out.mp4"),
+        &Control::default(),
+    )
+    .unwrap_err();
+    let invalid_data = -i32::from_le_bytes(*b"INDA");
+    assert!(
+        matches!(&err, Error::OpenInput { at: Origin::Track { group: 0, track: 0 }, cause } if cause.code == invalid_data),
+        "实际 {err:?}"
+    );
 }

@@ -4171,8 +4171,8 @@ class StreamReport:
     @property
     def discarded_cues(self) -> builtins.int:
         r"""
-        字幕：解析时跳过的块、对齐后不剩长度的 cue（同 `SubtitleFile.discarded_cues`），加上封进输出时被前一个包挡住
-        、推到没有长度的（MP4 按切出的段计）。音视频为 0
+        字幕：解析时跳过的块、对齐后不剩长度的 cue（同 `SubtitleFile.discarded_cues`），加上封进输出时没有文字的
+        cue，与被前一个包挡住、推到没有长度的（MP4 按切出的段计）。音视频为 0
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...

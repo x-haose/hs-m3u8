@@ -252,8 +252,8 @@ pub struct StreamReport {
     /// 的包），打包音频里切帧时跳过的不完整的帧或标签、认不出的字节，以及片内损坏之后定不了时刻（这一片是最后一片，
     /// 或下一片之前缺了分片）的帧。视频包照常写入，由解码器做错误隐藏
     pub discarded_corrupt_bytes: u64,
-    /// 字幕：[`SubtitleCues::discarded_cues`] 里的，加上封进输出时被前一个包挡住、推到没有长度的（前一组延续过来的 cue
-    /// 推后了下一组的；mov_text 按切出的段计）。音视频为 0
+    /// 字幕：[`SubtitleCues::discarded_cues`] 里的，加上封进输出时没有文字的 cue（换成 SubRip 或 mov_text 的文字后为
+    /// 空），与被前一个包挡住、推到没有长度的（前一组延续过来的 cue 推后了下一组的；mov_text 按切出的段计）。音视频为 0
     pub discarded_cues: u64,
     /// 输出时间线上从最早的呈现时刻到最晚的结束时刻；含组内时间戳间断（如缺失的分片）留下的空档
     pub duration: Duration,
