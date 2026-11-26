@@ -1,13 +1,16 @@
-//! 任务的结果：输出、合并出的流、直播的录制结果与缺失的分片。
+//! 任务的结果：输出、合并出的流、另存的字幕文件、直播的录制结果与缺失的分片。
 
 use std::time::Duration;
 
 use hs_m3u8_core as core;
 use pyo3::prelude::*;
+use pyo3_stub_gen::derive::gen_stub_pymethods;
 
 use super::failure::{FetchErrorKind, Leftover, StallCause};
 use crate::convert::{PyPath, Seq};
+use crate::error::StallReason;
 use crate::record::{record, variants};
+use crate::request::Container;
 
 variants! {
     /// 流的种类。
@@ -16,6 +19,8 @@ variants! {
         Video {},
         /// 音频
         Audio {},
+        /// 字幕（本库由 WebVTT 生成）
+        Subtitle {},
     }
 }
 
@@ -44,6 +49,11 @@ variants! {
             /// 声道数
             channels: u32,
         },
+        /// 字幕
+        Subtitle {
+            /// FFmpeg 的编码名：Matroska 里为 `subrip`，MP4 里为 `mov_text`
+            codec: String,
+        },
     }
 }
 
@@ -65,19 +75,80 @@ record! {
         pub discarded_corrupt_bytes: u64,
         /// 输出时间线上从最早的呈现时刻到最晚的结束时刻；含组内时间戳间断（如缺失的分片）留下的空档
         pub duration: Duration,
+        /// 字幕：解析时跳过的块、对齐后不剩长度的 cue（同 `SubtitleFile.discarded_cues`），加上封进输出时被前一个包挡住、
+        /// 推到没有长度的（MP4 按切出的段计）。音视频为 0
+        pub discarded_cues: u64 = 0,
     }
 }
 
 record! {
-    /// 合并 MP4 的结果。
+    @custom_new
+    /// 合并的结果。
     pub struct MediaReport {
         /// 各路输出流，按流的下标排列
         pub streams: Seq<StreamReport>,
+        /// 输入里没进输出的音视频流：一条轨里要取的那类流有几路时（如 TS 里带几种语言的音频），第一路之后的。同一条轨
+        /// 各组里同一路只列第一次出现的；没要的那类流（如只要视频时变体里混着的音频）不列
+        pub unused: Seq<UnusedStream>,
+    }
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl MediaReport {
+    /// 各参数即同名属性；`unused` 为 None 时为空。
+    #[new]
+    #[pyo3(signature = (*, streams, unused = None))]
+    fn new(streams: Seq<StreamReport>, unused: Option<Seq<UnusedStream>>) -> Self {
+        MediaReport {
+            streams,
+            unused: unused.unwrap_or_default(),
+        }
     }
 }
 
 record! {
-    /// 生成的 MP4。
+    /// 没进输出的一路流（`MediaReport.unused`）。
+    pub struct UnusedStream {
+        /// 首次出现的不连续段组，从 0 起
+        pub group: usize,
+        /// 第几条轨
+        pub track: usize,
+        /// 在那条轨的分片里的流下标（TS 里按节目表的顺序）
+        pub index: usize,
+        /// 编码参数
+        pub shape: Shape,
+        /// 流的元数据里的语言，照来源原样（TS 多为 ISO 639-2）；没有时为 None
+        pub language: Option<String>,
+    }
+}
+
+record! {
+    /// 生成的合并文件。
+    pub struct MergedOutput {
+        /// 绝对路径，相对路径按开始任务时的当前目录补全
+        pub path: PyPath,
+        /// 格式
+        pub container: Container,
+        /// 各路输出流的编码参数、包数与时长
+        pub report: MediaReport,
+    }
+}
+
+record! {
+    /// 另存的一个字幕文件（`SubtitleOutput.files`）。
+    pub struct SubtitleFile {
+        /// 绝对路径
+        pub path: PyPath,
+        /// 写进文件的 cue 数
+        pub cues: usize,
+        /// 解析时跳过的块（时间写坏的 cue 等）与对齐后不剩长度（结束不晚于所在组的起点）的 cue
+        pub discarded_cues: u64,
+    }
+}
+
+record! {
+    /// 生成的 MP4（`Output.mp4`）；同 `MergedOutput`，只在合并文件是 MP4 时有。
     pub struct Mp4Output {
         /// 绝对路径，相对路径按开始任务时的当前目录补全
         pub path: PyPath,
@@ -186,6 +257,7 @@ record! {
 }
 
 record! {
+    @custom_new
     /// 直播的录制结果。
     pub struct LiveReport {
         /// 本次运行的录制如何结束；只合并（`Engine.merge_recorded`）时为 None
@@ -195,13 +267,77 @@ record! {
         pub session_count: usize,
         /// 本次运行录制中途另起的会话，按先后；只合并时为空
         pub new_sessions: Seq<NewSession>,
+        /// 尾部没录到的字幕轨，按会话、轨号排列；含之前各次运行记下的
+        pub unrecorded_tails: Seq<UnrecordedTail>,
+    }
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl LiveReport {
+    /// 各参数即同名属性；`unrecorded_tails` 为 None 时为空。
+    #[new]
+    #[pyo3(signature = (*, end, session_count, new_sessions, unrecorded_tails = None))]
+    fn new(
+        end: Option<LiveEnd>,
+        session_count: usize,
+        new_sessions: Seq<NewSession>,
+        unrecorded_tails: Option<Seq<UnrecordedTail>>,
+    ) -> Self {
+        LiveReport {
+            end,
+            session_count,
+            new_sessions,
+            unrecorded_tails: unrecorded_tails.unwrap_or_default(),
+        }
     }
 }
 
 record! {
+    /// 直播里一条字幕轨在一个会话的尾部没录到：`after` 之后的字幕不在输出中。字幕轨的故障不结束录制、不使任务失败（录制
+    /// 的结束只看音视频轨），在这里报出。录制中察觉即记进任务目录（`TrackProgress.unrecorded_tail` 随之为 True），所以
+    /// 取消、失败或进程退出后只合并照样报出；停滞记下的之后有了进展即去掉，接不上而停了的不去掉
+    pub struct UnrecordedTail {
+        /// 会话编号
+        pub session: u32,
+        /// 第几条轨
+        pub track: usize,
+        /// 这个会话里录到的最后一个分片的媒体序号；一个也没录到时为 None
+        pub after: Option<u64>,
+        /// 这条轨合并进输出的最后一个分片在输出时间轴上的结束时刻（从输出开头算），供显示「约某时之后没录到」：按各分片
+        /// 声明的时长推算，有缺的分片或字幕与画面起步不同时会偏；这个会话里没有分片合并进输出时为 None
+        pub at: Option<Duration>,
+        /// 本次运行判定的原因；之前的运行记下的、只合并时为 None（原因不落盘）
+        pub cause: Option<TailCause>,
+    }
+}
+
+variants! {
+    /// 字幕轨尾部没录到的原因。
+    pub enum TailCause {
+        /// 看起来这条字幕轨已结束（不再出新分片，或播放列表已被删除），而停滞开始之后音视频轨也没再出新分片
+        Ended {
+            /// 看起来已结束的原因
+            cause: StallCause,
+        },
+        /// 故障：刷新一直失败、一直不返回，有新分片却都取不到，或音视频轨还在出新分片而它不再出
+        Failed {
+            /// 故障的原因
+            reason: StallReason,
+        },
+        /// 播放列表与之前刷新得到的接不上（多为字幕打包器重启）
+        Broken {
+            /// 接不上的方式
+            cause: SourceBreak,
+        },
+    }
+}
+
+record! {
+    @custom_new
     /// 任务结果：下载、录制或只合并。
     pub struct Output {
-        /// 生成的 MP4；没要 MP4（`Target.Hls`）时为 None
+        /// 生成的 MP4；没要合并文件、或合并文件不是 MP4 时为 None（见 `merged`）
         pub mp4: Option<Mp4Output>,
         /// 生成的本地 HLS 目录（绝对路径）；没要 HLS 时为 None。入口为其中的 `index.m3u8`：单轨时是媒体播放列表，视频与
         /// 独立音频分离时是主播放列表；各轨的分片、init 段（与分离时这条轨的 `index.m3u8`）在 `<轨道编号>/` 下。内容与
@@ -220,6 +356,41 @@ record! {
         pub missed: Seq<Missed>,
         /// 直播的录制结果；点播为 None
         pub live: Option<LiveReport>,
+        /// 生成的合并文件（任一格式）；没要合并文件（`Target.Hls`）时为 None
+        pub merged: Option<MergedOutput>,
+        /// 另存的字幕文件，按字幕的轨号；没另存时为空
+        pub subtitle_files: Seq<SubtitleFile>,
+    }
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl Output {
+    /// 各参数即同名属性；`subtitle_files` 为 None 时为空。
+    #[new]
+    #[pyo3(signature = (*, mp4, hls, segments, bytes, leftovers, missed, live, merged = None, subtitle_files = None))]
+    fn new(
+        mp4: Option<Mp4Output>,
+        hls: Option<PyPath>,
+        segments: usize,
+        bytes: u64,
+        leftovers: Seq<Leftover>,
+        missed: Seq<Missed>,
+        live: Option<LiveReport>,
+        merged: Option<MergedOutput>,
+        subtitle_files: Option<Seq<SubtitleFile>>,
+    ) -> Self {
+        Output {
+            mp4,
+            hls,
+            segments,
+            bytes,
+            leftovers,
+            missed,
+            live,
+            merged,
+            subtitle_files: subtitle_files.unwrap_or_default(),
+        }
     }
 }
 
@@ -228,9 +399,7 @@ impl From<core::remux::StreamKind> for StreamKind {
         match kind {
             core::remux::StreamKind::Video => StreamKind::Video {},
             core::remux::StreamKind::Audio => StreamKind::Audio {},
-            core::remux::StreamKind::Subtitle => {
-                unreachable!("Python 的输出选项不把字幕封进合并文件（见 OutputOptions::to_core）")
-            }
+            core::remux::StreamKind::Subtitle => StreamKind::Subtitle {},
         }
     }
 }
@@ -238,9 +407,9 @@ impl From<core::remux::StreamKind> for StreamKind {
 impl From<core::remux::Shape> for Shape {
     fn from(shape: core::remux::Shape) -> Self {
         match shape {
-            core::remux::Shape::Subtitle { .. } => {
-                unreachable!("Python 的输出选项不把字幕封进合并文件（见 OutputOptions::to_core）")
-            }
+            core::remux::Shape::Subtitle { codec } => Shape::Subtitle {
+                codec: codec.to_owned(),
+            },
             core::remux::Shape::Video {
                 codec,
                 width,
@@ -274,27 +443,41 @@ impl From<core::remux::StreamReport> for StreamReport {
             skipped_before_keyframe: s.skipped_before_keyframe,
             discarded_corrupt_bytes: s.discarded_corrupt_bytes,
             duration: s.duration,
+            discarded_cues: s.discarded_cues,
         }
     }
 }
 
-impl From<core::MergedOutput> for Mp4Output {
+impl From<core::remux::MediaReport> for MediaReport {
+    fn from(r: core::remux::MediaReport) -> Self {
+        MediaReport {
+            streams: r.streams.into_iter().map(StreamReport::from).collect(),
+            unused: r
+                .unused
+                .into_iter()
+                .map(|u| {
+                    let core::remux::Origin::Track { group, track } = u.at else {
+                        unreachable!("Python 只合并 HLS，没有合并文件的输入")
+                    };
+                    UnusedStream {
+                        group,
+                        track,
+                        index: u.index,
+                        shape: u.shape.into(),
+                        language: u.language,
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<core::MergedOutput> for MergedOutput {
     fn from(m: core::MergedOutput) -> Self {
-        assert_eq!(
-            m.container,
-            core::remux::Container::Mp4,
-            "Python 的输出只有 MP4 一种合并文件"
-        );
-        Mp4Output {
+        MergedOutput {
             path: m.path.into(),
-            report: MediaReport {
-                streams: m
-                    .report
-                    .streams
-                    .into_iter()
-                    .map(StreamReport::from)
-                    .collect(),
-            },
+            container: m.container.into(),
+            report: m.report.into(),
         }
     }
 }
@@ -372,14 +555,52 @@ impl From<core::LiveReport> for LiveReport {
             end: l.end.map(LiveEnd::from),
             session_count: l.session_count,
             new_sessions: l.new_sessions.into_iter().map(NewSession::from).collect(),
+            unrecorded_tails: l
+                .unrecorded_tails
+                .into_iter()
+                .map(|t| UnrecordedTail {
+                    session: t.session,
+                    track: t.track,
+                    after: t.after,
+                    at: t.at,
+                    cause: t.cause.map(|cause| match cause {
+                        core::TailCause::Ended(cause) => TailCause::Ended {
+                            cause: cause.into(),
+                        },
+                        core::TailCause::Failed(reason) => TailCause::Failed {
+                            reason: reason.into(),
+                        },
+                        core::TailCause::Broken(cause) => TailCause::Broken {
+                            cause: cause.into(),
+                        },
+                    }),
+                })
+                .collect(),
         }
     }
 }
 
 impl From<core::Output> for Output {
     fn from(o: core::Output) -> Self {
+        let merged = o.merged.map(MergedOutput::from);
         Output {
-            mp4: o.merged.map(Mp4Output::from),
+            mp4: merged
+                .as_ref()
+                .filter(|m| m.container == Container::Mp4 {})
+                .map(|m| Mp4Output {
+                    path: m.path.clone(),
+                    report: m.report.clone(),
+                }),
+            merged,
+            subtitle_files: o
+                .subtitle_files
+                .into_iter()
+                .map(|f| SubtitleFile {
+                    path: f.path.into(),
+                    cues: f.cues,
+                    discarded_cues: f.discarded_cues,
+                })
+                .collect(),
             hls: o.hls.map(PyPath::from),
             segments: o.segments,
             bytes: o.bytes,

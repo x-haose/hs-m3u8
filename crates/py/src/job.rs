@@ -37,7 +37,7 @@ struct Running {
 
 /// 任务的结果。
 enum Finished {
-    Done(Output),
+    Done(Box<Output>),
     Failed(Failure),
     /// 本库内部出错：panic 的说明
     Panicked(String),
@@ -111,7 +111,7 @@ impl Job {
         let waiting = runtime.spawn(job.wait());
         runtime.spawn(async move {
             let finished = match waiting.await {
-                Ok(Ok(output)) => Finished::Done(output.into()),
+                Ok(Ok(output)) => Finished::Done(Box::new(output.into())),
                 Ok(Err(error)) => Finished::Failed(Failure::new(error)),
                 Err(failure) => match failure.try_into_panic() {
                     Ok(payload) => Finished::Panicked(panic_message(payload)),
@@ -251,7 +251,7 @@ impl Job {
             return Err(runtime::closed_error());
         };
         match &*finished {
-            Finished::Done(output) => Ok(output.clone()),
+            Finished::Done(output) => Ok((**output).clone()),
             Finished::Failed(failure) => Err(Python::attach(|py| failure.raise(py))),
             Finished::Panicked(message) => Err(PanicException::new_err(message.clone())),
         }

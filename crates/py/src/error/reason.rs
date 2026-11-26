@@ -4,6 +4,7 @@ use hs_m3u8_core as core;
 use pyo3::prelude::*;
 
 use crate::convert::{Address, Seq};
+use crate::info::SubtitleFormat;
 use crate::record::{record, variants};
 use crate::report::{FetchFailure, RefreshCause, StallCause};
 
@@ -20,7 +21,8 @@ record! {
 }
 
 variants! {
-    /// 按选轨偏好选不出轨的原因。
+    /// 按选轨偏好选不出轨的原因。与 1.0 音频的几种对应的字幕的几种按种类分名（`Subtitle…`），音频与字幕都会有的新加的
+    /// 带 `kind`（`Duplicate`）。
     pub enum SelectFailure {
         /// 主播放列表里没有变体
         NoVariants {},
@@ -62,6 +64,59 @@ variants! {
             /// 所选变体引用的音频组；变体没有引用音频组时为 None
             group: Option<String>,
         },
+        /// 所选变体的字幕组里没有这个语言的字幕
+        #[pyo3(constructor = (*, group, language, available))]
+        SubtitleLanguageNotFound {
+            /// 字幕组
+            group: String,
+            /// 给的语言
+            language: String,
+            /// 组里有的语言
+            available: Seq<String>,
+        },
+        /// `RenditionChoice.Index` 指定字幕时下标超出范围
+        #[pyo3(constructor = (*, index, count))]
+        SubtitleIndexOutOfRange {
+            /// 给的下标
+            index: usize,
+            /// 字幕 rendition 的个数
+            count: usize,
+        },
+        /// 所选变体的字幕组里没有与 `RenditionChoice.Matching` 身份相同的字幕（变体没有引用字幕组时也是）
+        SubtitleNotFound {},
+        /// 按下标指定的字幕不在所选变体引用的字幕组里
+        #[pyo3(constructor = (*, index, group))]
+        NotVariantSubtitle {
+            /// 字幕的下标（见 `SubtitleInfo.index`）
+            index: usize,
+            /// 所选变体引用的字幕组；变体没有引用字幕组时为 None
+            group: Option<String>,
+        },
+        /// 按语言点名了字幕，所选变体却没有引用字幕组
+        NoSubtitleGroup {},
+        /// `AudioChoice.These` 或 `Subtitles.These` 里两项选到了同一条
+        #[pyo3(constructor = (*, kind, index))]
+        Duplicate {
+            /// 哪类
+            kind: RenditionKind,
+            /// 选到的那一条在这类里的下标（见 `AudioInfo.index`、`SubtitleInfo.index`）
+            index: usize,
+        },
+        /// 选到的字幕没写 URI（不合 RFC 8216）
+        SubtitlesWithoutUri {
+            /// 字幕的下标
+            index: usize,
+        },
+    }
+}
+
+variants! {
+    /// 音频还是字幕（`SelectFailure.Duplicate`）。
+    pub enum RenditionKind {
+        /// 音频
+        Audio {},
+        /// 字幕
+        Subtitles {},
     }
 }
 
@@ -189,6 +244,15 @@ variants! {
             /// init 段的地址
             url: Address,
         },
+        /// 点名选的字幕（`Subtitles.These`）或续传记录里的字幕不是本库能处理的格式；自动选到的跳过（见
+        /// `Selected.skipped_subtitles`）
+        #[pyo3(constructor = (*, url, format))]
+        SubtitleFormat {
+            /// 字幕的媒体播放列表的地址
+            url: Address,
+            /// 什么格式
+            format: SubtitleFormat,
+        },
     }
 }
 
@@ -251,6 +315,11 @@ variants! {
             at: u64,
             /// 这个 box 的实际字节数
             size: u64,
+        },
+        /// 字幕分片不是 WebVTT 文本
+        NotWebVtt {
+            /// 不是的原因
+            detail: String,
         },
     }
 }
@@ -380,7 +449,6 @@ impl From<core::hls::SelectError> for SelectFailure {
                 SelectFailure::VariantIndexOutOfRange { index, count }
             }
             E::VariantNotFound => SelectFailure::VariantNotFound {},
-            // Python 的选轨偏好只选一条音频、不要字幕（见 Preference::to_core），只会有音频的这几种
             E::LanguageNotFound {
                 kind: core::hls::RenditionKind::Audio,
                 group,
@@ -404,7 +472,36 @@ impl From<core::hls::SelectError> for SelectFailure {
                 index,
                 group,
             } => SelectFailure::NotVariantAudio { index, group },
-            other => unreachable!("Python 的选轨偏好只选一条音频、不要字幕，不会有：{other}"),
+            E::LanguageNotFound {
+                group,
+                language,
+                available,
+                ..
+            } => SelectFailure::SubtitleLanguageNotFound {
+                group,
+                language,
+                available: Seq(available),
+            },
+            E::IndexOutOfRange { index, count, .. } => {
+                SelectFailure::SubtitleIndexOutOfRange { index, count }
+            }
+            E::NotFound { .. } => SelectFailure::SubtitleNotFound {},
+            E::NotInGroup { index, group, .. } => {
+                SelectFailure::NotVariantSubtitle { index, group }
+            }
+            E::NoGroup { .. } => SelectFailure::NoSubtitleGroup {},
+            E::Duplicate { kind, index } => SelectFailure::Duplicate {
+                kind: match kind {
+                    core::hls::RenditionKind::Audio => RenditionKind::Audio {},
+                    core::hls::RenditionKind::Subtitles => RenditionKind::Subtitles {},
+                    other => unreachable!("只有音频与字幕可以逐个指定，不会有{other:?}"),
+                },
+                index,
+            },
+            E::SubtitlesWithoutUri { index } => SelectFailure::SubtitlesWithoutUri { index },
+            E::NoChoices { .. } => {
+                unreachable!("一项也没给的逐个指定在构造 Preference 时即被拒收（check_preference）")
+            }
         }
     }
 }
@@ -440,9 +537,9 @@ impl From<core::IntegrityFailure> for IntegrityFailure {
     fn from(integrity: core::IntegrityFailure) -> Self {
         use core::IntegrityFailure as I;
         match integrity {
-            I::NotWebVtt(_) => unreachable!(
-                "只在下载字幕分片时报：Python 的偏好不选字幕，记有字幕轨的目录开始时先报 PreferenceChanged（reselect 时为 TracksMismatch），只合并不下载"
-            ),
+            I::NotWebVtt(cause) => IntegrityFailure::NotWebVtt {
+                detail: cause.to_string(),
+            },
             I::Padding => IntegrityFailure::Padding {},
             I::CipherLength(length) => IntegrityFailure::CipherLength { length },
             I::RangeLength { expected, found } => IntegrityFailure::RangeLength { expected, found },
@@ -537,6 +634,7 @@ impl From<core::HookKind> for HookKind {
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<SegmentRef>()?;
     module.add_class::<SelectFailure>()?;
+    module.add_class::<RenditionKind>()?;
     module.add_class::<Malformed>()?;
     module.add_class::<Encryption>()?;
     module.add_class::<SourceUnsupported>()?;

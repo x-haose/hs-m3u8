@@ -12,8 +12,9 @@ use pyo3_stub_gen::TypeInfo;
 
 use crate::convert::{Address, ProxyAddress};
 
-/// 数据类：字段只读（同名属性）。构造函数各参数只能按关键字传、都必须给；要默认值或校验的写 `@custom_new`，自己定义
-/// 构造函数。
+/// 数据类：字段只读（同名属性）。构造函数各参数只能按关键字传；字段写了 `= 默认值` 的可以不给（后加的字段这样写，
+/// 之前版本的调用照旧可用），其余都必须给。默认值只能是 `None`、`false`、数字这类单个字面量：PyO3 只把它们写进运行时
+/// 签名，别的写成 `...`，与存根对不上。要校验或别的默认值的写 `@custom_new`，自己定义构造函数（这时不写默认值）。
 macro_rules! record {
     (
         @custom_new
@@ -55,7 +56,7 @@ macro_rules! record {
         pub struct $name:ident {
             $(
                 $(#[$field_meta:meta])*
-                pub $field:ident : $ty:ty
+                pub $field:ident : $ty:ty $(= $default:tt)?
             ),* $(,)?
         }
     ) => {
@@ -70,7 +71,7 @@ macro_rules! record {
         impl $name {
             /// 各参数即同名属性。
             #[new]
-            #[pyo3(signature = (*, $($field),*))]
+            #[pyo3(signature = (*, $($field $(= $default)?),*))]
             fn new($($field: $ty),*) -> Self {
                 $name { $($field),* }
             }

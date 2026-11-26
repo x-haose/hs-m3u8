@@ -12,10 +12,13 @@ pub(crate) use self::failure::{
     RefreshReason, StallCause,
 };
 pub(crate) use self::output::{
-    LiveEnd, LiveReport, MediaReport, MissReason, Missed, Mp4Output, NewSession, Output, Shape,
-    SourceBreak, StreamKind, StreamReport,
+    LiveEnd, LiveReport, MediaReport, MergedOutput, MissReason, Missed, Mp4Output, NewSession,
+    Output, Shape, SourceBreak, StreamKind, StreamReport, SubtitleFile, TailCause, UnrecordedTail,
+    UnusedStream,
 };
-pub(crate) use self::progress::{FileCount, Progress, Retrying, SegmentCounts, Stage, Writing};
+pub(crate) use self::progress::{
+    FileCount, Progress, Retrying, SegmentCounts, Stage, TrackKind, TrackProgress, Writing,
+};
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<HttpErrorKind>()?;
@@ -34,10 +37,17 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<StreamKind>()?;
     module.add_class::<Shape>()?;
     module.add_class::<Stage>()?;
+    module.add_class::<TrackKind>()?;
+    module.add_class::<TrackProgress>()?;
     module.add_class::<Progress>()?;
     module.add_class::<StreamReport>()?;
     module.add_class::<MediaReport>()?;
     module.add_class::<Mp4Output>()?;
+    module.add_class::<UnusedStream>()?;
+    module.add_class::<MergedOutput>()?;
+    module.add_class::<SubtitleFile>()?;
+    module.add_class::<UnrecordedTail>()?;
+    module.add_class::<TailCause>()?;
     module.add_class::<LiveEnd>()?;
     module.add_class::<SourceBreak>()?;
     module.add_class::<NewSession>()?;

@@ -37,6 +37,12 @@ pyo3_stub_gen::reexport_module_members!("hs_m3u8", "hs_m3u8._native");
 // awaited」警告，PyO3 的协程没有这个警告
 pyo3_stub_gen::reexport_module_members!("hs_m3u8" from "hs_m3u8._download"; "download");
 pyo3_stub_gen::reexport_module_members!("hs_m3u8" from "hs_m3u8._version"; "__version__");
+// 合并文件放不进的原因与异常在 1.0 只有 MP4 一种，名字带 Mp4；MKV 加入后另给通用名字（同一个类，python/hs_m3u8/_aliases.py）
+pyo3_stub_gen::reexport_module_members!(
+    "hs_m3u8" from "hs_m3u8._aliases";
+    "MergeUnsupported",
+    "MergeUnsupportedError"
+);
 
 /// 生成存根所需的类型信息；pyproject.toml 在仓库根。
 pub fn stub_info() -> pyo3_stub_gen::Result<pyo3_stub_gen::StubInfo> {

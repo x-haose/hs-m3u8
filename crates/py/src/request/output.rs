@@ -11,12 +11,59 @@ use crate::error::to_pyerr;
 use crate::record::{record, variants};
 
 variants! {
+    /// 合并文件的格式：各路流原样复制、不重编码。
+    pub enum Container {
+        /// MP4（`.mp4`）。字幕为 mov_text。MP3、MP2 音轨放进 MP4 后，苹果基于 AVFoundation 的播放器（QuickTime
+        /// Player、Safari 等）认不出
+        Mp4 {},
+        /// Matroska（`.mkv`）：收得下 MP4 收不下的编码（如 Vorbis）。字幕为 SubRip
+        Matroska {},
+    }
+}
+
+variants! {
+    /// 另存的字幕文件的格式（`SubtitleOutput.files`）。
+    pub enum SubtitleFileFormat {
+        /// SubRip（`.srt`）：只留文字与基本的粗体、斜体、下划线标记
+        Srt {},
+        /// WebVTT（`.vtt`）：保留 cue 的设置与标记
+        WebVtt {},
+    }
+}
+
+record! {
+    @custom_new
+    /// 选了字幕时合并文件怎样带上它们。时间按 X-TIMESTAMP-MAP 对齐到画面（RFC 8216 3.5），字幕分片按不连续段序号对到
+    /// 同号的那段画面上（对不上的列在 `Output.missed`，原因 `MissReason.NoMatchingDiscontinuity`）。选了字幕却既不封进
+    /// 也不另存、又没有本地 HLS 输出时，开始任务抛 `InvalidInputError`（字幕下了也用不上）；只合并录到了字幕的直播时
+    /// 同样，经 `Job.wait` 抛出。
+    pub struct SubtitleOutput {
+        /// 封进合并文件
+        pub embed: bool,
+        /// 另存为文件，放在合并文件旁边：`<主名>.<语言>[.forced][.n].<srt|vtt>`，语言照来源的 BCP 47（没有时为 `und`），
+        /// 同名时加序号 n；与合并文件一起写出、一起替换。None 不另存。要有合并文件，只输出本地 HLS 时抛
+        /// `InvalidInputError`
+        pub files: Option<SubtitleFileFormat>,
+    }
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl SubtitleOutput {
+    /// 各参数即同名属性：默认封进合并文件、不另存。
+    #[new]
+    #[pyo3(signature = (*, embed = true, files = None))]
+    fn new(embed: bool, files: Option<SubtitleFileFormat>) -> Self {
+        SubtitleOutput { embed, files }
+    }
+}
+
+variants! {
     /// 输出什么。各路径与任务目录须以文件名结尾，不能相同或互相包含（按字面比较，不跟随符号链接），所在目录不存在时
     /// 在任务开头与写出前创建；相对路径按开始任务时的当前目录补全，之后改变当前目录不影响任务；补全后最后一段变了
     /// （Windows 去掉结尾的点与空格）时报参数错误。
     pub enum Target {
-        /// MP4 文件，各路流原样复制、不重编码。MP3、MP2 音轨放进 MP4 后，苹果基于 AVFoundation 的播放器（QuickTime
-        /// Player、Safari 等）认不出
+        /// MP4 文件，等于 container 为 `Container.Mp4()` 的 `File`
         Mp4 {
             /// MP4 的路径
             path: PyPath,
@@ -27,11 +74,29 @@ variants! {
             /// 目录的路径
             path: PyPath,
         },
-        /// 两者都要，内容相同
+        /// 两者都要，内容相同；等于 container 为 `Container.Mp4()` 的 `FileAndHls`
         #[pyo3(constructor = (*, mp4, hls))]
         Both {
             /// MP4 的路径
             mp4: PyPath,
+            /// 本地 HLS 目录的路径
+            hls: PyPath,
+        },
+        /// 合并文件，格式为 `container`
+        #[pyo3(constructor = (*, path, container))]
+        File {
+            /// 合并文件的路径
+            path: PyPath,
+            /// 格式
+            container: Container,
+        },
+        /// 合并文件与本地 HLS 目录都要，内容相同
+        #[pyo3(constructor = (*, path, container, hls))]
+        FileAndHls {
+            /// 合并文件的路径
+            path: PyPath,
+            /// 合并文件的格式
+            container: Container,
             /// 本地 HLS 目录的路径
             hls: PyPath,
         },
@@ -44,31 +109,47 @@ record! {
     pub struct OutputOptions {
         /// 输出什么
         pub target: Target,
-        /// 任务目录；None 时与输出同级，名为输出的主名加 `.hsdl`：主名为 MP4 文件名去掉扩展名，只输出 HLS 时为 HLS
-        /// 目录名。`a.mp4` 与 HLS 目录 `a` 共用 `a.hsdl`，改变输出种类后接着用已下载的分片。只能是空目录、不存在的目录
-        /// 或本库建立的任务目录
+        /// 任务目录；None 时与输出同级，名为输出的主名加 `.hsdl`：主名为合并文件名去掉扩展名，只输出 HLS 时为 HLS
+        /// 目录名。`a.mp4`、`a.mkv` 与 HLS 目录 `a` 共用 `a.hsdl`，改变输出种类或格式后接着用已下载的分片。只能是空
+        /// 目录、不存在的目录或本库建立的任务目录
         pub work_dir: Option<PyPath>,
-        /// 输出已存在时替换：MP4 文件直接替换；HLS 目录只在其中全是本库写出的文件时替换。路径被别的东西占用（见
+        /// 输出已存在时替换：合并文件与另存的字幕文件直接替换；HLS 目录只在其中全是本库写出的文件时替换。路径被别的东西占用（见
         /// `OutputOccupiedError`）时覆盖也不替换。为 False 时 HLS 目录须不存在或为空（系统自动生成的元数据文件
         /// 不算），否则报 `OutputExistsError`
         pub overwrite: bool,
         /// 成功后保留任务目录
         pub keep_work_dir: bool,
+        /// 选了字幕时合并文件怎样带上它们
+        pub subtitles: SubtitleOutput,
     }
 }
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl OutputOptions {
-    /// 各参数即同名属性。
+    /// 各参数即同名属性；`subtitles` 默认 `SubtitleOutput()`（封进合并文件、不另存）。
     #[new]
-    #[pyo3(signature = (target, *, work_dir = None, overwrite = false, keep_work_dir = false))]
-    fn new(target: Target, work_dir: Option<PyPath>, overwrite: bool, keep_work_dir: bool) -> Self {
+    #[pyo3(signature = (
+        target,
+        *,
+        work_dir = None,
+        overwrite = false,
+        keep_work_dir = false,
+        subtitles = SubtitleOutput { embed: true, files: None },
+    ))]
+    fn new(
+        target: Target,
+        work_dir: Option<PyPath>,
+        overwrite: bool,
+        keep_work_dir: bool,
+        subtitles: SubtitleOutput,
+    ) -> Self {
         OutputOptions {
             target,
             work_dir,
             overwrite,
             keep_work_dir,
+            subtitles,
         }
     }
 
@@ -96,34 +177,57 @@ variants! {
 
 impl Target {
     fn to_core(&self) -> core::Target {
+        let file = |path: &PyPath, container: &Container| core::MergedFile {
+            path: path.0.clone(),
+            container: container.to_core(),
+        };
         match self {
-            Target::Mp4 { path } => core::Target::File(mp4(path)),
+            Target::Mp4 { path } => core::Target::File(file(path, &Container::Mp4 {})),
             Target::Hls { path } => core::Target::Hls(path.0.clone()),
-            Target::Both { mp4: file, hls } => core::Target::Both {
-                file: mp4(file),
+            Target::Both { mp4, hls } => core::Target::Both {
+                file: file(mp4, &Container::Mp4 {}),
+                hls: hls.0.clone(),
+            },
+            Target::File { path, container } => core::Target::File(file(path, container)),
+            Target::FileAndHls {
+                path,
+                container,
+                hls,
+            } => core::Target::Both {
+                file: file(path, container),
                 hls: hls.0.clone(),
             },
         }
     }
 }
 
-/// `path` 上的 MP4 合并文件。
-fn mp4(path: &PyPath) -> core::MergedFile {
-    core::MergedFile {
-        path: path.0.clone(),
-        container: core::remux::Container::Mp4,
+impl Container {
+    pub(crate) fn to_core(&self) -> core::remux::Container {
+        match self {
+            Container::Mp4 {} => core::remux::Container::Mp4,
+            Container::Matroska {} => core::remux::Container::Matroska,
+        }
+    }
+}
+
+impl From<core::remux::Container> for Container {
+    fn from(container: core::remux::Container) -> Self {
+        match container {
+            core::remux::Container::Mp4 => Container::Mp4 {},
+            core::remux::Container::Matroska => Container::Matroska {},
+        }
     }
 }
 
 impl OutputOptions {
     pub(crate) fn to_core(&self) -> core::OutputOptions {
         let mut options = core::OutputOptions::new(self.target.to_core());
-        // Python 接口不选字幕，也表示不了合并文件里的字幕流：合并文件里一律不封字幕。由 Rust 接口建立、记有字幕轨的直播
-        // 录制交给 Python 只合并时，有本地 HLS 输出则字幕随它输出，没有则报参数错误（字幕不会进任何输出）；开始任务时
-        // Python 的偏好与这类目录记的不同，先报 PreferenceChanged（reselect 时为 TracksMismatch），不下载字幕
         options.subtitles = core::SubtitleOutput {
-            embed: false,
-            files: None,
+            embed: self.subtitles.embed,
+            files: self.subtitles.files.as_ref().map(|format| match format {
+                SubtitleFileFormat::Srt {} => core::SubtitleFileFormat::Srt,
+                SubtitleFileFormat::WebVtt {} => core::SubtitleFileFormat::WebVtt,
+            }),
         };
         options.work_dir = self.work_dir.as_ref().map(|dir| dir.0.clone());
         options.overwrite = self.overwrite;

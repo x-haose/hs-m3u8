@@ -284,11 +284,10 @@ fn unsupported_error(
                 ),
             );
         }
-        U::SubtitleFormat { .. } => {
-            unreachable!(
-                "只在开始任务时报：Python 的偏好不选字幕，记有字幕轨的目录开始时先报 PreferenceChanged（reselect 时不按记录选轨、不读字幕，报 TracksMismatch）"
-            )
-        }
+        U::SubtitleFormat { url, format } => SourceUnsupported::SubtitleFormat {
+            url: Address(*url),
+            format: format.into(),
+        },
         U::Hls(reason) => {
             return instance(
                 py,

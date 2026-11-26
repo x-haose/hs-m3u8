@@ -17,12 +17,12 @@ pip install hs-m3u8
   - fMP4 里：H.264、HEVC、AV1、VP9 视频，AAC、AC-3、E-AC-3、MP3、MP2、FLAC、Opus、ALAC 音频；
   - TS 与打包音频里：H.264、HEVC 视频，AAC、AC-3、E-AC-3、MP3、MP2 音频；
   - MP3 采样率不低于 16 kHz，TS 与打包音频里的 E-AC-3 每帧 6 块、只有一个独立子流；
-  - 每条轨只取第一路视频与第一路音频（如 TS 里有多路音频时只取第一路，其余的在 Rust 接口的合并结果里列出），本地 HLS 原样保留全部；
+  - 每条轨只取第一路视频与第一路音频（如 TS 里有多路音频时只取第一路，其余的在合并结果里列出），本地 HLS 原样保留全部；
   - MP4 里的 MP3、MP2 音轨，苹果基于 AVFoundation 的播放器（QuickTime Player、Safari 等）认不出。
-- 多条音轨与字幕（目前只在 Rust 接口）：同时下多条独立的音频与字幕 rendition，合并为 MP4 或 Matroska（MKV，收得下 MP4 收不下的编码，如 Vorbis），各轨写上语言、名称与默认标志；HLS 的分段 WebVTT 字幕按 X-TIMESTAMP-MAP 对齐画面，按不连续段序号对到同号的那段画面上（字幕播放列表的不连续段与画面对不上的部分不进输出、在结果里列出），封进 MKV（SubRip）或 MP4（mov_text），或另存为 SRT、WebVTT 文件。选到的字幕拉不到时任务失败（探测时只标出）；fMP4 里的字幕（wvtt、stpp）与隐藏字幕（CLOSED-CAPTIONS）不支持：自动选到的跳过并列出，点名选的开始任务时报错（探测时同样只标出、列为跳过）。
+- 多条音轨与字幕：同时下多条独立的音频与字幕 rendition，合并为 MP4 或 Matroska（MKV，收得下 MP4 收不下的编码，如 Vorbis），各轨写上语言、名称与默认标志；HLS 的分段 WebVTT 字幕按 X-TIMESTAMP-MAP 对齐画面，按不连续段序号对到同号的那段画面上（字幕播放列表的不连续段与画面对不上的部分不进输出、在结果里列出），封进 MKV（SubRip）或 MP4（mov_text），或另存为 SRT、WebVTT 文件。选到的字幕拉不到时任务失败（探测时只标出）；fMP4 里的字幕（wvtt、stpp）与隐藏字幕（CLOSED-CAPTIONS）不支持：自动选到的跳过并列出，点名选的开始任务时报错（探测时同样只标出、列为跳过）。
 - 续传：分片落盘即完整，中断后再次运行只补缺的；播放列表变了时明确拒绝。
 - 下载时校验分片：解密失败、不是媒体数据的内容拒收；空的响应、fMP4 的顶层 box 或 moof 里声明的样本数据超出数据、TS 或打包音频截在包或帧中间（加密的看解出的内容）时，按没写完重新取，直播里仍没写完的记为缺失。恰好截在 TS 包、音频帧或两组 moof/mdat 之间的看不出，合并出的内容比声明的时长短。
-- 直播录制：按 RFC 8216 的节奏刷新，窗口滑过、取不到或来源标了 EXT-X-GAP 的分片在结果里如实报告；只有一条音视频轨时编码器重启（序号回退）后另起会话接着录；字幕轨的故障不结束录制，没录到的尾部在结果里列出（Rust 接口）；中断后续录，或不联网只合并已录到的。
+- 直播录制：按 RFC 8216 的节奏刷新，窗口滑过、取不到或来源标了 EXT-X-GAP 的分片在结果里如实报告；只有一条音视频轨时编码器重启（序号回退）后另起会话接着录；字幕轨的故障不结束录制，没录到的尾部在结果里列出；中断后续录，或不联网只合并已录到的。
 - 站点适配回调：改写播放列表、修改请求、变换 key、变换分片；也可直接给出 key 与 IV（EXT-X-KEY 没写 URI 时要靠它）。
 - 失败按处理方式分类：改请求再试、来源本身不行、可稍后重试的网络故障等，异常带类型化的原因。
 - DRM、SAMPLE-AES、用绝对位置寻址的 fMP4（tfhd 写了 base_data_offset，RFC 8216 不允许）、只有关键帧的播放列表（EXT-X-I-FRAMES-ONLY）、增量更新（EXT-X-SKIP）与 TS 的 init 段不支持，遇到即明确报错。
@@ -61,6 +61,27 @@ async def main() -> None:
 
 
 asyncio.run(main())
+```
+
+要几条音轨与字幕、存成 MKV 时：
+
+```python
+from hs_m3u8 import (
+    AudioChoice,
+    Container,
+    OutputOptions,
+    Preference,
+    SubtitleFileFormat,
+    SubtitleOutput,
+    Subtitles,
+    Target,
+)
+
+preference = Preference(audio=AudioChoice.All(), subtitles=Subtitles.All())  # 交给 Source(..., preference=preference)
+options = OutputOptions(
+    Target.File(path="downloads/video.mkv", container=Container.Matroska()),
+    subtitles=SubtitleOutput(files=SubtitleFileFormat.Srt()),  # 字幕封进 MKV，并在旁边另存 SRT
+)
 ```
 
 选轨偏好、请求头与代理、站点适配回调在 `Source` 上，输出种类与任务目录在 `OutputOptions` 上，并发、直播录制方式与自定义 key 在 `JobRequest` 上。中断后用同样的请求再次运行即续传，选轨偏好变了而选的仍是同一内容（如重新探测后再选）时用 `JobRequest(..., reselect=True)`，核对过已下载的确是同一内容才沿用；换清晰度另开任务目录；直播用 `job.stop()` 停止并写出已录到的部分。放弃任务用 `Engine.discard(任务目录)`，它会收拾写到一半的输出。1.0 起，升级本库后旧版本留下的任务目录照常续传、合并与放弃；任务目录的格式版本比所用的库写的新时（用旧版本打开新版本写的）抛 `WorkDirError`（`WorkDirProblem.UnsupportedVersion`）。数据类、枚举取值与异常都能 pickle（如交给进程池），只保证同一版本之间。

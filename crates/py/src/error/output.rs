@@ -9,7 +9,8 @@ use crate::record::variants;
 use crate::report::{Shape, StreamKind};
 
 variants! {
-    /// 内容放不进 MP4 的原因；可只输出本地 HLS（`Target.Hls`），它原样保留分片，不受这些限制。各取值的 `group` 为合并
+    /// 内容放不进合并文件的原因（名字沿用 1.0，MKV 的同样是它；新代码可用别名 `MergeUnsupported`）；可改存 MKV（收得下
+    /// 更多编码）或只输出本地 HLS（`Target.Hls`），它原样保留分片，不受这些限制。各取值的 `group` 为合并
     /// 时的组号：点播即播放列表里第几个不连续段组，直播为各轨都录到的组按会话、不连续段排列的下标。
     pub enum Mp4Unsupported {
         /// 编码放不进 MP4；异常的说明文字里列出支持的编码
@@ -169,6 +170,16 @@ variants! {
         },
         /// 各轨都没有要取的视频或音频流
         NoStreams {},
+        /// 同时显示的几条字幕的文字合计超过 MP4 字幕样本的上限（65535 字节）；只出在 MP4 里，可改存 MKV
+        #[pyo3(constructor = (*, group, track, bytes))]
+        SubtitleTooLong {
+            /// 第几个不连续段组
+            group: usize,
+            /// 第几条轨
+            track: usize,
+            /// 超出上限的样本的字节数
+            bytes: usize,
+        },
     }
 }
 
@@ -202,10 +213,11 @@ impl From<core::MergeUnsupported> for Mp4Unsupported {
         // NoStreams 不带位置，它的分支不用组号与轨号
         let (group, track) = unsupported.at().map_or((0, 0), hls_track);
         match unsupported {
-            U::SubtitleTooLong { .. } => {
-                unreachable!("Python 的输出选项不把字幕封进合并文件（见 OutputOptions::to_core）")
-            }
-            // HLS 只合并成 MP4，容器恒为 MP4
+            U::SubtitleTooLong { bytes, .. } => Mp4Unsupported::SubtitleTooLong {
+                group,
+                track,
+                bytes,
+            },
             U::Codec { kind, codec, .. } => Mp4Unsupported::Codec {
                 group,
                 track,

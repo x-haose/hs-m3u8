@@ -54,13 +54,19 @@ impl Source {
         check_scheme(url).map_err(Error::InvalidInput)
     }
 
-    /// 按语言选的音频、字幕的语言不能有换行：选轨偏好的摘要按行编码，播放列表里的语言也不会有换行。
+    /// 逐个指定（[`hls::Renditions::These`]）时至少一项；按语言选的音频、字幕的语言不能有换行：选轨偏好的摘要按行编码，
+    /// 播放列表里的语言也不会有换行。
     pub fn check_preference(preference: &hls::Preference) -> Result<(), Error> {
         for (what, renditions) in [("音频", &preference.audio), ("字幕", &preference.subtitles)]
         {
             let hls::Renditions::These(choices) = renditions else {
                 continue;
             };
+            if choices.is_empty() {
+                return Err(Error::InvalidInput(format!(
+                    "逐个指定{what}时一项也没给：一条也不要用 Renditions::None"
+                )));
+            }
             for choice in choices {
                 if let hls::RenditionChoice::Language(language) = choice
                     && language.contains(['\n', '\r'])

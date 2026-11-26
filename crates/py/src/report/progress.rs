@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use hs_m3u8_core as core;
 use pyo3::prelude::*;
+use pyo3_stub_gen::derive::gen_stub_pymethods;
 
 use super::failure::{FetchFailure, RefreshCause};
 use crate::convert::Seq;
@@ -29,18 +30,19 @@ variants! {
 }
 
 record! {
+    @custom_new
     /// 任务进度快照（`Job.progress`）。
     pub struct Progress {
         /// 所处的阶段
         pub stage: Stage,
-        /// 所选的变体与音频（怎样选见 `Preference`）；解析完成前、或来源本身是媒体播放列表时为 None。重新选轨而选出的与
+        /// 所选的轨（怎样选见 `Preference`）；解析完成前、或来源本身是媒体播放列表时为 None。重新选轨而选出的与
         /// 记录的不是同一条时为这次选出的，核对上才沿用；核对不上时输出仍照任务目录里记录的
         pub selected: Option<Selected>,
-        /// 分片数，各轨合计
+        /// 分片数，视频与音频轨合计；各轨的见 `tracks`
         pub segments: SegmentCounts,
         /// 第 0 条轨已完成分片的声明时长之和；含续传前已完成的。直播即已录时长
         pub duration: Duration,
-        /// 任务目录中已完成的分片与 init 段的字节数（解密后）；含续传前已完成的
+        /// 任务目录中已完成的分片与 init 段的字节数（解密后），视频与音频轨合计；含续传前已完成的
         pub bytes: u64,
         /// 本次运行从网络读到的响应体字节数，读到即计：含播放列表与 key，含没读完、校验失败与重试前的请求。按它的
         /// 变化算下载速度
@@ -53,12 +55,75 @@ record! {
         /// 直播：各轨（下标为轨道编号）最近一次刷新失败的原因。这条轨之后刷新成功、不再刷新或录制结束即为 None；
         /// 一直失败到停滞时任务以 `LiveStalledError` 结束。点播与录制开始前为空
         pub refresh_errors: Seq<Option<RefreshCause>>,
-        /// 直播且输出含 MP4：录到的内容放不进 MP4 的原因。续录时任务目录里已录齐的组在开始后核对一次，之后每个（会话,
+        /// 直播且输出含合并文件：录到的内容放不进合并文件的原因（名字沿用 1.0，MKV 的同样在这里）。续录时任务目录里已录齐的组在开始后核对一次，之后每个（会话,
         /// 不连续段）组在各轨都有分片时核对（录制循环结束、收尾时才下完的不核对）；第 0 组开头的分片判断不了时，各组
         /// 只核对自身、不与它比较。组号为核对时的，之后才录齐、排在前面的组会让合并时的组号变大。录制照常进行，停不停
-        /// 由调用方定（直播错过的内容录不回来）；合并 MP4 时照样以 `Mp4UnsupportedError` 失败，可改为只输出本地 HLS
-        /// 再合并。点播（下载各组的第一个分片后核对，放不进时任务直接失败）与不输出 MP4 时为 None
+        /// 由调用方定（直播错过的内容录不回来）；合并时照样以 `Mp4UnsupportedError` 失败，可改存 MKV 或只输出本地
+        /// HLS 再合并。点播（下载各组的第一个分片后核对，放不进时任务直接失败）与不输出合并文件时为 None
         pub mp4_unsupported: Option<Mp4Unsupported>,
+        /// 各轨的进度，按轨号（第 0 条为所选变体，其后依次是各独立音频、各字幕，同 `Selected`）；解析完成前为空
+        pub tracks: Seq<TrackProgress>,
+    }
+}
+
+#[gen_stub_pymethods]
+#[pymethods]
+impl Progress {
+    /// 各参数即同名属性；`tracks` 为 None 时为空。
+    #[new]
+    #[pyo3(signature = (*, stage, selected, segments, duration, bytes, received, retrying, writing, refresh_errors, mp4_unsupported, tracks = None))]
+    fn new(
+        stage: Stage,
+        selected: Option<Selected>,
+        segments: SegmentCounts,
+        duration: Duration,
+        bytes: u64,
+        received: u64,
+        retrying: Seq<Retrying>,
+        writing: Option<Writing>,
+        refresh_errors: Seq<Option<RefreshCause>>,
+        mp4_unsupported: Option<Mp4Unsupported>,
+        tracks: Option<Seq<TrackProgress>>,
+    ) -> Self {
+        Progress {
+            stage,
+            selected,
+            segments,
+            duration,
+            bytes,
+            received,
+            retrying,
+            writing,
+            refresh_errors,
+            mp4_unsupported,
+            tracks: tracks.unwrap_or_default(),
+        }
+    }
+}
+
+variants! {
+    /// 轨的种类。
+    pub enum TrackKind {
+        /// 所选变体（或来源本身），可能混着音频
+        Video {},
+        /// 独立的音频 rendition
+        Audio {},
+        /// 字幕 rendition
+        Subtitles {},
+    }
+}
+
+record! {
+    /// 一条轨的进度（`Progress.tracks`）。
+    pub struct TrackProgress {
+        /// 种类
+        pub kind: TrackKind,
+        /// 口径同 `Progress.segments`，只算这条轨
+        pub segments: SegmentCounts,
+        /// 口径同 `Progress.bytes`，只算这条轨
+        pub bytes: u64,
+        /// 直播的字幕轨：在录制中的会话里记为尾部没录到（见 `UnrecordedTail`），已写进任务目录。其余为 False
+        pub unrecorded_tail: bool,
     }
 }
 
@@ -96,8 +161,8 @@ record! {
 record! {
     /// 写出的进度（`Progress.writing`），以文件计：各组各轨的 init 段与分片各算一个（打包音频按分片）。
     pub struct Writing {
-        /// 合并 MP4：写完的输入文件，写到下一个分片的包时上一个才算完，合并完回读核对 MP4 时不再增长；不要 MP4 时为
-        /// None
+        /// 合并文件（名字沿用 1.0，MKV 的同样在这里）：写完的输入文件，写到下一个分片的包时上一个才算完，合并完回读核对
+        /// 时不再增长；不要合并文件时为 None
         pub mp4: Option<FileCount>,
         /// 备齐本地 HLS：放好的文件，已放过的 init 段照样算；与任务目录同盘时用硬链接，几乎不花时间。不要本地 HLS 时为
         /// None
@@ -132,13 +197,7 @@ impl From<core::Progress> for Progress {
         Progress {
             stage: p.stage.into(),
             selected: p.selected.map(Selected::from),
-            segments: SegmentCounts {
-                done: p.segments.done,
-                total: p.segments.total,
-                failed: p.segments.failed,
-                expired: p.segments.expired,
-                gap: p.segments.gap,
-            },
+            segments: counts(p.segments),
             duration: p.duration,
             bytes: p.bytes,
             received: p.received,
@@ -168,6 +227,30 @@ impl From<core::Progress> for Progress {
                 .map(|error| error.map(RefreshCause::from))
                 .collect(),
             mp4_unsupported: p.merge_unsupported.map(Mp4Unsupported::from),
+            tracks: p
+                .tracks
+                .into_iter()
+                .map(|t| TrackProgress {
+                    kind: match t.kind {
+                        core::TrackKind::Video => TrackKind::Video {},
+                        core::TrackKind::Audio => TrackKind::Audio {},
+                        core::TrackKind::Subtitles => TrackKind::Subtitles {},
+                    },
+                    segments: counts(t.segments),
+                    bytes: t.bytes,
+                    unrecorded_tail: t.unrecorded_tail,
+                })
+                .collect(),
         }
+    }
+}
+
+fn counts(c: core::SegmentCounts) -> SegmentCounts {
+    SegmentCounts {
+        done: c.done,
+        total: c.total,
+        failed: c.failed,
+        expired: c.expired,
+        gap: c.gap,
     }
 }

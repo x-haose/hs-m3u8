@@ -6,6 +6,7 @@ use hs_m3u8_core as core;
 use pyo3::prelude::*;
 
 use crate::convert::PyPath;
+use crate::error::IntegrityFailure;
 use crate::record::{record, variants};
 
 variants! {
@@ -84,6 +85,11 @@ variants! {
         },
         /// 重试后取到的内容仍没写完（见 `IncompleteError`）
         Incomplete {},
+        /// 内容校验不过；只出在直播的字幕分片上（如不是 WebVTT），其余轨的使任务失败
+        Rejected {
+            /// 校验不过的原因
+            reason: IntegrityFailure,
+        },
     }
 }
 
@@ -97,6 +103,11 @@ variants! {
         },
         /// 重试后取到的内容仍没写完（见 `IncompleteError`），稍后重试可能成功
         Incomplete {},
+        /// 内容校验不过；只出在直播的字幕分片上（如不是 WebVTT），其余轨的使任务失败
+        Rejected {
+            /// 校验不过的原因
+            reason: IntegrityFailure,
+        },
     }
 }
 
@@ -120,6 +131,9 @@ variants! {
             /// 错在哪里
             detail: String,
         },
+        /// 内容不是媒体播放列表（不是 UTF-8、不是播放列表、是主播放列表、混着主播放列表的标签，或大到超出播放列表的
+        /// 上限），多为服务器返回了错误页或回源错配；只出在直播的字幕轨上，其余轨的使任务失败
+        NotAPlaylist {},
     }
 }
 
@@ -204,9 +218,9 @@ impl From<core::FetchErrorKind> for FetchErrorKind {
         match kind {
             core::FetchErrorKind::Http(kind) => FetchErrorKind::Http { kind: kind.into() },
             core::FetchErrorKind::Incomplete => FetchErrorKind::Incomplete {},
-            core::FetchErrorKind::Rejected(_) => {
-                unreachable!("只出在直播的字幕轨上：Python 的偏好不选字幕，只合并时不下载也不刷新")
-            }
+            core::FetchErrorKind::Rejected(reason) => FetchErrorKind::Rejected {
+                reason: reason.into(),
+            },
         }
     }
 }
@@ -218,9 +232,9 @@ impl From<core::FetchFailure> for FetchFailure {
                 failure: failure.into(),
             },
             core::FetchFailure::Incomplete => FetchFailure::Incomplete {},
-            core::FetchFailure::Rejected(_) => {
-                unreachable!("只出在直播的字幕轨上：Python 的偏好不选字幕，只合并时不下载也不刷新")
-            }
+            core::FetchFailure::Rejected(reason) => FetchFailure::Rejected {
+                reason: reason.into(),
+            },
         }
     }
 }
@@ -248,9 +262,7 @@ impl From<core::RefreshReason> for RefreshCause {
                 line,
                 detail: kind.to_string(),
             },
-            core::RefreshReason::NotAPlaylist => {
-                unreachable!("只出在直播的字幕轨上：Python 的偏好不选字幕，只合并时不下载也不刷新")
-            }
+            core::RefreshReason::NotAPlaylist => RefreshReason::NotAPlaylist {},
         };
         RefreshCause {
             reason,

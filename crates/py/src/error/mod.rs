@@ -18,10 +18,11 @@ mod translate;
 
 use self::output::HlsUnsupported;
 pub(crate) use self::output::Mp4Unsupported;
+pub(crate) use self::reason::IntegrityFailure;
 pub(crate) use self::reason::RUST_ONLY;
+pub(crate) use self::reason::StallReason;
 use self::reason::{
-    HookKind, IntegrityFailure, Malformed, SegmentRef, SelectFailure, SourceUnsupported,
-    StallReason, WorkDirProblem,
+    HookKind, Malformed, SegmentRef, SelectFailure, SourceUnsupported, WorkDirProblem,
 };
 pub(crate) use self::translate::{invalid_input, to_pyerr, traverse};
 use crate::convert::{Address, PyPath, Seq};
