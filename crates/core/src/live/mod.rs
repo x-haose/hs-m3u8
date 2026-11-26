@@ -654,7 +654,7 @@ impl<'a> Recorder<'a> {
 
     /// 第 `track` 条轨的播放列表 `fetched` 与之前刷新得到的接不上。
     ///
-    /// - 字幕轨：随画面进了新会话而还没在新会话里录到分片的，就在这个会话里按新窗口重新开始；否则只停它自己（见
+    /// - 字幕轨：随画面进了新会话而还没在新会话里处理过分片的，就在这个会话里按新窗口重新开始；否则只停它自己（见
     ///   [`LiveTrack::stop_broken`]）。
     /// - 唯一的音视频轨：另起会话、按新窗口接着录，字幕轨跟着进新会话（见 [`LiveTrack::rejoin`]、
     ///   [`LiveTrack::forgive_restart`]）。
@@ -667,7 +667,7 @@ impl<'a> Recorder<'a> {
     ) -> Result<(), Error> {
         if !self.media[track] {
             let t = &mut self.tracks[track];
-            if t.is_unrecorded_in_session() {
+            if t.is_unprocessed_in_session() {
                 t.restart(cause, fetched);
             } else {
                 t.stop_broken(cause, Instant::now());
