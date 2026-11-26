@@ -76,6 +76,14 @@ jobs:
         if: runner.os == 'macOS'
         run: make rs_fmt rs_clippy rs_doc rs_test py_test
 
+      # 预生成的 FFmpeg 绑定须与 FFmpeg 的头文件、crates/ffmpeg-sys/build.rs 的清单一致：在本机目标上重新生成，与提交的
+      # 比较。bindgen 用 Xcode 带的 libclang
+      - name: FFmpeg 绑定是否最新（macOS）
+        if: runner.os == 'macOS'
+        run: |
+          uv run --no-sync python scripts/ffmpeg_bindings.py
+          git diff --exit-code -- crates/ffmpeg-sys/src/bindings
+
       # Windows 的 make 只在 MSYS2 里，而 MSYS2 的 link.exe 会遮住 MSVC 的链接器，所以直接运行与 Makefile 的
       # rs_fmt、rs_clippy、rs_doc、rs_test、py_test 相同的命令。每条命令单独一步：PowerShell 里一步跑几条命令时，只有最后一条的
       # 退出码算数
