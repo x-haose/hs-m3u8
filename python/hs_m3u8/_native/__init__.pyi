@@ -126,9 +126,9 @@ __all__ = [
 class AudioChoice:
     r"""
     取哪些音频。`Default`、`Language`、`All` 在变体没有引用音频组时不起作用（用变体里混着的音频）；变体引用的组在主
-    播放列表里一条也没有时，`Default`、`All` 同样用混着的，点名的（`Language`、`Index`、`Matching`、`These`）报找不到。
-    `Language(x)`、`Index(i)`、`Matching(k)` 与只有同一项的 `These((RenditionChoice 的同一项,))` 选出的音频相同，任务
-    目录记的选轨偏好也相同（同一个任务目录可以换着用），只是两者 `==` 不相等。
+    播放列表里一条也没有时，`Default`、`All` 同样用混着的，点名的（`Language`、`Index`、`Matching`、`These`）报找不
+    到。`Language(x)`、`Index(i)`、`Matching(k)` 与只有同一项的 `These((RenditionChoice 的同一项,))` 选出的音频相同
+    ，任务目录记的选轨偏好也相同（同一个任务目录可以换着用），只是两者 `==` 不相等。
     """
     def __repr__(self) -> builtins.str: ...
     @typing.final
@@ -444,8 +444,9 @@ class Engine:
         不联网，只把任务目录中已录到的直播分片写成输出；用于中断后不再续录、或来源已取不到的录制。进度给出已录的
         分片数、字节数与时长，阶段先为 `Stage.Preparing`、写出时为 `Stage.Writing`；开始写出前可取消，停止不起作用。
         参数错误立即抛出。目录里是点播的下载时抛 `WorkDirError`（`WorkDirProblem.NotLiveRecording`；点播用同样的请求
-        再次运行即可续传）；没有可合并的分片时抛 `NothingRecordedError`。结果的 `LiveReport.end` 为 None。由 Rust 接口录的
-        直播录到了字幕时，字幕不进 MP4、只随本地 HLS 输出：没有本地 HLS 输出时 `Job.wait` 抛 `InvalidInputError`。
+        再次运行即可续传）；没有可合并的分片时抛 `NothingRecordedError`。结果的 `LiveReport.end` 为 None。录到了字幕时
+        按 `OutputOptions.subtitles` 处理（默认封进合并文件）；既不封进、也不另存、又没有本地 HLS 输出时 `Job.wait` 抛
+        `InvalidInputError`。
         """
 
 class FetchErrorKind:
@@ -1996,7 +1997,7 @@ class Mp4Output:
 
 class Mp4Unsupported:
     r"""
-    内容放不进合并文件的原因（名字沿用 1.0，MKV 的同样是它；新代码可用别名 `MergeUnsupported`）；可改存 MKV（收得下
+    内容放不进合并文件的原因（名字带 MP4，MKV 的同样是它；通用名字为别名 `MergeUnsupported`）；可改存 MKV（收得下
     更多编码）或只输出本地 HLS（`Target.Hls`），它原样保留分片，不受这些限制。各取值的 `group` 为合并
     时的组号：点播即播放列表里第几个不连续段组，直播为各轨都录到的组按会话、不连续段排列的下标。
     """
@@ -2514,14 +2515,15 @@ class Output:
     @property
     def subtitle_files(self) -> builtins.tuple[SubtitleFile, ...]:
         r"""
-        另存的字幕文件，按字幕的轨号；没另存时为空
+        另存的字幕文件，与 `Selected.subtitles` 一一对应、顺序相同；没另存时为空
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
     def __repr__(self) -> builtins.str: ...
     def __new__(cls, *, mp4: typing.Optional[Mp4Output], hls: typing.Optional[builtins.str | os.PathLike[str]], segments: builtins.int, bytes: builtins.int, leftovers: collections.abc.Sequence[Leftover], missed: collections.abc.Sequence[Missed], live: typing.Optional[LiveReport], merged: typing.Optional[MergedOutput] = None, subtitle_files: typing.Optional[collections.abc.Sequence[SubtitleFile]] = None) -> Output:
         r"""
-        各参数即同名属性；`subtitle_files` 为 None 时为空。
+        各参数即同名属性；`subtitle_files` 为 None 时为空。`merged` 为 None 而给了 `mp4` 时由它得出（MP4 的合并文件）；
+        `mp4` 与 `merged` 对不上（`mp4` 应恰为 MP4 的 `merged`）时抛 `InvalidInputError`。
         """
 
 @typing.final
@@ -2671,8 +2673,8 @@ class Preference:
     def __repr__(self) -> builtins.str: ...
     def __new__(cls, *, variant: VariantChoice = ..., audio: AudioChoice = ..., subtitles: Subtitles = ...) -> Preference:
         r"""
-        `variant` 默认 `VariantChoice.Best()`，`audio` 默认 `AudioChoice.Default()`，`subtitles` 默认 `Subtitles.Off()`；
-        语言含换行、`These` 一项也没给时抛 `InvalidInputError`。
+        `variant` 默认 `VariantChoice.Best()`，`audio` 默认 `AudioChoice.Default()`，`subtitles` 默认 `Subtitles.Off()`
+        ；语言含换行、`These` 一项也没给时抛 `InvalidInputError`。
         """
 
 @typing.final
@@ -2762,11 +2764,12 @@ class Progress:
     @property
     def mp4_unsupported(self) -> typing.Optional[Mp4Unsupported.Codec | Mp4Unsupported.Mp3SampleRate | Mp4Unsupported.ParamsUnknown | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ConfigChanged | Mp4Unsupported.StreamChangedInGroup | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.FormatChangedInGroup | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.TimestampJump | Mp4Unsupported.NoKeyframe | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams | Mp4Unsupported.SubtitleTooLong]:
         r"""
-        直播且输出含合并文件：录到的内容放不进合并文件的原因（名字沿用 1.0，MKV 的同样在这里）。续录时任务目录里已录齐的组在开始后核对一次，之后每个（会话,
-        不连续段）组在各轨都有分片时核对（录制循环结束、收尾时才下完的不核对）；第 0 组开头的分片判断不了时，各组
-        只核对自身、不与它比较。组号为核对时的，之后才录齐、排在前面的组会让合并时的组号变大。录制照常进行，停不停
-        由调用方定（直播错过的内容录不回来）；合并时照样以 `Mp4UnsupportedError` 失败，可改存 MKV 或只输出本地
-        HLS 再合并。点播（下载各组的第一个分片后核对，放不进时任务直接失败）与不输出合并文件时为 None
+        直播且输出含合并文件：录到的内容放不进合并文件的原因（名字带 MP4，MKV 的同样在这里）。续录时任务目录里已录齐
+        的组在开始后核对一次，之后每个（会话,不连续段）组在各轨都有分片时核对（录制循环结束、收尾时才下完的不核对）
+        ；第 0 组开头的分片判断不了时，各组只核对自身、不与它比较。组号为核对时的，之后才录齐、排在前面的组会让合并
+        时的组号变大。录制照常进行，停不停由调用方定（直播错过的内容录不回来）；合并时照样以 `Mp4UnsupportedError`
+        失败，可改存 MKV 或只输出本地HLS 再合并。点播（下载各组的第一个分片后核对，放不进时任务直接失败）与不输出合
+        并文件时为 None
         """
     @property
     def tracks(self) -> builtins.tuple[TrackProgress, ...]:
@@ -3078,12 +3081,12 @@ class RenditionKind:
         def __new__(cls) -> RenditionKind.Audio: ...
     
     @typing.final
-    class Subtitles(RenditionKind):
+    class Subtitle(RenditionKind):
         r"""
         字幕
         """
         __match_args__ = ()
-        def __new__(cls) -> RenditionKind.Subtitles: ...
+        def __new__(cls) -> RenditionKind.Subtitle: ...
     
 
 class RequestError(HsM3u8Error):
@@ -3314,7 +3317,7 @@ class SelectError(RequestError):
     选轨偏好与来源不符。
     """
     @property
-    def reason(self) -> SelectFailure.NoVariants | SelectFailure.VariantIndexOutOfRange | SelectFailure.VariantNotFound | SelectFailure.AudioLanguageNotFound | SelectFailure.AudioIndexOutOfRange | SelectFailure.AudioNotFound | SelectFailure.NotVariantAudio | SelectFailure.SubtitleLanguageNotFound | SelectFailure.SubtitleIndexOutOfRange | SelectFailure.SubtitleNotFound | SelectFailure.NotVariantSubtitle | SelectFailure.NoSubtitleGroup | SelectFailure.Duplicate | SelectFailure.SubtitlesWithoutUri:
+    def reason(self) -> SelectFailure.NoVariants | SelectFailure.VariantIndexOutOfRange | SelectFailure.VariantNotFound | SelectFailure.AudioLanguageNotFound | SelectFailure.AudioIndexOutOfRange | SelectFailure.AudioNotFound | SelectFailure.NotVariantAudio | SelectFailure.SubtitleLanguageNotFound | SelectFailure.SubtitleIndexOutOfRange | SelectFailure.SubtitleNotFound | SelectFailure.NotVariantSubtitle | SelectFailure.NoSubtitleGroup | SelectFailure.Duplicate | SelectFailure.SubtitleWithoutUri:
         r"""
         选不出的原因
         """
@@ -3517,7 +3520,7 @@ class SelectFailure:
         """
         __match_args__ = ("kind", "index",)
         @property
-        def kind(self) -> RenditionKind.Audio | RenditionKind.Subtitles:
+        def kind(self) -> RenditionKind.Audio | RenditionKind.Subtitle:
             r"""
             哪类
             """
@@ -3529,7 +3532,7 @@ class SelectFailure:
         def __new__(cls, *, kind: RenditionKind, index: builtins.int) -> SelectFailure.Duplicate: ...
     
     @typing.final
-    class SubtitlesWithoutUri(SelectFailure):
+    class SubtitleWithoutUri(SelectFailure):
         r"""
         选到的字幕没写 URI（不合 RFC 8216）
         """
@@ -3539,7 +3542,7 @@ class SelectFailure:
             r"""
             字幕的下标
             """
-        def __new__(cls, index: builtins.int) -> SelectFailure.SubtitlesWithoutUri: ...
+        def __new__(cls, index: builtins.int) -> SelectFailure.SubtitleWithoutUri: ...
     
 
 @typing.final
@@ -3581,9 +3584,11 @@ class Selected:
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
     def __repr__(self) -> builtins.str: ...
-    def __new__(cls, *, variant: VariantInfo, audio: typing.Optional[AudioInfo], audios: typing.Optional[collections.abc.Sequence[AudioInfo]] = None, muxed_audio: builtins.bool = False, subtitles: typing.Optional[collections.abc.Sequence[SubtitleInfo]] = None, skipped_subtitles: typing.Optional[collections.abc.Sequence[SubtitleInfo]] = None) -> Selected:
+    def __new__(cls, *, variant: VariantInfo, audio: typing.Optional[AudioInfo], audios: typing.Optional[collections.abc.Sequence[AudioInfo]] = None, muxed_audio: typing.Optional[builtins.bool] = None, subtitles: typing.Optional[collections.abc.Sequence[SubtitleInfo]] = None, skipped_subtitles: typing.Optional[collections.abc.Sequence[SubtitleInfo]] = None) -> Selected:
         r"""
-        各参数即同名属性；`audios`、`subtitles`、`skipped_subtitles` 为 None 时为空。
+        各参数即同名属性；`subtitles`、`skipped_subtitles` 为 None 时为空。`audios` 为 None 时由 `audio` 得出（只有它一
+        条，或为空），`muxed_audio` 为 None 时为 `audio` 是 None；`audio` 不是 `audios` 的第一项时抛 `InvalidInputError`
+        。
         """
 
 class Shape:
@@ -4164,8 +4169,8 @@ class StreamReport:
     @property
     def discarded_cues(self) -> builtins.int:
         r"""
-        字幕：解析时跳过的块、对齐后不剩长度的 cue（同 `SubtitleFile.discarded_cues`），加上封进输出时被前一个包挡住、
-        推到没有长度的（MP4 按切出的段计）。音视频为 0
+        字幕：解析时跳过的块、对齐后不剩长度的 cue（同 `SubtitleFile.discarded_cues`），加上封进输出时被前一个包挡住
+        、推到没有长度的（MP4 按切出的段计）。音视频为 0
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
@@ -4432,7 +4437,8 @@ class SubtitleSupport:
 class Subtitles:
     r"""
     取哪些字幕（WebVTT 分段字幕；fMP4 里的字幕与隐藏字幕不支持：自动选到的跳过并列在 `Selected.skipped_subtitles`，
-    点名的报错）。变体没有引用字幕组时，按语言点名的抛 `SelectError`（`SelectFailure.NoGroup`），其余不选。
+    点名的报错）。变体没有引用字幕组时，`Default`、`All` 不选，`These` 抛 `SelectError`（按语言为
+    `SelectFailure.NoSubtitleGroup`，按下标为 `NotVariantSubtitle`，按身份为 `SubtitleNotFound`）。
     """
     def __repr__(self) -> builtins.str: ...
     @typing.final
@@ -4462,7 +4468,8 @@ class Subtitles:
     @typing.final
     class These(Subtitles):
         r"""
-        逐个指定，按给出的顺序各成一条字幕轨；至少一项，两项选到同一条时抛 `SelectError`（`SelectFailure.Duplicate`）
+        逐个指定，按给出的顺序各成一条字幕轨；至少一项，两项选到同一条时抛 `SelectError`（`SelectFailure.Duplicate`
+        ）
         """
         __match_args__ = ("choices",)
         @property
@@ -4722,12 +4729,12 @@ class TrackKind:
         def __new__(cls) -> TrackKind.Audio: ...
     
     @typing.final
-    class Subtitles(TrackKind):
+    class Subtitle(TrackKind):
         r"""
         字幕 rendition
         """
         __match_args__ = ()
-        def __new__(cls) -> TrackKind.Subtitles: ...
+        def __new__(cls) -> TrackKind.Subtitle: ...
     
 
 @typing.final
@@ -4736,7 +4743,7 @@ class TrackProgress:
     一条轨的进度（`Progress.tracks`）。
     """
     @property
-    def kind(self) -> TrackKind.Video | TrackKind.Audio | TrackKind.Subtitles:
+    def kind(self) -> TrackKind.Video | TrackKind.Audio | TrackKind.Subtitle:
         r"""
         种类
         """
@@ -5236,7 +5243,7 @@ class Writing:
     @property
     def mp4(self) -> typing.Optional[FileCount]:
         r"""
-        合并文件（名字沿用 1.0，MKV 的同样在这里）：写完的输入文件，写到下一个分片的包时上一个才算完，合并完回读核对
+        合并文件（名字带 MP4，MKV 的同样在这里）：写完的输入文件，写到下一个分片的包时上一个才算完，合并完回读核对
         时不再增长；不要合并文件时为 None
         """
     @property

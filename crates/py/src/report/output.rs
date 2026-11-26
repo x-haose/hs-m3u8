@@ -8,7 +8,7 @@ use pyo3_stub_gen::derive::gen_stub_pymethods;
 
 use super::failure::{FetchErrorKind, Leftover, StallCause};
 use crate::convert::{PyPath, Seq};
-use crate::error::StallReason;
+use crate::error::{StallReason, invalid_input};
 use crate::record::{record, variants};
 use crate::request::Container;
 
@@ -75,8 +75,8 @@ record! {
         pub discarded_corrupt_bytes: u64,
         /// 输出时间线上从最早的呈现时刻到最晚的结束时刻；含组内时间戳间断（如缺失的分片）留下的空档
         pub duration: Duration,
-        /// 字幕：解析时跳过的块、对齐后不剩长度的 cue（同 `SubtitleFile.discarded_cues`），加上封进输出时被前一个包挡住、
-        /// 推到没有长度的（MP4 按切出的段计）。音视频为 0
+        /// 字幕：解析时跳过的块、对齐后不剩长度的 cue（同 `SubtitleFile.discarded_cues`），加上封进输出时被前一个包挡住
+        /// 、推到没有长度的（MP4 按切出的段计）。音视频为 0
         pub discarded_cues: u64 = 0,
     }
 }
@@ -358,7 +358,7 @@ record! {
         pub live: Option<LiveReport>,
         /// 生成的合并文件（任一格式）；没要合并文件（`Target.Hls`）时为 None
         pub merged: Option<MergedOutput>,
-        /// 另存的字幕文件，按字幕的轨号；没另存时为空
+        /// 另存的字幕文件，与 `Selected.subtitles` 一一对应、顺序相同；没另存时为空
         pub subtitle_files: Seq<SubtitleFile>,
     }
 }
@@ -366,10 +366,12 @@ record! {
 #[gen_stub_pymethods]
 #[pymethods]
 impl Output {
-    /// 各参数即同名属性；`subtitle_files` 为 None 时为空。
+    /// 各参数即同名属性；`subtitle_files` 为 None 时为空。`merged` 为 None 而给了 `mp4` 时由它得出（MP4 的合并文件）；
+    /// `mp4` 与 `merged` 对不上（`mp4` 应恰为 MP4 的 `merged`）时抛 `InvalidInputError`。
     #[new]
     #[pyo3(signature = (*, mp4, hls, segments, bytes, leftovers, missed, live, merged = None, subtitle_files = None))]
     fn new(
+        py: Python<'_>,
         mp4: Option<Mp4Output>,
         hls: Option<PyPath>,
         segments: usize,
@@ -379,8 +381,21 @@ impl Output {
         live: Option<LiveReport>,
         merged: Option<MergedOutput>,
         subtitle_files: Option<Seq<SubtitleFile>>,
-    ) -> Self {
-        Output {
+    ) -> PyResult<Self> {
+        let merged = merged.or_else(|| {
+            mp4.as_ref().map(|m| MergedOutput {
+                path: m.path.clone(),
+                container: Container::Mp4 {},
+                report: m.report.clone(),
+            })
+        });
+        if mp4 != mp4_of(merged.as_ref()) {
+            return Err(invalid_input(
+                py,
+                "mp4 应恰为容器是 MP4 的 merged，没有或不是 MP4 时为 None".to_owned(),
+            ));
+        }
+        Ok(Output {
             mp4,
             hls,
             segments,
@@ -390,8 +405,18 @@ impl Output {
             live,
             merged,
             subtitle_files: subtitle_files.unwrap_or_default(),
-        }
+        })
     }
+}
+
+/// 合并文件 `merged` 是 MP4 时对应的 `Output.mp4`。
+fn mp4_of(merged: Option<&MergedOutput>) -> Option<Mp4Output> {
+    merged
+        .filter(|m| m.container == Container::Mp4 {})
+        .map(|m| Mp4Output {
+            path: m.path.clone(),
+            report: m.report.clone(),
+        })
 }
 
 impl From<core::remux::StreamKind> for StreamKind {
@@ -584,13 +609,7 @@ impl From<core::Output> for Output {
     fn from(o: core::Output) -> Self {
         let merged = o.merged.map(MergedOutput::from);
         Output {
-            mp4: merged
-                .as_ref()
-                .filter(|m| m.container == Container::Mp4 {})
-                .map(|m| Mp4Output {
-                    path: m.path.clone(),
-                    report: m.report.clone(),
-                }),
+            mp4: mp4_of(merged.as_ref()),
             merged,
             subtitle_files: o
                 .subtitle_files

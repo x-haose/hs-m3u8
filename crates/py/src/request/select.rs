@@ -64,9 +64,9 @@ variants! {
 
 variants! {
     /// 取哪些音频。`Default`、`Language`、`All` 在变体没有引用音频组时不起作用（用变体里混着的音频）；变体引用的组在主
-    /// 播放列表里一条也没有时，`Default`、`All` 同样用混着的，点名的（`Language`、`Index`、`Matching`、`These`）报找不到。
-    /// `Language(x)`、`Index(i)`、`Matching(k)` 与只有同一项的 `These((RenditionChoice 的同一项,))` 选出的音频相同，任务
-    /// 目录记的选轨偏好也相同（同一个任务目录可以换着用），只是两者 `==` 不相等。
+    /// 播放列表里一条也没有时，`Default`、`All` 同样用混着的，点名的（`Language`、`Index`、`Matching`、`These`）报找不
+    /// 到。`Language(x)`、`Index(i)`、`Matching(k)` 与只有同一项的 `These((RenditionChoice 的同一项,))` 选出的音频相同
+    /// ，任务目录记的选轨偏好也相同（同一个任务目录可以换着用），只是两者 `==` 不相等。
     pub enum AudioChoice {
         /// DEFAULT=YES 的，没有则取组内第一个
         Default {},
@@ -100,7 +100,8 @@ variants! {
 
 variants! {
     /// 取哪些字幕（WebVTT 分段字幕；fMP4 里的字幕与隐藏字幕不支持：自动选到的跳过并列在 `Selected.skipped_subtitles`，
-    /// 点名的报错）。变体没有引用字幕组时，按语言点名的抛 `SelectError`（`SelectFailure.NoGroup`），其余不选。
+    /// 点名的报错）。变体没有引用字幕组时，`Default`、`All` 不选，`These` 抛 `SelectError`（按语言为
+    /// `SelectFailure.NoSubtitleGroup`，按下标为 `NotVariantSubtitle`，按身份为 `SubtitleNotFound`）。
     pub enum Subtitles {
         /// 一个也不要
         Off {},
@@ -108,7 +109,8 @@ variants! {
         Default {},
         /// 组里全部，按出现顺序各成一条字幕轨
         All {},
-        /// 逐个指定，按给出的顺序各成一条字幕轨；至少一项，两项选到同一条时抛 `SelectError`（`SelectFailure.Duplicate`）
+        /// 逐个指定，按给出的顺序各成一条字幕轨；至少一项，两项选到同一条时抛 `SelectError`（`SelectFailure.Duplicate`
+        /// ）
         These {
             /// 各项
             choices: Seq<RenditionChoice>,
@@ -212,8 +214,8 @@ record! {
 #[gen_stub_pymethods]
 #[pymethods]
 impl Preference {
-    /// `variant` 默认 `VariantChoice.Best()`，`audio` 默认 `AudioChoice.Default()`，`subtitles` 默认 `Subtitles.Off()`；
-    /// 语言含换行、`These` 一项也没给时抛 `InvalidInputError`。
+    /// `variant` 默认 `VariantChoice.Best()`，`audio` 默认 `AudioChoice.Default()`，`subtitles` 默认 `Subtitles.Off()`
+    /// ；语言含换行、`These` 一项也没给时抛 `InvalidInputError`。
     #[new]
     #[pyo3(signature = (
         *,

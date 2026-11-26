@@ -103,7 +103,7 @@ variants! {
             index: usize,
         },
         /// 选到的字幕没写 URI（不合 RFC 8216）
-        SubtitlesWithoutUri {
+        SubtitleWithoutUri {
             /// 字幕的下标
             index: usize,
         },
@@ -116,7 +116,7 @@ variants! {
         /// 音频
         Audio {},
         /// 字幕
-        Subtitles {},
+        Subtitle {},
     }
 }
 
@@ -493,12 +493,12 @@ impl From<core::hls::SelectError> for SelectFailure {
             E::Duplicate { kind, index } => SelectFailure::Duplicate {
                 kind: match kind {
                     core::hls::RenditionKind::Audio => RenditionKind::Audio {},
-                    core::hls::RenditionKind::Subtitles => RenditionKind::Subtitles {},
+                    core::hls::RenditionKind::Subtitles => RenditionKind::Subtitle {},
                     other => unreachable!("只有音频与字幕可以逐个指定，不会有{other:?}"),
                 },
                 index,
             },
-            E::SubtitlesWithoutUri { index } => SelectFailure::SubtitlesWithoutUri { index },
+            E::SubtitlesWithoutUri { index } => SelectFailure::SubtitleWithoutUri { index },
             E::NoChoices { .. } => {
                 unreachable!("一项也没给的逐个指定在构造 Preference 时即被拒收（check_preference）")
             }

@@ -13,8 +13,11 @@ from hs_m3u8 import (
     FetchFailure,
     InvalidInputError,
     JobRequest,
+    MediaReport,
+    MergedOutput,
     MergeUnsupported,
     MergeUnsupportedError,
+    Mp4Output,
     Mp4Unsupported,
     Mp4UnsupportedError,
     Output,
@@ -23,6 +26,7 @@ from hs_m3u8 import (
     Probe,
     Progress,
     RenditionChoice,
+    Selected,
     Shape,
     Source,
     SubtitleFileFormat,
@@ -149,7 +153,7 @@ def test_several_audio_tracks_and_subtitles_go_into_matroska_and_srt(server: Ser
         TrackKind.Video(),
         TrackKind.Audio(),
         TrackKind.Audio(),
-        TrackKind.Subtitles(),
+        TrackKind.Subtitle(),
     ]
     assert [track.segments.done for track in progress.tracks] == [2, 3, 3, 2]
     assert progress.segments.done == 8
@@ -202,3 +206,23 @@ def test_merge_names_are_the_mp4_names() -> None:
     too_long = MergeUnsupported.SubtitleTooLong(group=0, track=3, bytes=70000)
     assert isinstance(too_long, Mp4Unsupported)
     assert_survives_pickle(too_long)
+
+
+def test_results_built_the_old_way_fill_in_the_new_fields(server: Server, tmp_path: Path) -> None:
+    """按 1.0 的写法构造 `Selected`、`Output` 时，新字段由旧字段得出；两边都给了而对不上时报错。"""
+    put_tracks(server)
+    master = probe(Source(server.url("master.m3u8"))).master
+    assert master is not None
+    variant, audio = master.variants[0], master.audio[0]
+    assert Selected(variant=variant, audio=audio).audios == (audio,)
+    assert Selected(variant=variant, audio=None).muxed_audio
+    with pytest.raises(InvalidInputError):
+        Selected(variant=variant, audio=audio, audios=(master.audio[1],))
+
+    report = MediaReport(streams=())
+    mp4 = Mp4Output(path=tmp_path / "out.mp4", report=report)
+    old = Output(mp4=mp4, hls=None, segments=0, bytes=0, leftovers=(), missed=(), live=None)
+    assert old.merged == MergedOutput(path=tmp_path / "out.mp4", container=Container.Mp4(), report=report)
+    mkv = MergedOutput(path=tmp_path / "out.mkv", container=Container.Matroska(), report=report)
+    with pytest.raises(InvalidInputError):
+        Output(mp4=mp4, hls=None, segments=0, bytes=0, leftovers=(), missed=(), live=None, merged=mkv)

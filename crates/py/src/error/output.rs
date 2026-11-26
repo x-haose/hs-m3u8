@@ -9,7 +9,7 @@ use crate::record::variants;
 use crate::report::{Shape, StreamKind};
 
 variants! {
-    /// 内容放不进合并文件的原因（名字沿用 1.0，MKV 的同样是它；新代码可用别名 `MergeUnsupported`）；可改存 MKV（收得下
+    /// 内容放不进合并文件的原因（名字带 MP4，MKV 的同样是它；通用名字为别名 `MergeUnsupported`）；可改存 MKV（收得下
     /// 更多编码）或只输出本地 HLS（`Target.Hls`），它原样保留分片，不受这些限制。各取值的 `group` 为合并
     /// 时的组号：点播即播放列表里第几个不连续段组，直播为各轨都录到的组按会话、不连续段排列的下标。
     pub enum Mp4Unsupported {

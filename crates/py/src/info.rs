@@ -7,6 +7,7 @@ use pyo3::prelude::*;
 use pyo3_stub_gen::derive::gen_stub_pymethods;
 
 use crate::convert::{Count, Seq};
+use crate::error::invalid_input;
 use crate::record::{record, variants};
 use crate::report::FetchFailure;
 use crate::request::{
@@ -233,25 +234,35 @@ record! {
 #[gen_stub_pymethods]
 #[pymethods]
 impl Selected {
-    /// 各参数即同名属性；`audios`、`subtitles`、`skipped_subtitles` 为 None 时为空。
+    /// 各参数即同名属性；`subtitles`、`skipped_subtitles` 为 None 时为空。`audios` 为 None 时由 `audio` 得出（只有它一
+    /// 条，或为空），`muxed_audio` 为 None 时为 `audio` 是 None；`audio` 不是 `audios` 的第一项时抛 `InvalidInputError`
+    /// 。
     #[new]
-    #[pyo3(signature = (*, variant, audio, audios = None, muxed_audio = false, subtitles = None, skipped_subtitles = None))]
+    #[pyo3(signature = (*, variant, audio, audios = None, muxed_audio = None, subtitles = None, skipped_subtitles = None))]
     fn new(
+        py: Python<'_>,
         variant: VariantInfo,
         audio: Option<AudioInfo>,
         audios: Option<Seq<AudioInfo>>,
-        muxed_audio: bool,
+        muxed_audio: Option<bool>,
         subtitles: Option<Seq<SubtitleInfo>>,
         skipped_subtitles: Option<Seq<SubtitleInfo>>,
-    ) -> Self {
-        Selected {
+    ) -> PyResult<Self> {
+        let audios = audios.unwrap_or_else(|| audio.iter().cloned().collect());
+        if audios.0.first() != audio.as_ref() {
+            return Err(invalid_input(
+                py,
+                "audio 应为 audios 的第一项（audios 为空时为 None）".to_owned(),
+            ));
+        }
+        Ok(Selected {
             variant,
+            muxed_audio: muxed_audio.unwrap_or(audio.is_none()),
             audio,
-            audios: audios.unwrap_or_default(),
-            muxed_audio,
+            audios,
             subtitles: subtitles.unwrap_or_default(),
             skipped_subtitles: skipped_subtitles.unwrap_or_default(),
-        }
+        })
     }
 }
 

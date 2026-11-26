@@ -64,7 +64,7 @@ impl Source {
             };
             if choices.is_empty() {
                 return Err(Error::InvalidInput(format!(
-                    "逐个指定{what}时一项也没给：一条也不要用 Renditions::None"
+                    "逐个指定{what}时一项也没给：一条也不要时选不要"
                 )));
             }
             for choice in choices {

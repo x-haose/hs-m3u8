@@ -114,8 +114,9 @@ impl Engine {
     /// 不联网，只把任务目录中已录到的直播分片写成输出；用于中断后不再续录、或来源已取不到的录制。进度给出已录的
     /// 分片数、字节数与时长，阶段先为 `Stage.Preparing`、写出时为 `Stage.Writing`；开始写出前可取消，停止不起作用。
     /// 参数错误立即抛出。目录里是点播的下载时抛 `WorkDirError`（`WorkDirProblem.NotLiveRecording`；点播用同样的请求
-    /// 再次运行即可续传）；没有可合并的分片时抛 `NothingRecordedError`。结果的 `LiveReport.end` 为 None。由 Rust 接口录的
-    /// 直播录到了字幕时，字幕不进 MP4、只随本地 HLS 输出：没有本地 HLS 输出时 `Job.wait` 抛 `InvalidInputError`。
+    /// 再次运行即可续传）；没有可合并的分片时抛 `NothingRecordedError`。结果的 `LiveReport.end` 为 None。录到了字幕时
+    /// 按 `OutputOptions.subtitles` 处理（默认封进合并文件）；既不封进、也不另存、又没有本地 HLS 输出时 `Job.wait` 抛
+    /// `InvalidInputError`。
     fn merge_recorded(&self, py: Python<'_>, output: OutputOptions) -> PyResult<Job> {
         let engine = self.inner.get("Engine")?;
         start_job(py, || engine.merge_recorded(output.to_core()), None)

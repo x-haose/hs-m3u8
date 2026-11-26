@@ -55,11 +55,12 @@ record! {
         /// 直播：各轨（下标为轨道编号）最近一次刷新失败的原因。这条轨之后刷新成功、不再刷新或录制结束即为 None；
         /// 一直失败到停滞时任务以 `LiveStalledError` 结束。点播与录制开始前为空
         pub refresh_errors: Seq<Option<RefreshCause>>,
-        /// 直播且输出含合并文件：录到的内容放不进合并文件的原因（名字沿用 1.0，MKV 的同样在这里）。续录时任务目录里已录齐的组在开始后核对一次，之后每个（会话,
-        /// 不连续段）组在各轨都有分片时核对（录制循环结束、收尾时才下完的不核对）；第 0 组开头的分片判断不了时，各组
-        /// 只核对自身、不与它比较。组号为核对时的，之后才录齐、排在前面的组会让合并时的组号变大。录制照常进行，停不停
-        /// 由调用方定（直播错过的内容录不回来）；合并时照样以 `Mp4UnsupportedError` 失败，可改存 MKV 或只输出本地
-        /// HLS 再合并。点播（下载各组的第一个分片后核对，放不进时任务直接失败）与不输出合并文件时为 None
+        /// 直播且输出含合并文件：录到的内容放不进合并文件的原因（名字带 MP4，MKV 的同样在这里）。续录时任务目录里已录齐
+        /// 的组在开始后核对一次，之后每个（会话,不连续段）组在各轨都有分片时核对（录制循环结束、收尾时才下完的不核对）
+        /// ；第 0 组开头的分片判断不了时，各组只核对自身、不与它比较。组号为核对时的，之后才录齐、排在前面的组会让合并
+        /// 时的组号变大。录制照常进行，停不停由调用方定（直播错过的内容录不回来）；合并时照样以 `Mp4UnsupportedError`
+        /// 失败，可改存 MKV 或只输出本地HLS 再合并。点播（下载各组的第一个分片后核对，放不进时任务直接失败）与不输出合
+        /// 并文件时为 None
         pub mp4_unsupported: Option<Mp4Unsupported>,
         /// 各轨的进度，按轨号（第 0 条为所选变体，其后依次是各独立音频、各字幕，同 `Selected`）；解析完成前为空
         pub tracks: Seq<TrackProgress>,
@@ -109,7 +110,7 @@ variants! {
         /// 独立的音频 rendition
         Audio {},
         /// 字幕 rendition
-        Subtitles {},
+        Subtitle {},
     }
 }
 
@@ -161,7 +162,7 @@ record! {
 record! {
     /// 写出的进度（`Progress.writing`），以文件计：各组各轨的 init 段与分片各算一个（打包音频按分片）。
     pub struct Writing {
-        /// 合并文件（名字沿用 1.0，MKV 的同样在这里）：写完的输入文件，写到下一个分片的包时上一个才算完，合并完回读核对
+        /// 合并文件（名字带 MP4，MKV 的同样在这里）：写完的输入文件，写到下一个分片的包时上一个才算完，合并完回读核对
         /// 时不再增长；不要合并文件时为 None
         pub mp4: Option<FileCount>,
         /// 备齐本地 HLS：放好的文件，已放过的 init 段照样算；与任务目录同盘时用硬链接，几乎不花时间。不要本地 HLS 时为
@@ -234,7 +235,7 @@ impl From<core::Progress> for Progress {
                     kind: match t.kind {
                         core::TrackKind::Video => TrackKind::Video {},
                         core::TrackKind::Audio => TrackKind::Audio {},
-                        core::TrackKind::Subtitles => TrackKind::Subtitles {},
+                        core::TrackKind::Subtitles => TrackKind::Subtitle {},
                     },
                     segments: counts(t.segments),
                     bytes: t.bytes,
