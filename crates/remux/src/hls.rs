@@ -188,8 +188,8 @@ fn write_groups(
         subtitles: lanes
             .into_iter()
             .map(|lane| SubtitleCues {
-                cues: lane.cues,
                 discarded_cues: lane.aligned_discarded,
+                cues: lane.into_cues(),
             })
             .collect(),
     })

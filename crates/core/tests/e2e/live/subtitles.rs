@@ -183,3 +183,57 @@ async fn merging_a_recording_with_subtitles_requires_a_use_for_them() {
     assert_eq!(output.subtitle_files.len(), 1);
     assert_eq!(output.subtitle_files[0].cues, 1);
 }
+
+/// 画面还在更新时字幕播放列表一直不变、也没有 ENDLIST：字幕轨不算停滞，录制等画面停滞才结束，结束原因落在画面上。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subtitle_playlist_that_stops_updating_does_not_stall_the_recording() {
+    let dir = test_dir("live_subtitles_stall");
+    let server = Server::start().await;
+    let video = |count: usize| {
+        let mut playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n".to_owned();
+        for i in 0..count {
+            playlist += &format!("#EXTINF:1,\nv/seg{i}.ts\n");
+        }
+        playlist
+    };
+    for i in 0..2 {
+        server.put(&format!("v/seg{i}.ts"), fixture(&format!("ts_a/seg{i}.ts")));
+    }
+    server.put("v.m3u8", video(1));
+    server.put(
+        "subs/0.vtt",
+        "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:131280,LOCAL:00:00:00.000\n\n00:00.300 --> 00:00.800\n字幕\n",
+    );
+    server.put(
+        "subs.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nsubs/0.vtt\n",
+    );
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n\
+         #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"zh\",LANGUAGE=\"zh\",URI=\"subs.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=200000,SUBTITLES=\"subs\"\nv.m3u8\n",
+    );
+    let mut req = live_request(server.url("master.m3u8"), &dir, STALL);
+    req.source.preference.subtitles = Renditions::All;
+    req.output.target = Target::File(MergedFile {
+        path: dir.join("out.mkv"),
+        container: Container::Matroska,
+    });
+    let job = engine().start(req).unwrap();
+    let mut progress = job.control().progress();
+    progress
+        .wait_for(|p| p.tracks.iter().map(|t| t.segments.done).eq([1, 1]))
+        .await
+        .unwrap();
+    // 两条轨都录到第一片之后画面再出一片，然后不再更新；字幕播放列表从头到尾不变，比画面早满停滞时限
+    server.put("v.m3u8", video(2));
+    let output = job.wait().await.unwrap();
+
+    let end = output.live.unwrap().end;
+    assert!(
+        matches!(end, Some(LiveEnd::Stalled { track: 0, .. })),
+        "{end:?}"
+    );
+    assert_eq!(output.segments, 2);
+}

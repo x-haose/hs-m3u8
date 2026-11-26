@@ -41,9 +41,10 @@ pub enum VariantChoice {
 pub enum Renditions {
     /// 一个也不要。音频为它时只取视频（变体里混着的音频也不要）
     None,
-    /// 组里 DEFAULT=YES 的；音频没有时取组里第一个，字幕没有时不选。变体没有引用这类组时：音频用变体里混着的，字幕不选
+    /// 组里 DEFAULT=YES 的；音频没有时取组里第一个，字幕没有时不选。变体没有引用这类组、或引用的组在主播放列表里一条也
+    /// 没有时：音频用变体里混着的，字幕不选
     Default,
-    /// 组里全部，按出现顺序
+    /// 组里全部，按出现顺序；组里一条也没有时同 [`Renditions::Default`]
     All,
     /// 逐个指定，按给出的顺序成轨；两项选到同一条时报 [`SelectError::Duplicate`]。至少一项，空的报
     /// [`SelectError::NoChoices`]：一条也不要用 [`Renditions::None`]
@@ -53,8 +54,9 @@ pub enum Renditions {
 /// 指定一条音频或字幕 rendition。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenditionChoice {
-    /// 组内第一个 LANGUAGE 与它相同（不区分大小写）的。变体没有引用音频组（或引用的组在主播放列表里没有）时音频的不起作用
-    /// （用变体里混着的）；字幕的报 [`SelectError::NoGroup`]
+    /// 组内第一个 LANGUAGE 与它相同（不区分大小写）的；引用的组在主播放列表里一条也没有时报
+    /// [`SelectError::LanguageNotFound`]（`available` 为空）。变体没有引用音频组时音频的不起作用（用变体里混着的）；没有
+    /// 引用字幕组时字幕的报 [`SelectError::NoGroup`]
     Language(String),
     /// 主播放列表里第几个这类 rendition（音频只数 TYPE=AUDIO 的，字幕只数 TYPE=SUBTITLES 的，按出现顺序，从 0 起）；
     /// 须在所选变体的组里。只对同一份主播放列表有效，同 [`VariantChoice::Index`]
@@ -124,7 +126,7 @@ pub enum SelectError {
     /// [`Renditions::These`] 里两项选到了同一条（`index` 口径同 [`RenditionChoice::Index`]）
     #[error("第 {index} 个{}被选了两次", kind_name(*kind))]
     Duplicate { kind: RenditionKind, index: usize },
-    /// 按语言点名了字幕，所选变体却没有引用字幕组（或引用的组在主播放列表里没有一条）
+    /// 按语言点名了字幕，所选变体却没有引用字幕组
     #[error("所选变体没有{}组，按语言点名的找不到", kind_name(*kind))]
     NoGroup { kind: RenditionKind },
     /// [`Renditions::These`] 是空的
@@ -157,19 +159,20 @@ pub fn select(master: &MasterPlaylist, preference: &Preference) -> Result<Select
         VariantChoice::Best => best_variant(master).ok_or(SelectError::NoVariants)?,
     };
     let variant = &master.variants[variant_index];
-    let audio_group = listed(master, RenditionKind::Audio, variant.audio.as_deref());
-    let subtitle_group = listed(
+    // 点名的选项照变体引用的组名找，找不到时报出这个组名；Default 与 All 在组里一条也没有时用混着的音频
+    let audio = pick(
         master,
-        RenditionKind::Subtitles,
-        variant.subtitles.as_deref(),
-    );
-    let audio = pick(master, RenditionKind::Audio, audio_group, &preference.audio)?;
+        RenditionKind::Audio,
+        variant.audio.as_deref(),
+        &preference.audio,
+    )?;
     let subtitles = pick(
         master,
         RenditionKind::Subtitles,
-        subtitle_group,
+        variant.subtitles.as_deref(),
         &preference.subtitles,
     )?;
+    let audio_group = listed(master, RenditionKind::Audio, variant.audio.as_deref());
     let muxed_audio = match (&preference.audio, audio_group) {
         (Renditions::None, _) => false,
         (_, None) => true,
@@ -193,7 +196,7 @@ pub fn select(master: &MasterPlaylist, preference: &Preference) -> Result<Select
     })
 }
 
-/// 变体引用的 `kind` 类组 `group`；主播放列表里没有一条这一组的 rendition 时（来源写错了组名）与没有引用一样，为 None。
+/// 变体引用的 `kind` 类组 `group`；主播放列表里没有一条这一组的 rendition 时（来源写错了组名）为 None。
 fn listed<'a>(
     master: &MasterPlaylist,
     kind: RenditionKind,
@@ -202,7 +205,8 @@ fn listed<'a>(
     group.filter(|group| renditions(master, kind).any(|(_, r)| r.group == *group))
 }
 
-/// 按 `choice` 从 `group` 组里选出 `kind` 类 rendition，与它们的位置（口径同 [`RenditionChoice::Index`]）。
+/// 按 `choice` 从 `group` 组（变体引用的，主播放列表里可以没有这一组）里选出 `kind` 类 rendition，与它们的位置（口径同
+/// [`RenditionChoice::Index`]）。变体没有引用音频组时，按语言点名的音频跳过（用混着的音频）。
 fn pick<'a>(
     master: &'a MasterPlaylist,
     kind: RenditionKind,

@@ -35,7 +35,7 @@ use crate::{
 pub(crate) struct Content {
     /// 各轨的取流方式（合并用）
     pub streams: Vec<Streams>,
-    /// 各不连续段组，每组各轨一项，轨道顺序与 `streams` 一致；至少一组，每项至少一个分片
+    /// 各不连续段组，每组各轨一项，轨道顺序与 `streams` 一致；至少一组，音视频轨的每项至少一个分片，字幕轨的可以为空
     pub groups: Vec<Vec<GroupTrack>>,
     /// 记进任务目录的选轨；来源本身是媒体播放列表时为 None
     pub selection: Option<SelectionRecord>,

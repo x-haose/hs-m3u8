@@ -20,9 +20,12 @@ pub(super) struct Stall {
 }
 
 impl Recorder<'_> {
-    /// 最早开始停滞的轨及其停滞开始的时刻（见 [`LiveTrack::stall_since`](super::LiveTrack::stall_since)）。
+    /// 最早开始停滞的音视频轨及其停滞开始的时刻（见 [`LiveTrack::stall_since`](super::LiveTrack::stall_since)）。字幕轨
+    /// 不算：有的服务器在节目结束后不再更新字幕播放列表，也不补 ENDLIST；它的刷新故障照样在下结论时报出（见
+    /// [`Recorder::on_stall`]）。
     fn next_stall(&self) -> Option<(Instant, usize)> {
         self.refreshing()
+            .filter(|&(i, _)| self.media[i])
             .filter_map(|(i, t)| Some((t.stall_since(self.options.stall_timeout)?, i)))
             .min()
     }
@@ -68,8 +71,8 @@ impl Recorder<'_> {
             .all(|(_, t)| t.settled(stall.since, stall.noticed, now))
     }
 
-    /// 对停滞 `stall` 下结论：其他还要刷新的轨有故障（见 [`LiveTrack::fault`](super::LiveTrack::fault)）时以它的原因使
-    /// 任务失败；否则看起来直播已结束时定下结束原因，不然任务失败。会话定下之前停滞的是还没拿到候选的轨，直播看起来已结
+    /// 对停滞 `stall` 下结论：其他还要刷新的轨（含字幕轨）有故障（见 [`LiveTrack::fault`](super::LiveTrack::fault)）时以它
+    /// 的原因使任务失败；否则看起来直播已结束时定下结束原因，不然任务失败。会话定下之前停滞的是还没拿到候选的轨，直播看起来已结
     /// 束时，还没拿到候选的轨都没有内容，这次都不录。
     pub(super) async fn on_stall(&mut self, stall: Stall, now: Instant) -> Result<(), Error> {
         let Stall {

@@ -154,12 +154,16 @@ variants! {
             /// 取不到的原因
             cause: FetchErrorKind,
         },
-        /// 所在不连续段不是每条轨都有内容（直播为有轨没录到，点播为有轨只有标了 EXT-X-GAP 的分片），无法合并
+        /// 所在不连续段不是每条音视频轨都有内容（直播为有音视频轨没录到，点播为有音视频轨只有标了 EXT-X-GAP 的分片），
+        /// 无法合并
         Unmergeable {},
         /// 来源标了 EXT-X-GAP：这一片没有内容，不取
         Gap {},
         /// 之前的运行中缺失，原因没有记录
         Unknown {},
+        /// 字幕分片：所在不连续段的序号（直播为同一会话里的）在音视频轨里没有，不知道该对到哪一段画面上。只出在由 Rust
+        /// 接口录的、带字幕轨的直播交给 `Engine.merge_recorded` 输出本地 HLS 时
+        NoMatchingDiscontinuity {},
     }
 }
 
@@ -342,9 +346,7 @@ impl From<core::MissReason> for MissReason {
                 cause: cause.into(),
             },
             core::MissReason::Unmergeable => MissReason::Unmergeable {},
-            core::MissReason::NoMatchingDiscontinuity => unreachable!(
-                "只出在点播的字幕轨上：Python 的偏好不选字幕，记有字幕轨的点播目录开始时先报 PreferenceChanged（reselect 时为 TracksMismatch）"
-            ),
+            core::MissReason::NoMatchingDiscontinuity => MissReason::NoMatchingDiscontinuity {},
             core::MissReason::Gap => MissReason::Gap {},
             core::MissReason::Unknown => MissReason::Unknown {},
         }

@@ -626,18 +626,32 @@ fn subtitles_without_uri_and_muxed_audio() {
     assert!(!select(&m, &none).unwrap().muxed_audio);
 }
 
-/// 变体引用的音频组在主播放列表里没有（来源写错了组名）：与没有引用一样用变体里混着的音频，不把音频丢掉。
+/// 变体引用的音频组在主播放列表里没有（来源写错了组名）：默认与全部用变体里混着的音频，不把音频丢掉；点名的照组名
+/// 报找不到，不悄悄换成混着的。
 #[test]
 fn a_variant_referencing_a_missing_audio_group_keeps_its_muxed_audio() {
     let m = master("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,AUDIO=\"aud\"\nv.m3u8\n");
-    let selection = select(&m, &Preference::default()).unwrap();
-    assert!(selection.muxed_audio && selection.audio.is_empty());
-    // 按语言选也与没有引用音频组一样，不起作用
-    let en = Preference {
-        audio: Renditions::These(vec![RenditionChoice::Language("en".into())]),
+    for audio in [Renditions::Default, Renditions::All] {
+        let preference = Preference {
+            audio,
+            ..Preference::default()
+        };
+        let selection = select(&m, &preference).unwrap();
+        assert!(selection.muxed_audio && selection.audio.is_empty());
+    }
+    let named = |choice| Preference {
+        audio: Renditions::These(vec![choice]),
         ..Preference::default()
     };
-    assert!(select(&m, &en).unwrap().muxed_audio);
+    assert_eq!(
+        select(&m, &named(RenditionChoice::Language("en".into()))).unwrap_err(),
+        SelectError::LanguageNotFound {
+            kind: RenditionKind::Audio,
+            group: "aud".into(),
+            language: "en".into(),
+            available: Vec::new(),
+        }
+    );
 }
 
 /// 按语言点名的字幕在变体没有字幕组时报找不到，不静默不选；空的逐个指定报错。

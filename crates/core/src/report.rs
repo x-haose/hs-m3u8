@@ -134,7 +134,7 @@ pub struct Progress {
     pub merge_unsupported: Option<MergeUnsupported>,
 }
 
-/// 分片数，各轨合计（[`Progress::segments`]）。
+/// 分片数：[`Progress::segments`] 为视频与音频轨合计，[`TrackProgress::segments`] 为一条轨的。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SegmentCounts {
     /// 已完成的；含续传前已完成的
@@ -483,8 +483,9 @@ pub enum MissReason {
     /// 所在不连续段不是每条音视频轨都有内容（直播为有音视频轨没录到，点播为有音视频轨只有标了 EXT-X-GAP 的分片），无法
     /// 合并
     Unmergeable,
-    /// 点播的字幕分片：所在不连续段的序号在音视频轨里没有（字幕播放列表的不连续段没跟着画面标，或 DISCONTINUITY-SEQUENCE
-    /// 的起点不同），不知道该对到哪一段画面上。简化：只按序号对组；要支持这类来源时改为按 cue 的媒体时刻落进时间相符的组
+    /// 字幕分片：所在不连续段的序号（直播为同一会话里的）在音视频轨里没有（字幕播放列表的不连续段没跟着画面标，或
+    /// DISCONTINUITY-SEQUENCE 的起点不同），不知道该对到哪一段画面上。简化：只按序号对组；要支持这类来源时改为按 cue
+    /// 的媒体时刻落进时间相符的组
     NoMatchingDiscontinuity,
     /// 来源标了 EXT-X-GAP：这一片没有内容，不取
     Gap,

@@ -10,8 +10,8 @@
 //! 前一段的结尾（MP4 同一时刻只有一个样本，起点严格递增）。推到没有长度的记在 [`Lane::packet_discarded`]（mov_text 按切出
 //! 的段计）。另存的文件用对齐、去重之后的 cue，不随封进输出时的推后而变。
 //!
-//! 简化：结束晚于本组画面结尾的 cue 不截短：可能延续到下一组的开头（下一组开头的字幕因而推后，只出在字幕比画面长的组
-//! 上），最后一组的会把字幕流拉得比画面长（MP4 的总时长随之变长）。组的实际结尾要等这一组写完才知道，而字幕包须与画面
+//! 简化：结束晚于本组画面结尾的 cue 不截短：可能延续到下一组的开头（封进输出时下一组开头的字幕因而推后，只出在字幕比
+//! 画面长的组上；另存的文件里两组的 cue 按起点重排、可以重叠），最后一组的会把字幕流拉得比画面长（MP4 的总时长随之变长）。组的实际结尾要等这一组写完才知道，而字幕包须与画面
 //! 交错写出；要截时先读完一组得出结尾，再生成这一组的字幕包。
 
 use std::collections::VecDeque;
@@ -69,8 +69,8 @@ pub(crate) struct Lane {
     pub(crate) queue: VecDeque<Packet>,
     /// 已排进队列的最后一个包的起点与结束：SubRip 的起点、mov_text 的段都不往回走
     last: Option<(i64, i64)>,
-    /// 对齐后的 cue，各组依次相接
-    pub(crate) cues: Vec<Cue>,
+    /// 对齐后的 cue，各组依次相接（取出时排序，见 [`Lane::into_cues`]）
+    cues: Vec<Cue>,
     /// 解析时按 WebVTT 的规则跳过的块，与对齐后不剩长度或时刻超出范围的 cue
     pub(crate) aligned_discarded: u64,
     /// 封进输出时被前一个包挡住、推到没有长度的包（SubRip 为 cue，mov_text 为切出的段）
@@ -176,6 +176,12 @@ impl Lane {
     fn push(&mut self, packet: Packet) {
         self.last = Some((packet.start_us, packet.start_us + packet.duration_us));
         self.queue.push_back(packet);
+    }
+
+    /// 各组对齐后的 cue，按起点排列（起点相同的保持原来的先后）：前一组结束晚于画面的 cue 可以晚于后一组开头的。
+    pub(crate) fn into_cues(mut self) -> Vec<Cue> {
+        self.cues.sort_by_key(|c| c.start_us);
+        self.cues
     }
 
     /// 正在写的组里的这条轨，报错时用。

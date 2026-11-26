@@ -50,7 +50,7 @@ pub(crate) fn merge_plan(
                 .collect()
         })
         .unwrap_or_default();
-    let unmergeable = unmergeable(&by_group, &common);
+    let unmergeable = unmergeable(&by_group, streams, &media, &common);
     let holes = files
         .iter()
         .enumerate()
@@ -73,18 +73,28 @@ pub(crate) fn merge_plan(
     })
 }
 
-/// 所在组不是每条轨都有（不在 `common` 里）的分片。
-fn unmergeable(by_group: &[ByGroup<'_>], common: &BTreeSet<GroupKey>) -> Vec<Missed> {
+/// 所在组不是每条音视频轨都有（不在 `common` 里）的分片：有音视频轨有这一组的为 [`MissReason::Unmergeable`]；字幕轨的
+/// 组在音视频轨里都没有的为 [`MissReason::NoMatchingDiscontinuity`]。`media` 为各音视频轨的分组。
+fn unmergeable(
+    by_group: &[ByGroup<'_>],
+    streams: &[Streams],
+    media: &[&ByGroup<'_>],
+    common: &BTreeSet<GroupKey>,
+) -> Vec<Missed> {
     let mut missed = Vec::new();
     for (track, groups) in by_group.iter().enumerate() {
         for (key, files) in groups {
-            if !common.contains(key) {
-                missed.extend(
-                    files
-                        .iter()
-                        .map(|f| single(f, track, MissReason::Unmergeable)),
-                );
+            if common.contains(key) {
+                continue;
             }
+            let reason = if streams[track] == Streams::Subtitles
+                && !media.iter().any(|g| g.contains_key(key))
+            {
+                MissReason::NoMatchingDiscontinuity
+            } else {
+                MissReason::Unmergeable
+            };
+            missed.extend(files.iter().map(|f| single(f, track, reason.clone())));
         }
     }
     missed
@@ -219,6 +229,8 @@ fn uncovered(hole: &Missed, known: &[Missed]) -> Vec<Missed> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ident::Fingerprint;
+    use crate::workdir::{SegmentName, SessionStart};
     use crate::{FetchErrorKind, HttpErrorKind};
 
     fn missed(session: u32, track: usize, range: (u64, u64), reason: MissReason) -> Missed {
@@ -250,6 +262,45 @@ mod tests {
                 missed(0, 0, (u64::MAX, u64::MAX), not_found.clone()),
                 missed(0, 1, (7, 7), not_found.clone()),
                 missed(1, 0, (7, 7), not_found),
+            ]
+        );
+    }
+
+    fn file(session: u32, sequence: u64, discontinuity: u64) -> SegmentFile {
+        SegmentFile {
+            name: SegmentName {
+                session,
+                start: SessionStart::Fresh,
+                sequence,
+                discontinuity,
+                init: None,
+                duration_us: 1_000_000,
+                id: Fingerprint::of_content(&sequence.to_be_bytes()),
+            },
+            path: std::path::PathBuf::new(),
+            len: 1,
+        }
+    }
+
+    /// 组不在每条音视频轨里：有音视频轨有它的为 Unmergeable；字幕轨的组在音视频轨里都没有的为 NoMatchingDiscontinuity。
+    #[test]
+    fn subtitle_groups_missing_from_the_media_are_reported_as_such() {
+        let video = [file(0, 0, 0), file(0, 1, 1)];
+        let audio = [file(0, 0, 0)];
+        let subtitles = [file(0, 0, 0), file(0, 1, 1), file(0, 2, 7)];
+        let by_group: Vec<ByGroup<'_>> = [&video[..], &audio, &subtitles]
+            .into_iter()
+            .map(group_files)
+            .collect();
+        let streams = [Streams::Video, Streams::Audio, Streams::Subtitles];
+        let media = [&by_group[0], &by_group[1]];
+        let common = BTreeSet::from([(0, 0)]);
+        assert_eq!(
+            unmergeable(&by_group, &streams, &media, &common),
+            vec![
+                missed(0, 0, (1, 1), MissReason::Unmergeable),
+                missed(0, 2, (1, 1), MissReason::Unmergeable),
+                missed(0, 2, (2, 2), MissReason::NoMatchingDiscontinuity),
             ]
         );
     }

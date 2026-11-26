@@ -1725,7 +1725,8 @@ class MissReason:
     @typing.final
     class Unmergeable(MissReason):
         r"""
-        所在不连续段不是每条轨都有内容（直播为有轨没录到，点播为有轨只有标了 EXT-X-GAP 的分片），无法合并
+        所在不连续段不是每条音视频轨都有内容（直播为有音视频轨没录到，点播为有音视频轨只有标了 EXT-X-GAP 的分片），
+        无法合并
         """
         __match_args__ = ()
         def __new__(cls) -> MissReason.Unmergeable: ...
@@ -1745,6 +1746,15 @@ class MissReason:
         """
         __match_args__ = ()
         def __new__(cls) -> MissReason.Unknown: ...
+    
+    @typing.final
+    class NoMatchingDiscontinuity(MissReason):
+        r"""
+        字幕分片：所在不连续段的序号（直播为同一会话里的）在音视频轨里没有，不知道该对到哪一段画面上。只出在由 Rust
+        接口录的、带字幕轨的直播交给 `Engine.merge_recorded` 输出本地 HLS 时
+        """
+        __match_args__ = ()
+        def __new__(cls) -> MissReason.NoMatchingDiscontinuity: ...
     
 
 @typing.final
@@ -1778,7 +1788,7 @@ class Missed:
         区间里的分片数，即 `last - first + 1`；超出 64 位整数时为 2**64 - 1
         """
     @property
-    def reason(self) -> MissReason.Expired | MissReason.Failed | MissReason.InitFailed | MissReason.Unmergeable | MissReason.Gap | MissReason.Unknown:
+    def reason(self) -> MissReason.Expired | MissReason.Failed | MissReason.InitFailed | MissReason.Unmergeable | MissReason.Gap | MissReason.Unknown | MissReason.NoMatchingDiscontinuity:
         r"""
         缺失的原因
         """

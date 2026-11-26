@@ -335,6 +335,49 @@ fn subtitles_follow_each_discontinuity_group() {
     );
 }
 
+/// 第一组里起点晚于这一组画面结尾的 cue 与第二组开头的 cue：另存用的 cue 按起点排列，不按组的先后。
+#[test]
+fn cues_for_files_are_ordered_across_groups() {
+    let dir = work_dir("sub_order");
+    let vtt = |name: &str, body: &str| {
+        let path = dir.join(name);
+        let header = format!("WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:{TS_A_START},LOCAL:00:00:00.000\n\n");
+        std::fs::write(&path, format!("{header}{body}")).unwrap();
+        TrackSegments {
+            init: None,
+            segments: vec![Segment {
+                path,
+                duration_us: 1_000_000,
+            }],
+            gaps: Vec::new(),
+        }
+    };
+    let video = track("ts_a");
+    let first = vtt("g0.vtt", "00:05.000 --> 00:05.500\n晚\n");
+    let second = vtt("g1.vtt", "00:00.500 --> 00:00.900\n二\n");
+    let merged = hs_m3u8_remux::remux(
+        &tracks(),
+        &[group([video.clone(), first]), group([video, second])],
+        &dir.join("order.mkv"),
+        Container::Matroska,
+        SubtitleMode::CuesOnly,
+        &Control::default(),
+    )
+    .unwrap();
+    let texts: Vec<&str> = merged.subtitles[0]
+        .cues
+        .iter()
+        .map(|c| c.text.as_str())
+        .collect();
+    assert_eq!(texts, ["二", "晚"]);
+    let starts: Vec<i64> = merged.subtitles[0]
+        .cues
+        .iter()
+        .map(|c| c.start_us)
+        .collect();
+    assert!(starts.is_sorted(), "{starts:?}");
+}
+
 /// MP4 里几条音频各成一路：语言写 ISO 639-2 的术语代码；Matroska 的字幕写强制标志。
 #[test]
 fn labels_in_mp4_and_forced_subtitles_in_matroska() {
