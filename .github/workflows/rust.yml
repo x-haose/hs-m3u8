@@ -109,3 +109,29 @@ jobs:
       - name: Python 测试（Windows）
         if: runner.os == 'Windows'
         run: uv run --no-sync pytest
+
+  # 播放列表与字幕解析器的模糊测试短跑；只用纯 Rust 的 hls 与 subtitle crate，不要 FFmpeg
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # 与 Makefile 的 FUZZ_TOOLCHAIN 相同
+      - name: nightly 工具链
+        run: rustup toolchain install nightly-2026-11-25 --profile minimal
+
+      - name: 安装 cargo-fuzz
+        uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-fuzz@0.13.2
+
+      - name: 模糊测试
+        run: make fuzz
+
+      - name: 保留找到的输入
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/

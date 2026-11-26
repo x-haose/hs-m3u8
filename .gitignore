@@ -31,3 +31,9 @@ third_party/ffmpeg/dist/
 # maturin develop 装进 Python 包目录的扩展模块
 python/hs_m3u8/*.so
 python/hs_m3u8/*.pyd
+
+# cargo-fuzz 运行时生成的语料、找到的输入与产物（种子语料在 fuzz/seeds/）
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/
+fuzz/target/

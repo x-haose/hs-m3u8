@@ -1,0 +1,32 @@
+# 播放列表与字幕解析器的模糊测试（cargo-fuzz，要 nightly 工具链），不在工作区里：用法见 Makefile 的 fuzz 目标。
+[package]
+name = "hs-m3u8-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+hs-m3u8-hls = { path = "../crates/hls" }
+hs-m3u8-subtitle = { path = "../crates/subtitle" }
+libfuzzer-sys = "0.4.13"
+
+# 独立的工作区：cargo-fuzz 用 nightly 与插桩构建，不与主工作区共用 Cargo.lock 与产物
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "hls"
+path = "fuzz_targets/hls.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "webvtt"
+path = "fuzz_targets/webvtt.rs"
+test = false
+doc = false
+bench = false

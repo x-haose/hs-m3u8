@@ -1,4 +1,4 @@
-.PHONY: check ffmpeg ffmpeg_present licenses \
+.PHONY: check ffmpeg ffmpeg_present licenses fuzz \
 	rs_check rs_fmt rs_lint rs_clippy rs_doc rs_test rs_cov \
 	py_check py_cov py_env py_develop py_stubs py_test compat
 
@@ -18,6 +18,18 @@ README_EXAMPLES := target/readme-examples
 
 check: rs_check py_check py_cov compat
 
+# 播放列表与字幕解析器的模糊测试（fuzz/），每个目标跑 FUZZ_SECONDS 秒；cargo-fuzz 要 nightly，版本固定在这里，CI 同此。
+# 找到的输入在 fuzz/artifacts/<目标>/，运行中积累的语料在 fuzz/corpus/<目标>/，种子语料在 fuzz/seeds/<目标>/
+FUZZ_TOOLCHAIN := nightly-2026-11-25
+FUZZ_SECONDS ?= 60
+FUZZ_TARGETS := hls webvtt
+fuzz:
+	@cargo +$(FUZZ_TOOLCHAIN) fuzz --version >/dev/null 2>&1 || { echo "缺少 $(FUZZ_TOOLCHAIN) 或 cargo-fuzz，版本见 .github/workflows/rust.yml"; exit 1; }
+	cd fuzz && for target in $(FUZZ_TARGETS); do \
+		mkdir -p corpus/$$target && \
+		cargo +$(FUZZ_TOOLCHAIN) fuzz run $$target corpus/$$target seeds/$$target -- -max_total_time=$(FUZZ_SECONDS) || exit 1; \
+	done
+
 # 对外契约（Python 接口、任务目录格式）与最近的发布比较；要完整的提交历史与标签
 compat: py_env
 	uv run --no-sync python scripts/check_compat.py
@@ -25,8 +37,10 @@ compat: py_env
 # Rust 的全部检查；CI 按平台调用其中的子目标
 rs_check: rs_fmt rs_lint rs_clippy rs_doc rs_test rs_cov
 
+# fuzz/ 是独立的工作区，另查
 rs_fmt:
 	cargo fmt --all --check
+	cargo fmt --manifest-path fuzz/Cargo.toml --check
 
 # 与平台无关的检查：依赖方向、压制属性与注释、依赖的安全公告与许可证、随发布包分发的声明是否最新
 rs_lint: py_env

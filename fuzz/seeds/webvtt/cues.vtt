@@ -1,0 +1,11 @@
+WEBVTT
+X-TIMESTAMP-MAP=MPEGTS:900000,LOCAL:00:00:00.000
+
+NOTE x
+
+1
+00:00:01.000 --> 00:00:02.500 align:start
+<b>a</b> &amp; <c.x>b</c>
+
+00:01.200 --> 00:03.000
+<v Bob>c
