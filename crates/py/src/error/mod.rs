@@ -290,9 +290,10 @@ exception! {
 }
 
 exception! {
-    /// 内容放不进 MP4；可只输出本地 HLS（`Target.Hls`）。下到（直播为录到）各组各轨的第一个分片时先核对其中判断
-    /// 得了的：编码，各组的流种类、编码参数与解码配置，E-AC-3 的帧结构；组内中途的变化、后面分片里的问题，以及只靠
-    /// 第一个分片判断不了的，合并时读到才报。
+    /// 内容放不进合并文件（名字带 MP4，MKV 的同样是它；通用名字为别名 `MergeUnsupportedError`）；可改存 MKV（收得下更多
+    /// 编码）或只输出本地 HLS（`Target.Hls`）。下到（直播为录到）各组各轨的第一个分片时先核对其中判断得了的：编码，各组
+    /// 的流种类、编码参数与解码配置，E-AC-3 的帧结构；组内中途的变化、后面分片里的问题，以及只靠第一个分片判断不了的，
+    /// 合并时读到才报。
     pub struct Mp4UnsupportedError extends RequestError {
         /// 放不进的原因
         pub reason: Mp4Unsupported,
@@ -300,7 +301,7 @@ exception! {
 }
 
 exception! {
-    /// 本地 HLS 表示不了这些内容；能否改为只输出 MP4（`Target.Mp4`）见原因的各项。
+    /// 本地 HLS 表示不了这些内容；能否改为只输出合并文件（`Target.File`）见原因的各项。
     pub struct HlsUnsupportedError extends RequestError {
         /// 表示不了的原因
         pub reason: HlsUnsupported,
@@ -438,7 +439,7 @@ exception! {
 }
 
 exception! {
-    /// 合并 MP4 或下载中核对能否合并时失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是
+    /// 合并或下载中核对能否合并时失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进合并文件是
     /// `Mp4UnsupportedError`。
     pub struct RemuxError extends HsM3u8Error {}
 }

@@ -13,7 +13,7 @@ variants! {
     /// 更多编码）或只输出本地 HLS（`Target.Hls`），它原样保留分片，不受这些限制。各取值的 `group` 为合并
     /// 时的组号：点播即播放列表里第几个不连续段组，直播为各轨都录到的组按会话、不连续段排列的下标。
     pub enum Mp4Unsupported {
-        /// 编码放不进 MP4；异常的说明文字里列出支持的编码
+        /// 编码放不进这种合并文件（如 Vorbis 放不进 MP4，可改存 MKV）；异常的说明文字里列出支持的编码
         #[pyo3(constructor = (*, group, track, kind, codec))]
         Codec {
             /// 第几个不连续段组

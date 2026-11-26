@@ -635,7 +635,7 @@ class HlsUnsupported:
 @typing.final
 class HlsUnsupportedError(RequestError):
     r"""
-    本地 HLS 表示不了这些内容；能否改为只输出 MP4（`Target.Mp4`）见原因的各项。
+    本地 HLS 表示不了这些内容；能否改为只输出合并文件（`Target.File`）见原因的各项。
     """
     @property
     def reason(self) -> HlsUnsupported.MixedInit | HlsUnsupported.BandwidthUnknown | HlsUnsupported.FormatChangedInGroup:
@@ -1576,8 +1576,9 @@ class LiveEnd:
     @typing.final
     class Broken(LiveEnd):
         r"""
-        一条轨的播放列表与之前刷新得到的接不上，且录的不止一条轨：其他轨从哪里起与它对得上不知道，不另起会话，
-        之后的分片未录。只录一条轨时另起会话接着录（见 `NewSession`）
+        一条音视频轨的播放列表与之前刷新得到的接不上，且音视频轨不止一条：其他轨从哪里起与它对得上不知道，不另起
+        会话，之后的分片未录。只有一条音视频轨时另起会话接着录（见 `NewSession`）；字幕轨接不上只停它自己（见
+        `TailCause.Broken`）
         """
         __match_args__ = ("track", "cause",)
         @property
@@ -1922,8 +1923,8 @@ class MissReason:
     @typing.final
     class NoMatchingDiscontinuity(MissReason):
         r"""
-        字幕分片：所在不连续段的序号（直播为同一会话里的）在音视频轨里没有，不知道该对到哪一段画面上。只出在由 Rust
-        接口录的、带字幕轨的直播交给 `Engine.merge_recorded` 输出本地 HLS 时
+        字幕分片：所在不连续段的序号（直播为同一会话里的）在音视频轨里没有（字幕播放列表的不连续段没跟着画面标，
+        或 DISCONTINUITY-SEQUENCE 的起点不同），不知道该对到哪一段画面上
         """
         __match_args__ = ()
         def __new__(cls) -> MissReason.NoMatchingDiscontinuity: ...
@@ -2005,7 +2006,7 @@ class Mp4Unsupported:
     @typing.final
     class Codec(Mp4Unsupported):
         r"""
-        编码放不进 MP4；异常的说明文字里列出支持的编码
+        编码放不进这种合并文件（如 Vorbis 放不进 MP4，可改存 MKV）；异常的说明文字里列出支持的编码
         """
         __match_args__ = ("group", "track", "kind", "codec",)
         @property
@@ -2384,9 +2385,10 @@ class Mp4Unsupported:
 @typing.final
 class Mp4UnsupportedError(RequestError):
     r"""
-    内容放不进 MP4；可只输出本地 HLS（`Target.Hls`）。下到（直播为录到）各组各轨的第一个分片时先核对其中判断
-    得了的：编码，各组的流种类、编码参数与解码配置，E-AC-3 的帧结构；组内中途的变化、后面分片里的问题，以及只靠
-    第一个分片判断不了的，合并时读到才报。
+    内容放不进合并文件（名字带 MP4，MKV 的同样是它；通用名字为别名 `MergeUnsupportedError`）；可改存 MKV（收得下更多
+    编码）或只输出本地 HLS（`Target.Hls`）。下到（直播为录到）各组各轨的第一个分片时先核对其中判断得了的：编码，各组
+    的流种类、编码参数与解码配置，E-AC-3 的帧结构；组内中途的变化、后面分片里的问题，以及只靠第一个分片判断不了的，
+    合并时读到才报。
     """
     @property
     def reason(self) -> Mp4Unsupported.Codec | Mp4Unsupported.Mp3SampleRate | Mp4Unsupported.ParamsUnknown | Mp4Unsupported.LayoutChanged | Mp4Unsupported.ParamsChanged | Mp4Unsupported.ConfigChanged | Mp4Unsupported.StreamChangedInGroup | Mp4Unsupported.ParamsChangedInGroup | Mp4Unsupported.FormatChangedInGroup | Mp4Unsupported.Eac3ShortFrames | Mp4Unsupported.Eac3Substreams | Mp4Unsupported.DtsNotIncreasing | Mp4Unsupported.TimestampJump | Mp4Unsupported.NoKeyframe | Mp4Unsupported.UntimedPackedAudio | Mp4Unsupported.NoStreams | Mp4Unsupported.SubtitleTooLong:
@@ -2406,8 +2408,8 @@ class Mp4UnsupportedError(RequestError):
 @typing.final
 class NewSession:
     r"""
-    录制中途另起的会话：只录一条轨时，它的播放列表与之前刷新得到的接不上，不结束录制，另起会话接着录。序号回退时
-    从新窗口的起点录；矛盾时跳过已处理到的序号，只录更新的分片。
+    录制中途另起的会话：只有一条音视频轨时，它的播放列表与之前刷新得到的接不上，不结束录制，另起会话接着录。序号
+    回退时从新窗口的起点录；矛盾时跳过已处理到的序号，只录更新的分片。字幕轨跟着进新会话。
     """
     @property
     def session(self) -> builtins.int:
@@ -2954,7 +2956,7 @@ class RefreshReason:
 @typing.final
 class RemuxError(HsM3u8Error):
     r"""
-    合并 MP4 或下载中核对能否合并时失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是
+    合并或下载中核对能否合并时失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进合并文件是
     `Mp4UnsupportedError`。
     """
     def __new__(cls, message: builtins.str, *, retryable: builtins.bool = False, retry_after: typing.Optional[datetime.timedelta] = None, segment: typing.Optional[SegmentRef] = None, key_url: typing.Optional[builtins.str] = None, leftovers: typing.Optional[collections.abc.Sequence[Leftover]] = None) -> RemuxError:
@@ -3291,7 +3293,7 @@ class SegmentRef:
     @property
     def track(self) -> builtins.int:
         r"""
-        第几条轨：0 为所选变体（来源本身是媒体播放列表时即它），1 为独立的音频
+        第几条轨：0 为所选变体（来源本身是媒体播放列表时即它），其后依次是各独立的音频、各字幕（同 `Selected`）
         """
     @property
     def sequence(self) -> builtins.int:
@@ -4801,7 +4803,8 @@ class UnrecordedTail:
     @property
     def cause(self) -> typing.Optional[TailCause.Ended | TailCause.Failed | TailCause.Broken]:
         r"""
-        本次运行判定的原因；之前的运行记下的、只合并时为 None（原因不落盘）
+        本次运行判定的原因；之前的运行记下的、只合并时（原因不落盘），与另起会话那一刻这条轨还有分片在下载、之后也
+        没录到的（那时判不出）为 None
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...

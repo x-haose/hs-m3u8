@@ -11,7 +11,7 @@ use crate::report::{FetchFailure, RefreshCause, StallCause};
 record! {
     /// 出错的分片。
     pub struct SegmentRef {
-        /// 第几条轨：0 为所选变体（来源本身是媒体播放列表时即它），1 为独立的音频
+        /// 第几条轨：0 为所选变体（来源本身是媒体播放列表时即它），其后依次是各独立的音频、各字幕（同 `Selected`）
         pub track: usize,
         /// 媒体序号
         pub sequence: u64,
