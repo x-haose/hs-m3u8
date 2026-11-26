@@ -652,9 +652,13 @@ impl<'a> Recorder<'a> {
         Ok(())
     }
 
-    /// 第 `track` 条轨的播放列表 `fetched` 与之前刷新得到的接不上。字幕轨只停它自己（见 [`LiveTrack::stop_broken`]）；
-    /// 在随画面进的新会话里还没录到分片的按新窗口重新开始（见 [`LiveTrack::restart`]）。它是唯一的音视频轨时另起会话接着
-    /// 录（见 [`LiveTrack::restart`]），字幕轨跟着进新会话（见 [`LiveTrack::rejoin`]、[`LiveTrack::forgive_restart`]）；音视频轨不止一条时其他轨从哪里起与它对得上不知道，定下结束原因，这条轨暂存的不再处理。
+    /// 第 `track` 条轨的播放列表 `fetched` 与之前刷新得到的接不上。
+    ///
+    /// - 字幕轨：随画面进了新会话而还没在新会话里录到分片的，就在这个会话里按新窗口重新开始；否则只停它自己（见
+    ///   [`LiveTrack::stop_broken`]）。
+    /// - 唯一的音视频轨：另起会话、按新窗口接着录，字幕轨跟着进新会话（见 [`LiveTrack::rejoin`]、
+    ///   [`LiveTrack::forgive_restart`]）。
+    /// - 音视频轨不止一条：其他轨从哪里起与它对得上不知道，定下结束原因，这条轨暂存的不再处理。
     async fn source_broke(
         &mut self,
         track: usize,
