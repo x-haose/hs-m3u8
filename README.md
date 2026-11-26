@@ -17,7 +17,7 @@ pip install hs-m3u8
   - fMP4 里：H.264、HEVC、AV1、VP9 视频，AAC、AC-3、E-AC-3、MP3、MP2、FLAC、Opus、ALAC 音频；
   - TS 与打包音频里：H.264、HEVC 视频，AAC、AC-3、E-AC-3、MP3、MP2 音频；
   - MP3 采样率不低于 16 kHz，TS 与打包音频里的 E-AC-3 每帧 6 块、只有一个独立子流；
-  - 每条轨只取第一路视频与第一路音频（如 TS 里有多路音频时只取第一路，其余的在合并结果里列出），本地 HLS 原样保留全部；
+  - 每条轨只取第一路视频与第一路音频（如 TS 里有多路音频时只取第一路，其余的在 Rust 接口的合并结果里列出），本地 HLS 原样保留全部；
   - MP4 里的 MP3、MP2 音轨，苹果基于 AVFoundation 的播放器（QuickTime Player、Safari 等）认不出。
 - 多条音轨与字幕（目前只在 Rust 接口）：同时下多条独立的音频与字幕 rendition，合并为 MP4 或 Matroska（MKV，收得下 MP4 收不下的编码，如 Vorbis），各轨写上语言、名称与默认标志；HLS 的分段 WebVTT 字幕按 X-TIMESTAMP-MAP 对齐画面，按不连续段序号对到同号的那段画面上（字幕播放列表的不连续段与画面对不上的部分不进输出、在结果里列出），封进 MKV（SubRip）或 MP4（mov_text），或另存为 SRT、WebVTT 文件。选到的字幕拉不到时任务失败（探测时只标出）；fMP4 里的字幕（wvtt、stpp）与隐藏字幕（CLOSED-CAPTIONS）不支持：自动选到的跳过并列出，点名选的开始任务时报错（探测时同样只标出、列为跳过）。
 - 续传：分片落盘即完整，中断后再次运行只补缺的；播放列表变了时明确拒绝。

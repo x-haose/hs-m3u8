@@ -133,6 +133,7 @@ fn unused_streams(input: &Input, wanted: Streams, at: Origin) -> Vec<UnusedStrea
                 .skip(1)
                 .map(move |s| UnusedStream {
                     at,
+                    index: s.index(),
                     shape: ffi::shape(&s, kind),
                     language: ffi::language(&s),
                 })
@@ -140,11 +141,12 @@ fn unused_streams(input: &Input, wanted: Streams, at: Origin) -> Vec<UnusedStrea
         .collect()
 }
 
-/// 把 `found` 里还没列过的（同一条轨、参数与语言都相同的算列过）加进 `unused`。
+/// 把 `found` 里还没列过的（同一条轨、流下标、参数与语言都相同的算列过）加进 `unused`。
 pub(crate) fn add_unused(unused: &mut Vec<UnusedStream>, found: &[OpenTrack]) {
     for stream in found.iter().flat_map(|t| &t.unused) {
         let listed = unused.iter().any(|u| {
             u.at.index() == stream.at.index()
+                && u.index == stream.index
                 && u.shape == stream.shape
                 && u.language == stream.language
         });

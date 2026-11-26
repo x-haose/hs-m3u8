@@ -249,7 +249,7 @@ fn a_pid_change_within_a_group_is_rejected() {
     }
     assert_eq!(report.streams[1].packets, packets);
     // 另一路列进没取的流；两组里同样的一路只列一次
-    let unused = |report: &MediaReport| -> Vec<(Origin, &'static str, Option<String>)> {
+    let unused = |report: &MediaReport| -> Vec<(Origin, usize, &'static str, Option<String>)> {
         report
             .unused
             .iter()
@@ -257,12 +257,12 @@ fn a_pid_change_within_a_group_is_rejected() {
                 let Shape::Audio { codec, .. } = u.shape else {
                     panic!("{u:?}");
                 };
-                (u.at, codec, u.language.clone())
+                (u.at, u.index, codec, u.language.clone())
             })
             .collect()
     };
     let at = Origin::Track { group: 0, track: 0 };
-    assert_eq!(unused(&report), [(at, "aac", None)]);
+    assert_eq!(unused(&report), [(at, 2, "aac", None)]);
     let twice = remux(
         &[Streams::All],
         &[group([two.clone()]), group([two.clone()])],
@@ -270,7 +270,7 @@ fn a_pid_change_within_a_group_is_rejected() {
         &Control::default(),
     )
     .unwrap();
-    assert_eq!(unused(&twice), [(at, "aac", None)]);
+    assert_eq!(unused(&twice), [(at, 2, "aac", None)]);
     // 只要视频时音频不算没取
     let video = remux(
         &[Streams::Video],

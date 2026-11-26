@@ -262,13 +262,18 @@ pub(crate) async fn merge_recorded(
     }
     let dir = WorkDir::open(root, record, lock, SelectionCheck::SameTracks).await?;
     let streams = dir.record().streams();
-    if streams.contains(&Streams::Subtitles) {
+    let stored = dir.scan(streams.len()).await?;
+    // 录到了字幕分片才要求字幕有去处：一片也没录到时什么都不会丢
+    let recorded_subtitles = streams
+        .iter()
+        .zip(&stored.segments)
+        .any(|(s, segments)| *s == Streams::Subtitles && !segments.is_empty());
+    if recorded_subtitles {
         output.require_subtitle_use()?;
     }
     let output = with_subtitle_files(&output, &dir).await?;
     let kinds = track_kinds(&streams);
     progress.send_modify(|p| p.set_tracks(&kinds));
-    let stored = dir.scan(streams.len()).await?;
     live::count_stored(&stored, &progress);
     let content = merge_live(&dir, &stored, streams, None)?;
     finish(dir, content, &output, &cancel, &progress).await

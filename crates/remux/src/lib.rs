@@ -277,7 +277,7 @@ pub struct StreamReport {
 pub struct MediaReport {
     pub streams: Vec<StreamReport>,
     /// 输入里没有进输出的音视频流：一条轨（或一个输入）里要取的那类流有几路时，第一路之后的（见 [`Streams`]）。同一条轨
-    /// 各组里相同的（参数与语言都相同）只列第一次出现的；调用方没要的那类流不列
+    /// 各组里同一路（流下标、参数与语言都相同）只列第一次出现的；调用方没要的那类流不列
     pub unused: Vec<UnusedStream>,
 }
 
@@ -286,6 +286,8 @@ pub struct MediaReport {
 pub struct UnusedStream {
     /// 所在的组与轨（或输入），首次出现处
     pub at: Origin,
+    /// 在输入里的流下标（FFmpeg 的 stream index，TS 里按 PMT 的顺序）
+    pub index: usize,
     pub shape: Shape,
     /// 流的元数据里的语言，照来源原样（TS 多为 ISO 639-2）；没有时为 None
     pub language: Option<String>,
