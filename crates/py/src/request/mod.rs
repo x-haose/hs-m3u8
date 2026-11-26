@@ -15,8 +15,8 @@ pub(crate) use self::output::{
     Container, OutputOptions, SubtitleFileFormat, SubtitleOutput, Target, Unsettled,
 };
 pub(crate) use self::select::{
-    AudioChoice, AudioKey, Preference, RenditionChoice, RenditionKey, Subtitles, VariantChoice,
-    VariantKey,
+    AudioChoice, AudioKey, Preference, RenditionChoice, RenditionKey, SubtitleChoice,
+    VariantChoice, VariantKey,
 };
 pub(crate) use self::source::Source;
 
@@ -25,7 +25,7 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<VariantKey>()?;
     module.add_class::<AudioChoice>()?;
     module.add_class::<AudioKey>()?;
-    module.add_class::<Subtitles>()?;
+    module.add_class::<SubtitleChoice>()?;
     module.add_class::<RenditionChoice>()?;
     module.add_class::<RenditionKey>()?;
     module.add_class::<Preference>()?;

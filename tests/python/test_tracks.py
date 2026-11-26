@@ -29,11 +29,11 @@ from hs_m3u8 import (
     Selected,
     Shape,
     Source,
+    SubtitleChoice,
     SubtitleFileFormat,
     SubtitleFormat,
     SubtitleOutput,
     SubtitleProblem,
-    Subtitles,
     SubtitleSupport,
     Target,
     TrackKind,
@@ -96,7 +96,7 @@ def run(request: JobRequest) -> tuple[Output, Progress]:
 def test_probe_reports_which_subtitles_can_be_downloaded(server: Server) -> None:
     """字幕组里每一条都读：fMP4 的标为格式不支持，取不到的给出原因，都不让探测失败；默认选到的 fMP4 字幕列为跳过。"""
     put_tracks(server)
-    preference = Preference(subtitles=Subtitles.Default())
+    preference = Preference(subtitles=SubtitleChoice.Default())
 
     result = probe(Source(server.url("master.m3u8"), preference=preference))
 
@@ -124,7 +124,7 @@ def test_several_audio_tracks_and_subtitles_go_into_matroska_and_srt(server: Ser
     assert zh is not None
     preference = Preference(
         audio=AudioChoice.All(),
-        subtitles=Subtitles.These((zh.subtitles[0].choice(),)),
+        subtitles=SubtitleChoice.These((zh.subtitles[0].choice(),)),
     )
     target = tmp_path / "out.mkv"
     request = JobRequest(
@@ -195,8 +195,8 @@ def test_empty_choices_are_rejected_when_built() -> None:
     with pytest.raises(InvalidInputError):
         Preference(audio=AudioChoice.These(()))
     with pytest.raises(InvalidInputError):
-        Preference(subtitles=Subtitles.These(()))
-    assert Preference() == Preference(audio=AudioChoice.Default(), subtitles=Subtitles.Off())
+        Preference(subtitles=SubtitleChoice.These(()))
+    assert Preference() == Preference(audio=AudioChoice.Default(), subtitles=SubtitleChoice.Off())
 
 
 def test_merge_names_are_the_mp4_names() -> None:
@@ -223,6 +223,9 @@ def test_results_built_the_old_way_fill_in_the_new_fields(server: Server, tmp_pa
     mp4 = Mp4Output(path=tmp_path / "out.mp4", report=report)
     old = Output(mp4=mp4, hls=None, segments=0, bytes=0, leftovers=(), missed=(), live=None)
     assert old.merged == MergedOutput(path=tmp_path / "out.mp4", container=Container.Mp4(), report=report)
+    new = Output(hls=None, segments=0, bytes=0, leftovers=(), missed=(), live=None, merged=old.merged)
+    assert new.mp4 == mp4
+    assert Selected(variant=variant, audios=(audio,)).audio == audio
     mkv = MergedOutput(path=tmp_path / "out.mkv", container=Container.Matroska(), report=report)
     with pytest.raises(InvalidInputError):
         Output(mp4=mp4, hls=None, segments=0, bytes=0, leftovers=(), missed=(), live=None, merged=mkv)

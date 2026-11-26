@@ -102,7 +102,7 @@ variants! {
     /// 取哪些字幕（WebVTT 分段字幕；fMP4 里的字幕与隐藏字幕不支持：自动选到的跳过并列在 `Selected.skipped_subtitles`，
     /// 点名的报错）。变体没有引用字幕组时，`Default`、`All` 不选，`These` 抛 `SelectError`（按语言为
     /// `SelectFailure.NoSubtitleGroup`，按下标为 `NotVariantSubtitle`，按身份为 `SubtitleNotFound`）。
-    pub enum Subtitles {
+    pub enum SubtitleChoice {
         /// 一个也不要
         Off {},
         /// 组里 DEFAULT=YES 的；没有则不选
@@ -119,7 +119,7 @@ variants! {
 }
 
 variants! {
-    /// 指定一条音频或字幕 rendition（用在 `AudioChoice.These`、`Subtitles.These` 里）。
+    /// 指定一条音频或字幕 rendition（用在 `AudioChoice.These`、`SubtitleChoice.These` 里）。
     pub enum RenditionChoice {
         /// 组内第一个 LANGUAGE 与它相同（不区分大小写）的
         Language {
@@ -207,14 +207,14 @@ record! {
         /// 取哪些音频
         pub audio: AudioChoice,
         /// 取哪些字幕
-        pub subtitles: Subtitles,
+        pub subtitles: SubtitleChoice,
     }
 }
 
 #[gen_stub_pymethods]
 #[pymethods]
 impl Preference {
-    /// `variant` 默认 `VariantChoice.Best()`，`audio` 默认 `AudioChoice.Default()`，`subtitles` 默认 `Subtitles.Off()`
+    /// `variant` 默认 `VariantChoice.Best()`，`audio` 默认 `AudioChoice.Default()`，`subtitles` 默认 `SubtitleChoice.Off()`
     /// ；语言含换行、`These` 一项也没给时抛 `InvalidInputError`。
     #[new]
     #[pyo3(signature = (
@@ -227,7 +227,7 @@ impl Preference {
         py: Python<'_>,
         variant: VariantChoice,
         audio: AudioChoice,
-        subtitles: Subtitles,
+        subtitles: SubtitleChoice,
     ) -> PyResult<Self> {
         let preference = Preference {
             variant,
@@ -263,7 +263,7 @@ impl Preference {
                 other => unreachable!("核心的默认音频是组里默认的，不是 {other:?}"),
             },
             subtitles: match subtitles {
-                core::hls::Renditions::None => Subtitles::Off {},
+                core::hls::Renditions::None => SubtitleChoice::Off {},
                 other => unreachable!("核心默认不要字幕，不是 {other:?}"),
             },
         }
@@ -302,10 +302,10 @@ impl Preference {
                 ),
             },
             subtitles: match &self.subtitles {
-                Subtitles::Off {} => core::hls::Renditions::None,
-                Subtitles::Default {} => core::hls::Renditions::Default,
-                Subtitles::All {} => core::hls::Renditions::All,
-                Subtitles::These { choices } => core::hls::Renditions::These(
+                SubtitleChoice::Off {} => core::hls::Renditions::None,
+                SubtitleChoice::Default {} => core::hls::Renditions::Default,
+                SubtitleChoice::All {} => core::hls::Renditions::All,
+                SubtitleChoice::These { choices } => core::hls::Renditions::These(
                     choices.0.iter().map(RenditionChoice::to_core).collect(),
                 ),
             },

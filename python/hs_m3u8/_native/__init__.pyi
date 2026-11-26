@@ -96,6 +96,7 @@ __all__ = [
     "StallReason",
     "StreamKind",
     "StreamReport",
+    "SubtitleChoice",
     "SubtitleFile",
     "SubtitleFileFormat",
     "SubtitleFormat",
@@ -103,7 +104,6 @@ __all__ = [
     "SubtitleOutput",
     "SubtitleProblem",
     "SubtitleSupport",
-    "Subtitles",
     "SystemProxyError",
     "TailCause",
     "Target",
@@ -2522,10 +2522,10 @@ class Output:
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
     def __repr__(self) -> builtins.str: ...
-    def __new__(cls, *, mp4: typing.Optional[Mp4Output], hls: typing.Optional[builtins.str | os.PathLike[str]], segments: builtins.int, bytes: builtins.int, leftovers: collections.abc.Sequence[Leftover], missed: collections.abc.Sequence[Missed], live: typing.Optional[LiveReport], merged: typing.Optional[MergedOutput] = None, subtitle_files: typing.Optional[collections.abc.Sequence[SubtitleFile]] = None) -> Output:
+    def __new__(cls, *, mp4: typing.Optional[Mp4Output] = None, hls: typing.Optional[builtins.str | os.PathLike[str]], segments: builtins.int, bytes: builtins.int, leftovers: collections.abc.Sequence[Leftover], missed: collections.abc.Sequence[Missed], live: typing.Optional[LiveReport], merged: typing.Optional[MergedOutput] = None, subtitle_files: typing.Optional[collections.abc.Sequence[SubtitleFile]] = None) -> Output:
         r"""
-        各参数即同名属性；`subtitle_files` 为 None 时为空。`merged` 为 None 而给了 `mp4` 时由它得出（MP4 的合并文件）；
-        `mp4` 与 `merged` 对不上（`mp4` 应恰为 MP4 的 `merged`）时抛 `InvalidInputError`。
+        各参数即同名属性；`subtitle_files` 为 None 时为空。`mp4` 与 `merged` 给一边即可，另一边由它得出（`mp4` 为 MP4
+        的 `merged`）；两边都给了而对不上时抛 `InvalidInputError`。
         """
 
 @typing.final
@@ -2666,16 +2666,16 @@ class Preference:
         取哪些音频
         """
     @property
-    def subtitles(self) -> Subtitles.Off | Subtitles.Default | Subtitles.All | Subtitles.These:
+    def subtitles(self) -> SubtitleChoice.Off | SubtitleChoice.Default | SubtitleChoice.All | SubtitleChoice.These:
         r"""
         取哪些字幕
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
     def __repr__(self) -> builtins.str: ...
-    def __new__(cls, *, variant: VariantChoice = ..., audio: AudioChoice = ..., subtitles: Subtitles = ...) -> Preference:
+    def __new__(cls, *, variant: VariantChoice = ..., audio: AudioChoice = ..., subtitles: SubtitleChoice = ...) -> Preference:
         r"""
-        `variant` 默认 `VariantChoice.Best()`，`audio` 默认 `AudioChoice.Default()`，`subtitles` 默认 `Subtitles.Off()`
+        `variant` 默认 `VariantChoice.Best()`，`audio` 默认 `AudioChoice.Default()`，`subtitles` 默认 `SubtitleChoice.Off()`
         ；语言含换行、`These` 一项也没给时抛 `InvalidInputError`。
         """
 
@@ -2971,7 +2971,7 @@ class RemuxError(HsM3u8Error):
 
 class RenditionChoice:
     r"""
-    指定一条音频或字幕 rendition（用在 `AudioChoice.These`、`Subtitles.These` 里）。
+    指定一条音频或字幕 rendition（用在 `AudioChoice.These`、`SubtitleChoice.These` 里）。
     """
     def __repr__(self) -> builtins.str: ...
     @typing.final
@@ -3518,7 +3518,7 @@ class SelectFailure:
     @typing.final
     class Duplicate(SelectFailure):
         r"""
-        `AudioChoice.These` 或 `Subtitles.These` 里两项选到了同一条
+        `AudioChoice.These` 或 `SubtitleChoice.These` 里两项选到了同一条
         """
         __match_args__ = ("kind", "index",)
         @property
@@ -3580,17 +3580,17 @@ class Selected:
     @property
     def skipped_subtitles(self) -> builtins.tuple[SubtitleInfo, ...]:
         r"""
-        选到而没选上的字幕，原因见各自的 `support`：按 `Subtitles.Default`、`Subtitles.All` 自动选到而格式不支持的；
+        选到而没选上的字幕，原因见各自的 `support`：按 `SubtitleChoice.Default`、`SubtitleChoice.All` 自动选到而格式不支持的；
         探测时另有读不了的与点名而格式不支持的（开始任务时这两种使任务失败）
         """
     def __eq__(self, other: builtins.object, /) -> builtins.bool: ...
     def __hash__(self) -> builtins.int: ...
     def __repr__(self) -> builtins.str: ...
-    def __new__(cls, *, variant: VariantInfo, audio: typing.Optional[AudioInfo], audios: typing.Optional[collections.abc.Sequence[AudioInfo]] = None, muxed_audio: typing.Optional[builtins.bool] = None, subtitles: typing.Optional[collections.abc.Sequence[SubtitleInfo]] = None, skipped_subtitles: typing.Optional[collections.abc.Sequence[SubtitleInfo]] = None) -> Selected:
+    def __new__(cls, *, variant: VariantInfo, audio: typing.Optional[AudioInfo] = None, audios: typing.Optional[collections.abc.Sequence[AudioInfo]] = None, muxed_audio: typing.Optional[builtins.bool] = None, subtitles: typing.Optional[collections.abc.Sequence[SubtitleInfo]] = None, skipped_subtitles: typing.Optional[collections.abc.Sequence[SubtitleInfo]] = None) -> Selected:
         r"""
-        各参数即同名属性；`subtitles`、`skipped_subtitles` 为 None 时为空。`audios` 为 None 时由 `audio` 得出（只有它一
-        条，或为空），`muxed_audio` 为 None 时为 `audio` 是 None；`audio` 不是 `audios` 的第一项时抛 `InvalidInputError`
-        。
+        各参数即同名属性；`subtitles`、`skipped_subtitles` 为 None 时为空。`audio` 与 `audios` 给一边即可，另一边由它
+        得出（`audio` 为 `audios` 的第一项）；`muxed_audio` 为 None 时为没有独立音频。两边都给了而 `audio` 不是 `audios`
+        的第一项时抛 `InvalidInputError`。
         """
 
 class Shape:
@@ -3937,7 +3937,7 @@ class SourceUnsupported:
     @typing.final
     class SubtitleFormat(SourceUnsupported):
         r"""
-        点名选的字幕（`Subtitles.These`）或续传记录里的字幕不是本库能处理的格式；自动选到的跳过（见
+        点名选的字幕（`SubtitleChoice.These`）或续传记录里的字幕不是本库能处理的格式；自动选到的跳过（见
         `Selected.skipped_subtitles`）
         """
         __match_args__ = ("url", "format",)
@@ -4182,6 +4182,52 @@ class StreamReport:
         """
     def __repr__(self) -> builtins.str: ...
 
+class SubtitleChoice:
+    r"""
+    取哪些字幕（WebVTT 分段字幕；fMP4 里的字幕与隐藏字幕不支持：自动选到的跳过并列在 `Selected.skipped_subtitles`，
+    点名的报错）。变体没有引用字幕组时，`Default`、`All` 不选，`These` 抛 `SelectError`（按语言为
+    `SelectFailure.NoSubtitleGroup`，按下标为 `NotVariantSubtitle`，按身份为 `SubtitleNotFound`）。
+    """
+    def __repr__(self) -> builtins.str: ...
+    @typing.final
+    class Off(SubtitleChoice):
+        r"""
+        一个也不要
+        """
+        __match_args__ = ()
+        def __new__(cls) -> SubtitleChoice.Off: ...
+    
+    @typing.final
+    class Default(SubtitleChoice):
+        r"""
+        组里 DEFAULT=YES 的；没有则不选
+        """
+        __match_args__ = ()
+        def __new__(cls) -> SubtitleChoice.Default: ...
+    
+    @typing.final
+    class All(SubtitleChoice):
+        r"""
+        组里全部，按出现顺序各成一条字幕轨
+        """
+        __match_args__ = ()
+        def __new__(cls) -> SubtitleChoice.All: ...
+    
+    @typing.final
+    class These(SubtitleChoice):
+        r"""
+        逐个指定，按给出的顺序各成一条字幕轨；至少一项，两项选到同一条时抛 `SelectError`（`SelectFailure.Duplicate`
+        ）
+        """
+        __match_args__ = ("choices",)
+        @property
+        def choices(self) -> builtins.tuple[RenditionChoice.Language | RenditionChoice.Index | RenditionChoice.Matching, ...]:
+            r"""
+            各项
+            """
+        def __new__(cls, choices: collections.abc.Sequence[RenditionChoice]) -> SubtitleChoice.These: ...
+    
+
 @typing.final
 class SubtitleFile:
     r"""
@@ -4324,7 +4370,7 @@ class SubtitleInfo:
     def __repr__(self) -> builtins.str: ...
     def choice(self) -> RenditionChoice.Matching:
         r"""
-        按身份选这条字幕，用在 `Subtitles.These` 里，同 `VariantInfo.choice()`。
+        按身份选这条字幕，用在 `SubtitleChoice.These` 里，同 `VariantInfo.choice()`。
         """
 
 @typing.final
@@ -4434,52 +4480,6 @@ class SubtitleSupport:
             原因
             """
         def __new__(cls, problem: SubtitleProblem) -> SubtitleSupport.Unreadable: ...
-    
-
-class Subtitles:
-    r"""
-    取哪些字幕（WebVTT 分段字幕；fMP4 里的字幕与隐藏字幕不支持：自动选到的跳过并列在 `Selected.skipped_subtitles`，
-    点名的报错）。变体没有引用字幕组时，`Default`、`All` 不选，`These` 抛 `SelectError`（按语言为
-    `SelectFailure.NoSubtitleGroup`，按下标为 `NotVariantSubtitle`，按身份为 `SubtitleNotFound`）。
-    """
-    def __repr__(self) -> builtins.str: ...
-    @typing.final
-    class Off(Subtitles):
-        r"""
-        一个也不要
-        """
-        __match_args__ = ()
-        def __new__(cls) -> Subtitles.Off: ...
-    
-    @typing.final
-    class Default(Subtitles):
-        r"""
-        组里 DEFAULT=YES 的；没有则不选
-        """
-        __match_args__ = ()
-        def __new__(cls) -> Subtitles.Default: ...
-    
-    @typing.final
-    class All(Subtitles):
-        r"""
-        组里全部，按出现顺序各成一条字幕轨
-        """
-        __match_args__ = ()
-        def __new__(cls) -> Subtitles.All: ...
-    
-    @typing.final
-    class These(Subtitles):
-        r"""
-        逐个指定，按给出的顺序各成一条字幕轨；至少一项，两项选到同一条时抛 `SelectError`（`SelectFailure.Duplicate`
-        ）
-        """
-        __match_args__ = ("choices",)
-        @property
-        def choices(self) -> builtins.tuple[RenditionChoice.Language | RenditionChoice.Index | RenditionChoice.Matching, ...]:
-            r"""
-            各项
-            """
-        def __new__(cls, choices: collections.abc.Sequence[RenditionChoice]) -> Subtitles.These: ...
     
 
 @typing.final

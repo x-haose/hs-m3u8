@@ -368,10 +368,10 @@ record! {
 #[gen_stub_pymethods]
 #[pymethods]
 impl Output {
-    /// 各参数即同名属性；`subtitle_files` 为 None 时为空。`merged` 为 None 而给了 `mp4` 时由它得出（MP4 的合并文件）；
-    /// `mp4` 与 `merged` 对不上（`mp4` 应恰为 MP4 的 `merged`）时抛 `InvalidInputError`。
+    /// 各参数即同名属性；`subtitle_files` 为 None 时为空。`mp4` 与 `merged` 给一边即可，另一边由它得出（`mp4` 为 MP4
+    /// 的 `merged`）；两边都给了而对不上时抛 `InvalidInputError`。
     #[new]
-    #[pyo3(signature = (*, mp4, hls, segments, bytes, leftovers, missed, live, merged = None, subtitle_files = None))]
+    #[pyo3(signature = (*, mp4 = None, hls, segments, bytes, leftovers, missed, live, merged = None, subtitle_files = None))]
     fn new(
         py: Python<'_>,
         mp4: Option<Mp4Output>,
@@ -391,6 +391,7 @@ impl Output {
                 report: m.report.clone(),
             })
         });
+        let mp4 = mp4.or_else(|| mp4_of(merged.as_ref()));
         if mp4 != mp4_of(merged.as_ref()) {
             return Err(invalid_input(
                 py,

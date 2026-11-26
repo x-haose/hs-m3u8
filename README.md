@@ -73,11 +73,12 @@ from hs_m3u8 import (
     Preference,
     SubtitleFileFormat,
     SubtitleOutput,
-    Subtitles,
+    SubtitleChoice,
     Target,
 )
 
-preference = Preference(audio=AudioChoice.All(), subtitles=Subtitles.All())  # 交给 Source(..., preference=preference)
+# 交给 Source(..., preference=preference)
+preference = Preference(audio=AudioChoice.All(), subtitles=SubtitleChoice.All())
 options = OutputOptions(
     Target.File(path="downloads/video.mkv", container=Container.Matroska()),
     subtitles=SubtitleOutput(files=SubtitleFileFormat.Srt()),  # 字幕封进 MKV，并在旁边另存 SRT

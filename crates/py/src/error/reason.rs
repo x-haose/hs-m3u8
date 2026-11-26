@@ -94,7 +94,7 @@ variants! {
         },
         /// 按语言点名了字幕，所选变体却没有引用字幕组
         NoSubtitleGroup {},
-        /// `AudioChoice.These` 或 `Subtitles.These` 里两项选到了同一条
+        /// `AudioChoice.These` 或 `SubtitleChoice.These` 里两项选到了同一条
         #[pyo3(constructor = (*, kind, index))]
         Duplicate {
             /// 哪类
@@ -244,7 +244,7 @@ variants! {
             /// init 段的地址
             url: Address,
         },
-        /// 点名选的字幕（`Subtitles.These`）或续传记录里的字幕不是本库能处理的格式；自动选到的跳过（见
+        /// 点名选的字幕（`SubtitleChoice.These`）或续传记录里的字幕不是本库能处理的格式；自动选到的跳过（见
         /// `Selected.skipped_subtitles`）
         #[pyo3(constructor = (*, url, format))]
         SubtitleFormat {

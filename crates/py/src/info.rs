@@ -149,7 +149,7 @@ record! {
 #[gen_stub_pymethods]
 #[pymethods]
 impl SubtitleInfo {
-    /// 按身份选这条字幕，用在 `Subtitles.These` 里，同 `VariantInfo.choice()`。
+    /// 按身份选这条字幕，用在 `SubtitleChoice.These` 里，同 `VariantInfo.choice()`。
     #[gen_stub(override_return_type(type_repr = "RenditionChoice.Matching"))]
     fn choice(&self) -> RenditionChoice {
         RenditionChoice::Matching {
@@ -225,7 +225,7 @@ record! {
         pub muxed_audio: bool,
         /// 字幕，按选的顺序
         pub subtitles: Seq<SubtitleInfo>,
-        /// 选到而没选上的字幕，原因见各自的 `support`：按 `Subtitles.Default`、`Subtitles.All` 自动选到而格式不支持的；
+        /// 选到而没选上的字幕，原因见各自的 `support`：按 `SubtitleChoice.Default`、`SubtitleChoice.All` 自动选到而格式不支持的；
         /// 探测时另有读不了的与点名而格式不支持的（开始任务时这两种使任务失败）
         pub skipped_subtitles: Seq<SubtitleInfo>,
     }
@@ -234,11 +234,11 @@ record! {
 #[gen_stub_pymethods]
 #[pymethods]
 impl Selected {
-    /// 各参数即同名属性；`subtitles`、`skipped_subtitles` 为 None 时为空。`audios` 为 None 时由 `audio` 得出（只有它一
-    /// 条，或为空），`muxed_audio` 为 None 时为 `audio` 是 None；`audio` 不是 `audios` 的第一项时抛 `InvalidInputError`
-    /// 。
+    /// 各参数即同名属性；`subtitles`、`skipped_subtitles` 为 None 时为空。`audio` 与 `audios` 给一边即可，另一边由它
+    /// 得出（`audio` 为 `audios` 的第一项）；`muxed_audio` 为 None 时为没有独立音频。两边都给了而 `audio` 不是 `audios`
+    /// 的第一项时抛 `InvalidInputError`。
     #[new]
-    #[pyo3(signature = (*, variant, audio, audios = None, muxed_audio = None, subtitles = None, skipped_subtitles = None))]
+    #[pyo3(signature = (*, variant, audio = None, audios = None, muxed_audio = None, subtitles = None, skipped_subtitles = None))]
     fn new(
         py: Python<'_>,
         variant: VariantInfo,
@@ -249,6 +249,7 @@ impl Selected {
         skipped_subtitles: Option<Seq<SubtitleInfo>>,
     ) -> PyResult<Self> {
         let audios = audios.unwrap_or_else(|| audio.iter().cloned().collect());
+        let audio = audio.or_else(|| audios.0.first().cloned());
         if audios.0.first() != audio.as_ref() {
             return Err(invalid_input(
                 py,
