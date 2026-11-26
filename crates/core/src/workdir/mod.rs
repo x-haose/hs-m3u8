@@ -135,7 +135,7 @@ pub(crate) struct WorkDir {
     /// `pending` 已核对上、已改记（见 [`WorkDir::adopt_record`]）
     adopted: AtomicBool,
     /// 直播尾部没录到的字幕轨（会话, 轨号），升序、不重复，与生效的记录一起写在 `job.json` 里；录制中随时改记（见
-    /// [`WorkDir::set_tail`]）。`Recorder` 只拿到 `&WorkDir`，所以用锁
+    /// [`WorkDir::set_tail`]）。录制中经共享引用改记，所以用锁
     tails: Mutex<Vec<(u32, usize)>>,
     lock: Lock,
 }

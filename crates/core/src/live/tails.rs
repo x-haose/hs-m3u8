@@ -5,13 +5,12 @@
 use tokio::time::Instant;
 
 use super::{Phase, Recorder};
-use crate::{Error, TailCause};
+use crate::Error;
 
 impl Recorder<'_> {
-    /// 会话定下后，第 `track` 条字幕轨此刻（`now`）该不该记为尾部没录到：前后接不上而停了的记；出现了 ENDLIST 或录满的
-    /// 不记；否则已停滞（见 [`super::LiveTrack::stall_since`]）、或之前的运行记下而本次还没录到它的新分片的记。音视频轨
-    /// 不记。
-    fn wants_tail(&self, track: usize, now: Instant) -> bool {
+    /// 会话定下后，第 `track` 条字幕轨该不该记为尾部没录到：前后接不上而停了的记；出现了 ENDLIST 或录满的不记；否则
+    /// 停滞过而之后还没录到新分片的（见 `marked`）记。音视频轨不记。
+    fn wants_tail(&self, track: usize) -> bool {
         if self.media[track] {
             return false;
         }
@@ -19,12 +18,20 @@ impl Recorder<'_> {
         if t.is_broken() {
             return true;
         }
-        if t.is_ended() || t.is_full(self.max_us()) {
-            return false;
+        !t.is_ended() && !t.is_full(self.max_us()) && self.marked[track]
+    }
+
+    /// 此刻（`now`）已停滞（见 [`super::LiveTrack::stall_since`]）的字幕轨置上 `marked`。
+    fn mark_stalled(&mut self, now: Instant) {
+        for track in 0..self.tracks.len() {
+            let stalled = !self.media[track]
+                && self.tracks[track]
+                    .stall_since(self.options.stall_timeout)
+                    .is_some_and(|since| since <= now);
+            if stalled {
+                self.marked[track] = true;
+            }
         }
-        self.carried[track]
-            || t.stall_since(self.options.stall_timeout)
-                .is_some_and(|since| since <= now)
     }
 
     /// 还没记为尾部没录到的字幕轨里，最早变得该记的时刻（停滞开始的时刻，见 [`Recorder::wants_tail`]）；会话定下之前或
@@ -51,8 +58,9 @@ impl Recorder<'_> {
         let Phase::Decided { session } = self.phase else {
             return Ok(());
         };
+        self.mark_stalled(now);
         for track in 0..self.tracks.len() {
-            let tailed = self.wants_tail(track, now);
+            let tailed = self.wants_tail(track);
             if tailed != self.tails_written[track] {
                 self.dir.set_tail(session, track, tailed).await?;
                 self.tails_written[track] = tailed;
@@ -63,16 +71,20 @@ impl Recorder<'_> {
         Ok(())
     }
 
-    /// 录制结束（会话已定下、在途的下载已收尾）时改记各字幕轨（见 [`Recorder::update_tails`]），返回本次判定得出原因的
-    /// （见 [`super::LiveTrack::unrecorded_tail`]），按轨号。之前的运行记下、本次没满停滞时限的照旧记着，没有原因。
-    pub(super) async fn settle_tails(
-        &mut self,
-        now: Instant,
-    ) -> Result<Vec<(usize, TailCause)>, Error> {
+    /// 录制结束（会话已定下、在途的下载已收尾）时改记各字幕轨（见 [`Recorder::update_tails`]），并判出这个会话里记为尾部
+    /// 没录到的原因（见 [`Recorder::note_tail_causes`]）。
+    pub(super) async fn settle_tails(&mut self, now: Instant) -> Result<(), Error> {
         self.update_tails(now).await?;
+        self.note_tail_causes(now);
+        Ok(())
+    }
+
+    /// 录制中的会话里记为尾部没录到的字幕轨，判出本次的原因（见 [`super::LiveTrack::unrecorded_tail`]）记进
+    /// `tail_causes`；之前的运行记下、本次没满停滞时限的没有原因。录制结束时与另起会话之前各调一次。
+    pub(super) fn note_tail_causes(&mut self, now: Instant) {
+        let session = self.session();
         let (timeout, max_us) = (self.options.stall_timeout, self.max_us());
-        let mut tails = Vec::new();
-        for track in (0..self.tracks.len()).filter(|&t| !self.media[t]) {
+        for track in (0..self.tracks.len()).filter(|&t| self.tails_written[t]) {
             let media = &self.media;
             let (before, rest) = self.tracks.split_at_mut(track);
             let (this, after) = rest.split_first_mut().expect("track 在范围内");
@@ -86,9 +98,8 @@ impl Recorder<'_> {
                     .any(|(i, t)| media[i] && t.listed_since(since))
             };
             if let Some(cause) = this.unrecorded_tail(timeout, max_us, now, others_live) {
-                tails.push((track, cause));
+                self.tail_causes.push((session, track, cause));
             }
         }
-        Ok(tails)
     }
 }

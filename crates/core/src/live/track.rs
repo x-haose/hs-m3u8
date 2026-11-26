@@ -426,7 +426,9 @@ impl LiveTrack {
 
     /// 字幕轨随唯一的音视频轨另起的会话（见 [`LiveTrack::restart`]）接着录：它自己没有接不上，窗口不变（在途的刷新与
     /// 准备照常由它处理，录过的不重录），之后处理的分片记进新会话，起点为已处理到的序号（见 [`Window::renew_session`]）。
-    /// 这个会话里不录的轨不变。
+    /// 这个会话里不录的轨不变。简化：字幕的序号回退晚于画面（CDN 缓存、打包器滞后）时，回退前列出的旧时间线分片记进新
+    /// 会话，按 X-TIMESTAMP-MAP 对齐时多半落在新画面之外而丢掉；随后它自己的回退按接不上停掉，这次运行不再录它（报为尾部
+    /// 没录到）。要接上时，字幕轨在新会话里还没录到分片就遇到回退的，按新窗口重新开始。
     pub(super) fn rejoin(&mut self) {
         if let Role::Decided(window) = &mut self.role {
             window.renew_session();

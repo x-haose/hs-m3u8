@@ -58,10 +58,8 @@ pub(crate) struct Outcome {
     pub missed: Vec<Missed>,
     /// 本次运行录制中途另起的会话
     pub new_sessions: Vec<NewSession>,
-    /// 录制结束时的会话；会话还没定下就结束时为 None
-    pub session: Option<u32>,
-    /// 录制结束时尾部没录到的字幕轨与原因，按轨号（见 [`crate::UnrecordedTail`]）
-    pub tails: Vec<(usize, TailCause)>,
+    /// 本次运行判出原因的尾部没录到的字幕轨：（会话, 轨号, 原因），见 [`crate::UnrecordedTail`]
+    pub tails: Vec<(u32, usize, TailCause)>,
 }
 
 /// 录制用到的共享对象。
@@ -127,9 +125,11 @@ struct Recorder<'a> {
     stall: Option<Stall>,
     /// 按轨号：这条轨是音视频轨（字幕轨为 false，不定录制的结束）
     media: Vec<bool>,
-    /// 按轨号：之前的运行在录制中的会话里记下了这条字幕轨尾部没录到，本次还没录到它的新分片（见
-    /// [`Recorder::wants_tail`]）
-    carried: Vec<bool>,
+    /// 按轨号：这条字幕轨在录制中的会话里停滞过（之前的运行记下的，或本次满了停滞时限），之后还没录到新分片（见
+    /// [`Recorder::wants_tail`]）。停滞时置上，录到分片才清：排进队列的分片可能一个也下不成
+    marked: Vec<bool>,
+    /// 本次运行判出原因的尾部（会话, 轨号, 原因），见 [`Recorder::note_tail_causes`]
+    tail_causes: Vec<(u32, usize, TailCause)>,
     /// 按轨号：已写进任务目录的尾部（见 [`crate::workdir::WorkDir::set_tail`]）；由 [`Recorder::update_tails`] 改
     tails_written: Vec<bool>,
 }
@@ -263,19 +263,19 @@ impl<'a> Recorder<'a> {
         merge: Option<MergeCheck>,
         media: Vec<bool>,
     ) -> Recorder<'a> {
-        let carried = match phase {
+        let marked = match phase {
             Phase::Decided { session } => tailed_in(ctx.dir, session, tracks.len()),
             Phase::Deciding(_) => vec![false; tracks.len()],
         };
         if let Phase::Decided { session } = phase {
             ctx.progress.send_modify(|p| {
                 p.session = Some(session);
-                for (track, &t) in p.tracks.iter_mut().zip(&carried) {
+                for (track, &t) in p.tracks.iter_mut().zip(&marked) {
                     track.unrecorded_tail = t;
                 }
             });
         }
-        let tails_written = carried.clone();
+        let tails_written = marked.clone();
         Recorder {
             http: ctx.http.clone(),
             hooks: ctx.hooks.clone(),
@@ -292,7 +292,8 @@ impl<'a> Recorder<'a> {
             merge,
             stall: None,
             media,
-            carried,
+            marked,
+            tail_causes: Vec::new(),
             tails_written,
         }
     }
@@ -598,7 +599,9 @@ impl<'a> Recorder<'a> {
         let Fetched { playlist, started } = fetched;
         let update = match self.tracks[track].apply(&scope, &playlist, inits, started, now)? {
             ControlFlow::Break(cause) => {
-                return self.source_broke(track, cause, Fetched { playlist, started });
+                return self
+                    .source_broke(track, cause, Fetched { playlist, started })
+                    .await;
             }
             ControlFlow::Continue(update) => update,
         };
@@ -634,7 +637,7 @@ impl<'a> Recorder<'a> {
     /// 第 `track` 条轨的播放列表 `fetched` 与之前刷新得到的接不上。字幕轨只停它自己（见 [`LiveTrack::stop_broken`]）；
     /// 它是唯一的音视频轨时另起会话接着录（见 [`LiveTrack::restart`]），字幕轨跟着从窗口起点进新会话（见
     /// [`LiveTrack::rejoin`]）；音视频轨不止一条时其他轨从哪里起与它对得上不知道，定下结束原因，这条轨暂存的不再处理。
-    fn source_broke(
+    async fn source_broke(
         &mut self,
         track: usize,
         cause: SourceBreak,
@@ -653,6 +656,10 @@ impl<'a> Recorder<'a> {
             .session()
             .checked_add(1)
             .ok_or_else(|| self.sessions_exhausted())?;
+        // 旧会话的尾部写定、判出原因，再换到新会话
+        let now = Instant::now();
+        self.update_tails(now).await?;
+        self.note_tail_causes(now);
         self.decide(session);
         self.tracks[track].restart(cause, fetched);
         for (t, &media) in self.tracks.iter_mut().zip(&self.media) {
@@ -676,9 +683,9 @@ impl<'a> Recorder<'a> {
     /// 定下录制的会话，进度里随之写上。
     fn decide(&mut self, session: u32) {
         self.phase = Phase::Decided { session };
-        self.carried = tailed_in(self.dir, session, self.tracks.len());
-        self.tails_written.clone_from(&self.carried);
-        let tailed = &self.carried;
+        self.marked = tailed_in(self.dir, session, self.tracks.len());
+        self.tails_written.clone_from(&self.marked);
+        let tailed = &self.marked;
         self.progress.send_modify(|p| {
             p.session = Some(session);
             for (track, &t) in p.tracks.iter_mut().zip(tailed) {
@@ -701,8 +708,8 @@ impl<'a> Recorder<'a> {
             Ok(len) => {
                 count_done(self.progress, id, len);
                 self.tracks[id.track].segment_recorded(Instant::now());
-                // 录到了新分片：之前的运行记下的尾部不再算（见 wants_tail）
-                self.carried[id.track] = false;
+                // 录到了新分片：停滞过的标记清掉（见 wants_tail）
+                self.marked[id.track] = false;
                 return Ok(());
             }
             Err(error) => error,
@@ -738,20 +745,14 @@ impl<'a> Recorder<'a> {
         match result {
             Ok(end) => {
                 fetcher.drain(|id, r| self.on_finished(id, r)).await?;
-                let session = match self.phase {
-                    Phase::Decided { session } => Some(session),
-                    Phase::Deciding(_) => None,
-                };
-                let tails = match session {
-                    Some(_) => self.settle_tails(Instant::now()).await?,
-                    None => Vec::new(),
-                };
+                if let Phase::Decided { .. } = self.phase {
+                    self.settle_tails(Instant::now()).await?;
+                }
                 Ok(Outcome {
                     end,
                     missed: self.missed,
                     new_sessions: self.new_sessions,
-                    session,
-                    tails,
+                    tails: self.tail_causes,
                 })
             }
             Err(e) => {

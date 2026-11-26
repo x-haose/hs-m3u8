@@ -22,8 +22,8 @@ use crate::workdir::{
     preference_digest, read_resumable, url_digest,
 };
 use crate::{
-    Error, JobType, Leftover, LeftoverKind, LiveReport, Output, Progress, Stage, TailCause,
-    UnrecordedTail, Unsettled, WorkDirProblem, blocking,
+    Error, JobType, Leftover, LeftoverKind, LiveReport, Output, Progress, Stage, UnrecordedTail,
+    Unsettled, WorkDirProblem, blocking,
 };
 
 /// 一次运行用到的共享对象。
@@ -359,17 +359,7 @@ fn merge_live(
         return Err(Error::NothingRecorded);
     }
     let (end, known, new_sessions, causes) = match recording {
-        Some(r) => {
-            let causes: Vec<(u32, usize, TailCause)> = match r.session {
-                Some(session) => r
-                    .tails
-                    .into_iter()
-                    .map(|(track, cause)| (session, track, cause))
-                    .collect(),
-                None => Vec::new(),
-            };
-            (Some(r.end), r.missed, r.new_sessions, causes)
-        }
+        Some(r) => (Some(r.end), r.missed, r.new_sessions, r.tails),
         None => (None, Vec::new(), Vec::new(), Vec::new()),
     };
     let unrecorded_tails = dir
