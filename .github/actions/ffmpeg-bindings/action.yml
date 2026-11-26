@@ -1,0 +1,34 @@
+name: FFmpeg 绑定
+# 仓库里已有本机目标的文件时核对与提交的一致；没有时作为附件 ffmpeg-bindings-<目标> 上传，下载后提交。要先有 FFmpeg
+# （third_party/ffmpeg/dist）、Python 开发环境与 libclang
+description: 用 scripts/ffmpeg_bindings.py 生成本机目标的 hs-m3u8-ffmpeg-sys 绑定，核对或上传
+
+runs:
+  using: composite
+  steps:
+    - name: 生成
+      id: generate
+      shell: bash
+      run: |
+        target=$(rustc -vV | sed -n 's/^host: //p')
+        file="crates/ffmpeg-sys/src/bindings/$target.rs"
+        if [[ -f $file ]]; then committed=true; else committed=false; fi
+        uv run --no-sync python scripts/ffmpeg_bindings.py
+        {
+          echo "target=$target"
+          echo "file=$file"
+          echo "committed=$committed"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: 与提交的比较
+      if: steps.generate.outputs.committed == 'true'
+      shell: bash
+      run: git diff --exit-code -- "${{ steps.generate.outputs.file }}"
+
+    - name: 上传新生成的
+      if: steps.generate.outputs.committed == 'false'
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ffmpeg-bindings-${{ steps.generate.outputs.target }}
+        path: ${{ steps.generate.outputs.file }}
+        if-no-files-found: error

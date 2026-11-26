@@ -103,6 +103,10 @@ jobs:
       - name: Python 开发环境
         run: uv sync --locked
 
+      # Linux 两个目标的预生成 FFmpeg 绑定在这里生成与核对（同一个容器里的 libclang），见这个 action 的说明
+      - name: FFmpeg 绑定
+        uses: ./.github/actions/ffmpeg-bindings
+
       - name: 构建 wheel
         run: uv run --no-sync maturin build --release --locked --compatibility manylinux_2_28 --out dist
 
