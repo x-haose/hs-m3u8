@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use crate::info::Selected;
 use crate::remux::MediaReport;
-use crate::{FetchErrorKind, FetchFailure, HttpFailure, MergeUnsupported, Purpose, hls};
+use crate::{
+    FetchErrorKind, FetchFailure, HttpFailure, MergeUnsupported, Purpose, StallReason, hls,
+};
 
 /// 任务目录里已完成的内容（[`crate::Engine::inspect`]），按目录里记录的任务种类。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,7 +260,7 @@ pub struct FileCount {
 /// 直播一次刷新失败的原因；这类失败等下次刷新，不使任务立即失败。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RefreshReason {
-    /// 取不到：404/410 或临时故障（刷新只发一次请求，失败了等下次刷新）
+    /// 取不到：404/410 或临时故障（刷新只发一次请求，失败了等下次刷新）；字幕轨另含其余 HTTP 错误（如 401、403）
     #[error(transparent)]
     Http(HttpFailure),
     /// 内容为空，多为服务器还没写完
@@ -407,6 +409,32 @@ pub struct LiveReport {
     pub session_count: usize,
     /// 本次运行录制中途另起的会话，按先后；只合并时为空
     pub new_sessions: Vec<NewSession>,
+    /// 尾部没录到的字幕轨，按会话、轨号排列；含之前各次运行记下的（见 [`UnrecordedTail`]）
+    pub unrecorded_tails: Vec<UnrecordedTail>,
+}
+
+/// 直播里一条字幕轨在一个会话的尾部没录到：这个会话的录制结束时，它已停滞（同 [`crate::LiveOptions::stall_timeout`]
+/// 的判据：持续这么久没录到新分片），`after` 之后到录制结束的字幕不在输出中。字幕轨的故障不结束录制、不使任务失败
+/// （录制的结束只看音视频轨），在这里报出。简化：录制结束前停滞还不满时限的那一段不报；续录同一会话、又录到了新分片的，
+/// 这一项去掉
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnrecordedTail {
+    pub session: u32,
+    pub track: usize,
+    /// 这个会话里录到的最后一个分片的媒体序号；一个也没录到时为 None
+    pub after: Option<u64>,
+    /// 本次运行录制结束时判定的原因；之前的运行记下的、或只合并时为 None（原因不落盘）
+    pub cause: Option<TailCause>,
+}
+
+/// 字幕轨尾部没录到的原因。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TailCause {
+    /// 看起来这条字幕轨已结束：不再出新分片，或播放列表已被删除；音视频轨也都结束了
+    Ended(StallCause),
+    /// 故障：刷新一直失败（字幕轨另含 401、403 这类不可重试的 HTTP 错误），有新分片却都取不到，或音视频轨还在出新
+    /// 分片而它不再出（[`StallReason::TrackStopped`]）
+    Failed(StallReason),
 }
 
 /// 本次运行的录制如何结束。

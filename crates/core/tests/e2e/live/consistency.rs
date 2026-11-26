@@ -115,6 +115,7 @@ fn report_with(
         end: Some(end),
         session_count,
         new_sessions,
+        unrecorded_tails: vec![],
     };
     (Some(live), vec![])
 }

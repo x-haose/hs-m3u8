@@ -600,6 +600,7 @@ async fn merge_recorded_merges_without_the_network() {
         end: None,
         session_count: 1,
         new_sessions: vec![],
+        unrecorded_tails: vec![],
     };
     assert_eq!(outcome(&output), (Some(want), vec![]));
 }

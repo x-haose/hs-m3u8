@@ -1,9 +1,11 @@
 //! 直播录字幕：字幕轨与音视频一样按会话录、停止后一起合并，跨片重复的 cue 只留一条。
 
+use axum::http::StatusCode;
 use hs_m3u8_core::hls::Renditions;
 use hs_m3u8_core::remux::{Container, Shape};
 use hs_m3u8_core::{
-    Error, LiveEnd, MergedFile, SubtitleFileFormat, SubtitleOutput, Target, TrackKind,
+    Error, HttpErrorKind, HttpFailure, LiveEnd, MergedFile, RefreshReason, StallCause, StallReason,
+    SubtitleFileFormat, SubtitleOutput, TailCause, Target, TrackKind, UnrecordedTail,
 };
 
 use super::{STALL, live_request};
@@ -230,10 +232,115 @@ async fn a_subtitle_playlist_that_stops_updating_does_not_stall_the_recording() 
     server.put("v.m3u8", video(2));
     let output = job.wait().await.unwrap();
 
-    let end = output.live.unwrap().end;
+    let live = output.live.unwrap();
     assert!(
-        matches!(end, Some(LiveEnd::Stalled { track: 0, .. })),
-        "{end:?}"
+        matches!(live.end, Some(LiveEnd::Stalled { track: 0, .. })),
+        "{:?}",
+        live.end
     );
     assert_eq!(output.segments, 2);
+    // 字幕在第 0 片之后没再录到：它不再出新分片，画面也结束了
+    assert_eq!(
+        live.unrecorded_tails,
+        [UnrecordedTail {
+            session: 0,
+            track: 1,
+            after: Some(0),
+            cause: Some(TailCause::Ended(StallCause::NoNewSegments)),
+        }]
+    );
+}
+
+/// 字幕播放列表一直 403：录制照常由画面结束，字幕轨记为尾部没录到、带上原因；之后只合并时仍报出这一项，原因不落盘。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_subtitle_playlist_is_reported_as_an_unrecorded_tail() {
+    let dir = test_dir("live_subtitles_forbidden");
+    let server = Server::start().await;
+    let video = |count: usize| {
+        let mut playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n".to_owned();
+        for i in 0..count {
+            playlist += &format!("#EXTINF:1,\nv/seg{i}.ts\n");
+        }
+        playlist
+    };
+    for i in 0..2 {
+        server.put(&format!("v/seg{i}.ts"), fixture(&format!("ts_a/seg{i}.ts")));
+    }
+    server.put("v.m3u8", video(1));
+    server.put(
+        "subs/0.vtt",
+        "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:131280,LOCAL:00:00:00.000\n\n00:00.300 --> 00:00.800\n字幕\n",
+    );
+    server.put(
+        "subs.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nsubs/0.vtt\n",
+    );
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n\
+         #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"zh\",LANGUAGE=\"zh\",URI=\"subs.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=200000,SUBTITLES=\"subs\"\nv.m3u8\n",
+    );
+    let mut req = live_request(server.url("master.m3u8"), &dir, STALL);
+    req.source.preference.subtitles = Renditions::All;
+    req.output.target = Target::File(MergedFile {
+        path: dir.join("out.mkv"),
+        container: Container::Matroska,
+    });
+    req.output.keep_work_dir = true;
+    let job = engine().start(req.clone()).unwrap();
+    let mut progress = job.control().progress();
+    progress
+        .wait_for(|p| p.tracks.iter().map(|t| t.segments.done).eq([1, 1]))
+        .await
+        .unwrap();
+    server.status("subs.m3u8", StatusCode::FORBIDDEN);
+    server.put("v.m3u8", video(2));
+    let output = job.wait().await.unwrap();
+
+    let live = output.live.unwrap();
+    assert!(
+        matches!(live.end, Some(LiveEnd::Stalled { track: 0, .. })),
+        "{:?}",
+        live.end
+    );
+    let [tail] = &live.unrecorded_tails[..] else {
+        panic!("{:?}", live.unrecorded_tails);
+    };
+    assert_eq!((tail.session, tail.track, tail.after), (0, 1, Some(0)));
+    assert!(
+        matches!(
+            &tail.cause,
+            Some(TailCause::Failed(StallReason::RefreshFailed(
+                RefreshReason::Http(HttpFailure {
+                    kind: HttpErrorKind::Status(403),
+                    ..
+                })
+            )))
+        ),
+        "{:?}",
+        tail.cause
+    );
+    server.stop().await;
+
+    req.output.target = Target::File(MergedFile {
+        path: dir.join("again.mkv"),
+        container: Container::Matroska,
+    });
+    req.output.work_dir = Some(dir.join("out.hsdl"));
+    let merged = engine()
+        .merge_recorded(req.output)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
+    assert_eq!(
+        merged.live.unwrap().unrecorded_tails,
+        [UnrecordedTail {
+            session: 0,
+            track: 1,
+            after: Some(0),
+            cause: None,
+        }]
+    );
 }

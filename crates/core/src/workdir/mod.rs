@@ -214,6 +214,36 @@ impl WorkDir {
         Ok(())
     }
 
+    /// 直播录制结束：生效的记录里第 `session` 个会话尾部没录到的字幕轨改记为 `tracks`（轨号，升序），有变化时写进
+    /// `job.json`。
+    pub(crate) async fn record_tails(
+        &mut self,
+        session: u32,
+        tracks: &[usize],
+    ) -> Result<(), Error> {
+        let record = match &mut self.pending {
+            Some(pending) if self.adopted.load(Ordering::Relaxed) => &mut pending.record,
+            _ => &mut self.record,
+        };
+        let RecordKind::Live { tails } = &mut record.kind else {
+            panic!("只有直播录制记尾部");
+        };
+        let mut updated: Vec<(u32, usize)> = tails
+            .iter()
+            .copied()
+            .filter(|&(s, _)| s != session)
+            .chain(tracks.iter().map(|&track| (session, track)))
+            .collect();
+        updated.sort_unstable();
+        if updated == *tails {
+            return Ok(());
+        }
+        *tails = updated;
+        let path = self.layout.root.join(JOB_FILE);
+        let bytes = encode_hls(record);
+        blocking(move || write_atomic(&path, &bytes)).await?
+    }
+
     /// 直播录制目录中前 `tracks` 条轨已完成的分片与 init 段。
     pub(crate) async fn scan(&self, tracks: usize) -> Result<Stored, Error> {
         let layout = self.layout.clone();
@@ -316,7 +346,7 @@ fn read_saved(root: &Path) -> Result<Option<Saved>, Error> {
         })
         .collect();
     Ok(Some(Saved::Hls(HlsSaved {
-        live: matches!(record.kind, RecordKind::Live),
+        live: matches!(record.kind, RecordKind::Live { .. }),
         segments: tracks
             .iter()
             .filter(|t| t.kind != TrackKind::Subtitles)
@@ -1068,7 +1098,7 @@ mod tests {
             preference_digest: "p".into(),
             url_digest: "u".into(),
             selection: None,
-            kind: RecordKind::Live,
+            kind: RecordKind::Live { tails: Vec::new() },
         };
         let job = encode_hls(&record);
         fs::write(root.join(JOB_FILE), &job).unwrap();

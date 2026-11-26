@@ -21,8 +21,8 @@ use crate::workdir::{
     preference_digest, read_resumable, url_digest,
 };
 use crate::{
-    Error, JobType, Leftover, LeftoverKind, LiveReport, Output, Progress, Stage, Unsettled,
-    WorkDirProblem, blocking,
+    Error, JobType, Leftover, LeftoverKind, LiveReport, Output, Progress, Stage, TailCause,
+    UnrecordedTail, Unsettled, WorkDirProblem, blocking,
 };
 
 /// 一次运行用到的共享对象。
@@ -75,7 +75,7 @@ pub(crate) async fn run(
     }
     let continuing_live = recorded
         .as_ref()
-        .is_some_and(|r| matches!(r.kind, RecordKind::Live));
+        .is_some_and(|r| matches!(r.kind, RecordKind::Live { .. }));
     let selection = recorded
         .as_ref()
         .filter(|_| !request.reselect)
@@ -152,9 +152,9 @@ async fn run_live(
         preference_digest,
         url_digest: url_digest(&task.request.source.url),
         selection: resolved.selection_record(),
-        kind: RecordKind::Live,
+        kind: RecordKind::Live { tails: Vec::new() },
     };
-    let dir = WorkDir::open(
+    let mut dir = WorkDir::open(
         task.output.work_dir.clone(),
         record,
         lock,
@@ -177,6 +177,11 @@ async fn run_live(
         .merged()
         .map(|(_, container)| (dir.record().streams(), container));
     let recording = live::record(ctx, resolved.tracks, options, merge).await?;
+    drop(fetcher);
+    if let Some(session) = recording.session {
+        let tracks: Vec<usize> = recording.tails.iter().map(|(track, _)| *track).collect();
+        dir.record_tails(session, &tracks).await?;
+    }
     let streams = dir.record().streams();
     let stored = dir.scan(streams.len()).await?;
     let input = merge_live(&dir, &stored, streams, Some(recording))?;
@@ -325,14 +330,44 @@ fn merge_live(
     if plan.groups.is_empty() {
         return Err(Error::NothingRecorded);
     }
-    let (end, known, new_sessions) = match recording {
-        Some(r) => (Some(r.end), r.missed, r.new_sessions),
-        None => (None, Vec::new(), Vec::new()),
+    let (end, known, new_sessions, causes) = match recording {
+        Some(r) => {
+            let causes: Vec<(u32, usize, TailCause)> = match r.session {
+                Some(session) => r
+                    .tails
+                    .into_iter()
+                    .map(|(track, cause)| (session, track, cause))
+                    .collect(),
+                None => Vec::new(),
+            };
+            (Some(r.end), r.missed, r.new_sessions, causes)
+        }
+        None => (None, Vec::new(), Vec::new(), Vec::new()),
     };
+    let RecordKind::Live { tails } = &dir.record().kind else {
+        panic!("只合并直播录制");
+    };
+    let unrecorded_tails = tails
+        .iter()
+        .map(|&(session, track)| UnrecordedTail {
+            session,
+            track,
+            after: stored.segments[track]
+                .iter()
+                .filter(|f| f.name.session == session)
+                .map(|f| f.name.sequence)
+                .max(),
+            cause: causes
+                .iter()
+                .find(|(s, t, _)| (*s, *t) == (session, track))
+                .map(|(_, _, cause)| cause.clone()),
+        })
+        .collect();
     let report = LiveReport {
         end,
         session_count: plan.sessions,
         new_sessions,
+        unrecorded_tails,
     };
     Ok(Content {
         streams,

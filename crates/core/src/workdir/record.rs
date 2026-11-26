@@ -97,10 +97,12 @@ pub(crate) enum SelectionCheck {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RecordKind {
     /// 点播：计划摘要（见 [`crate::vod::Plan::digest`]）相同才能续传
-    Vod {
-        plan_digest: String,
+    Vod { plan_digest: String },
+    Live {
+        /// 尾部没录到的字幕轨：（会话, 轨号），按会话、轨号排列、不重复（见 [`crate::UnrecordedTail`]）。每次录制结束时
+        /// 按这个会话的结局改记；续录同一会话录到了的去掉
+        tails: Vec<(u32, usize)>,
     },
-    Live,
 }
 
 impl HlsRecord {
@@ -112,7 +114,7 @@ impl HlsRecord {
     pub(crate) fn job_type(&self) -> JobType {
         match self.kind {
             RecordKind::Vod { .. } => JobType::Vod,
-            RecordKind::Live => JobType::Live,
+            RecordKind::Live { .. } => JobType::Live,
         }
     }
 
@@ -143,7 +145,8 @@ impl HlsRecord {
     }
 
     /// `self` 里与 `recorded` 是同一条（见 [`HlsRecord::changed_tracks`]）的轨，属性换成 `recorded` 里的：同一条轨沿用
-    /// 首次记下的属性（见 [`SelectionRecord`]）。两者轨道结构相同时才调用。
+    /// 首次记下的属性（见 [`SelectionRecord`]）；直播尾部没录到的字幕轨照 `recorded` 的（它描述已录到的内容）。两者轨道
+    /// 结构相同时才调用。
     pub(super) fn keeping_attributes_of(mut self, recorded: &HlsRecord) -> HlsRecord {
         if let (Some(current), Some(recorded)) = (&mut self.selection, &recorded.selection) {
             if recorded.variant.same_as(&current.variant) {
@@ -159,6 +162,11 @@ impl HlsRecord {
                     *current = recorded.clone();
                 }
             }
+        }
+        if let (RecordKind::Live { tails }, RecordKind::Live { tails: recorded }) =
+            (&mut self.kind, &recorded.kind)
+        {
+            tails.clone_from(recorded);
         }
         self
     }
@@ -271,6 +279,9 @@ enum JobFile {
         preference_digest: String,
         url_digest: String,
         selection: Option<AnySelectionFile>,
+        /// 格式版本 16 起；没有时为空，空时不写
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unrecorded_tails: Vec<TailFile>,
     },
     /// 格式版本 14 起
     File {
@@ -283,6 +294,14 @@ enum JobFile {
         #[serde(default)]
         identity_digest: Option<String>,
     },
+}
+
+/// 尾部没录到的一条字幕轨在 job.json 中的写法（见 [`RecordKind::Live`]）。
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TailFile {
+    session: u32,
+    track: usize,
 }
 
 /// 选轨记录在 job.json 中的写法：格式版本 16 起为 [`SelectionFile`]，之前为 [`SelectionFileV13`]，按版本核对是哪一种。
@@ -416,11 +435,15 @@ pub(super) fn encode_hls(record: &HlsRecord) -> Vec<u8> {
             selection,
             plan_digest: plan_digest.clone(),
         },
-        RecordKind::Live => JobFile::Live {
+        RecordKind::Live { tails } => JobFile::Live {
             format_version,
             preference_digest,
             url_digest,
             selection,
+            unrecorded_tails: tails
+                .iter()
+                .map(|&(session, track)| TailFile { session, track })
+                .collect(),
         },
     };
     serde_json::to_vec(&file).expect("JobFile 只含字符串、整数、数组与枚举，序列化不会失败")
@@ -462,11 +485,35 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Recorded, WorkDirProblem> {
                 RecordKind::Vod { plan_digest },
             ),
             JobFile::Live {
+                unrecorded_tails, ..
+            } if version < TRACKS_JOB_FORMAT_VERSION && !unrecorded_tails.is_empty() => {
+                return Err(WorkDirProblem::Corrupt(format!(
+                    "job.json 是格式版本 {version}，那时还没有字幕轨"
+                )));
+            }
+            JobFile::Live {
                 preference_digest,
                 url_digest,
                 selection,
+                unrecorded_tails,
                 ..
-            } => (preference_digest, url_digest, selection, RecordKind::Live),
+            } => {
+                let tails: Vec<(u32, usize)> = unrecorded_tails
+                    .iter()
+                    .map(|t| (t.session, t.track))
+                    .collect();
+                if !tails.is_sorted_by(|a, b| a < b) {
+                    return Err(WorkDirProblem::Corrupt(
+                        "job.json 的 unrecorded_tails 没有按会话、轨号排列或有重复".to_owned(),
+                    ));
+                }
+                (
+                    preference_digest,
+                    url_digest,
+                    selection,
+                    RecordKind::Live { tails },
+                )
+            }
             JobFile::File { .. } if version < FILE_JOB_FORMAT_VERSION => {
                 return Err(WorkDirProblem::Corrupt(format!(
                     "job.json 是格式版本 {version}，那时还没有文件任务"
@@ -793,7 +840,7 @@ mod tests {
             preference_digest: "ab".into(),
             url_digest: "cd".into(),
             selection: Some(selection(variant_key(), stable_audio_key())),
-            kind: RecordKind::Live,
+            kind: RecordKind::Live { tails: Vec::new() },
         };
         let bytes = encode_hls(&live);
         assert_eq!(
@@ -801,6 +848,18 @@ mod tests {
             r#"{"kind":"live","format_version":16,"preference_digest":"ab","url_digest":"cd","selection":{"variant":{"key":{"attributes":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020","mp4a.40.2"],"audio_group":"aud","occurrence":1}},"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"]},"muxed_audio":false,"audio":[{"key":{"stable":{"id":"Audio-37262","occurrence":0}},"name":"Eng\n\"lish\"","language":"en","default":true,"forced":false}],"subtitles":[{"key":{"stable":{"id":"sub-zh","occurrence":0}},"name":null,"language":"zh-Hans","default":false,"forced":true}]}}"#
         );
         assert_eq!(decode(&bytes), Ok(Recorded::Hls(Box::new(live.clone()))));
+        // 尾部没录到的字幕轨有才写
+        let tailed = HlsRecord {
+            kind: RecordKind::Live {
+                tails: vec![(0, 2), (1, 2)],
+            },
+            ..live.clone()
+        };
+        let bytes = encode_hls(&tailed);
+        assert!(String::from_utf8(bytes.clone()).unwrap().ends_with(
+            r#","unrecorded_tails":[{"session":0,"track":2},{"session":1,"track":2}]}"#
+        ));
+        assert_eq!(decode(&bytes), Ok(Recorded::Hls(Box::new(tailed))));
         let stable = HlsRecord {
             selection: Some(selection(stable_variant_key(), audio_key())),
             ..live
@@ -887,6 +946,10 @@ mod tests {
             // 版本与选轨记录的写法不符
             r#"{"kind":"live","format_version":16,"preference_digest":"a","url_digest":"u","selection":{"variant":{"key":{"stable":{"id":"x","audio_group":null,"occurrence":0}},"bandwidth":null,"resolution":null,"codecs":[]},"audio":null}}"#,
             r#"{"kind":"live","format_version":15,"preference_digest":"a","url_digest":"u","selection":{"variant":{"key":{"stable":{"id":"x","audio_group":null,"occurrence":0}},"bandwidth":null,"resolution":null,"codecs":[]},"muxed_audio":true,"audio":[],"subtitles":[]}}"#,
+            // 尾部记录：15 还没有字幕轨；没排序或有重复
+            r#"{"kind":"live","format_version":15,"preference_digest":"a","url_digest":"u","selection":null,"unrecorded_tails":[{"session":0,"track":1}]}"#,
+            r#"{"kind":"live","format_version":16,"preference_digest":"a","url_digest":"u","selection":null,"unrecorded_tails":[{"session":1,"track":1},{"session":0,"track":1}]}"#,
+            r#"{"kind":"live","format_version":16,"preference_digest":"a","url_digest":"u","selection":null,"unrecorded_tails":[{"session":0,"track":1},{"session":0,"track":1}]}"#,
         ] {
             assert!(decode(rejected.as_bytes()).is_err(), "{rejected}");
         }
@@ -899,7 +962,7 @@ mod tests {
             preference_digest: "a".into(),
             url_digest: "u".into(),
             selection: Some(selection(variant_key(), audio_key())),
-            kind: RecordKind::Live,
+            kind: RecordKind::Live { tails: Vec::new() },
         };
         let other = HlsRecord {
             preference_digest: "b".into(),

@@ -278,6 +278,19 @@ impl Error {
         }
     }
 
+    /// 任何 HTTP 错误（含 401、403 这类不可重试的）的原因；其余为 None。
+    pub(crate) fn http_status_failure(&self) -> Option<HttpFailure> {
+        match self {
+            Error::Http {
+                kind, retry_after, ..
+            } => Some(HttpFailure {
+                kind: kind.clone(),
+                retry_after: *retry_after,
+            }),
+            _ => None,
+        }
+    }
+
     /// 分片或 init 段取不到：请求取不到（见 [`Error::http_failure`]），或重试后内容仍没写完；分片的失败看其原因。
     /// key、回调、校验等失败为 None。
     pub(crate) fn missable(&self) -> Option<FetchFailure> {
@@ -579,7 +592,7 @@ pub enum IntegrityFailure {
 }
 
 /// 直播停滞的故障原因。
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StallReason {
     /// 刷新播放列表一直失败（404/410 之外的取不到，或内容不完整），带最近一次的原因
     #[error("刷新播放列表一直失败，最近一次：{0}")]

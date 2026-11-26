@@ -14,7 +14,7 @@ use crate::ident::Fingerprint;
 use crate::workdir::SessionStart;
 use crate::{
     Error, FetchFailure, HttpErrorKind, HttpFailure, RefreshReason, SourceBreak, StallCause,
-    StallReason, Unsupported,
+    StallReason, TailCause, Unsupported,
 };
 
 /// 两次刷新之间的最短间隔，防止 TARGETDURATION 为 0 或极小时空转。
@@ -546,6 +546,43 @@ impl LiveTrack {
             return Err(StallReason::TrackStopped(ended));
         }
         Ok(ended)
+    }
+}
+
+impl LiveTrack {
+    /// 录制结束时（`now`，在途的下载已收尾）这条轨的尾部没录到的原因（见 [`crate::UnrecordedTail`]）：没录满
+    /// `max_us`、没出现 ENDLIST，而这个会话里没录它（判定期间看起来已结束），或已停滞（见 [`LiveTrack::stall_since`]，
+    /// 判据同 [`LiveTrack::stall`]）。没有时为 None。`others_live(since)` 为其他轨在 `since` 之后列出过新分片。
+    pub(super) fn unrecorded_tail(
+        &mut self,
+        stall_timeout: Duration,
+        max_us: Option<u64>,
+        now: Instant,
+        others_live: impl Fn(Instant) -> bool,
+    ) -> Option<TailCause> {
+        if self.is_full(max_us) {
+            return None;
+        }
+        if let Role::Idle = self.role {
+            let refresh_error = self.last_refresh_error.take();
+            return Some(
+                match (refresh_error.as_ref().and_then(gone), refresh_error) {
+                    (Some(status), _) => TailCause::Ended(StallCause::PlaylistGone(status)),
+                    (None, Some(cause)) => TailCause::Failed(StallReason::RefreshFailed(cause)),
+                    (None, None) => TailCause::Ended(StallCause::NoNewSegments),
+                },
+            );
+        }
+        if self.is_ended() {
+            return None;
+        }
+        let since = self
+            .stall_since(stall_timeout)
+            .filter(|&since| since <= now)?;
+        Some(match self.stall(now, since, now, others_live(since)) {
+            Ok(cause) => TailCause::Ended(cause),
+            Err(reason) => TailCause::Failed(reason),
+        })
     }
 }
 

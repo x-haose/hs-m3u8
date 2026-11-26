@@ -21,8 +21,7 @@ pub(super) struct Stall {
 
 impl Recorder<'_> {
     /// 最早开始停滞的音视频轨及其停滞开始的时刻（见 [`LiveTrack::stall_since`](super::LiveTrack::stall_since)）。字幕轨
-    /// 不算：有的服务器在节目结束后不再更新字幕播放列表，也不补 ENDLIST；它的刷新故障照样在下结论时报出（见
-    /// [`Recorder::on_stall`]）。
+    /// 不算：它停滞或故障都不结束录制，录制结束时报为尾部没录到（见 [`crate::UnrecordedTail`]）。
     fn next_stall(&self) -> Option<(Instant, usize)> {
         self.refreshing()
             .filter(|&(i, _)| self.media[i])
@@ -58,21 +57,23 @@ impl Recorder<'_> {
             return Some(now);
         }
         self.refreshing()
+            .filter(|&(i, _)| self.media[i])
             .filter_map(|(_, t)| t.deadline(stall.noticed))
             .filter(|&at| at > now)
             .min()
     }
 
-    /// 此刻能对停滞 `stall` 下结论：还要刷新的各轨（含停滞的轨）在停滞开始之后的状况都有据可依（见
+    /// 此刻能对停滞 `stall` 下结论：还要刷新的各音视频轨（含停滞的轨）在停滞开始之后的状况都有据可依（见
     /// [`LiveTrack::settled`](super::LiveTrack::settled)）。结论只依据停滞开始之后的刷新：进程被挂起醒来时停滞已到，而
     /// 期间一次刷新也没发。
     pub(super) fn judgeable(&self, stall: Stall, now: Instant) -> bool {
         self.refreshing()
+            .filter(|&(i, _)| self.media[i])
             .all(|(_, t)| t.settled(stall.since, stall.noticed, now))
     }
 
-    /// 对停滞 `stall` 下结论：其他还要刷新的轨（含字幕轨）有故障（见 [`LiveTrack::fault`](super::LiveTrack::fault)）时以它
-    /// 的原因使任务失败；否则看起来直播已结束时定下结束原因，不然任务失败。会话定下之前停滞的是还没拿到候选的轨，直播看起来已结
+    /// 对停滞 `stall` 下结论：其他还要刷新的音视频轨有故障（见 [`LiveTrack::fault`](super::LiveTrack::fault)）时以它的
+    /// 原因使任务失败；否则看起来直播已结束时定下结束原因，不然任务失败。会话定下之前停滞的是还没拿到候选的轨，直播看起来已结
     /// 束时，还没拿到候选的轨都没有内容，这次都不录。
     pub(super) async fn on_stall(&mut self, stall: Stall, now: Instant) -> Result<(), Error> {
         let Stall {
@@ -80,7 +81,12 @@ impl Recorder<'_> {
             since,
             noticed,
         } = stall;
-        let others = || self.refreshing().filter(move |&(i, _)| i != track);
+        // 字幕轨的故障不使任务失败，录制结束时报为尾部没录到（见 [`Recorder::unrecorded_tails`]）
+        let media = &self.media;
+        let others = || {
+            self.refreshing()
+                .filter(move |&(i, _)| i != track && media[i])
+        };
         if let Some((other, cause)) =
             others().find_map(|(i, t)| Some((i, t.fault(since, noticed, now)?)))
         {

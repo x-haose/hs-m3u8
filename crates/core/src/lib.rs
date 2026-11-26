@@ -91,8 +91,8 @@ pub use proxy::{Bypass, ProxySource, SystemProxy, system_proxy};
 pub use report::{
     FileCount, FileOutput, FileProgress, FileSaved, HlsSaved, Leftover, LeftoverKind, LiveEnd,
     LiveReport, MergedOutput, MissReason, Missed, NewSession, Output, Progress, RefreshReason,
-    Retrying, Saved, SegmentCounts, SourceBreak, Stage, StallCause, SubtitleFile, Throttled,
-    TrackKind, TrackProgress, TrackSaved, Writing,
+    Retrying, Saved, SegmentCounts, SourceBreak, Stage, StallCause, SubtitleFile, TailCause,
+    Throttled, TrackKind, TrackProgress, TrackSaved, UnrecordedTail, Writing,
 };
 pub use request::{
     Body, Call, HttpOptions, JobRequest, KeyOverride, LiveOptions, Method, Proxy, RetryPolicy,

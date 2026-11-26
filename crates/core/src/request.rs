@@ -343,6 +343,9 @@ pub fn check_option_header(name: &str, value: &str) -> Result<(), String> {
 /// 一直不返回，这条轨仍在出新分片却一个都下载不成功，或只有这条轨不再出新分片，任务失败
 /// （[`crate::Error::LiveStalled`]），任务目录保留，可稍后续录。
 ///
+/// 字幕轨不参与这些判定（ENDLIST、录满、停滞都只看音视频轨）：它照常刷新，刷新失败（含 401、403）只等下次刷新，不使任务
+/// 失败；录制结束时它已停滞的，报为尾部没录到（[`crate::LiveReport::unrecorded_tails`]）。
+///
 /// 窗口已滑过、来源标了 EXT-X-GAP 或取不到（404/410、重试后仍失败的临时故障）的分片记为缺失（见
 /// [`crate::Output::missed`]），录制继续。其他失败（如 403、key 失败、校验失败）使任务失败。
 ///

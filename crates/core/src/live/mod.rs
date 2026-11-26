@@ -47,7 +47,7 @@ use crate::resolve::ResolvedTrack;
 use crate::workdir::{self, Stored, StoredInit, WorkDir};
 use crate::{
     Error, LiveEnd, MergeUnsupported, MissReason, Missed, NewSession, Progress, RefreshReason,
-    SegmentCounts, SourceBreak, Stage, WorkDirProblem,
+    SegmentCounts, SourceBreak, Stage, TailCause, WorkDirProblem,
 };
 
 /// 本次运行的录制结果。
@@ -57,6 +57,10 @@ pub(crate) struct Outcome {
     pub missed: Vec<Missed>,
     /// 本次运行录制中途另起的会话
     pub new_sessions: Vec<NewSession>,
+    /// 录制结束时的会话；会话还没定下就结束时为 None
+    pub session: Option<u32>,
+    /// 录制结束时尾部没录到的字幕轨与原因，按轨号（见 [`crate::UnrecordedTail`]）
+    pub tails: Vec<(usize, TailCause)>,
 }
 
 /// 录制用到的共享对象。
@@ -508,8 +512,14 @@ impl<'a> Recorder<'a> {
         let (playlist, inits) = match result {
             Ok(loaded) => loaded,
             Err(e) => {
-                let Some(cause) = waitable_refresh_error(&e) else {
-                    return Err(e);
+                let cause = match (waitable_refresh_error(&e), self.media[track]) {
+                    (Some(cause), _) => cause,
+                    // 字幕轨不结束录制：其余 HTTP 错误（如 401、403）同样等下次刷新，到录制结束仍不好时报为尾部没录到
+                    (None, false) => match e.http_status_failure() {
+                        Some(failure) => RefreshReason::Http(failure),
+                        None => return Err(e),
+                    },
+                    (None, true) => return Err(e),
                 };
                 self.tracks[track].refresh_failed(cause, Instant::now());
                 return Ok(());
@@ -662,6 +672,30 @@ impl<'a> Recorder<'a> {
         Ok(())
     }
 
+    /// 录制结束（会话已定下、在途的下载已收尾）时各字幕轨尾部没录到的原因（见 [`LiveTrack::unrecorded_tail`]），按轨号。
+    fn unrecorded_tails(&mut self, now: Instant) -> Vec<(usize, TailCause)> {
+        let (timeout, max_us) = (self.options.stall_timeout, self.max_us());
+        let media = &self.media;
+        let mut tails = Vec::new();
+        for track in (0..self.tracks.len()).filter(|&t| !media[t]) {
+            let (before, rest) = self.tracks.split_at_mut(track);
+            let (this, after) = rest.split_first_mut().expect("track 在范围内");
+            // 音视频轨在 since 之后还列出过新分片
+            let others_live = |since| {
+                let after = after.iter().enumerate().map(|(i, t)| (track + 1 + i, t));
+                before
+                    .iter()
+                    .enumerate()
+                    .chain(after)
+                    .any(|(i, t)| media[i] && t.listed_since(since))
+            };
+            if let Some(cause) = this.unrecorded_tail(timeout, max_us, now, others_live) {
+                tails.push((track, cause));
+            }
+        }
+        tails
+    }
+
     /// 录制结束后收尾：正常结束时等已列出的分片下完；失败时取消其余下载、等它们退出。
     async fn settle(
         mut self,
@@ -671,10 +705,20 @@ impl<'a> Recorder<'a> {
         match result {
             Ok(end) => {
                 fetcher.drain(|id, r| self.on_finished(id, r)).await?;
+                let session = match self.phase {
+                    Phase::Decided { session } => Some(session),
+                    Phase::Deciding(_) => None,
+                };
+                let tails = match session {
+                    Some(_) => self.unrecorded_tails(Instant::now()),
+                    None => Vec::new(),
+                };
                 Ok(Outcome {
                     end,
                     missed: self.missed,
                     new_sessions: self.new_sessions,
+                    session,
+                    tails,
                 })
             }
             Err(e) => {
