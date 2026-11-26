@@ -131,6 +131,9 @@ struct Recorder<'a> {
     marked: Vec<Option<u64>>,
     /// 本次运行判出原因的尾部（会话, 轨号, 原因），见 [`Recorder::note_tail_causes`]
     tail_causes: Vec<(u32, usize, TailCause)>,
+    /// 另起会话之前的会话里在途、之后才录到的字幕分片所在的（会话, 轨号）：那个会话的尾部不再算，由
+    /// [`Recorder::update_tails`] 撤掉
+    recovered: Vec<(u32, usize)>,
     /// 按轨号：已写进任务目录的尾部（见 [`crate::workdir::WorkDir::set_tail`]）；由 [`Recorder::update_tails`] 改
     tails_written: Vec<bool>,
 }
@@ -300,6 +303,7 @@ impl<'a> Recorder<'a> {
             media,
             marked,
             tail_causes: Vec::new(),
+            recovered: Vec::new(),
             tails_written,
         }
     }
@@ -739,6 +743,9 @@ impl<'a> Recorder<'a> {
             Ok(len) => {
                 count_done(self.progress, id, len);
                 self.tracks[id.track].segment_recorded(Instant::now());
+                if !self.media[id.track] && id.name.session != self.session() {
+                    self.recovered.push((id.name.session, id.track));
+                }
                 return Ok(());
             }
             Err(error) => error,

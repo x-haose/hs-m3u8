@@ -62,6 +62,10 @@ impl Recorder<'_> {
         let Phase::Decided { session } = self.phase else {
             return Ok(());
         };
+        for (old, track) in std::mem::take(&mut self.recovered) {
+            self.dir.set_tail(old, track, false).await?;
+            self.tail_causes.retain(|&(s, t, _)| (s, t) != (old, track));
+        }
         self.mark_stalled(now);
         for track in 0..self.tracks.len() {
             let tailed = self.wants_tail(track);
@@ -84,7 +88,8 @@ impl Recorder<'_> {
     }
 
     /// 录制中的会话里记为尾部没录到的字幕轨，判出本次的原因（见 [`super::LiveTrack::unrecorded_tail`]）记进
-    /// `tail_causes`；之前的运行记下、本次没满停滞时限的没有原因。录制结束时与另起会话之前各调一次。
+    /// `tail_causes`；之前的运行记下、本次没满停滞时限的，与另起会话时还有分片在下载（之后也没录到）的没有原因。录制结束
+    /// 时与另起会话之前各调一次。
     pub(super) fn note_tail_causes(&mut self, now: Instant) {
         let session = self.session();
         let (timeout, max_us) = (self.options.stall_timeout, self.max_us());

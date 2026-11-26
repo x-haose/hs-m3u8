@@ -223,12 +223,21 @@ impl Window {
         });
     }
 
-    /// 之后处理的分片记进另起的会话：这条轨在新会话的起点为已处理到的序号（跳过它及之前的；还没处理过分片时从窗口起点
-    /// 录）。已处理的位置与已录到的时长不变。
+    /// 之后处理的分片记进另起的会话，起点为已处理到的序号（跳过它及之前的；还没处理过分片时从窗口起点录）。不连续段编号
+    /// 与另起会话的画面同一口径（偏移从 0 起，见 [`Window::align`]）：比对基准里的编号换算过去，已用过的最大编号与各组的
+    /// init 段从头来。比对基准、处理位置、已录到的时长与内容已知的 init 段沿用：之后来源自己的回退照样认得出，之前发起的
+    /// 刷新与准备回来时照常用得上。
     pub(super) fn renew_session(&mut self) {
         self.start = self
             .processed_through()
             .map_or(SessionStart::Fresh, SessionStart::After);
+        for listed in self.previous.values_mut() {
+            listed.discontinuity -= self.offset;
+        }
+        self.offset = 0;
+        self.max_discontinuity = None;
+        self.group_inits.clear();
+        self.processed.refill = None;
     }
 
     pub(super) fn recorded_us(&self) -> u64 {

@@ -615,14 +615,27 @@ impl LiveTrack {
         }
     }
 
-    /// 停滞的结论，取走最近一次刷新失败的原因；只在据此结束录制时调用，此时这条轨的状况有据可依（见
-    /// [`LiveTrack::settled`]）。停滞开始于 `since`、在 `noticed` 被察觉。`Ok` 为看起来直播已结束，`Err` 为故障。
-    /// `others_live` 为其他轨在 `since` 之后列出过新分片：这时本轨不再出新分片是本轨的故障。
+    /// 停滞的结论（见 [`LiveTrack::stall_cause`]），取走最近一次刷新失败的原因；只在据此结束录制时调用，此时这条轨的
+    /// 状况有据可依（见 [`LiveTrack::settled`]）。
+    pub(super) fn stall(
+        &mut self,
+        now: Instant,
+        since: Instant,
+        noticed: Instant,
+        others_live: bool,
+    ) -> Result<StallCause, StallReason> {
+        let cause = self.stall_cause(now, since, noticed, others_live);
+        self.last_refresh_error = None;
+        cause
+    }
+
+    /// 停滞开始于 `since`、在 `noticed` 被察觉时此刻（`now`）的结论，不改这条轨的状态。`Ok` 为看起来直播已结束，`Err`
+    /// 为故障。`others_live` 为其他轨在 `since` 之后列出过新分片：这时本轨不再出新分片是本轨的故障。
     ///
     /// 依次看：在途的请求满了期限；播放列表没被删除（最近一次刷新不是 404/410）而 `since` 之后列出过新分片（刷新是
     /// 通的，新分片都取不到）；播放列表已删除；刷新失败；都没有时为不再出新分片。
-    pub(super) fn stall(
-        &mut self,
+    fn stall_cause(
+        &self,
         now: Instant,
         since: Instant,
         noticed: Instant,
@@ -634,7 +647,7 @@ impl LiveTrack {
         {
             return Err(StallReason::RefreshPending);
         }
-        let refresh_error = self.last_refresh_error.take();
+        let refresh_error = self.last_refresh_error.clone();
         let gone = refresh_error.as_ref().and_then(gone);
         if gone.is_none() && self.listed_since(since) {
             let failure = self.last_download_failure.clone().expect(
@@ -660,7 +673,7 @@ impl LiveTrack {
     /// 判据同 [`LiveTrack::stall`]，停滞从开始的时刻起算，在途的请求那时起满了期限即为一直不返回）。没有时为 None。
     /// `others_live(since)` 为音视频轨在 `since` 之后列出过新分片。
     pub(super) fn unrecorded_tail(
-        &mut self,
+        &self,
         stall_timeout: Duration,
         max_us: Option<u64>,
         now: Instant,
@@ -682,10 +695,12 @@ impl LiveTrack {
         let since = self
             .stall_since(stall_timeout)
             .filter(|&since| since <= now)?;
-        Some(match self.stall(now, since, since, others_live(since)) {
-            Ok(cause) => TailCause::Ended(cause),
-            Err(reason) => TailCause::Failed(reason),
-        })
+        Some(
+            match self.stall_cause(now, since, since, others_live(since)) {
+                Ok(cause) => TailCause::Ended(cause),
+                Err(reason) => TailCause::Failed(reason),
+            },
+        )
     }
 }
 
