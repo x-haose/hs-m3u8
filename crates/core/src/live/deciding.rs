@@ -81,13 +81,16 @@ impl Recorder<'_> {
     }
 
     /// 记下第 `track` 条轨拉到的播放列表是否列出了新分片、安排下次刷新；有分片时暂存，其中第一份开始核对。
-    /// 还没拿到候选就拉到已结束而没有分片的，这条轨这次没有可录的，不影响判定。字幕轨只暂存，会话定下后按顺序处理。
+    /// 还没拿到候选就拉到已结束而没有分片的，这条轨这次没有可录的，不影响判定。字幕轨只暂存（空而没结束的不暂存），会话定下后按顺序处理。
     fn note(&mut self, track: usize, fetched: Fetched) {
         let judges = self.verdicts().judges(track);
         let t = &mut self.tracks[track];
         t.note_undecided(&fetched.playlist, fetched.started, Instant::now());
         if !judges {
-            t.hold(fetched);
+            // 没有分片又没结束的不用处理：之后的刷新会再列出
+            if !fetched.playlist.segments.is_empty() || fetched.playlist.ended {
+                t.hold(fetched);
+            }
             return;
         }
         if fetched.playlist.segments.is_empty() {

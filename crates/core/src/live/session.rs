@@ -9,7 +9,7 @@
 //! 会话里有轨不录（已录满或这次没有内容）时，它在这个会话里没有分片，录到的合并不进去，判定时即报错。
 //!
 //! 字幕轨不参与判定、不出结论（它靠 X-TIMESTAMP-MAP 与不连续段序号对齐画面，不作对齐的证据）：会话定下后，在这个会话里
-//! 录过的接着补录，否则从窗口起点录；已录满的这次不录。
+//! 录过的接着补录，否则从窗口起点录；已录满的、或没有要录的音视频轨时这次不录。
 //!
 //! 本次的记录与目录里的有须核对的差别（见 [`SourceChange`]）时：所选的轨身份变了的轨，目录里已有它的分片的，须它自己
 //! 核对一致，别的轨接得上不能替它作证；地址变了的，须接着最近的会话录。做不到即无法确认是同一内容，判定时报错；这次没
@@ -279,7 +279,8 @@ impl Verdicts {
             .zip(media.iter().zip(full))
             .map(
                 |(((recorded, verdict), records), (&media, full))| match (recorded, verdict) {
-                    _ if !media && full => None,
+                    // 没有要录的音视频轨时字幕也不录：录进旧会话的只会有字幕，地址变了时还没核对过
+                    _ if !media && (full || !recording) => None,
                     (Some(r), _) if !media && r.session == session => Some(Start::Continue(r)),
                     _ if !media => Some(Start::New(SessionStart::Fresh)),
                     _ if !records => None,
@@ -357,6 +358,45 @@ mod tests {
             decision.conclude(track, verdict);
         }
         decision.decide()
+    }
+
+    /// 字幕轨（第 1 条）不出结论也能判定：视频接得上时它接着同一会话录；视频已录满、没有要录的音视频轨时它也不录（地址
+    /// 变了时也不会录进旧会话）。
+    #[test]
+    fn subtitles_follow_the_media_decision() {
+        let decide = |video_full: bool, verdict: Verdict, url: bool| {
+            let mut decision = Verdicts {
+                previous_session: 3,
+                recorded: vec![Some(recorded(3, &[10, 11])), Some(recorded(3, &[10]))],
+                full: vec![video_full, false],
+                verdicts: vec![None, None],
+                media: vec![true, false],
+                change: if url {
+                    change(true, [false, false])
+                } else {
+                    None
+                },
+            };
+            assert!(!decision.is_complete());
+            decision.conclude(0, verdict);
+            assert!(decision.is_complete());
+            decision.decide().unwrap()
+        };
+        let continued = decide(false, Verdict::Matches, false);
+        assert_eq!(continued.session, 3);
+        assert!(matches!(continued.tracks[1], Some(Start::Continue(_))));
+        let renewed = decide(false, Verdict::Differs, false);
+        assert_eq!(renewed.session, 4);
+        assert!(matches!(
+            renewed.tracks[1],
+            Some(Start::New(SessionStart::Fresh))
+        ));
+        for url in [false, true] {
+            let idle = decide(true, Verdict::Unverifiable, url);
+            assert_eq!(idle.session, 3);
+            assert!(idle.tracks.iter().all(Option::is_none));
+            assert!(!idle.adopt);
+        }
     }
 
     fn change(url: bool, tracks: [bool; 2]) -> Option<SourceChange> {

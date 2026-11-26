@@ -99,8 +99,8 @@ pub(crate) enum RecordKind {
     /// 点播：计划摘要（见 [`crate::vod::Plan::digest`]）相同才能续传
     Vod { plan_digest: String },
     Live {
-        /// 尾部没录到的字幕轨：（会话, 轨号），按会话、轨号排列、不重复（见 [`crate::UnrecordedTail`]）。每次录制结束时
-        /// 按这个会话的结局改记；续录同一会话录到了的去掉
+        /// 尾部没录到的字幕轨：（会话, 轨号），按会话、轨号排列、不重复（见 [`crate::UnrecordedTail`]）；录制中随时改记
+        /// （见 [`super::WorkDir::set_tail`]）
         tails: Vec<(u32, usize)>,
     },
 }

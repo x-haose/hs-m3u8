@@ -81,7 +81,7 @@ impl Recorder<'_> {
             since,
             noticed,
         } = stall;
-        // 字幕轨的故障不使任务失败，录制结束时报为尾部没录到（见 [`Recorder::unrecorded_tails`]）
+        // 字幕轨的故障不使任务失败，报为尾部没录到（见 crate::UnrecordedTail）
         let media = &self.media;
         let others = || {
             self.refreshing()

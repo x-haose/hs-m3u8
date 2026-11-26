@@ -694,8 +694,10 @@ impl<'a> Recorder<'a> {
             Ok(len) => {
                 count_done(self.progress, id, len);
                 self.tracks[id.track].segment_recorded(Instant::now());
-                // 录到了新分片：不再是尾部没录到（由 write_tails 写出）
-                self.tailed[id.track] = false;
+                // 录到了新分片：不再是尾部没录到（由 write_tails 写出）；接不上而停了的轨下完的是停之前排进的分片
+                if !self.tracks[id.track].is_broken() {
+                    self.tailed[id.track] = false;
+                }
                 return Ok(());
             }
             Err(error) => error,

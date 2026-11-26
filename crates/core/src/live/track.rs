@@ -378,7 +378,6 @@ impl LiveTrack {
         !self.pending.is_empty() || self.preparing.is_some()
     }
 
-    /// 之后不再刷新、不再处理这条轨（接不上而结束录制）。
     /// 字幕轨前后接不上而停了（见 [`LiveTrack::stop_broken`]）。
     pub(super) fn is_broken(&self) -> bool {
         self.broken.is_some()
@@ -391,6 +390,7 @@ impl LiveTrack {
         self.broken = Some(cause);
     }
 
+    /// 之后不再刷新、不再处理这条轨（接不上而结束录制，或字幕轨接不上而停了）。
     pub(super) fn stop_processing(&mut self) {
         self.refresh = Refresh::Ended;
         self.pending.clear();

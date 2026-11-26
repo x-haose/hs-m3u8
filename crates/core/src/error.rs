@@ -287,13 +287,15 @@ impl Error {
                 kind: kind.clone(),
                 retry_after: *retry_after,
             }),
-            Error::Segment { cause, .. } | Error::Call { cause, .. } => cause.any_http_failure(),
+            Error::Segment { cause, .. } | Error::Call { cause, .. } | Error::Key { cause, .. } => {
+                cause.any_http_failure()
+            }
             _ => None,
         }
     }
 
     /// 直播字幕轨的刷新失败中等下次刷新的及其原因：除了音视频轨也等的（`waitable`），还有任何 HTTP 错误与不是媒体播放
-    /// 列表的内容（字幕轨的外部故障不使任务失败）。其余（DRM、回调出错等）为 None。
+    /// 列表的内容（见 [`RefreshReason::NotAPlaylist`]；字幕轨的外部故障不使任务失败）。其余（DRM、回调出错等）为 None。
     pub(crate) fn subtitle_refresh_failure(&self) -> Option<RefreshReason> {
         if let Some(failure) = self.any_http_failure() {
             return Some(RefreshReason::Http(failure));
@@ -305,12 +307,15 @@ impl Error {
                 | hs_m3u8_hls::Malformed::Mixed => Some(RefreshReason::NotAPlaylist),
                 _ => None,
             },
+            Error::NotMediaPlaylist { .. } | Error::ResponseTooLarge { .. } => {
+                Some(RefreshReason::NotAPlaylist)
+            }
             _ => None,
         }
     }
 
-    /// 直播字幕分片取不到：除了 [`Error::missable`] 的，还有任何 HTTP 错误与校验不过的内容（字幕轨的外部故障不使任务
-    /// 失败）。其余为 None。
+    /// 直播字幕分片取不到：除了 [`Error::missable`] 的，还有任何 HTTP 错误（含取 key 的）与校验不过的内容（字幕轨的外部
+    /// 故障不使任务失败）。其余为 None。
     pub(crate) fn subtitle_missable(&self) -> Option<FetchFailure> {
         if let Some(failure) = self.missable() {
             return Some(failure);

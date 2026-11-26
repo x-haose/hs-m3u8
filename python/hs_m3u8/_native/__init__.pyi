@@ -2747,8 +2747,8 @@ class RefreshReason:
     @typing.final
     class NotAPlaylist(RefreshReason):
         r"""
-        内容不是媒体播放列表（不是 UTF-8、不是播放列表，或混着主播放列表的标签），多为服务器返回了错误页；只出在
-        由 Rust 接口录的直播的字幕轨上
+        内容不是媒体播放列表（不是 UTF-8、不是播放列表、是主播放列表、混着主播放列表的标签，或大到超出播放列表的
+        上限），多为服务器返回了错误页或回源错配；只出在由 Rust 接口录的直播的字幕轨上
         """
         __match_args__ = ()
         def __new__(cls) -> RefreshReason.NotAPlaylist: ...

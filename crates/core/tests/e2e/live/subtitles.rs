@@ -387,7 +387,7 @@ async fn resuming_without_subtitle_segments_does_not_wait_for_them() {
          #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"zh\",LANGUAGE=\"zh\",URI=\"subs.m3u8\"\n\
          #EXT-X-STREAM-INF:BANDWIDTH=200000,SUBTITLES=\"subs\"\nv.m3u8\n",
     );
-    let mut req = live_request(server.url("master.m3u8"), &dir, STALL);
+    let mut req = live_request(server.url("master.m3u8"), &dir, LONG_STALL);
     req.source.preference.subtitles = Renditions::All;
     req.output.target = Target::File(MergedFile {
         path: dir.join("out.mkv"),
@@ -402,10 +402,11 @@ async fn resuming_without_subtitle_segments_does_not_wait_for_them() {
     server.put("v.m3u8", video(2, false));
     let job = engine().start(req).unwrap();
     let mut progress = job.control().progress();
-    // 会话定下、画面接着录到第 1 片：判定没有等字幕
-    progress
-        .wait_for(|p| p.tracks.first().is_some_and(|t| t.segments.done == 2))
+    // 会话定下、画面接着录到第 1 片：判定没有等字幕（等它要等满远长于此的停滞时限）
+    let decided = progress.wait_for(|p| p.tracks.first().is_some_and(|t| t.segments.done == 2));
+    tokio::time::timeout(LONG_STALL / 3, decided)
         .await
+        .expect("会话判定不等字幕轨")
         .unwrap();
     server.put(
         "subs/1.vtt",
@@ -415,9 +416,10 @@ async fn resuming_without_subtitle_segments_does_not_wait_for_them() {
         "subs.m3u8",
         "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1,\nsubs/1.vtt\n",
     );
-    progress
-        .wait_for(|p| p.tracks.get(1).is_some_and(|t| t.segments.done == 2))
+    let joined = progress.wait_for(|p| p.tracks.get(1).is_some_and(|t| t.segments.done == 2));
+    tokio::time::timeout(LONG_STALL / 3, joined)
         .await
+        .expect("字幕出了分片照样并入")
         .unwrap();
     server.put("v.m3u8", video(2, true));
     let output = job.wait().await.unwrap();
@@ -432,9 +434,12 @@ async fn resuming_without_subtitle_segments_does_not_wait_for_them() {
     );
 }
 
+/// 远长于测试本身的停滞时限：测试里不会有轨停滞。
+const LONG_STALL: Duration = Duration::from_secs(30);
+
 /// 一个画面加一条字幕的直播源：画面播放列表 v.m3u8 先列 ts_a 的第 0 片，字幕播放列表 subs.m3u8 列一片与之对齐的字幕；
-/// 都没有 ENDLIST。返回输出为 MKV 的录制请求。
-fn subtitled_live(server: &Server, dir: &std::path::Path) -> JobRequest {
+/// 都没有 ENDLIST。返回输出为 MKV、停滞时限为 `stall_timeout` 的录制请求。
+fn subtitled_live(server: &Server, dir: &std::path::Path, stall_timeout: Duration) -> JobRequest {
     for i in 0..2 {
         server.put(&format!("v/seg{i}.ts"), fixture(&format!("ts_a/seg{i}.ts")));
     }
@@ -453,7 +458,7 @@ fn subtitled_live(server: &Server, dir: &std::path::Path) -> JobRequest {
          #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"zh\",LANGUAGE=\"zh\",URI=\"subs.m3u8\"\n\
          #EXT-X-STREAM-INF:BANDWIDTH=200000,SUBTITLES=\"subs\"\nv.m3u8\n",
     );
-    let mut req = live_request(server.url("master.m3u8"), dir, STALL);
+    let mut req = live_request(server.url("master.m3u8"), dir, stall_timeout);
     req.source.preference.subtitles = Renditions::All;
     req.output.target = Target::File(MergedFile {
         path: dir.join("out.mkv"),
@@ -487,7 +492,7 @@ async fn both_recorded(progress: &mut tokio::sync::watch::Receiver<Progress>, do
 async fn a_tail_noticed_before_cancelling_survives_into_merging() {
     let dir = test_dir("live_subtitles_tail_cancel");
     let server = Server::start().await;
-    let mut req = subtitled_live(&server, &dir);
+    let mut req = subtitled_live(&server, &dir, STALL);
     req.output.keep_work_dir = true;
     let job = engine().start(req.clone()).unwrap();
     let mut progress = job.control().progress();
@@ -526,7 +531,8 @@ async fn a_tail_noticed_before_cancelling_survives_into_merging() {
 async fn subtitle_failures_only_affect_the_subtitle_track() {
     let dir = test_dir("live_subtitles_failures");
     let server = Server::start().await;
-    let req = subtitled_live(&server, &dir);
+    // 停滞时限远长于这条测试：尾部只会由接不上记下
+    let req = subtitled_live(&server, &dir, LONG_STALL);
     let job = engine().start(req).unwrap();
     let mut progress = job.control().progress();
     both_recorded(&mut progress, 1).await;
