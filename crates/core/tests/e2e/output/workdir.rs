@@ -1,7 +1,9 @@
 //! 写出之后删除任务目录：只删本库写的文件，系统生成的元数据文件不妨碍删除。
 
 use crate::server::Server;
-use crate::{apple_double, engine, fixture, mp4_target, request, run, test_dir};
+#[cfg(unix)]
+use crate::mp4_target;
+use crate::{apple_double, engine, fixture, request, run, test_dir};
 
 /// 输出经符号链接落在任务目录里（按字面比较看不出）：删除任务目录时只删本库写的文件，输出留下，
 /// 没删干净记在 leftovers 里；job.json 也留下，目录仍是任务目录，再运行（覆盖）照常进行。
