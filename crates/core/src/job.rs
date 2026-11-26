@@ -155,7 +155,7 @@ async fn run_live(
         selection: resolved.selection_record(),
         kind: RecordKind::Live { tails: Vec::new() },
     };
-    let mut dir = WorkDir::open(
+    let dir = WorkDir::open(
         task.output.work_dir.clone(),
         record,
         lock,
@@ -178,11 +178,6 @@ async fn run_live(
         .merged()
         .map(|(_, container)| (dir.record().streams(), container));
     let recording = live::record(ctx, resolved.tracks, options, merge).await?;
-    drop(fetcher);
-    if let Some(session) = recording.session {
-        let tracks: Vec<usize> = recording.tails.iter().map(|(track, _)| *track).collect();
-        dir.record_tails(session, &tracks).await?;
-    }
     let streams = dir.record().streams();
     let stored = dir.scan(streams.len()).await?;
     let input = merge_live(&dir, &stored, streams, Some(recording))?;
@@ -377,10 +372,8 @@ fn merge_live(
         }
         None => (None, Vec::new(), Vec::new(), Vec::new()),
     };
-    let RecordKind::Live { tails } = &dir.record().kind else {
-        panic!("只合并直播录制");
-    };
-    let unrecorded_tails = tails
+    let unrecorded_tails = dir
+        .tails()
         .iter()
         .map(|&(session, track)| UnrecordedTail {
             session,

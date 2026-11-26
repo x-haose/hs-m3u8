@@ -29,6 +29,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -133,6 +134,9 @@ pub(crate) struct WorkDir {
     pending: Option<Pending>,
     /// `pending` 已核对上、已改记（见 [`WorkDir::adopt_record`]）
     adopted: AtomicBool,
+    /// 直播尾部没录到的字幕轨（会话, 轨号），升序、不重复；录制中随时改记（见 [`WorkDir::set_tail`]）。`record` 与
+    /// `pending` 里的尾部在打开时移到这里、留空，写 `job.json` 时用这里的
+    tails: Mutex<Vec<(u32, usize)>>,
     lock: Lock,
 }
 
@@ -208,39 +212,38 @@ impl WorkDir {
     pub(crate) async fn adopt_record(&self) -> Result<(), Error> {
         let pending = self.pending.as_ref().expect("只在有须核对的差别时改记");
         let path = self.layout.root.join(JOB_FILE);
-        let bytes = encode_hls(&pending.record);
+        let bytes = encode_hls(&with_tails(&pending.record, &self.tails()));
         blocking(move || write_atomic(&path, &bytes)).await??;
         self.adopted.store(true, Ordering::Relaxed);
         Ok(())
     }
 
-    /// 直播录制结束：生效的记录里第 `session` 个会话尾部没录到的字幕轨改记为 `tracks`（轨号，升序），有变化时写进
-    /// `job.json`。
-    pub(crate) async fn record_tails(
-        &mut self,
+    /// 直播尾部没录到的字幕轨（会话, 轨号），升序（见 [`crate::UnrecordedTail`]）。
+    pub(crate) fn tails(&self) -> Vec<(u32, usize)> {
+        self.tails.lock().expect("持锁期间不会 panic").clone()
+    }
+
+    /// 把第 `session` 个会话第 `track` 条字幕轨记为（`tailed`）或不再记为尾部没录到，有变化时写进 `job.json`（生效的
+    /// 记录）。录制中察觉停滞、又录到新分片时即改记，取消、失败或进程退出之后只合并也报得出。
+    pub(crate) async fn set_tail(
+        &self,
         session: u32,
-        tracks: &[usize],
+        track: usize,
+        tailed: bool,
     ) -> Result<(), Error> {
-        let record = match &mut self.pending {
-            Some(pending) if self.adopted.load(Ordering::Relaxed) => &mut pending.record,
-            _ => &mut self.record,
+        let bytes = {
+            let mut tails = self.tails.lock().expect("持锁期间不会 panic");
+            let at = tails.binary_search(&(session, track));
+            match (at, tailed) {
+                (Err(at), true) => tails.insert(at, (session, track)),
+                (Ok(at), false) => {
+                    tails.remove(at);
+                }
+                (Ok(_), true) | (Err(_), false) => return Ok(()),
+            }
+            encode_hls(&with_tails(self.record(), &tails))
         };
-        let RecordKind::Live { tails } = &mut record.kind else {
-            panic!("只有直播录制记尾部");
-        };
-        let mut updated: Vec<(u32, usize)> = tails
-            .iter()
-            .copied()
-            .filter(|&(s, _)| s != session)
-            .chain(tracks.iter().map(|&track| (session, track)))
-            .collect();
-        updated.sort_unstable();
-        if updated == *tails {
-            return Ok(());
-        }
-        *tails = updated;
         let path = self.layout.root.join(JOB_FILE);
-        let bytes = encode_hls(record);
         blocking(move || write_atomic(&path, &bytes)).await?
     }
 
@@ -439,13 +442,38 @@ fn open(
             }
         }
     };
+    // 生效的记录（写在 job.json 里的）带着尾部：新建的没有，沿用的为原有的（keeping_attributes_of 已带上）
+    let (record, tails) = take_tails(record);
+    let pending = pending.map(|p| Pending {
+        record: take_tails(p.record).0,
+        change: p.change,
+    });
     Ok(WorkDir {
         layout,
         record,
         pending,
         adopted: AtomicBool::new(false),
+        tails: Mutex::new(tails),
         lock,
     })
+}
+
+/// 记录与它的直播尾部，取出后记录里的为空。
+fn take_tails(mut record: HlsRecord) -> (HlsRecord, Vec<(u32, usize)>) {
+    let tails = match &mut record.kind {
+        RecordKind::Live { tails } => std::mem::take(tails),
+        RecordKind::Vod { .. } => Vec::new(),
+    };
+    (record, tails)
+}
+
+/// 带上直播尾部 `tails` 的记录，用于写 `job.json`。
+fn with_tails(record: &HlsRecord, tails: &[(u32, usize)]) -> HlsRecord {
+    let mut record = record.clone();
+    if let RecordKind::Live { tails: kept } = &mut record.kind {
+        *kept = tails.to_vec();
+    }
+    record
 }
 
 /// 删掉任务目录里之前的任务留下的内容，换成当前任务：HLS 的分片与 init 段，与 `job.json` 记着的 `recorded` 是文件任务时

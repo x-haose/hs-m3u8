@@ -8,6 +8,9 @@
 //! 会话，接得上的轨跳过录过的序号。没有一条轨核对一致时，之前没录到的轨不知道与哪段时间对得上，不并入旧会话。另起的
 //! 会话里有轨不录（已录满或这次没有内容）时，它在这个会话里没有分片，录到的合并不进去，判定时即报错。
 //!
+//! 字幕轨不参与判定、不出结论（它靠 X-TIMESTAMP-MAP 与不连续段序号对齐画面，不作对齐的证据）：会话定下后，在这个会话里
+//! 录过的接着补录，否则从窗口起点录；已录满的这次不录。
+//!
 //! 本次的记录与目录里的有须核对的差别（见 [`SourceChange`]）时：所选的轨身份变了的轨，目录里已有它的分片的，须它自己
 //! 核对一致，别的轨接得上不能替它作证；地址变了的，须接着最近的会话录。做不到即无法确认是同一内容，判定时报错；这次没
 //! 有要录的轨而地址变了时不改记，照常合并。
@@ -145,17 +148,21 @@ pub(super) struct Verdicts {
     recorded: Vec<Option<LatestSession>>,
     /// 各轨已录满 max_duration、这次不录
     full: Vec<bool>,
+    /// 各轨的结论；字幕轨恒为 None
     verdicts: Vec<Option<Verdict>>,
+    /// 按轨号：音视频轨为 true，字幕轨为 false（不参与判定）
+    media: Vec<bool>,
     /// 本次的记录与目录里的须核对的差别
     change: Option<SourceChange>,
 }
 
 impl Verdicts {
-    /// 由目录里已录的内容开始判定，`change` 为本次的记录与目录里的须核对的差别；一个分片都没有时为 Ok(None)（直接录
-    /// 第 0 个会话）。某轨最近的会话里分片记的起点不一致时目录内容矛盾，返回原因。
+    /// 由目录里已录的内容开始判定，`change` 为本次的记录与目录里的须核对的差别，`media` 按轨号标出音视频轨；一个分片都
+    /// 没有时为 Ok(None)（直接录第 0 个会话）。某轨最近的会话里分片记的起点不一致时目录内容矛盾，返回原因。
     pub(super) fn new(
         stored: &Stored,
         change: Option<&SourceChange>,
+        media: Vec<bool>,
     ) -> Result<Option<Self>, String> {
         let Some(previous_session) = stored
             .segments
@@ -177,6 +184,7 @@ impl Verdicts {
             recorded,
             full: stored.segments.iter().map(|_| false).collect(),
             verdicts: stored.segments.iter().map(|_| None).collect(),
+            media,
             change: change.cloned(),
         }))
     }
@@ -202,20 +210,37 @@ impl Verdicts {
         self.verdicts[track].is_some()
     }
 
-    pub(super) fn is_complete(&self) -> bool {
-        self.verdicts.iter().all(Option::is_some)
+    /// 第 `track` 条轨参与判定（音视频轨）。
+    pub(super) fn judges(&self, track: usize) -> bool {
+        self.media[track]
     }
 
-    /// 各轨都有结论后作出判定，取走各轨最近的会话（规则见模块说明）。没有要录的轨时不另起会话。
+    /// 各音视频轨都有结论。
+    pub(super) fn is_complete(&self) -> bool {
+        self.verdicts
+            .iter()
+            .zip(&self.media)
+            .all(|(v, &media)| !media || v.is_some())
+    }
+
+    /// 各音视频轨都有结论后作出判定，取走各轨最近的会话（规则见模块说明）。没有要录的音视频轨时不另起会话。
     pub(super) fn decide(&mut self) -> Result<Decision, Undecided> {
+        let media = std::mem::take(&mut self.media);
+        // 字幕轨没有结论，在下面的判断里不起作用：当作 Unverifiable 且不算要录的轨
         let verdicts: Vec<Verdict> = std::mem::take(&mut self.verdicts)
             .into_iter()
-            .map(|v| v.expect("判定前各轨都已有结论"))
+            .zip(&media)
+            .map(|(v, &media)| match v {
+                Some(v) => v,
+                None if !media => Verdict::Unverifiable,
+                None => panic!("判定前各音视频轨都已有结论"),
+            })
             .collect();
         let records: Vec<bool> = verdicts
             .iter()
             .zip(&self.full)
-            .map(|(&v, &full)| !full && v != Verdict::Ended)
+            .zip(&media)
+            .map(|((&v, &full), &media)| media && !full && v != Verdict::Ended)
             .collect();
         let previous = self.previous_session;
         let recording = records.contains(&true);
@@ -224,6 +249,7 @@ impl Verdicts {
         let adopt = match &self.change {
             None => false,
             Some(change) => {
+                // 字幕轨换了身份而目录里已有它的分片时同样核对不上：它不出结论
                 let unproven = change.tracks.iter().zip(&verdicts).zip(&self.recorded).any(
                     |((&changed, &verdict), recorded)| {
                         changed && recorded.is_some() && verdict != Verdict::Matches
@@ -238,25 +264,32 @@ impl Verdicts {
         let session = if continued || !recording {
             previous
         } else {
-            if let Some(idle) = records.iter().position(|&r| !r) {
+            if let Some(idle) = (0..records.len()).find(|&t| media[t] && !records[t]) {
                 return Err(Undecided::Unaligned(idle));
             }
             previous
                 .checked_add(1)
                 .ok_or(Undecided::SessionsExhausted)?
         };
+        let full = std::mem::take(&mut self.full);
         let tracks = std::mem::take(&mut self.recorded)
             .into_iter()
             .zip(verdicts)
             .zip(records)
-            .map(|((recorded, verdict), records)| match (recorded, verdict) {
-                _ if !records => None,
-                (Some(r), Verdict::Matches) if continued && r.session == previous => {
-                    Some(Start::Continue(r))
-                }
-                (Some(r), Verdict::Matches) => Some(Start::New(SessionStart::After(r.last()))),
-                _ => Some(Start::New(SessionStart::Fresh)),
-            })
+            .zip(media.iter().zip(full))
+            .map(
+                |(((recorded, verdict), records), (&media, full))| match (recorded, verdict) {
+                    _ if !media && full => None,
+                    (Some(r), _) if !media && r.session == session => Some(Start::Continue(r)),
+                    _ if !media => Some(Start::New(SessionStart::Fresh)),
+                    _ if !records => None,
+                    (Some(r), Verdict::Matches) if continued && r.session == previous => {
+                        Some(Start::Continue(r))
+                    }
+                    (Some(r), Verdict::Matches) => Some(Start::New(SessionStart::After(r.last()))),
+                    _ => Some(Start::New(SessionStart::Fresh)),
+                },
+            )
             .collect();
         Ok(Decision {
             session,
@@ -317,6 +350,7 @@ mod tests {
             ],
             full: full.to_vec(),
             verdicts: vec![None, None],
+            media: vec![true, true],
             change,
         };
         for (track, verdict) in verdicts.into_iter().enumerate() {

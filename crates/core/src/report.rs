@@ -160,6 +160,9 @@ pub struct TrackProgress {
     pub segments: SegmentCounts,
     /// 口径同 [`Progress::bytes`]，只算这条轨
     pub bytes: u64,
+    /// 直播的字幕轨：在录制中的会话里记为尾部没录到（停滞满了时限，或前后接不上而停了；见 [`UnrecordedTail`]），已写进
+    /// 任务目录；录到新分片即恢复为 false。其余为 false
+    pub unrecorded_tail: bool,
 }
 
 /// 轨的种类。
@@ -189,6 +192,7 @@ impl Progress {
                 kind,
                 segments: SegmentCounts::default(),
                 bytes: 0,
+                unrecorded_tail: false,
             })
             .collect();
     }
@@ -272,6 +276,10 @@ pub enum RefreshReason {
     /// 语法错误，多为服务器还没写完
     #[error("第 {line} 行：{kind}")]
     Syntax { line: usize, kind: hls::SyntaxError },
+    /// 内容不是媒体播放列表（不是 UTF-8、不是播放列表，或混着主播放列表的标签），多为服务器返回了错误页；只出在字幕轨上，
+    /// 其余轨的使任务失败
+    #[error("内容不是媒体播放列表")]
+    NotAPlaylist,
 }
 
 impl RefreshReason {
@@ -279,7 +287,10 @@ impl RefreshReason {
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
             RefreshReason::Http(failure) => failure.retry_after,
-            RefreshReason::Empty | RefreshReason::Truncated | RefreshReason::Syntax { .. } => None,
+            RefreshReason::Empty
+            | RefreshReason::Truncated
+            | RefreshReason::Syntax { .. }
+            | RefreshReason::NotAPlaylist => None,
         }
     }
 
@@ -288,7 +299,10 @@ impl RefreshReason {
     pub fn retryable(&self) -> bool {
         match self {
             RefreshReason::Http(failure) => failure.kind.retryable(),
-            RefreshReason::Empty | RefreshReason::Truncated | RefreshReason::Syntax { .. } => true,
+            RefreshReason::Empty
+            | RefreshReason::Truncated
+            | RefreshReason::Syntax { .. }
+            | RefreshReason::NotAPlaylist => true,
         }
     }
 }
@@ -413,32 +427,37 @@ pub struct LiveReport {
     pub unrecorded_tails: Vec<UnrecordedTail>,
 }
 
-/// 直播里一条字幕轨在一个会话的尾部没录到：这个会话的录制结束时，它已停滞（同 [`crate::LiveOptions::stall_timeout`]
-/// 的判据：持续这么久没录到新分片），`after` 之后到录制结束的字幕不在输出中。字幕轨的故障不结束录制、不使任务失败
-/// （录制的结束只看音视频轨），在这里报出。简化：录制结束前停滞还不满时限的那一段不报；续录同一会话、又录到了新分片的，
-/// 这一项去掉
+/// 直播里一条字幕轨在一个会话的尾部没录到：`after` 之后的字幕不在输出中。字幕轨的故障不结束录制、不使任务失败（录制的
+/// 结束只看音视频轨），在这里报出。
+///
+/// 录制中它停滞（持续 [`crate::LiveOptions::stall_timeout`] 与 3 个目标时长中较长的那么久没录到新分片）或前后接不上而停了
+/// 时即记进任务目录（[`TrackProgress::unrecorded_tail`] 随之变为 true），录到新分片即去掉；所以取消、失败或进程退出后
+/// 只合并照样报出。录制结束时出现了 ENDLIST 或录满的去掉。简化：录制结束前停滞还不满时限的那一段不报。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnrecordedTail {
     pub session: u32,
     pub track: usize,
     /// 这个会话里录到的最后一个分片的媒体序号；一个也没录到时为 None
     pub after: Option<u64>,
-    /// 这条轨合并进输出的最后一个分片在输出时间轴上的结束时刻（从输出开头算，各组首尾相接）；按各分片声明的时长
-    /// （EXTINF）推算，与输出里实际的时刻差出各组声明与实际时长之差（通常不到一秒）。这个会话里没有分片合并进输出时为
-    /// None
+    /// 这条轨合并进输出的最后一个分片在输出时间轴上的结束时刻（从输出开头算），供显示「某时之后没录到」。是推算：之前
+    /// 各组取音视频轨声明时长（EXTINF）之和中最长的首尾相接，加上这一组里这条轨合并进输出的分片的声明时长。偏早的
+    /// 来源：缺的分片（见 [`Output::missed`]）在输出里仍占时间却没算进去，这条轨在这一组里起步晚于画面的部分也没算；
+    /// 另差出各组声明与实际时长之差。这个会话里没有分片合并进输出时为 None
     pub at: Option<Duration>,
-    /// 本次运行录制结束时判定的原因；之前的运行记下的、或只合并时为 None（原因不落盘）
+    /// 本次运行判定的原因；之前的运行记下的、或只合并时为 None（原因不落盘）
     pub cause: Option<TailCause>,
 }
 
 /// 字幕轨尾部没录到的原因。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TailCause {
-    /// 看起来这条字幕轨已结束：不再出新分片，或播放列表已被删除；音视频轨也都结束了
+    /// 看起来这条字幕轨已结束：不再出新分片，或播放列表已被删除，而停滞开始之后音视频轨也没再出新分片
     Ended(StallCause),
-    /// 故障：刷新一直失败（字幕轨另含 401、403 这类不可重试的 HTTP 错误），有新分片却都取不到，或音视频轨还在出新
-    /// 分片而它不再出（[`StallReason::TrackStopped`]）
+    /// 故障：刷新一直失败（字幕轨另含 401、403 这类不可重试的 HTTP 错误与不是播放列表的内容）、一直不返回，有新分片却
+    /// 都取不到，或音视频轨还在出新分片而它不再出（[`StallReason::TrackStopped`]）
     Failed(StallReason),
+    /// 播放列表与之前刷新得到的接不上（多为字幕打包器重启）：这次运行不再录它
+    Broken(SourceBreak),
 }
 
 /// 本次运行的录制如何结束。

@@ -386,6 +386,19 @@ class FetchErrorKind:
         __match_args__ = ()
         def __new__(cls) -> FetchErrorKind.Incomplete: ...
     
+    @typing.final
+    class Rejected(FetchErrorKind):
+        r"""
+        内容校验不过；只出在由 Rust 接口录的直播的字幕分片上（如不是 WebVTT）
+        """
+        __match_args__ = ("reason",)
+        @property
+        def reason(self) -> IntegrityFailure.Padding | IntegrityFailure.CipherLength | IntegrityFailure.RangeLength | IntegrityFailure.UnrecognizedSegment | IntegrityFailure.NotFmp4 | IntegrityFailure.Fmp4BoxTooSmall | IntegrityFailure.Fmp4TrailingBytes | IntegrityFailure.Fmp4Malformed | IntegrityFailure.Fmp4OpenBoxTooLarge:
+            r"""
+            校验不过的原因
+            """
+        def __new__(cls, reason: IntegrityFailure) -> FetchErrorKind.Rejected: ...
+    
 
 class FetchFailure:
     r"""
@@ -412,6 +425,19 @@ class FetchFailure:
         """
         __match_args__ = ()
         def __new__(cls) -> FetchFailure.Incomplete: ...
+    
+    @typing.final
+    class Rejected(FetchFailure):
+        r"""
+        内容校验不过；只出在由 Rust 接口录的直播的字幕分片上（如不是 WebVTT）
+        """
+        __match_args__ = ("reason",)
+        @property
+        def reason(self) -> IntegrityFailure.Padding | IntegrityFailure.CipherLength | IntegrityFailure.RangeLength | IntegrityFailure.UnrecognizedSegment | IntegrityFailure.NotFmp4 | IntegrityFailure.Fmp4BoxTooSmall | IntegrityFailure.Fmp4TrailingBytes | IntegrityFailure.Fmp4Malformed | IntegrityFailure.Fmp4OpenBoxTooLarge:
+            r"""
+            校验不过的原因
+            """
+        def __new__(cls, reason: IntegrityFailure) -> FetchFailure.Rejected: ...
     
 
 @typing.final
@@ -1703,7 +1729,7 @@ class MissReason:
         """
         __match_args__ = ("cause",)
         @property
-        def cause(self) -> FetchErrorKind.Http | FetchErrorKind.Incomplete:
+        def cause(self) -> FetchErrorKind.Http | FetchErrorKind.Incomplete | FetchErrorKind.Rejected:
             r"""
             取不到的原因
             """
@@ -1716,7 +1742,7 @@ class MissReason:
         """
         __match_args__ = ("cause",)
         @property
-        def cause(self) -> FetchErrorKind.Http | FetchErrorKind.Incomplete:
+        def cause(self) -> FetchErrorKind.Http | FetchErrorKind.Incomplete | FetchErrorKind.Rejected:
             r"""
             取不到的原因
             """
@@ -2644,7 +2670,7 @@ class RefreshCause:
     直播一次刷新失败；这类失败等下次刷新，不使任务立即失败。
     """
     @property
-    def reason(self) -> RefreshReason.Http | RefreshReason.Empty | RefreshReason.Truncated | RefreshReason.Syntax:
+    def reason(self) -> RefreshReason.Http | RefreshReason.Empty | RefreshReason.Truncated | RefreshReason.Syntax | RefreshReason.NotAPlaylist:
         r"""
         失败的原因
         """
@@ -2717,6 +2743,15 @@ class RefreshReason:
             错在哪里
             """
         def __new__(cls, *, line: builtins.int, detail: builtins.str) -> RefreshReason.Syntax: ...
+    
+    @typing.final
+    class NotAPlaylist(RefreshReason):
+        r"""
+        内容不是媒体播放列表（不是 UTF-8、不是播放列表，或混着主播放列表的标签），多为服务器返回了错误页；只出在
+        由 Rust 接口录的直播的字幕轨上
+        """
+        __match_args__ = ()
+        def __new__(cls) -> RefreshReason.NotAPlaylist: ...
     
 
 @typing.final
@@ -2868,7 +2903,7 @@ class Retrying:
         请求的用途
         """
     @property
-    def failure(self) -> FetchFailure.Http | FetchFailure.Incomplete:
+    def failure(self) -> FetchFailure.Http | FetchFailure.Incomplete | FetchFailure.Rejected:
         r"""
         上一次尝试的失败
         """
@@ -3562,7 +3597,7 @@ class StallReason:
         """
         __match_args__ = ("cause",)
         @property
-        def cause(self) -> FetchFailure.Http | FetchFailure.Incomplete:
+        def cause(self) -> FetchFailure.Http | FetchFailure.Incomplete | FetchFailure.Rejected:
             r"""
             最近一次取不到的分片或 init 段
             """

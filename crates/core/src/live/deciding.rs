@@ -1,6 +1,6 @@
 //! 续录时的会话判定期间：等各轨拿到候选（第一份有分片的播放列表），核对能否接着它最近的会话录，各轨都有
 //! 结论后定下会话（规则见 [`super::session`]），再开始录。判定期间各轨照常刷新，拉到的都暂存起来，会话定下后
-//! 按顺序处理；已有候选的轨在等本任务，不算停滞。
+//! 按顺序处理；已有候选的轨在等本任务，不算停滞。字幕轨不参与判定（见 [`super::session`]）：拉到的照样暂存，不等它。
 
 use hs_m3u8_hls::MediaPlaylist;
 use tokio::time::Instant;
@@ -28,7 +28,9 @@ impl Recorder<'_> {
         for (track, fetched) in first.into_iter().enumerate() {
             if self.tracks[track].is_full(max_us) {
                 self.verdicts().mark_full(track);
-                self.check(track, &fetched.playlist);
+                if self.verdicts().judges(track) {
+                    self.check(track, &fetched.playlist);
+                }
             } else {
                 self.note(track, fetched);
             }
@@ -55,22 +57,19 @@ impl Recorder<'_> {
         self.decide_if_complete().await
     }
 
-    /// 会话定下之前直播看起来已结束：还没拿到候选（也没有已录满）的轨都没有内容，这次不录，不影响判定。
+    /// 会话定下之前直播看起来已结束：还没拿到候选（也没有已录满）的音视频轨都没有内容，这次不录，不影响判定。
     pub(super) async fn drop_waiting(&mut self) -> Result<(), Error> {
         for track in 0..self.tracks.len() {
-            if self.tracks[track].has_candidate() || self.verdicts().has_concluded(track) {
+            let verdicts = self.verdicts();
+            if !verdicts.judges(track) || verdicts.has_concluded(track) {
+                continue;
+            }
+            if self.tracks[track].has_candidate() {
                 continue;
             }
             self.tracks[track].end_undecided();
             self.verdicts().conclude(track, Verdict::Ended);
         }
-        self.decide_if_complete().await
-    }
-
-    /// 会话定下之前字幕轨 `track` 停滞（还没拿到候选）：这次不录（录制结束时报为尾部没录到），不使任务失败，不再等它。
-    pub(super) async fn drop_subtitles(&mut self, track: usize) -> Result<(), Error> {
-        self.tracks[track].end_undecided();
-        self.verdicts().conclude(track, Verdict::Ended);
         self.decide_if_complete().await
     }
 
@@ -82,10 +81,15 @@ impl Recorder<'_> {
     }
 
     /// 记下第 `track` 条轨拉到的播放列表是否列出了新分片、安排下次刷新；有分片时暂存，其中第一份开始核对。
-    /// 还没拿到候选就拉到已结束而没有分片的，这条轨这次没有可录的，不影响判定。
+    /// 还没拿到候选就拉到已结束而没有分片的，这条轨这次没有可录的，不影响判定。字幕轨只暂存，会话定下后按顺序处理。
     fn note(&mut self, track: usize, fetched: Fetched) {
+        let judges = self.verdicts().judges(track);
         let t = &mut self.tracks[track];
         t.note_undecided(&fetched.playlist, fetched.started, Instant::now());
+        if !judges {
+            t.hold(fetched);
+            return;
+        }
         if fetched.playlist.segments.is_empty() {
             if fetched.playlist.ended && !t.has_candidate() {
                 t.end_undecided();

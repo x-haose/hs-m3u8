@@ -96,6 +96,8 @@ pub(super) struct LiveTrack {
     last_refresh_error: Option<RefreshReason>,
     /// 服务器在最近一次失败的刷新里要求等到的时刻（Retry-After）；刷新成功即清空
     server_wait: Option<Instant>,
+    /// 字幕轨前后接不上而停了（见 [`LiveTrack::stop_broken`]）的原因
+    broken: Option<SourceBreak>,
 }
 
 impl LiveTrack {
@@ -128,6 +130,7 @@ impl LiveTrack {
             last_download_failure: None,
             last_refresh_error: None,
             server_wait: None,
+            broken: None,
         })
     }
 
@@ -376,6 +379,18 @@ impl LiveTrack {
     }
 
     /// 之后不再刷新、不再处理这条轨（接不上而结束录制）。
+    /// 字幕轨前后接不上而停了（见 [`LiveTrack::stop_broken`]）。
+    pub(super) fn is_broken(&self) -> bool {
+        self.broken.is_some()
+    }
+
+    /// 字幕轨前后接不上（原因 `cause`）：这次运行不再录它（同 [`LiveTrack::stop_processing`]），录制结束时报为尾部没录到。
+    /// 它不作对齐的证据，不另起会话。
+    pub(super) fn stop_broken(&mut self, cause: SourceBreak) {
+        self.stop_processing();
+        self.broken = Some(cause);
+    }
+
     pub(super) fn stop_processing(&mut self) {
         self.refresh = Refresh::Ended;
         self.pending.clear();
@@ -550,9 +565,10 @@ impl LiveTrack {
 }
 
 impl LiveTrack {
-    /// 录制结束时（`now`，在途的下载已收尾）这条轨的尾部没录到的原因（见 [`crate::UnrecordedTail`]）：没录满
-    /// `max_us`、没出现 ENDLIST，而这个会话里没录它（判定期间看起来已结束），或已停滞（见 [`LiveTrack::stall_since`]，
-    /// 判据同 [`LiveTrack::stall`]）。没有时为 None。`others_live(since)` 为其他轨在 `since` 之后列出过新分片。
+    /// 录制结束时（`now`，在途的下载已收尾）这条字幕轨的尾部没录到的原因（见 [`crate::UnrecordedTail`]）：前后接不上
+    /// 而停了（见 [`LiveTrack::stop_broken`]），或没录满 `max_us`、没出现 ENDLIST 而已停滞（见 [`LiveTrack::stall_since`]，
+    /// 判据同 [`LiveTrack::stall`]，停滞从开始的时刻起算，在途的请求那时起满了期限即为一直不返回）。没有时为 None。
+    /// `others_live(since)` 为音视频轨在 `since` 之后列出过新分片。
     pub(super) fn unrecorded_tail(
         &mut self,
         stall_timeout: Duration,
@@ -560,26 +576,23 @@ impl LiveTrack {
         now: Instant,
         others_live: impl Fn(Instant) -> bool,
     ) -> Option<TailCause> {
+        if let Some(cause) = self.broken {
+            return Some(TailCause::Broken(cause));
+        }
         if self.is_full(max_us) {
             return None;
         }
-        if let Role::Idle = self.role {
-            let refresh_error = self.last_refresh_error.take();
-            return Some(
-                match (refresh_error.as_ref().and_then(gone), refresh_error) {
-                    (Some(status), _) => TailCause::Ended(StallCause::PlaylistGone(status)),
-                    (None, Some(cause)) => TailCause::Failed(StallReason::RefreshFailed(cause)),
-                    (None, None) => TailCause::Ended(StallCause::NoNewSegments),
-                },
-            );
-        }
+        assert!(
+            !matches!(self.role, Role::Idle),
+            "字幕轨不参与会话判定，只在录满时这次不录"
+        );
         if self.is_ended() {
             return None;
         }
         let since = self
             .stall_since(stall_timeout)
             .filter(|&since| since <= now)?;
-        Some(match self.stall(now, since, now, others_live(since)) {
+        Some(match self.stall(now, since, since, others_live(since)) {
             Ok(cause) => TailCause::Ended(cause),
             Err(reason) => TailCause::Failed(reason),
         })

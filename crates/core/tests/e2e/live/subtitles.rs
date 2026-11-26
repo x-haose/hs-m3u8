@@ -6,8 +6,9 @@ use axum::http::StatusCode;
 use hs_m3u8_core::hls::Renditions;
 use hs_m3u8_core::remux::{Container, Shape};
 use hs_m3u8_core::{
-    Error, HttpErrorKind, HttpFailure, LiveEnd, MergedFile, RefreshReason, StallCause, StallReason,
-    SubtitleFileFormat, SubtitleOutput, TailCause, Target, TrackKind, UnrecordedTail,
+    Error, FetchErrorKind, HttpErrorKind, HttpFailure, JobRequest, LiveEnd, MergedFile, MissReason,
+    Missed, Progress, RefreshReason, SourceBreak, StallCause, StallReason, SubtitleFileFormat,
+    SubtitleOutput, TailCause, Target, TrackKind, UnrecordedTail,
 };
 
 use super::{STALL, interrupt, live_request};
@@ -352,7 +353,8 @@ async fn a_failing_subtitle_playlist_is_reported_as_an_unrecorded_tail() {
     );
 }
 
-/// 续录时字幕播放列表一直没有分片：会话判定不一直等它，字幕轨满了停滞时限就这次不录、报为尾部没录到，画面照常续录。
+/// 续录时字幕播放列表还没有分片：会话判定不等它（字幕轨不参与判定），画面照常续录；字幕之后出了分片照样接着录进这个
+/// 会话。
 #[tokio::test(flavor = "multi_thread")]
 async fn resuming_without_subtitle_segments_does_not_wait_for_them() {
     let dir = test_dir("live_subtitles_resume_empty");
@@ -397,25 +399,180 @@ async fn resuming_without_subtitle_segments_does_not_wait_for_them() {
     .await;
 
     server.put("subs.m3u8", "#EXTM3U\n#EXT-X-TARGETDURATION:1\n");
-    server.put("v.m3u8", video(2, true));
+    server.put("v.m3u8", video(2, false));
     let job = engine().start(req).unwrap();
-    // 判定一直等下去时这里超时
-    let output = tokio::time::timeout(Duration::from_secs(60), job.wait())
+    let mut progress = job.control().progress();
+    // 会话定下、画面接着录到第 1 片：判定没有等字幕
+    progress
+        .wait_for(|p| p.tracks.first().is_some_and(|t| t.segments.done == 2))
         .await
-        .expect("会话判定不等没有分片的字幕轨")
         .unwrap();
+    server.put(
+        "subs/1.vtt",
+        "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:221280,LOCAL:00:00:00.000\n\n00:00.300 --> 00:00.800\n又有字幕\n",
+    );
+    server.put(
+        "subs.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1,\nsubs/1.vtt\n",
+    );
+    progress
+        .wait_for(|p| p.tracks.get(1).is_some_and(|t| t.segments.done == 2))
+        .await
+        .unwrap();
+    server.put("v.m3u8", video(2, true));
+    let output = job.wait().await.unwrap();
 
     let live = output.live.unwrap();
     assert_eq!(live.end, Some(LiveEnd::EndList));
-    assert_eq!(output.segments, 2);
+    assert_eq!(live.session_count, 1);
+    assert!(
+        live.unrecorded_tails.is_empty(),
+        "{:?}",
+        live.unrecorded_tails
+    );
+}
+
+/// 一个画面加一条字幕的直播源：画面播放列表 v.m3u8 先列 ts_a 的第 0 片，字幕播放列表 subs.m3u8 列一片与之对齐的字幕；
+/// 都没有 ENDLIST。返回输出为 MKV 的录制请求。
+fn subtitled_live(server: &Server, dir: &std::path::Path) -> JobRequest {
+    for i in 0..2 {
+        server.put(&format!("v/seg{i}.ts"), fixture(&format!("ts_a/seg{i}.ts")));
+    }
+    server.put("v.m3u8", ts_video(1, false));
+    server.put(
+        "subs/0.vtt",
+        "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:131280,LOCAL:00:00:00.000\n\n00:00.300 --> 00:00.800\n字幕\n",
+    );
+    server.put(
+        "subs.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nsubs/0.vtt\n",
+    );
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n\
+         #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"zh\",LANGUAGE=\"zh\",URI=\"subs.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=200000,SUBTITLES=\"subs\"\nv.m3u8\n",
+    );
+    let mut req = live_request(server.url("master.m3u8"), dir, STALL);
+    req.source.preference.subtitles = Renditions::All;
+    req.output.target = Target::File(MergedFile {
+        path: dir.join("out.mkv"),
+        container: Container::Matroska,
+    });
+    req
+}
+
+/// 画面播放列表：列 ts_a 的前 `count` 片，`ended` 时带 ENDLIST。
+fn ts_video(count: usize, ended: bool) -> String {
+    let mut playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n".to_owned();
+    for i in 0..count {
+        playlist += &format!("#EXTINF:1,\nv/seg{i}.ts\n");
+    }
+    if ended {
+        playlist += "#EXT-X-ENDLIST\n";
+    }
+    playlist
+}
+
+/// 等两条轨都录到 `done` 片。
+async fn both_recorded(progress: &mut tokio::sync::watch::Receiver<Progress>, done: usize) {
+    progress
+        .wait_for(|p| p.tracks.iter().map(|t| t.segments.done).eq([done, done]))
+        .await
+        .unwrap();
+}
+
+/// 字幕轨记为尾部没录到时即写进任务目录：之后任务被取消，只合并照样报出这一项（原因不落盘）。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tail_noticed_before_cancelling_survives_into_merging() {
+    let dir = test_dir("live_subtitles_tail_cancel");
+    let server = Server::start().await;
+    let mut req = subtitled_live(&server, &dir);
+    req.output.keep_work_dir = true;
+    let job = engine().start(req.clone()).unwrap();
+    let mut progress = job.control().progress();
+    both_recorded(&mut progress, 1).await;
+    server.status("subs.m3u8", StatusCode::FORBIDDEN);
+    // 画面再出一片，比字幕晚满停滞时限
+    server.put("v.m3u8", ts_video(2, false));
+    progress
+        .wait_for(|p| p.tracks.get(1).is_some_and(|t| t.unrecorded_tail))
+        .await
+        .unwrap();
+    job.control().cancel();
+    assert!(matches!(job.wait().await, Err(Error::Cancelled)));
+    server.stop().await;
+
+    let merged = engine()
+        .merge_recorded(req.output)
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
     assert_eq!(
-        live.unrecorded_tails,
+        merged.live.unwrap().unrecorded_tails,
         [UnrecordedTail {
             session: 0,
             track: 1,
             after: Some(0),
             at: Some(Duration::from_secs(1)),
-            cause: Some(TailCause::Ended(StallCause::NoNewSegments)),
+            cause: None,
         }]
+    );
+}
+
+/// 字幕分片 403 只记为这一片缺失，录制照常；字幕播放列表的序号处矛盾（同一序号换了分片）只停字幕轨，尾部原因为接不上。
+#[tokio::test(flavor = "multi_thread")]
+async fn subtitle_failures_only_affect_the_subtitle_track() {
+    let dir = test_dir("live_subtitles_failures");
+    let server = Server::start().await;
+    let req = subtitled_live(&server, &dir);
+    let job = engine().start(req).unwrap();
+    let mut progress = job.control().progress();
+    both_recorded(&mut progress, 1).await;
+    server.status("subs/1.vtt", StatusCode::FORBIDDEN);
+    server.put(
+        "subs.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nsubs/0.vtt\n#EXTINF:1,\nsubs/1.vtt\n",
+    );
+    progress
+        .wait_for(|p| p.tracks.get(1).is_some_and(|t| t.segments.failed == 1))
+        .await
+        .unwrap();
+    // 第 0 片换成了别的分片：与之前刷新得到的矛盾
+    server.put(
+        "subs.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nsubs/other.vtt\n#EXTINF:1,\nsubs/1.vtt\n",
+    );
+    progress
+        .wait_for(|p| p.tracks.get(1).is_some_and(|t| t.unrecorded_tail))
+        .await
+        .unwrap();
+    server.put("v.m3u8", ts_video(2, true));
+    let output = job.wait().await.unwrap();
+
+    let live = output.live.unwrap();
+    assert_eq!(live.end, Some(LiveEnd::EndList));
+    assert_eq!(
+        output.missed,
+        [Missed {
+            session: 0,
+            track: 1,
+            first: 1,
+            last: 1,
+            reason: MissReason::Failed(FetchErrorKind::Http(HttpErrorKind::Status(403))),
+        }]
+    );
+    let [tail] = &live.unrecorded_tails[..] else {
+        panic!("{:?}", live.unrecorded_tails);
+    };
+    assert_eq!((tail.track, tail.after), (1, Some(0)));
+    assert!(
+        matches!(
+            tail.cause,
+            Some(TailCause::Broken(SourceBreak::Inconsistent { sequence: 0 }))
+        ),
+        "{:?}",
+        tail.cause
     );
 }

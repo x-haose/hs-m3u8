@@ -278,8 +278,8 @@ impl Error {
         }
     }
 
-    /// 任何 HTTP 错误（含 401、403 这类不可重试的）的原因；其余为 None。
-    pub(crate) fn http_status_failure(&self) -> Option<HttpFailure> {
+    /// 任何 HTTP 错误（含 401、403 这类不可重试的、证书与代理错误）的原因，看包着的原因；其余为 None。
+    fn any_http_failure(&self) -> Option<HttpFailure> {
         match self {
             Error::Http {
                 kind, retry_after, ..
@@ -287,6 +287,40 @@ impl Error {
                 kind: kind.clone(),
                 retry_after: *retry_after,
             }),
+            Error::Segment { cause, .. } | Error::Call { cause, .. } => cause.any_http_failure(),
+            _ => None,
+        }
+    }
+
+    /// 直播字幕轨的刷新失败中等下次刷新的及其原因：除了音视频轨也等的（`waitable`），还有任何 HTTP 错误与不是媒体播放
+    /// 列表的内容（字幕轨的外部故障不使任务失败）。其余（DRM、回调出错等）为 None。
+    pub(crate) fn subtitle_refresh_failure(&self) -> Option<RefreshReason> {
+        if let Some(failure) = self.any_http_failure() {
+            return Some(RefreshReason::Http(failure));
+        }
+        match self {
+            Error::Playlist { cause, .. } => match &**cause {
+                hs_m3u8_hls::Malformed::NotAPlaylist
+                | hs_m3u8_hls::Malformed::NotUtf8
+                | hs_m3u8_hls::Malformed::Mixed => Some(RefreshReason::NotAPlaylist),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// 直播字幕分片取不到：除了 [`Error::missable`] 的，还有任何 HTTP 错误与校验不过的内容（字幕轨的外部故障不使任务
+    /// 失败）。其余为 None。
+    pub(crate) fn subtitle_missable(&self) -> Option<FetchFailure> {
+        if let Some(failure) = self.missable() {
+            return Some(failure);
+        }
+        if let Some(failure) = self.any_http_failure() {
+            return Some(FetchFailure::Http(failure));
+        }
+        match self {
+            Error::Integrity { kind, .. } => Some(FetchFailure::Rejected(kind.clone())),
+            Error::Segment { cause, .. } | Error::Call { cause, .. } => cause.subtitle_missable(),
             _ => None,
         }
     }
@@ -463,6 +497,9 @@ pub enum FetchFailure {
     /// 重试后取到的内容仍没写完（见 [`Error::Incomplete`]）
     #[error("内容没有写完")]
     Incomplete,
+    /// 内容校验不过（见 [`Error::Integrity`]）；只出在直播的字幕分片上（如不是 WebVTT），其余轨的使任务失败
+    #[error("数据校验失败：{0}")]
+    Rejected(IntegrityFailure),
 }
 
 impl FetchFailure {
@@ -471,6 +508,7 @@ impl FetchFailure {
         match self {
             FetchFailure::Http(failure) => FetchErrorKind::Http(failure.kind.clone()),
             FetchFailure::Incomplete => FetchErrorKind::Incomplete,
+            FetchFailure::Rejected(failure) => FetchErrorKind::Rejected(failure.clone()),
         }
     }
 
@@ -478,6 +516,7 @@ impl FetchFailure {
         match self {
             FetchFailure::Http(failure) => failure.kind.retryable(),
             FetchFailure::Incomplete => true,
+            FetchFailure::Rejected(_) => false,
         }
     }
 
@@ -485,7 +524,7 @@ impl FetchFailure {
     pub fn retry_after(&self) -> Option<Duration> {
         match self {
             FetchFailure::Http(failure) => failure.retry_after,
-            FetchFailure::Incomplete => None,
+            FetchFailure::Incomplete | FetchFailure::Rejected(_) => None,
         }
     }
 }
@@ -499,6 +538,9 @@ pub enum FetchErrorKind {
     /// 重试后取到的内容仍没写完（见 [`Error::Incomplete`]）
     #[error("内容没有写完")]
     Incomplete,
+    /// 内容校验不过；只出在直播的字幕分片上（见 [`FetchFailure::Rejected`]）
+    #[error("数据校验失败：{0}")]
+    Rejected(IntegrityFailure),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -594,7 +636,8 @@ pub enum IntegrityFailure {
 /// 直播停滞的故障原因。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum StallReason {
-    /// 刷新播放列表一直失败（404/410 之外的取不到，或内容不完整），带最近一次的原因
+    /// 刷新播放列表一直失败（404/410 之外的取不到，或内容不完整；直播字幕轨另含 401、403 等与不是播放列表的内容），带最近
+    /// 一次的原因
     #[error("刷新播放列表一直失败，最近一次：{0}")]
     RefreshFailed(RefreshReason),
     /// 刷新播放列表（或为新分片拉 init 段）的请求，在察觉停滞之后又过了一个目标时长仍未返回

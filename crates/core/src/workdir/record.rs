@@ -558,12 +558,24 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Recorded, WorkDirProblem> {
             )));
         }
     };
-    Ok(Recorded::Hls(Box::new(HlsRecord {
+    let record = HlsRecord {
         preference_digest,
         url_digest,
         selection,
         kind,
-    })))
+    };
+    if let RecordKind::Live { tails } = &record.kind {
+        let streams = record.streams();
+        if let Some(&(session, track)) = tails
+            .iter()
+            .find(|(_, track)| streams.get(*track) != Some(&Streams::Subtitles))
+        {
+            return Err(WorkDirProblem::Corrupt(format!(
+                "job.json 的 unrecorded_tails 记了会话 {session} 的第 {track} 条轨，它不是所选的字幕轨"
+            )));
+        }
+    }
+    Ok(Recorded::Hls(Box::new(record)))
 }
 
 impl From<&SelectionRecord> for SelectionFile {
@@ -950,6 +962,9 @@ mod tests {
             r#"{"kind":"live","format_version":15,"preference_digest":"a","url_digest":"u","selection":null,"unrecorded_tails":[{"session":0,"track":1}]}"#,
             r#"{"kind":"live","format_version":16,"preference_digest":"a","url_digest":"u","selection":null,"unrecorded_tails":[{"session":1,"track":1},{"session":0,"track":1}]}"#,
             r#"{"kind":"live","format_version":16,"preference_digest":"a","url_digest":"u","selection":null,"unrecorded_tails":[{"session":0,"track":1},{"session":0,"track":1}]}"#,
+            // 尾部记录的轨号不是所选的字幕轨：越界，或是音视频轨
+            r#"{"kind":"live","format_version":16,"preference_digest":"a","url_digest":"u","selection":null,"unrecorded_tails":[{"session":0,"track":0}]}"#,
+            r#"{"kind":"live","format_version":16,"preference_digest":"a","url_digest":"u","selection":null,"unrecorded_tails":[{"session":0,"track":7}]}"#,
         ] {
             assert!(decode(rejected.as_bytes()).is_err(), "{rejected}");
         }
