@@ -658,7 +658,7 @@ checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "hs-m3u8-core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "aes",
  "axum",
@@ -687,7 +687,7 @@ dependencies = [
 
 [[package]]
 name = "hs-m3u8-hls"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "thiserror",
  "url",
@@ -695,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "hs-m3u8-py"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "hs-m3u8-core",
  "pyo3",
@@ -706,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "hs-m3u8-remux"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "ffmpeg-next",
  "hs-m3u8-subtitle",
@@ -717,14 +717,14 @@ dependencies = [
 
 [[package]]
 name = "hs-m3u8-subtitle"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "hs-m3u8-sysproxy"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "system-configuration",
  "windows-registry",
