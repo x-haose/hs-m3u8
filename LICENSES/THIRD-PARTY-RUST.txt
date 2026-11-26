@@ -18,7 +18,7 @@ cfg-if 1.0.5  MIT OR Apache-2.0  https://github.com/rust-lang/cfg-if
 chrono 0.4.45  MIT OR Apache-2.0  https://github.com/chronotope/chrono
 cipher 0.5.2  MIT OR Apache-2.0  https://github.com/RustCrypto/traits
 const-oid 0.10.2  Apache-2.0 OR MIT  https://github.com/RustCrypto/formats
-cookie 0.18.2  MIT OR Apache-2.0  https://github.com/SergioBenitez/cookie-rs
+cookie 0.18.3  MIT OR Apache-2.0  https://github.com/SergioBenitez/cookie-rs
 cookie_store 0.22.1  MIT OR Apache-2.0  https://github.com/pfernie/cookie_store
 core-foundation 0.10.1  MIT OR Apache-2.0  https://github.com/servo/core-foundation-rs
 core-foundation 0.9.4  MIT OR Apache-2.0  https://github.com/servo/core-foundation-rs
@@ -36,7 +36,7 @@ errno 0.3.15  MIT OR Apache-2.0  https://github.com/lambda-fairy/rust-errno
 ffmpeg-next 9.0.0  WTFPL  https://github.com/zmwangx/rust-ffmpeg
 ffmpeg-sys-next 9.0.0  WTFPL  https://github.com/zmwangx/rust-ffmpeg-sys
 fnv 1.0.7  Apache-2.0 / MIT  https://github.com/servo/rust-fnv
-form_urlencoded 1.2.2  MIT OR Apache-2.0  https://github.com/servo/rust-url
+form_urlencoded 1.2.3  MIT OR Apache-2.0  https://github.com/servo/rust-url
 fs4 1.1.0  MIT OR Apache-2.0  https://github.com/al8n/fs4
 futures-channel 0.3.34  MIT OR Apache-2.0  https://github.com/rust-lang/futures-rs
 futures-core 0.3.34  MIT OR Apache-2.0  https://github.com/rust-lang/futures-rs
@@ -158,7 +158,7 @@ unic-ucd-ident 0.9.0  MIT/Apache-2.0  https://github.com/open-i18n/rust-unic/
 unic-ucd-version 0.9.0  MIT/Apache-2.0  https://github.com/open-i18n/rust-unic/
 unicode_names2 1.3.0  (MIT OR Apache-2.0) AND Unicode-DFS-2016  https://github.com/progval/unicode_names2
 untrusted 0.9.0  ISC  https://github.com/briansmith/untrusted
-url 2.5.8  MIT OR Apache-2.0  https://github.com/servo/rust-url
+url 2.5.9  MIT OR Apache-2.0  https://github.com/servo/rust-url
 utf8_iter 1.0.4  Apache-2.0 OR MIT  https://github.com/hsivonen/utf8_iter
 want 0.3.2  MIT  https://github.com/seanmonstar/want
 winapi-util 0.1.11  Unlicense OR MIT  https://github.com/BurntSushi/winapi-util
@@ -675,7 +675,7 @@ either 1.19.0：LICENSE-APACHE
 equivalent 1.0.2：LICENSE-APACHE
 errno 0.3.15：LICENSE-APACHE
 fnv 1.0.7：LICENSE-APACHE
-form_urlencoded 1.2.2：LICENSE-APACHE
+form_urlencoded 1.2.3：LICENSE-APACHE
 fs4 1.1.0：LICENSE-APACHE
 hashbrown 0.17.1：LICENSE-APACHE
 httparse 1.10.1：LICENSE-APACHE
@@ -719,7 +719,7 @@ unic-emoji-char 0.9.0：LICENSE-APACHE（本项目补的，出处见源码的 th
 unic-ucd-ident 0.9.0：LICENSE-APACHE（本项目补的，出处见源码的 third_party/crate-licenses/README.md）
 unic-ucd-version 0.9.0：LICENSE-APACHE（本项目补的，出处见源码的 third_party/crate-licenses/README.md）
 unicode_names2 1.3.0：LICENSE-APACHE
-url 2.5.8：LICENSE-APACHE
+url 2.5.9：LICENSE-APACHE
 --------------------------------------------------------------------------------
 
                               Apache License
@@ -1993,7 +1993,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-cookie 0.18.2：LICENSE-APACHE
+cookie 0.18.3：LICENSE-APACHE
 --------------------------------------------------------------------------------
 
                               Apache License
@@ -2200,7 +2200,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 --------------------------------------------------------------------------------
-cookie 0.18.2：LICENSE-MIT
+cookie 0.18.3：LICENSE-MIT
 --------------------------------------------------------------------------------
 
 Copyright (c) 2017 Sergio Benitez
@@ -3282,7 +3282,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 --------------------------------------------------------------------------------
-form_urlencoded 1.2.2：LICENSE-MIT
+form_urlencoded 1.2.3：LICENSE-MIT
 --------------------------------------------------------------------------------
 
 Copyright (c) 2013-2016 The rust-url developers
@@ -4604,7 +4604,7 @@ ICU 1.8.1 to ICU 57.1 © 1995-2016 International Business Machines Corporation a
 --------------------------------------------------------------------------------
 idna 1.1.0：LICENSE-MIT
 percent-encoding 2.3.2：LICENSE-MIT
-url 2.5.8：LICENSE-MIT
+url 2.5.9：LICENSE-MIT
 --------------------------------------------------------------------------------
 
 Copyright (c) 2013-2025 The rust-url developers
