@@ -141,7 +141,7 @@ impl LiveTrack {
             None => {
                 assert!(
                     self.pending.is_empty(),
-                    "这次不录的轨没有暂存：已录满的不参与判定，看起来已结束的没有候选"
+                    "这次不录的轨没有暂存：已录满的不参与判定，看起来已结束的没有候选，没录满的字幕轨见 skip_session"
                 );
                 Role::Idle
             }
@@ -383,6 +383,18 @@ impl LiveTrack {
         self.broken.is_some()
     }
 
+    /// 没录满的字幕轨这个会话里不录（没有要录的音视频轨）：判定期间暂存的丢掉，不再刷新。
+    pub(super) fn skip_session(&mut self) {
+        self.pending.clear();
+        self.refresh = Refresh::Ended;
+        self.role = Role::Idle;
+    }
+
+    /// 这次运行不再处理它拉到的播放列表：这个会话里不录，或字幕轨接不上而停了。之后才返回的刷新与准备结果丢掉。
+    pub(super) fn is_stopped(&self) -> bool {
+        matches!(self.role, Role::Idle) || self.is_broken()
+    }
+
     /// 字幕轨前后接不上（原因 `cause`）：这次运行不再录它（同 [`LiveTrack::stop_processing`]），录制结束时报为尾部没录到。
     /// 它不作对齐的证据，不另起会话。
     pub(super) fn stop_broken(&mut self, cause: SourceBreak) {
@@ -412,19 +424,13 @@ impl LiveTrack {
         self.pending.push_front(fetched);
     }
 
-    /// 字幕轨随唯一的音视频轨另起的会话（见 [`LiveTrack::restart`]）从窗口起点重新录：它靠 X-TIMESTAMP-MAP 对齐，不接着
-    /// 旧窗口；之前接不上而停了的重新刷新，停滞从 `now` 起算。已录到的时长沿用。
-    pub(super) fn rejoin(&mut self, now: Instant) {
-        let recorded_us = self.window().map_or(self.recorded_us, Window::recorded_us);
-        self.role = Role::Decided(Box::new(Window::new(
-            Start::New(SessionStart::Fresh),
-            recorded_us,
-        )));
-        if self.broken.take().is_some() {
-            self.refresh = Refresh::Due(now);
+    /// 字幕轨随唯一的音视频轨另起的会话（见 [`LiveTrack::restart`]）接着录：它自己没有接不上，窗口不变（在途的刷新与
+    /// 准备照常由它处理，录过的不重录），之后处理的分片记进新会话，起点为已处理到的序号（见 [`Window::renew_session`]）。
+    /// 这个会话里不录的轨不变。
+    pub(super) fn rejoin(&mut self) {
+        if let Role::Decided(window) = &mut self.role {
+            window.renew_session();
         }
-        self.last_progress = now;
-        self.last_listed = now;
     }
 
     /// 按定下的会话处理一份播放列表并安排下次刷新；`started` 为这次拉取开始的时刻。见 [`Window::update`]。
@@ -597,10 +603,10 @@ impl LiveTrack {
         if self.is_full(max_us) {
             return None;
         }
-        assert!(
-            !matches!(self.role, Role::Idle),
-            "字幕轨不参与会话判定，只在录满时这次不录"
-        );
+        if matches!(self.role, Role::Idle) {
+            // 这个会话里不录（没有要录的音视频轨）：没有尾部
+            return None;
+        }
         if self.is_ended() {
             return None;
         }

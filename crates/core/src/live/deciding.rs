@@ -175,8 +175,13 @@ impl Recorder<'_> {
         }
         self.decide(decision.session);
         let now = Instant::now();
+        let max_us = self.max_us();
         for (track, start) in decision.tracks.into_iter().enumerate() {
-            self.tracks[track].enter_session(start, now);
+            let t = &mut self.tracks[track];
+            match start {
+                None if !self.media[track] && !t.is_full(max_us) => t.skip_session(),
+                start => t.enter_session(start, now),
+            }
             self.prepare_next(track);
         }
         Ok(())

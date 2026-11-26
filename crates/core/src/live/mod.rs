@@ -503,6 +503,9 @@ impl<'a> Recorder<'a> {
                 result,
             } => {
                 self.tracks[track].prepared();
+                if self.tracks[track].is_stopped() {
+                    return Ok(());
+                }
                 self.process(track, fetched, result?, fetcher).await?;
                 self.prepare_next(track);
                 Ok(())
@@ -526,7 +529,7 @@ impl<'a> Recorder<'a> {
         }
     }
 
-    /// 第 `track` 条轨一次刷新的结果：可以再试的失败安排下次刷新，其余失败上抛；结束中拉到的不再处理。
+    /// 第 `track` 条轨一次刷新的结果：可以再试的失败安排下次刷新，其余失败上抛；结束中拉到的、这条轨已不再处理（见 [`LiveTrack::is_stopped`]）时的不再处理。
     /// 会话定下之前发起、定下之后才返回的，暂存起来排在之前暂存的后面（这次不录的轨不刷新，所以只有要录的轨）。
     async fn refreshed(
         &mut self,
@@ -535,7 +538,7 @@ impl<'a> Recorder<'a> {
         result: Result<(hls::MediaPlaylist, Option<NewInits>), Error>,
         fetcher: &mut Fetcher,
     ) -> Result<(), Error> {
-        if self.ending.is_some() {
+        if self.ending.is_some() || self.tracks[track].is_stopped() {
             return Ok(());
         }
         let (playlist, inits) = match result {
@@ -652,10 +655,10 @@ impl<'a> Recorder<'a> {
             .ok_or_else(|| self.sessions_exhausted())?;
         self.decide(session);
         self.tracks[track].restart(cause, fetched);
-        let (now, max_us) = (Instant::now(), self.max_us());
         for (t, &media) in self.tracks.iter_mut().zip(&self.media) {
-            if !media && !t.is_full(max_us) {
-                t.rejoin(now);
+            // 接不上而停了的字幕轨这次运行不再录：它的窗口已不可信
+            if !media && !t.is_broken() {
+                t.rejoin();
             }
         }
         self.new_sessions.push(NewSession { session, cause });
@@ -715,7 +718,7 @@ impl<'a> Recorder<'a> {
         let reason = MissReason::Failed(failure.kind());
         self.tracks[id.track].segment_missed(failure);
         self.missed.push(Missed {
-            session: self.session(),
+            session: id.name.session,
             track: id.track,
             first: id.name.sequence,
             last: id.name.sequence,

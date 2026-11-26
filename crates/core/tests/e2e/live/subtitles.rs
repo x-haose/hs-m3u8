@@ -599,7 +599,11 @@ async fn a_restart_of_the_only_media_track_starts_a_new_session_with_subtitles()
             playlist_in("v/", &[0, 1], true),
         ],
     );
-    server.put("subs.m3u8", "#EXTM3U\n#EXT-X-TARGETDURATION:1\n");
+    server.put("subs/0.vtt", "WEBVTT\n\n00:00.300 --> 00:00.800\n字幕\n");
+    server.put(
+        "subs.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nsubs/0.vtt\n",
+    );
     server.put(
         "master.m3u8",
         "#EXTM3U\n\
@@ -628,4 +632,36 @@ async fn a_restart_of_the_only_media_track_starts_a_new_session_with_subtitles()
         }]
     );
     assert_eq!(live.session_count, 2);
+    // 字幕轨接着原窗口录，录过的不重录
+    assert_eq!(server.hits("subs/0.vtt"), 1);
+}
+
+/// 续录时画面播放列表已结束而没有分片（这次没有要录的音视频轨）、字幕播放列表仍有分片：字幕这次也不录，直接合并之前
+/// 录到的。
+#[tokio::test(flavor = "multi_thread")]
+async fn subtitles_are_not_recorded_when_no_media_track_is() {
+    let dir = test_dir("live_subtitles_no_media");
+    let server = Server::start().await;
+    let req = subtitled_live(&server, &dir, LONG_STALL);
+    interrupt(&req, |p| {
+        p.tracks.iter().map(|t| t.segments.done).eq([1, 1])
+    })
+    .await;
+
+    server.put(
+        "v.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-ENDLIST\n",
+    );
+    server.put(
+        "subs.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nsubs/0.vtt\n#EXTINF:1,\nsubs/1.vtt\n",
+    );
+    let output = tokio::time::timeout(LONG_STALL / 3, engine().start(req).unwrap().wait())
+        .await
+        .expect("没有要录的轨时直接合并")
+        .unwrap();
+
+    assert_eq!(output.segments, 1);
+    assert_eq!(server.hits("subs/1.vtt"), 0);
+    assert!(output.live.unwrap().unrecorded_tails.is_empty());
 }

@@ -223,6 +223,14 @@ impl Window {
         });
     }
 
+    /// 之后处理的分片记进另起的会话：这条轨在新会话的起点为已处理到的序号（跳过它及之前的；还没处理过分片时从窗口起点
+    /// 录）。已处理的位置与已录到的时长不变。
+    pub(super) fn renew_session(&mut self) {
+        self.start = self
+            .processed_through()
+            .map_or(SessionStart::Fresh, SessionStart::After);
+    }
+
     pub(super) fn recorded_us(&self) -> u64 {
         self.recorded_us
     }
