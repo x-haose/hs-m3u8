@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use axum::http::StatusCode;
 
+use hs_m3u8_core::hls::{Preference, Renditions};
 use hs_m3u8_core::{CancellationToken, Error, JobRequest, Unsettled};
 
 use crate::file::{FileServer, Served, content, file_request, interrupt_at, span};
@@ -29,17 +30,38 @@ use crate::{engine, fixture, request, run, test_dir};
 ///   0 录过的序号，起点写作 `after<序号>`），再中断。续录的来源里视频多出一个没录过的分片（见 [`NEW_ON_CONTINUE`]）
 /// - `file`：文件任务（格式版本 14 起），一个连接按块下了一半后中断；来源 `source/file.bin` 的 ETag 与 Last-Modified 见
 ///   [`FILE_ETAG`]、[`FILE_LAST_MODIFIED`]；格式版本 15 起给了内容身份 [`FILE_IDENTITY`]
-const SAMPLES: [&str; 6] = [
+/// - `vod-tracks`（格式版本 16 起）：视频加两条独立音频、一条 WebVTT 字幕的 fMP4 点播，按 [`tracks_preference`] 选了全部
+///   音频与字幕，第二条音频最后一个分片取不到而失败
+const SAMPLES: [&str; 7] = [
     "vod",
     "vod-ts",
     "vod-muxed",
     "live",
     "live-sessions",
     "file",
+    "vod-tracks",
 ];
 
 /// 只在这个格式版本起才有的样本。
-const SINCE: [(&str, u64); 1] = [("file", 14)];
+const SINCE: [(&str, u64); 2] = [("file", 14), ("vod-tracks", 16)];
+
+/// `vod-tracks` 样本的选轨偏好：全部音频与字幕。
+fn tracks_preference() -> Preference {
+    Preference {
+        audio: Renditions::All,
+        subtitles: Renditions::All,
+        ..Preference::default()
+    }
+}
+
+/// 样本 `sample` 的点播请求：`vod-tracks` 带它的选轨偏好（见 [`tracks_preference`]），其余为默认。
+fn vod_request(sample: &Path, url: hs_m3u8_core::Url, dir: &Path) -> JobRequest {
+    let mut req = request(url, dir);
+    if sample.file_name().is_some_and(|n| n == "vod-tracks") {
+        req.source.preference = tracks_preference();
+    }
+    req
+}
 
 /// 文件任务样本的来源给的 ETag 与 Last-Modified：续传时照样给，核对得上。
 const FILE_ETAG: &str = "\"sample\"";
@@ -214,17 +236,23 @@ async fn vod_samples_resume() {
         let source = sample.join("source");
         let fresh_dir = test_dir(&format!("samples_fresh_{}", label(&sample)));
         let (fresh_server, files) = serve(&source).await;
-        let fresh = run(request(fresh_server.url("index.m3u8"), &fresh_dir))
-            .await
-            .unwrap();
+        let fresh = run(vod_request(
+            &sample,
+            fresh_server.url("index.m3u8"),
+            &fresh_dir,
+        ))
+        .await
+        .unwrap();
 
         let dir = test_dir(&format!("samples_resume_{}", label(&sample)));
         copy_dir(&sample.join("work"), &dir.join("out.hsdl"));
         let (server, _) = serve(&source).await;
-        let output = run(request(server.url("index.m3u8"), &dir)).await.unwrap();
+        let output = run(vod_request(&sample, server.url("index.m3u8"), &dir))
+            .await
+            .unwrap();
 
         let mp4 = |output: &hs_m3u8_core::Output| {
-            std::fs::read(&output.mp4.as_ref().unwrap().path).unwrap()
+            std::fs::read(&output.merged.as_ref().unwrap().path).unwrap()
         };
         assert!(
             mp4(&output) == mp4(&fresh),
@@ -257,7 +285,7 @@ async fn live_samples_merge() {
         let progress = job.control().progress();
         let output = job.wait().await.unwrap();
 
-        assert!(output.mp4.unwrap().path.is_file());
+        assert!(output.merged.unwrap().path.is_file());
         assert_eq!(
             progress.borrow().segments.done,
             names.len(),
@@ -436,6 +464,15 @@ async fn write_samples() {
     source.put("a.m3u8", ts_playlist("a/", 2..4, 1, &[], true));
     save(&req, "live-sessions", &source.files);
 
+    let mut source = SampleSource::start().await;
+    put_fmp4_tracks(&mut source);
+    source.server.status("a2/seg2.m4s", StatusCode::NOT_FOUND);
+    let mut req = request(source.server.url("index.m3u8"), &dir.join("vod-tracks"));
+    req.source.preference = tracks_preference();
+    let failed = run(req.clone()).await;
+    assert!(matches!(failed, Err(Error::Segment { .. })), "{failed:?}");
+    save(&req, "vod-tracks", &source.files);
+
     let server = FileServer::start().await;
     let body = content(FILE_LEN);
     server.put("file.bin", sample_file(body.clone()));
@@ -495,6 +532,48 @@ fn put_fmp4_split(source: &mut SampleSource, extra: (&str, &str), end: bool) {
     source.put(
         "index.m3u8",
         split_master(extra, "video.m3u8", "audio.m3u8"),
+    );
+}
+
+/// fmp4_a 的视频、两条音频（内容相同，`a1/`、`a2/`）与一条 WebVTT 字幕（`subs/`，两片），主播放列表引用音频组与字幕组。
+fn put_fmp4_tracks(source: &mut SampleSource) {
+    for (kind, dir, count) in [("video", "v", 2), ("audio", "a1", 3), ("audio", "a2", 3)] {
+        source.put(
+            &format!("{dir}/init.mp4"),
+            fixture(&format!("fmp4_a/{kind}/init.mp4")),
+        );
+        let mut playlist =
+            format!("#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-MAP:URI=\"{dir}/init.mp4\"\n");
+        for i in 0..count {
+            source.put(
+                &format!("{dir}/seg{i}.m4s"),
+                fixture(&format!("fmp4_a/{kind}/seg{i}.m4s")),
+            );
+            playlist += &format!("#EXTINF:1,\n{dir}/seg{i}.m4s\n");
+        }
+        source.put(&format!("{dir}.m3u8"), playlist + "#EXT-X-ENDLIST\n");
+    }
+    let mut playlist = String::from("#EXTM3U\n#EXT-X-TARGETDURATION:1\n");
+    for i in 0..2 {
+        let start = i * 1000 + 200;
+        source.put(
+            &format!("subs/{i}.vtt"),
+            format!(
+                "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000\n\n\
+                 00:00:0{i}.200 --> 00:00:0{i}.800\n第 {i} 片 {start}\n"
+            ),
+        );
+        playlist += &format!("#EXTINF:1,\nsubs/{i}.vtt\n");
+    }
+    source.put("subs.m3u8", playlist + "#EXT-X-ENDLIST\n");
+    source.put(
+        "index.m3u8",
+        "#EXTM3U\n\
+         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES,URI=\"a1.m3u8\"\n\
+         #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",NAME=\"Deutsch\",LANGUAGE=\"de\",URI=\"a2.m3u8\"\n\
+         #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"简体中文\",LANGUAGE=\"zh-Hans\",URI=\"subs.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=320x180,CODECS=\"avc1.64000c,mp4a.40.2\",AUDIO=\"aud\",SUBTITLES=\"subs\"\n\
+         v.m3u8\n",
     );
 }
 

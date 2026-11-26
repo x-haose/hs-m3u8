@@ -22,6 +22,8 @@ pub struct Variant {
     pub codecs: Vec<String>,
     /// AUDIO 属性：引用的音频 rendition 组
     pub audio: Option<String>,
+    /// SUBTITLES 属性：引用的字幕 rendition 组
+    pub subtitles: Option<String>,
     /// STABLE-VARIANT-ID：跨两次拉取主播放列表标识同一条流，稳定 ID 相同的流内容相同；原样保留，不核对规范限定的字符集
     pub stable_id: Option<String>,
 }
@@ -40,6 +42,12 @@ pub struct Rendition {
     pub name: Option<String>,
     pub language: Option<String>,
     pub default: bool,
+    /// AUTOSELECT=YES：没有明确选择时播放器可按系统语言自动选它
+    pub autoselect: bool,
+    /// FORCED=YES：只含画面里外语对白等必须显示的内容的字幕（只对 SUBTITLES 有意义）
+    pub forced: bool,
+    /// CHANNELS 原样，如 `2`、`6`、`16/JOC`（只对 AUDIO 有意义）
+    pub channels: Option<String>,
     /// None 表示该 rendition 的媒体混在变体流里
     pub uri: Option<Url>,
     /// STABLE-RENDITION-ID，含义同 [`Variant::stable_id`]
@@ -97,6 +105,7 @@ pub(crate) fn parse(text: &str, url: &Url) -> Result<MasterPlaylist, Malformed> 
                     resolution: info.resolution,
                     codecs: info.codecs,
                     audio: info.audio,
+                    subtitles: info.subtitles,
                     stable_id: info.stable_id,
                 });
             }
@@ -123,6 +132,7 @@ struct StreamInf {
     resolution: Option<Resolution>,
     codecs: Vec<String>,
     audio: Option<String>,
+    subtitles: Option<String>,
     stable_id: Option<String>,
 }
 
@@ -145,6 +155,7 @@ fn parse_stream_inf(value: &str) -> Result<StreamInf, SyntaxError> {
             })
             .unwrap_or_default(),
         audio: attrs.get("AUDIO").map(str::to_owned),
+        subtitles: attrs.get("SUBTITLES").map(str::to_owned),
         stable_id: attrs.get("STABLE-VARIANT-ID").map(str::to_owned),
     })
 }
@@ -159,14 +170,20 @@ fn parse_media(value: &str, url: &Url) -> Result<Rendition, SyntaxError> {
         "CLOSED-CAPTIONS" => RenditionKind::ClosedCaptions,
         _ => return Err(SyntaxError::RenditionType(kind.to_owned())),
     };
+    let yes = |name| {
+        attrs
+            .get(name)
+            .is_some_and(|v| v.eq_ignore_ascii_case("YES"))
+    };
     Ok(Rendition {
         kind,
         group: attrs.require("EXT-X-MEDIA", "GROUP-ID")?.to_owned(),
         name: attrs.get("NAME").map(str::to_owned),
         language: attrs.get("LANGUAGE").map(str::to_owned),
-        default: attrs
-            .get("DEFAULT")
-            .is_some_and(|d| d.eq_ignore_ascii_case("YES")),
+        default: yes("DEFAULT"),
+        autoselect: yes("AUTOSELECT"),
+        forced: yes("FORCED"),
+        channels: attrs.get("CHANNELS").map(str::to_owned),
         uri: attrs.get("URI").map(|u| resolve(url, u)).transpose()?,
         stable_id: attrs.get("STABLE-RENDITION-ID").map(str::to_owned),
     })

@@ -1,6 +1,8 @@
 //! fMP4 分片的结构核对：没写完与最后一个 box 的长度写 0。
 
-use hs_m3u8_remux::{Control, Error, Streams, TrackSegments, remux};
+use hs_m3u8_remux::{Control, Error, Streams, TrackSegments};
+
+use crate::remux;
 
 use crate::{declared, group, track, work_dir};
 

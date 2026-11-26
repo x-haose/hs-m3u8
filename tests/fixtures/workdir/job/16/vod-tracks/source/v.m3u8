@@ -1,0 +1,8 @@
+#EXTM3U
+#EXT-X-TARGETDURATION:1
+#EXT-X-MAP:URI="v/init.mp4"
+#EXTINF:1,
+v/seg0.m4s
+#EXTINF:1,
+v/seg1.m4s
+#EXT-X-ENDLIST

@@ -2,7 +2,9 @@
 
 use std::sync::atomic::Ordering;
 
-use hs_m3u8_remux::{Control, Error, Segment, Streams, TrackSegments, remux};
+use hs_m3u8_remux::{Control, Error, Segment, Streams, TrackSegments};
+
+use crate::remux;
 
 use crate::{counting_cancel, group, track, work_dir};
 

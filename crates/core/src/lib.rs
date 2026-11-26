@@ -1,4 +1,4 @@
-//! HLS 下载引擎：选轨、并发拉取分片、AES-128 解密与校验、可续传的任务目录、直播录制，输出为 MP4、可直接播放的本地 HLS
+//! HLS 下载引擎：选轨、并发拉取分片、AES-128 解密与校验、可续传的任务目录、直播录制，输出为 MP4 或 Matroska、可直接播放的本地 HLS
 //! 目录，或两者都要。另有单个文件的分段下载（[`Engine::start_file`]），与 HLS 共用客户端、引擎的请求名额、重试与任务目
 //! 录；先认出地址是播放列表、网页还是文件用 [`Engine::identify`]，按同样的请求设置取回一个小资源（如 tracker 列表）用
 //! [`Engine::fetch`]，调用接口（如网盘的 JSON 接口，任何状态都拿回整个响应）用 [`Engine::call`]。
@@ -11,8 +11,8 @@
 //! 参数错误由 [`Engine::start`]、[`Engine::merge_recorded`] 立即返回，其余失败经 [`Job::wait`] 的 `Err` 返回；任务失败
 //! 或取消时不生成输出，任务目录保留以便续传。
 //!
-//! 结果与错误里的轨道编号（`track`）：第 0 条为所选变体（来源本身是媒体播放列表时即它），第 1 条（若有）为
-//! 独立的音频 rendition。
+//! 结果与错误里的轨道编号（`track`）：第 0 条为所选变体（来源本身是媒体播放列表时即它），其后依次是所选的各独立音频
+//! rendition、各字幕 rendition（见 [`Selected`]）。
 
 mod blocking;
 
@@ -75,17 +75,23 @@ pub use error::{
 pub use fetched::Fetched;
 pub use file::{Expected, FileInfo, FileRequest, Resource};
 pub use hooks::{HookError, HookKind, Hooks, NoHooks, Purpose, RequestParts};
-/// 内容放不进 MP4 的原因（[`Unsupported::Mp4`]）；本地 HLS 表示不了的见 [`HlsUnsupported`]。
-pub use hs_m3u8_remux::Unsupported as Mp4Unsupported;
+/// 内容放不进合并文件的原因（[`Unsupported::Merge`]）；本地 HLS 表示不了的见 [`HlsUnsupported`]。
+pub use hs_m3u8_remux::Unsupported as MergeUnsupported;
 pub use ident::bare_url;
-pub use info::{AudioInfo, MasterInfo, Selected, TrackInfo, VariantInfo};
-pub use output::{FileOutputOptions, OutputOptions, Target};
+pub use info::{
+    AudioInfo, MasterInfo, Selected, SubtitleFormat, SubtitleInfo, SubtitleProblem, TrackInfo,
+    VariantInfo,
+};
+pub use output::{
+    FileOutputOptions, MergedFile, OutputOptions, SubtitleFileFormat, SubtitleOutput, Target,
+};
 pub use probe::Probe;
 pub use proxy::{Bypass, ProxySource, SystemProxy, system_proxy};
 pub use report::{
     FileCount, FileOutput, FileProgress, FileSaved, HlsSaved, Leftover, LeftoverKind, LiveEnd,
-    LiveReport, MissReason, Missed, Mp4Output, NewSession, Output, Progress, RefreshReason,
-    Retrying, Saved, SegmentCounts, SourceBreak, Stage, StallCause, Throttled, Writing,
+    LiveReport, MergedOutput, MissReason, Missed, NewSession, Output, Progress, RefreshReason,
+    Retrying, Saved, SegmentCounts, SourceBreak, Stage, StallCause, Throttled, TrackKind,
+    TrackProgress, Writing,
 };
 pub use request::{
     Body, Call, HttpOptions, JobRequest, KeyOverride, LiveOptions, Method, Proxy, RetryPolicy,
@@ -130,8 +136,8 @@ pub async fn merge_files(
 /// 公开接口用到的播放列表解析与选轨类型。
 pub mod hls {
     pub use hs_m3u8_hls::{
-        AudioChoice, AudioKey, Encryption, Malformed, Preference, Resolution, SelectError,
-        SyntaxError, VariantChoice, VariantKey,
+        Encryption, Malformed, Preference, RenditionChoice, RenditionKey, RenditionKind,
+        Renditions, Resolution, SelectError, SyntaxError, VariantChoice, VariantKey,
     };
 }
 

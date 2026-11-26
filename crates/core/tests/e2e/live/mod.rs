@@ -10,6 +10,7 @@ mod resume;
 mod sessions;
 mod stall;
 mod stop;
+mod subtitles;
 
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -19,7 +20,7 @@ use hs_m3u8_core::{
     Error, JobRequest, LiveEnd, LiveOptions, LiveReport, MissReason, Missed, Output, Progress,
     RetryPolicy, Url,
 };
-use hs_m3u8_remux::{DiscontinuityGroup, Streams};
+use hs_m3u8_remux::DiscontinuityGroup;
 
 use crate::server::Server;
 use crate::{engine, expected, fixture, request, run, track};
@@ -98,7 +99,7 @@ async fn run_until_full(req: &JobRequest) {
     first.output.keep_work_dir = true;
     let output = run(first).await.unwrap();
     assert_eq!(output.live.unwrap().end, Some(LiveEnd::DurationReached));
-    std::fs::remove_file(req.output.target.mp4().unwrap()).unwrap();
+    std::fs::remove_file(&req.output.target.file().unwrap().path).unwrap();
 }
 
 /// 录制的报告与缺失的分片，同 [`report`] 的写法。
@@ -138,7 +139,7 @@ async fn interrupt(req: &JobRequest, until: impl FnMut(&Progress) -> bool) {
     progress.wait_for(until).await.unwrap();
     job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
-    assert!(!req.output.target.mp4().unwrap().exists());
+    assert!(!req.output.target.file().unwrap().path.exists());
 }
 
 /// 视频加独立音频 rendition 的直播源：放 fmp4_a 的 init 段与分片，两条媒体播放列表按 `video` / `audio`
@@ -224,7 +225,11 @@ fn expected_split_long(dir: &Path, groups: &[(&[u64], &[u64])]) -> Vec<u8> {
             }
         })
         .collect();
-    expected(dir, &[Streams::Video, Streams::Audio], &groups)
+    expected(
+        dir,
+        &[crate::video(), crate::audio("en", None, true)],
+        &groups,
+    )
 }
 
 /// fmp4_a 视频与音频各取若干个分片、合成一组的期望输出。
@@ -235,7 +240,7 @@ fn expected_split(dir: &Path, video: &[&str], audio: &[&str]) -> Vec<u8> {
     ];
     expected(
         dir,
-        &[Streams::Video, Streams::Audio],
+        &[crate::video(), crate::audio("en", None, true)],
         &[DiscontinuityGroup { tracks }],
     )
 }

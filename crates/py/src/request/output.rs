@@ -97,13 +97,21 @@ variants! {
 impl Target {
     fn to_core(&self) -> core::Target {
         match self {
-            Target::Mp4 { path } => core::Target::Mp4(path.0.clone()),
+            Target::Mp4 { path } => core::Target::File(mp4(path)),
             Target::Hls { path } => core::Target::Hls(path.0.clone()),
-            Target::Both { mp4, hls } => core::Target::Both {
-                mp4: mp4.0.clone(),
+            Target::Both { mp4: file, hls } => core::Target::Both {
+                file: mp4(file),
                 hls: hls.0.clone(),
             },
         }
+    }
+}
+
+/// `path` 上的 MP4 合并文件。
+fn mp4(path: &PyPath) -> core::MergedFile {
+    core::MergedFile {
+        path: path.0.clone(),
+        container: core::remux::Container::Mp4,
     }
 }
 

@@ -115,8 +115,21 @@ pub enum Error {
     Fmp4OpenEnded { path: PathBuf, at: u64 },
     #[error("打开{at}失败：{cause}")]
     OpenInput { at: Origin, cause: FfmpegError },
-    #[error("{at}的{kind}流与前面的重复")]
-    DuplicateKind { at: Origin, kind: StreamKind },
+    /// 字幕分片不是能用的 WebVTT
+    #[error("{at}的字幕分片 {path} 无法解析：{cause}")]
+    Subtitle {
+        at: Origin,
+        path: PathBuf,
+        cause: hs_m3u8_subtitle::Error,
+    },
+    #[error("{at}的{cause}")]
+    SubtitleTooLong {
+        at: Origin,
+        cause: hs_m3u8_subtitle::TooLong,
+    },
+    /// 输出只能有一路视频；音频、字幕可以有多路
+    #[error("{at}的视频流与前面的重复：输出只能有一路视频")]
+    DuplicateVideo { at: Origin },
     /// 打包音频要按包在输入里的字节位置找到所在的分片；FFmpeg 的裸音频解复用器都给出位置
     #[error("读取{at}（打包音频）时，包没有在输入里的字节位置，定不了属于哪个分片")]
     UnplacedPacket { at: Origin },
@@ -155,7 +168,7 @@ pub enum Error {
 
 /// 内容放不进输出（MP4 或 Matroska）：编码不受支持或参数探测不出；后续组与第 0 组的流种类、编码参数或解码配置不同，
 /// 组内分片格式、PID 或编码参数变了，或组内时间戳不递增、往前跳（同一条轨的内容须前后一致、时间戳递增且连续）；一组的
-/// 视频没有能开始解码的帧；打包音频没有时间戳而要与其他轨对齐；或各轨都没有要取的流。HLS 的合并只输出 MP4。
+/// 视频没有能开始解码的帧；打包音频没有时间戳而要与其他轨对齐；或各轨都没有要取的流。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unsupported {
     #[error(
@@ -192,8 +205,9 @@ pub enum Unsupported {
     ParamsChanged {
         at: Origin,
         kind: StreamKind,
-        first: Shape,
-        found: Shape,
+        /// 装箱：少见的失败，不让每个结果都带着两份参数的大小
+        first: Box<Shape>,
+        found: Box<Shape>,
     },
     /// 编码参数相同而解码配置与第 0 组不同：fMP4 的为 init 段里的（如 H.264 的参数集），TS 与打包音频里的音频为帧头
     /// （如 AAC 的 profile 与采样率下标，LC 与 HE-AAC 的采样率都可以是 48 kHz）；或一组是 fMP4 而另一组是 TS 或打包

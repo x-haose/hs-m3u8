@@ -2,8 +2,10 @@
 
 use ffmpeg_next as ffmpeg;
 use hs_m3u8_remux::{
-    Control, Error, Origin, Shape, StreamKind, Streams, TrackSegments, Unsupported, remux,
+    Control, Error, Origin, Shape, StreamKind, Streams, TrackSegments, Unsupported,
 };
+
+use crate::remux;
 
 use crate::{check, group, packed_fixture, packed_segment, segs, track, work_dir};
 
@@ -93,19 +95,14 @@ fn chroma_changes_are_rejected() {
     .unwrap_err();
     assert!(
         matches!(
-            err,
+            &err,
             Error::Unsupported(Unsupported::ParamsChanged {
                 at: Origin::Track { group: 1, .. },
-                first: Shape::Video {
-                    pixel_format: Some("yuv420p"),
-                    ..
-                },
-                found: Shape::Video {
-                    pixel_format: Some("yuv444p"),
-                    ..
-                },
+                first,
+                found,
                 ..
-            })
+            }) if matches!(**first, Shape::Video { pixel_format: Some("yuv420p"), .. })
+                && matches!(**found, Shape::Video { pixel_format: Some("yuv444p"), .. })
         ),
         "跨组：实际 {err:?}"
     );

@@ -19,6 +19,7 @@ pip install hs-m3u8
   - MP3 采样率不低于 16 kHz，TS 与打包音频里的 E-AC-3 每帧 6 块、只有一个独立子流；
   - 每条轨只取第一路视频与第一路音频（如 TS 里有多路音频时只取第一路），本地 HLS 原样保留全部；
   - MP4 里的 MP3、MP2 音轨，苹果基于 AVFoundation 的播放器（QuickTime Player、Safari 等）认不出。
+- 多条音轨与字幕（目前只在 Rust 接口）：同时下多条独立的音频与字幕 rendition，合并为 MP4 或 Matroska（MKV，收得下 MP4 收不下的编码，如 Vorbis），各轨写上语言、名称与默认标志；HLS 的分段 WebVTT 字幕按 X-TIMESTAMP-MAP 对齐画面，封进 MKV（SubRip）或 MP4（mov_text），或另存为 SRT、WebVTT 文件。fMP4 里的字幕（wvtt、stpp）与隐藏字幕（CLOSED-CAPTIONS）不支持：自动选到的跳过并列出，点名选的报错。
 - 续传：分片落盘即完整，中断后再次运行只补缺的；播放列表变了时明确拒绝。
 - 下载时校验分片：解密失败、不是媒体数据的内容拒收；空的响应、fMP4 的顶层 box 或 moof 里声明的样本数据超出数据、TS 或打包音频截在包或帧中间（加密的看解出的内容）时，按没写完重新取，直播里仍没写完的记为缺失。恰好截在 TS 包、音频帧或两组 moof/mdat 之间的看不出，合并出的内容比声明的时长短。
 - 直播录制：按 RFC 8216 的节奏刷新，窗口滑过、取不到或来源标了 EXT-X-GAP 的分片在结果里如实报告；只录一条轨时编码器重启（序号回退）后另起会话接着录；中断后续录，或不联网只合并已录到的。
@@ -100,18 +101,26 @@ Rust 库没有发布到 crates.io。在自己的项目里用 git 依赖（`hs-m3
 ```rust no_run
 use std::num::NonZeroUsize;
 
-use hs_m3u8_core::{Engine, JobRequest, OutputOptions, Source, Target, Url};
+use hs_m3u8_core::hls::Renditions;
+use hs_m3u8_core::remux::Container;
+use hs_m3u8_core::{Engine, JobRequest, MergedFile, OutputOptions, Source, Target, Url};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let engine = Engine::new(NonZeroUsize::new(32).unwrap());
     let url = Url::parse("https://example.com/master.m3u8")?;
-    let output = OutputOptions::new(Target::Mp4("downloads/video.mp4".into()));
-    let request = JobRequest::new(Source::new(url), output);
-    let job = engine.start(request)?;
+    // 最高清的变体，所选变体的音频组与字幕组里的全部，封进一个 MKV
+    let mut source = Source::new(url);
+    source.preference.audio = Renditions::All;
+    source.preference.subtitles = Renditions::All;
+    let output = OutputOptions::new(Target::File(MergedFile {
+        path: "downloads/video.mkv".into(),
+        container: Container::Matroska,
+    }));
+    let job = engine.start(JobRequest::new(source, output))?;
     let output = job.wait().await?;
-    if let Some(mp4) = output.mp4 {
-        println!("已保存到 {}", mp4.path.display());
+    if let Some(merged) = output.merged {
+        println!("已保存到 {}", merged.path.display());
     }
     Ok(())
 }
@@ -141,7 +150,8 @@ Windows 上在已加载 MSVC 环境的 MSYS2 里运行 `build.sh`。已按 `buil
 |---|---|
 | `crates/hls` | 播放列表解析、规范化、选轨 |
 | `crates/core` | 下载、解密与校验、续传、直播录制、合并（Rust 公开 API 未定型） |
-| `crates/remux` | 转封装为 MP4（静态链接的精简 FFmpeg） |
+| `crates/remux` | 转封装为 MP4 或 Matroska（静态链接的精简 FFmpeg） |
+| `crates/subtitle` | WebVTT 解析与对齐，SRT、WebVTT、mov_text 的写出 |
 | `crates/py` | Python 绑定（`hs_m3u8`） |
 
 桌面下载器在独立的仓库 [hs-dlx](https://github.com/x-haose/hs-dlx)，经 git 依赖使用这里的 `hs-m3u8-core`。

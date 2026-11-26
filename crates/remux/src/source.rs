@@ -81,7 +81,7 @@ impl Source {
                 crate::Shape::Audio { sample_rate, .. } => {
                     s.frame_samples.map(|samples| (sample_rate, samples))
                 }
-                crate::Shape::Video { .. } => None,
+                crate::Shape::Video { .. } | crate::Shape::Subtitle { .. } => None,
             };
             map[s.index] = Some(Mapping {
                 output,

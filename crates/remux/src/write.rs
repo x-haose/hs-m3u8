@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ffmpeg::{Dictionary, Packet, Rational, Rescale, Rounding, codec, encoder, format};
+use ffmpeg::{Dictionary, Packet, Rational, Rescale, Rounding, codec, encoder, format, media};
 use ffmpeg_next as ffmpeg;
 
 use crate::chain::{self, Halt, SegmentChain};
@@ -13,9 +13,11 @@ use crate::error::file_error;
 use crate::ffi::{self, OpenFailure, OutputFile};
 use crate::group::OpenTrack;
 use crate::source::{Dropped, Mapping, Source};
+use crate::subtitles::{self, Lane};
 use crate::timing::{MICROS, SampleClock, retime};
 use crate::{
-    Cancel, Container, Error, FfmpegError, MediaReport, Origin, Shape, StreamReport, Unsupported,
+    Cancel, Container, Error, FfmpegError, Label, MediaReport, Origin, Shape, StreamKind,
+    StreamReport, Unsupported,
 };
 
 /// 一路输出流：第 0 组决定其编码参数，写出过程中累计统计。`_us` 结尾的时刻为输出时间线上的微秒。
@@ -60,24 +62,50 @@ pub(crate) struct Muxer {
 }
 
 impl Muxer {
-    /// 以 `container` 的格式打开输出，按第 0 组（或各完整文件）`first`（各轨选中的流为 `layout`）建立输出流并写头。
+    /// 以 `container` 的格式打开输出，按第 0 组（或各完整文件）`first`（各轨选中的流为 `layout`）建立音视频输出流，其后
+    /// 为 `subtitles` 里各轨（轨号）的字幕流，写上 `labels`（按轨号；合并完整文件时为空，不写）并写头。
     pub(crate) fn open(
         path: &str,
         container: Container,
         cancel: &Cancel,
         first: &[OpenTrack],
         layout: &[Vec<Desc>],
+        labels: &[&Label],
+        subtitles: &[usize],
     ) -> Result<Muxer, Error> {
         let mut file = ffi::open_output(path, container, cancel)
             .map_err(|failure| open_error(failure, path, cancel))?;
         add_streams(&mut file.octx, container, first)?;
+        let codec = subtitles::Codec::of(container);
+        for _ in subtitles {
+            let mut ost = file
+                .octx
+                .add_stream(encoder::find(codec::Id::None))
+                .map_err(|e| Error::Mux(e.into()))?;
+            ffi::set_subtitle_parameters(&mut ost, codec);
+            ost.set_time_base(SUBTITLE_TIME_BASE);
+        }
+        if !labels.is_empty() {
+            let owners: Vec<usize> = layout
+                .iter()
+                .enumerate()
+                .flat_map(|(track, descs)| std::iter::repeat_n(track, descs.len()))
+                .chain(subtitles.iter().copied())
+                .collect();
+            label_streams(&mut file.octx, container, &owners, labels);
+        }
         write_header(&mut file, container)?;
-        let outs: Vec<OutStream> = layout
+        let shapes = layout
             .iter()
             .flatten()
+            .map(|desc| desc.shape)
+            .chain(subtitles.iter().map(|_| Shape::Subtitle {
+                codec: codec.name(),
+            }));
+        let outs: Vec<OutStream> = shapes
             .enumerate()
-            .map(|(out, desc)| OutStream {
-                shape: desc.shape,
+            .map(|(out, shape)| OutStream {
+                shape,
                 time_base: file.octx.stream(out).expect("输出流已创建").time_base(),
                 written: 0,
                 dropped: Dropped::default(),
@@ -106,28 +134,35 @@ impl Muxer {
         self.outs.len()
     }
 
-    /// 各路输出流已写出部分的最晚结束时刻与上一个包的 DTS，输出时间线上的微秒；还没写出时为 None。
+    /// 各路输出流已写出部分的最晚结束时刻与上一个包的 DTS，输出时间线上的微秒；还没写出时、字幕流（不参与组间的偏移，
+    /// 字幕跟着画面走）为 None。
     pub(crate) fn written_until(&self) -> Vec<(Option<i64>, Option<i64>)> {
         self.outs
             .iter()
-            .map(|o| (o.end_us, o.last_dts_us))
+            .map(|o| match o.shape.kind() {
+                StreamKind::Subtitle => (None, None),
+                _ => (o.end_us, o.last_dts_us),
+            })
             .collect()
     }
 
-    /// 最粗的输出时间基的一个 tick，向上取整到微秒：换到输出时间基时的舍入不超过它的一半。
+    /// 音视频输出流里最粗的时间基的一个 tick，向上取整到微秒：换到输出时间基时的舍入不超过它的一半。
     pub(crate) fn coarsest_tick_us(&self) -> i64 {
         self.outs
             .iter()
+            .filter(|o| o.shape.kind() != StreamKind::Subtitle)
             .map(|o| 1i64.rescale_with(o.time_base, MICROS, Rounding::Up))
             .max()
             .expect("至少有一路输出流")
     }
 
-    /// 按加上各输入 [`Source::offset_us`] 之后的 DTS 交错写出各输入的包，直到都读完；`before` 在每个包写出之前调用，参数
-    /// 为它所在的输入、包、映射与输出时间线上的 DTS（微秒），返回错误时中止。读完后把各输入丢弃的包计入输出流。
+    /// 按加上各输入 [`Source::offset_us`] 之后的 DTS 交错写出各输入的包与各字幕通道（`lanes`，合并完整文件时为空）里封进
+    /// 输出的字幕包，直到都写完，时刻相同时先写音视频；`before` 在每个音视频包写出之前调用，参数为它所在的输入、包、映射
+    /// 与输出时间线上的 DTS（微秒），返回错误时中止。读完后把各输入丢弃的包计入输出流。
     pub(crate) fn interleave(
         &mut self,
         sources: &mut [Source],
+        lanes: &mut [Lane],
         mut before: impl FnMut(&mut Source, &Packet, Mapping, i64) -> Result<(), Error>,
     ) -> Result<(), Error> {
         loop {
@@ -144,6 +179,25 @@ impl Muxer {
                 .enumerate()
                 .filter_map(|(i, s)| s.front_dts_us().map(|dts| (i, dts)))
                 .min_by_key(|&(_, dts)| dts);
+            let subtitle = lanes
+                .iter()
+                .enumerate()
+                .filter(|(_, lane)| lane.output.is_some())
+                .filter_map(|(l, lane)| lane.front_us().map(|us| (l, us)))
+                .min_by_key(|&(_, us)| us);
+            if let Some((l, start_us)) = subtitle
+                && next.is_none_or(|(_, dts_us)| start_us < dts_us)
+            {
+                let lane = &mut lanes[l];
+                let packet = lane
+                    .queue
+                    .pop_front()
+                    .expect("front_us 只指向有待写包的通道");
+                let (output, _) = lane.output.expect("只挑封进输出的通道");
+                let at = lane.at();
+                self.write_subtitle(packet, output, at)?;
+                continue;
+            }
             let Some((i, dts_us)) = next else { break };
             let source = &mut sources[i];
             let (packet, mapping) = source.queue.pop_front().expect("next 只指向有待写包的输入");
@@ -212,6 +266,48 @@ impl Muxer {
         o.last_dts_us = Some(t.dts_us);
         packet.set_position(-1);
         packet.set_stream(out);
+        if let Err(e) = packet.write_interleaved(&mut self.file.octx) {
+            return Err(self.file.write_error(e));
+        }
+        self.outs[out].written += 1;
+        Ok(())
+    }
+
+    /// 把字幕包写到输出流 `out`；`at` 只用于报错时指出轨道。
+    fn write_subtitle(
+        &mut self,
+        subtitle: subtitles::Packet,
+        out: usize,
+        at: Origin,
+    ) -> Result<(), Error> {
+        if self.file.cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let o = &mut self.outs[out];
+        let mut packet = Packet::copy(&subtitle.data);
+        let dts = subtitle.start_us.rescale(MICROS, o.time_base);
+        let duration = subtitle.duration_us.rescale(MICROS, o.time_base);
+        if o.last_dts
+            .is_some_and(|last| dts < last || (self.container == Container::Mp4 && dts == last))
+        {
+            return Err(Error::Unsupported(Unsupported::DtsNotIncreasing {
+                at,
+                kind: StreamKind::Subtitle,
+            }));
+        }
+        packet.set_dts(Some(dts));
+        packet.set_pts(Some(dts));
+        packet.set_duration(duration);
+        packet.set_flags(ffmpeg::packet::Flags::KEY);
+        packet.set_stream(out);
+        o.last_dts = Some(dts);
+        o.start_us = Some(
+            o.start_us
+                .map_or(subtitle.start_us, |s| s.min(subtitle.start_us)),
+        );
+        let end_us = subtitle.start_us + subtitle.duration_us;
+        o.end_us = Some(o.end_us.map_or(end_us, |e| e.max(end_us)));
+        o.last_dts_us = Some(subtitle.start_us);
         if let Err(e) = packet.write_interleaved(&mut self.file.octx) {
             return Err(self.file.write_error(e));
         }
@@ -323,6 +419,51 @@ fn add_streams(
     Ok(())
 }
 
+/// 字幕流的时间基：WebVTT 的精度为毫秒，Matroska 的时间基也是。
+const SUBTITLE_TIME_BASE: Rational = Rational(1, 1000);
+
+/// 给各输出流写上标注：第 i 路流属于第 `owners[i]` 条轨，标注为 `labels[owners[i]]`（见 [`Label`]）。每类流里都没有标默认
+/// 的时，第一路视频与第一路音频为默认。
+fn label_streams(
+    octx: &mut format::context::Output,
+    container: Container,
+    owners: &[usize],
+    labels: &[&Label],
+) {
+    let kinds: Vec<media::Type> = octx.streams().map(|s| s.parameters().medium()).collect();
+    let flagged = |kind: media::Type| {
+        kinds
+            .iter()
+            .zip(owners)
+            .any(|(&k, &owner)| k == kind && labels[owner].default)
+    };
+    let mut first_seen: Vec<media::Type> = Vec::new();
+    for (index, (&kind, &owner)) in kinds.iter().zip(owners).enumerate() {
+        let label = labels[owner];
+        let first = !first_seen.contains(&kind);
+        if first {
+            first_seen.push(kind);
+        }
+        let default = label.default || (first && kind != media::Type::Subtitle && !flagged(kind));
+        let mut metadata = Dictionary::new();
+        let code = label
+            .language
+            .as_deref()
+            .and_then(hs_m3u8_subtitle::iso639_2)
+            .map_or("und", |(bibliographic, terminology)| match container {
+                Container::Matroska => bibliographic,
+                Container::Mp4 => terminology,
+            });
+        metadata.set("language", code);
+        if let Some(title) = label.name.as_deref().or(label.language.as_deref()) {
+            metadata.set("title", title);
+        }
+        let mut ost = octx.stream_mut(index).expect("下标在流数以内");
+        ost.set_metadata(metadata);
+        ffi::set_disposition(&mut ost, default, label.forced);
+    }
+}
+
 /// 写头（MP4 的 moov 前置）；封装器不认识的选项视为错误。
 fn write_header(file: &mut OutputFile, container: Container) -> Result<(), Error> {
     let mut options = Dictionary::new();
@@ -345,7 +486,11 @@ fn write_header(file: &mut OutputFile, container: Container) -> Result<(), Error
 
 /// 回读输出，核对每路流的包数与写入的一致。
 fn verify(path: &Path, outs: &[OutStream], cancel: &Cancel) -> Result<(), Error> {
-    let found = count_packets(path, cancel)?;
+    let blanks: Vec<bool> = outs
+        .iter()
+        .map(|o| o.shape == Shape::Subtitle { codec: "mov_text" })
+        .collect();
+    let found = count_packets(path, &blanks, cancel)?;
     if found.len() != outs.len() {
         return Err(Error::VerifyStreams {
             expected: outs.len(),
@@ -364,9 +509,10 @@ fn verify(path: &Path, outs: &[OutStream], cancel: &Cancel) -> Result<(), Error>
     Ok(())
 }
 
-/// 回读文件，按流下标统计包数。经分片链读（见 [`crate::chain`]）：读文件出错照原样报为 [`Error::Io`]，取消为
+/// 回读文件，按流下标统计包数；`skip_blank[i]` 为真的流（mov_text）不数清屏的空样本：链接的 FFmpeg 的 movenc 在字幕
+/// 样本之间与末尾自己补上（mov_write_packet 与 mov_write_trailer），补几个取决于各路流的包的先后，本库写出的都有文字。经分片链读（见 [`crate::chain`]）：读文件出错照原样报为 [`Error::Io`]，取消为
 /// [`Error::Cancelled`]，其余为 [`Error::Reread`]（输出本身读不懂）。
-fn count_packets(path: &Path, cancel: &Cancel) -> Result<Vec<u64>, Error> {
+fn count_packets(path: &Path, skip_blank: &[bool], cancel: &Cancel) -> Result<Vec<u64>, Error> {
     let file_failed = |cause| Error::Io {
         action: "回读",
         path: path.to_path_buf(),
@@ -392,6 +538,12 @@ fn count_packets(path: &Path, cancel: &Cancel) -> Result<Vec<u64>, Error> {
         if !chain::read(&mut ictx, &failure, &mut packet).map_err(halted)? {
             return Ok(counts);
         }
-        counts[packet.stream()] += 1;
+        let blank = skip_blank.get(packet.stream()).copied().unwrap_or(false)
+            && packet
+                .data()
+                .is_none_or(|data| data.iter().all(|&b| b == 0) && data.len() <= 2);
+        if !blank {
+            counts[packet.stream()] += 1;
+        }
     }
 }

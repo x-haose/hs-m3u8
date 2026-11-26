@@ -1,18 +1,22 @@
 //! 记进任务目录的选轨：续传、续录时按其中的身份在主播放列表中找回同一条轨，不受主播放列表增删变体、地址换令牌的
-//! 影响；本地 HLS 的主播放列表按其中的属性写变体与音频（只合并时只有它可用）。
+//! 影响；本地 HLS 的主播放列表与合并文件里各轨的标注按其中的属性写（只合并时只有它可用）。
 
 use hs_m3u8_hls::{
-    AudioKey, CodecKind, MasterPlaylist, Resolution, SelectedAudio, Selection, VariantKey,
-    codec_family,
+    CodecKind, MasterPlaylist, RenditionKey, RenditionKind, Resolution, SelectedRendition,
+    Selection, VariantKey, codec_family,
 };
-use hs_m3u8_remux::Streams;
+use hs_m3u8_remux::{Label, Streams};
 
 /// 一次选轨。属性是首次选出这些轨时来源写的，之后身份相同即沿用、不随拉到的主播放列表更新：身份相同的轨内容相同。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SelectionRecord {
     pub variant: VariantRecord,
-    /// 独立的音频 rendition；None 表示音频混在变体流里（或没有音频）
-    pub audio: Option<AudioRecord>,
+    /// 用变体流里混着的音频（见 [`Selection::muxed_audio`]）
+    pub muxed_audio: bool,
+    /// 有独立媒体播放列表的音频，按轨号
+    pub audio: Vec<RenditionRecord>,
+    /// 字幕，按轨号（在音频之后）
+    pub subtitles: Vec<RenditionRecord>,
 }
 
 /// 所选变体的身份与属性。
@@ -26,20 +30,30 @@ pub(crate) struct VariantRecord {
     pub codecs: Vec<String>,
 }
 
-/// 所选音频 rendition 的身份与属性。
+/// 所选音频或字幕 rendition 的身份与属性。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AudioRecord {
-    pub key: AudioKey,
+pub(crate) struct RenditionRecord {
+    pub key: RenditionKey,
     /// NAME
     pub name: Option<String>,
     /// LANGUAGE
     pub language: Option<String>,
+    /// DEFAULT=YES
+    pub default: bool,
+    /// FORCED=YES
+    pub forced: bool,
 }
 
 impl SelectionRecord {
     /// `selection` 为从 `master` 中选出的轨。
     pub(crate) fn of(selection: &Selection, master: &MasterPlaylist) -> Self {
         let variant = &selection.variant;
+        let renditions = |kind, selected: &[SelectedRendition]| {
+            selected
+                .iter()
+                .map(|s| RenditionRecord::of(master, kind, s))
+                .collect()
+        };
         SelectionRecord {
             variant: VariantRecord {
                 key: VariantKey::of(master, selection.variant_index)
@@ -48,42 +62,128 @@ impl SelectionRecord {
                 resolution: variant.resolution,
                 codecs: variant.codecs.clone(),
             },
-            audio: selection.audio.as_ref().map(|a| AudioRecord {
-                key: AudioKey::of(master, a.index).expect("选出的音频在主播放列表里"),
-                name: a.rendition.name.clone(),
-                language: a.rendition.language.clone(),
-            }),
+            muxed_audio: selection.muxed_audio,
+            audio: renditions(RenditionKind::Audio, &selection.audio),
+            subtitles: renditions(RenditionKind::Subtitles, &selection.subtitles),
         }
     }
 
-    /// 在 `master` 中找回这次选轨：音频在找到的变体引用的音频组里找，且须有独立的媒体播放列表；找到的变体分辨率或编码
-    /// 种类、音频的语言与记录的不同（见 [`VariantRecord::agrees`]、[`AudioRecord::agrees`]）也算找不到。
+    /// 在 `master` 中找回这次选轨：音频、字幕在找到的变体引用的组里找，且须有独立的媒体播放列表；找到的变体分辨率或
+    /// 编码种类、音频与字幕的语言与记录的不同（见 [`VariantRecord::agrees`]、[`RenditionRecord::agrees`]）也算找不到。
     pub(crate) fn find(&self, master: &MasterPlaylist) -> Option<Selection> {
         let variant_index = self.variant.key.find(master)?;
         let variant = &master.variants[variant_index];
         if !self.variant.agrees(variant.resolution, &variant.codecs) {
             return None;
         }
-        let audio = match &self.audio {
-            None => None,
-            Some(audio) => {
-                let (index, rendition) = audio.key.find(master, variant.audio.as_deref()?)?;
-                if !audio.agrees(rendition.language.as_deref()) {
-                    return None;
-                }
-                Some(SelectedAudio {
-                    index,
-                    uri: rendition.uri.clone()?,
-                    rendition: rendition.clone(),
-                })
-            }
+        let find_all = |records: &[RenditionRecord], kind, group: Option<&str>| {
+            records
+                .iter()
+                .map(|r| r.find(master, kind, group))
+                .collect::<Option<Vec<_>>>()
         };
         Some(Selection {
             variant_index,
             variant: variant.clone(),
-            audio,
+            muxed_audio: self.muxed_audio,
+            audio: find_all(&self.audio, RenditionKind::Audio, variant.audio.as_deref())?,
+            subtitles: find_all(
+                &self.subtitles,
+                RenditionKind::Subtitles,
+                variant.subtitles.as_deref(),
+            )?,
         })
     }
+
+    /// 第 0 条轨（变体）之后的各轨：音频在前、字幕在后，按轨号。
+    pub(crate) fn renditions(&self) -> impl Iterator<Item = &RenditionRecord> {
+        self.audio.iter().chain(&self.subtitles)
+    }
+}
+
+impl RenditionRecord {
+    /// `master` 里选出的 `kind` 类 rendition `selected`。
+    fn of(master: &MasterPlaylist, kind: RenditionKind, selected: &SelectedRendition) -> Self {
+        let rendition = &selected.rendition;
+        RenditionRecord {
+            key: RenditionKey::of(master, kind, selected.index).expect("选出的在主播放列表里"),
+            name: rendition.name.clone(),
+            language: rendition.language.clone(),
+            default: rendition.default,
+            forced: rendition.forced,
+        }
+    }
+
+    /// 在 `master` 的 `group` 组里找回它：须有独立的媒体播放列表，语言与记录的不矛盾（见 [`RenditionRecord::agrees`]）。
+    fn find(
+        &self,
+        master: &MasterPlaylist,
+        kind: RenditionKind,
+        group: Option<&str>,
+    ) -> Option<SelectedRendition> {
+        let (index, rendition) = self.key.find(master, kind, group?)?;
+        if !self.agrees(rendition.language.as_deref()) {
+            return None;
+        }
+        Some(SelectedRendition {
+            index,
+            uri: rendition.uri.clone()?,
+            rendition: rendition.clone(),
+        })
+    }
+
+    /// 与 `other` 是同一条：身份相同，且语言不矛盾（见 [`RenditionRecord::agrees`]）。
+    pub(crate) fn same_as(&self, other: &RenditionRecord) -> bool {
+        self.key == other.key && self.agrees(other.language.as_deref())
+    }
+
+    /// 与语言 `language` 不矛盾：两边都写了的才比，不分大小写；NAME 会本地化改写，不比。按属性认的身份本身含语言，只有
+    /// 按稳定 ID 认的会不符：来源把同一稳定 ID 给了另一条，违反了稳定 ID 的约定。
+    fn agrees(&self, language: Option<&str>) -> bool {
+        match (self.language.as_deref(), language) {
+            (Some(recorded), Some(current)) => recorded.eq_ignore_ascii_case(current),
+            _ => true,
+        }
+    }
+
+    /// 写进合并文件的标注。
+    pub(crate) fn label(&self) -> Label {
+        Label {
+            language: self.language.clone(),
+            name: self.name.clone(),
+            default: self.default,
+            forced: self.forced,
+        }
+    }
+}
+
+/// 各轨的取流方式：第 0 条轨为变体，用混着的音频时全取、否则只取视频（变体里混着的音频不用，与播放器一致）；其后各条
+/// 独立音频只取音频，各条字幕为字幕轨。来源本身是媒体播放列表时 `selection` 为 None，只有一条轨，全取。
+pub(crate) fn track_streams(selection: Option<&SelectionRecord>) -> Vec<Streams> {
+    let Some(selection) = selection else {
+        return vec![Streams::All];
+    };
+    let first = if selection.muxed_audio {
+        Streams::All
+    } else {
+        Streams::Video
+    };
+    std::iter::once(first)
+        .chain(selection.audio.iter().map(|_| Streams::Audio))
+        .chain(selection.subtitles.iter().map(|_| Streams::Subtitles))
+        .collect()
+}
+
+/// 各轨写进合并文件的标注，按轨号；第 0 条轨（变体）不带标注。
+pub(crate) fn track_labels(selection: Option<&SelectionRecord>) -> Vec<Label> {
+    std::iter::once(Label::default())
+        .chain(
+            selection
+                .into_iter()
+                .flat_map(SelectionRecord::renditions)
+                .map(RenditionRecord::label),
+        )
+        .collect()
 }
 
 impl VariantRecord {
@@ -121,31 +221,6 @@ impl VariantRecord {
             || codecs.is_empty()
             || families(&self.codecs) == families(codecs);
         resolution && codecs
-    }
-}
-
-impl AudioRecord {
-    /// 与 `other` 是同一条音频：身份相同，且语言不矛盾（见 [`AudioRecord::agrees`]）。
-    pub(crate) fn same_as(&self, other: &AudioRecord) -> bool {
-        self.key == other.key && self.agrees(other.language.as_deref())
-    }
-
-    /// 与语言 `language` 不矛盾：两边都写了的才比，不分大小写；NAME 会本地化改写，不比。按属性认的身份本身含语言，只有
-    /// 按稳定 ID 认的会不符：来源把同一稳定 ID 给了另一条音频，违反了稳定 ID 的约定。
-    fn agrees(&self, language: Option<&str>) -> bool {
-        match (self.language.as_deref(), language) {
-            (Some(recorded), Some(current)) => recorded.eq_ignore_ascii_case(current),
-            _ => true,
-        }
-    }
-}
-
-/// 各轨的取流方式：选了独立音频 rendition 时，第 0 条轨只取视频（变体里混着的音频不用，与播放器一致），
-/// 第 1 条轨取音频；否则只有一条轨，全取。来源本身是媒体播放列表时 `selection` 为 None。
-pub(crate) fn track_streams(selection: Option<&SelectionRecord>) -> Vec<Streams> {
-    match selection.and_then(|s| s.audio.as_ref()) {
-        Some(_) => vec![Streams::Video, Streams::Audio],
-        None => vec![Streams::All],
     }
 }
 

@@ -1,5 +1,6 @@
-//! 转封装：把 HLS 各条轨的分片原样复制（不重编码）进一个 MP4（[`remux`]），或把几个完整文件（如分开下载的视频与音频）
-//! 合进一个 MP4 或 Matroska 文件（[`merge_files`]）。以下先说 HLS 的合并，完整文件的不同之处见 [`merge_files`]。
+//! 转封装：把 HLS 各条轨的分片原样复制（不重编码）进一个 MP4 或 Matroska 文件（[`remux`]），字幕轨由 WebVTT 生成；或把
+//! 几个完整文件（如分开下载的视频与音频）合进一个（[`merge_files`]）。以下先说 HLS 的合并，完整文件的不同之处见
+//! [`merge_files`]。
 //!
 //! 输入按不连续段组（两个 `EXT-X-DISCONTINUITY` 之间）组织，每组里每条轨一份分片列表，fMP4 另带 init 段。
 //! - 组内：一条轨的分片按字节顺序当作一个连续的输入读取，同一时刻只打开一个文件，不先拼成大文件；打包音频（RFC
@@ -8,7 +9,8 @@
 //! - 组间：整组使用同一个时间偏移，保留组内各轨（如视频与独立音频 rendition）原有的相对时序；
 //!   各组首尾相接，下一组从上一组所有流的最晚结束时刻之后开始。
 //! - 每条轨按调用方指定的 [`Streams`] 贡献第一路视频和（或）第一路音频，没有这类流的轨不贡献（各轨合起来至少
-//!   一路），未指定种类的流不进输出、不检查编码；同一类流只能来自一条轨；编码参数须探测得出；后续组的流布局、编码
+//!   一路），未指定种类的流不进输出、不检查编码；视频只能来自一条轨，音频可以来自几条轨、各成一路；字幕轨见
+//!   [`Streams::Subtitles`] 与 [`remux`]；编码参数须探测得出；后续组的流布局、编码
 //!   参数与解码配置必须与第一组一致，参数随帧携带的（TS 与打包音频）在组内也不能变，分片格式与 PID 也不能换；每路流
 //!   的解码时间戳必须严格递增（组内不能往回跳或重复），相邻分片之间也不能往前跳得比声明的时长多出一截。TS 里损坏的
 //!   音频包、打包音频里的损坏处跳过并计数（见 [`StreamReport::discarded_corrupt_bytes`]）；每组开头解不出的视频包
@@ -20,7 +22,7 @@
 //! 音频的输入时间基比一个采样点粗（如 Matroska 与部分 fMP4 的 1 毫秒）、输出时间基更细时，帧长已知的编码（链接的
 //! FFmpeg 里为 AAC）按采样点接续，每个样本的时长都是整帧（同 ffmpeg 命令行复制音频时的做法），HLS 与合并文件都如此。
 //!
-//! 输出写完回读核对每路流的包数并落盘。[`remux`] 失败或取消（见 [`Cancel`]）时输出上可能留有写了一半的文件，输出
+//! 输出写完回读核对每路流的包数（mov_text 不数封装器自己补的清屏空样本）并落盘。[`remux`] 失败或取消（见 [`Cancel`]）时输出上可能留有写了一半的文件，输出
 //! 要么完整、要么不存在由调用方写到临时路径、成功后改名、失败时删除来保证；[`merge_files`] 自己写临时文件、成功后
 //! 换上。错误信息已包含原因，不经 `source()` 重复给出。
 //!
@@ -45,6 +47,7 @@ mod nal;
 mod packed;
 mod source;
 pub mod standalone;
+mod subtitles;
 mod timing;
 mod write;
 
@@ -91,6 +94,7 @@ pub struct DiscontinuityGroup {
 pub enum StreamKind {
     Video,
     Audio,
+    Subtitle,
 }
 
 impl StreamKind {
@@ -98,6 +102,7 @@ impl StreamKind {
         match self {
             StreamKind::Video => media::Type::Video,
             StreamKind::Audio => media::Type::Audio,
+            StreamKind::Subtitle => media::Type::Subtitle,
         }
     }
 }
@@ -107,6 +112,7 @@ impl fmt::Display for StreamKind {
         f.write_str(match self {
             StreamKind::Video => "视频",
             StreamKind::Audio => "音频",
+            StreamKind::Subtitle => "字幕",
         })
     }
 }
@@ -114,19 +120,55 @@ impl fmt::Display for StreamKind {
 /// 一条轨（或合并文件时一个输入）在输出中贡献哪些种类的流，各组相同。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Streams {
+    /// 第一路视频与第一路音频
     All,
     Video,
     Audio,
+    /// 整条轨是 WebVTT 字幕分片（HLS 的 SUBTITLES rendition），不经 FFmpeg 读；只用于 [`remux`]
+    Subtitles,
 }
 
 impl Streams {
+    /// 要不要这条轨里 FFmpeg 读出的 `kind` 类流（字幕轨不经 FFmpeg，什么也不要）。
     pub(crate) fn wants(self, kind: StreamKind) -> bool {
         match self {
-            Streams::All => true,
+            Streams::All => kind != StreamKind::Subtitle,
             Streams::Video => kind == StreamKind::Video,
             Streams::Audio => kind == StreamKind::Audio,
+            Streams::Subtitles => false,
         }
     }
+}
+
+/// 合并 HLS 时的一条轨：贡献哪些流，与写进输出各路流的标注。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Track {
+    pub streams: Streams,
+    pub label: Label,
+}
+
+/// 写进输出流的标注（MP4 的 mdhd 语言、udta 名称与 tkhd 启用标志，Matroska 的 Language、Name、FlagDefault 与
+/// FlagForced）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Label {
+    /// BCP 47 语言标签（如 `en`、`zh-Hans`），写进输出时换成 ISO 639-2（MP4 用术语代码、Matroska 用书目代码），认不出的
+    /// 写 `und`；None 也写 `und`
+    pub language: Option<String>,
+    /// 轨道名称；None 而有语言时写语言标签原文（ISO 639-2 分不开简繁等，名称里留着）
+    pub name: Option<String>,
+    /// 播放器默认选它。各类流里都没有标的时，第一路视频与第一路音频为默认，字幕都不默认
+    pub default: bool,
+    /// 强制显示的字幕（只含画面里外语对白等）
+    pub forced: bool,
+}
+
+/// [`remux`] 的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Merged {
+    pub report: MediaReport,
+    /// 各字幕轨（[`Streams::Subtitles`]，按轨号）换到输出时间线上的 cue，与封进输出的字幕（若封）对齐，用于另存为
+    /// SRT / WebVTT 文件
+    pub subtitles: Vec<Vec<hs_m3u8_subtitle::Cue>>,
 }
 
 /// 一路流的编码参数；放进同一条 MP4 轨的内容必须前后一致，不同不连续段组的同一条轨之间按此比较。
@@ -147,6 +189,11 @@ pub enum Shape {
         sample_rate: u32,
         channels: u32,
     },
+    /// 本库由 WebVTT 生成的字幕流
+    Subtitle {
+        /// FFmpeg 的编码名：Matroska 里为 `subrip`，MP4 里为 `mov_text`
+        codec: &'static str,
+    },
 }
 
 impl Shape {
@@ -159,6 +206,7 @@ impl Shape {
                 channels,
                 ..
             } => sample_rate > 0 && channels > 0,
+            Shape::Subtitle { .. } => true,
         }
     }
 
@@ -166,12 +214,15 @@ impl Shape {
         match self {
             Shape::Video { .. } => StreamKind::Video,
             Shape::Audio { .. } => StreamKind::Audio,
+            Shape::Subtitle { .. } => StreamKind::Subtitle,
         }
     }
 
     pub fn codec(&self) -> &'static str {
         match self {
-            Shape::Video { codec, .. } | Shape::Audio { codec, .. } => codec,
+            Shape::Video { codec, .. } | Shape::Audio { codec, .. } | Shape::Subtitle { codec } => {
+                codec
+            }
         }
     }
 }

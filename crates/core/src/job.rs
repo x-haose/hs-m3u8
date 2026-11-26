@@ -13,15 +13,15 @@ use crate::info::Selected;
 use crate::live::{self, Context, Outcome};
 use crate::output::{self, Content, ResolvedOutput};
 use crate::request::JobRequest;
-use crate::resolve::{self, Resolved};
+use crate::resolve::{self, Resolved, SubtitleScope};
 use crate::vod::{self, Plan};
 use crate::workdir::{
-    self, HlsRecord, Lock, OutputKind, RecordKind, Recorded, SelectionCheck, Stored, WorkDir,
+    self, HlsRecord, Lock, RecordKind, Recorded, SelectionCheck, Stored, WorkDir,
     preference_digest, read_resumable, url_digest,
 };
 use crate::{
-    Error, JobType, Leftover, LeftoverKind, LiveReport, Output, Progress, Stage, Unsettled,
-    WorkDirProblem, blocking,
+    Error, JobType, Leftover, LeftoverKind, LiveReport, Output, Progress, Stage, TrackKind,
+    Unsettled, WorkDirProblem, blocking,
 };
 
 /// 一次运行用到的共享对象。
@@ -79,17 +79,24 @@ pub(crate) async fn run(
         .as_ref()
         .filter(|_| !request.reselect)
         .and_then(|r| r.selection.as_ref());
-    let resolved = resolve::resolve(&task.http, &request.source, selection, &task.cancel)
-        .await?
-        .ok_or_else(|| Error::WorkDir {
-            path: root.clone(),
-            problem: WorkDirProblem::SelectionGone,
-        })?;
-    let selection = resolved
-        .master
-        .as_ref()
-        .map(|m| Selected::of(&m.playlist, &m.selection));
-    task.progress.send_modify(|p| p.selected = selection);
+    let resolved = resolve::resolve(
+        &task.http,
+        &request.source,
+        selection,
+        SubtitleScope::Selected,
+        &task.cancel,
+    )
+    .await?
+    .ok_or_else(|| Error::WorkDir {
+        path: root.clone(),
+        problem: WorkDirProblem::SelectionGone,
+    })?;
+    let selection = resolved.master.as_ref().map(Selected::of);
+    let kinds = track_kinds(&resolved.streams());
+    task.progress.send_modify(|p| {
+        p.selected = selection;
+        p.set_tracks(&kinds);
+    });
     if resolved.is_live() || continuing_live && request.live.is_some() {
         run_live(task, preference, resolved, lock).await
     } else {
@@ -109,9 +116,40 @@ pub(crate) async fn prepare(output: &ResolvedOutput) -> Result<Option<Lock>, Err
     Ok(lock)
 }
 
+/// 各轨的种类，按取流方式（见 [`crate::selection::track_streams`]）。
+fn track_kinds(streams: &[Streams]) -> Vec<TrackKind> {
+    streams
+        .iter()
+        .map(|s| match s {
+            Streams::All | Streams::Video => TrackKind::Video,
+            Streams::Audio => TrackKind::Audio,
+            Streams::Subtitles => TrackKind::Subtitles,
+        })
+        .collect()
+}
+
+/// 按任务目录记录的选轨加上另存的字幕文件（见 [`ResolvedOutput::with_subtitle_files`]），并在下载之前核对它们（见
+/// [`output::check_more`]）。
+async fn with_subtitle_files(
+    output: &ResolvedOutput,
+    dir: &WorkDir,
+) -> Result<ResolvedOutput, Error> {
+    let subtitles: Vec<(Option<&str>, bool)> = dir
+        .record()
+        .selection
+        .iter()
+        .flat_map(|s| &s.subtitles)
+        .map(|s| (s.language.as_deref(), s.forced))
+        .collect();
+    let extended = output.with_subtitle_files(&subtitles)?;
+    let checked = extended.clone();
+    blocking(move || output::check_more(&checked)).await??;
+    Ok(extended)
+}
+
 /// 直播：录制，再合并任务目录中录到的全部分片。
 async fn run_live(
-    task: Task,
+    mut task: Task,
     preference_digest: String,
     resolved: Resolved,
     lock: Option<Lock>,
@@ -134,6 +172,7 @@ async fn run_live(
         task.selection_check(),
     )
     .await?;
+    task.output = with_subtitle_files(&task.output, &dir).await?;
     let mut fetcher = task.fetcher(&dir, Permit::Live);
     let ctx = Context {
         http: task.http.clone(),
@@ -144,11 +183,11 @@ async fn run_live(
         cancel: &task.cancel,
         stop: &task.stop,
     };
-    let mp4 = task
+    let merge = task
         .output
-        .get(OutputKind::Mp4)
-        .map(|_| dir.record().streams());
-    let recording = live::record(ctx, resolved.tracks, options, mp4).await?;
+        .merged()
+        .map(|(_, container)| (dir.record().streams(), container));
+    let recording = live::record(ctx, resolved.tracks, options, merge).await?;
     let streams = dir.record().streams();
     let stored = dir.scan(streams.len()).await?;
     let input = merge_live(&dir, &stored, streams, Some(recording))?;
@@ -157,7 +196,7 @@ async fn run_live(
 
 /// 点播：下载计划中尚未完成的部分，再合并。
 async fn run_vod(
-    task: Task,
+    mut task: Task,
     preference_digest: String,
     resolved: Resolved,
     lock: Option<Lock>,
@@ -180,10 +219,21 @@ async fn run_vod(
         task.selection_check(),
     )
     .await?;
+    task.output = with_subtitle_files(&task.output, &dir).await?;
     let mut fetcher = task.fetcher(&dir, Permit::Vod);
-    let mp4 = task.output.get(OutputKind::Mp4).map(|_| streams.as_slice());
-    let groups =
-        vod::download(&mut fetcher, &plan, &dir, mp4, &task.progress, &task.cancel).await?;
+    let merge = task
+        .output
+        .merged()
+        .map(|(_, container)| (streams.as_slice(), container));
+    let groups = vod::download(
+        &mut fetcher,
+        &plan,
+        &dir,
+        merge,
+        &task.progress,
+        &task.cancel,
+    )
+    .await?;
     let input = Content {
         streams,
         groups,
@@ -223,7 +273,10 @@ pub(crate) async fn merge_recorded(
         });
     }
     let dir = WorkDir::open(root, record, lock, SelectionCheck::SameTracks).await?;
+    let output = with_subtitle_files(&output, &dir).await?;
     let streams = dir.record().streams();
+    let kinds = track_kinds(&streams);
+    progress.send_modify(|p| p.set_tracks(&kinds));
     let stored = dir.scan(streams.len()).await?;
     live::count_stored(&stored, &progress);
     let content = merge_live(&dir, &stored, streams, None)?;
@@ -312,7 +365,7 @@ impl Task {
             self.request.source.hooks.clone(),
             self.request.key,
             self.request.concurrency,
-            dir.layout().root(),
+            dir,
             permit,
             &self.cancel,
         )

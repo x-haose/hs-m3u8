@@ -3,11 +3,13 @@
 use std::sync::Arc;
 
 use hs_m3u8_core::{HookError, Hooks, Purpose, RequestParts, Url};
-use hs_m3u8_remux::{DiscontinuityGroup, Streams};
+use hs_m3u8_remux::DiscontinuityGroup;
 
 use super::{TS_A, expected_ts_a};
 use crate::server::Server;
-use crate::{assert_output, encrypt, engine, expected, fixture, request, run, test_dir, track};
+use crate::{
+    all, assert_output, encrypt, engine, expected, fixture, request, run, test_dir, track,
+};
 
 /// 站点适配：改写播放列表、给每个请求签名、解开变换过的 key、去掉分片前的伪装字节。
 struct SiteHooks;
@@ -105,6 +107,6 @@ async fn init_sections_pass_through_on_init() {
 
     let segments = ["seg0.m4s", "seg1.m4s"];
     let tracks = vec![track("fmp4_a/video", Some("init.mp4"), &segments)];
-    let want = expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]);
+    let want = expected(&dir, &[all()], &[DiscontinuityGroup { tracks }]);
     assert_output(&output, &want);
 }

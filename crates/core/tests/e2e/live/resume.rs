@@ -2,19 +2,21 @@
 
 use std::time::Duration;
 
-use hs_m3u8_core::hls::{AudioChoice, VariantChoice};
+use hs_m3u8_core::hls::{RenditionChoice, Renditions, VariantChoice};
 use hs_m3u8_core::{
-    Error, JobType, LiveEnd, LiveOptions, LiveReport, MissReason, Mp4Unsupported, Stage, Target,
+    Error, JobType, LiveEnd, LiveOptions, LiveReport, MergeUnsupported, MissReason, Stage, Target,
     Unsupported, Url, WorkDirProblem,
 };
-use hs_m3u8_remux::{DiscontinuityGroup, Origin, StreamKind, Streams};
+use hs_m3u8_remux::{DiscontinuityGroup, Origin, StreamKind};
 
 use super::{
     STALL, expected_split_long, interrupt, live_request, missed, outcome, playlist, playlist_in,
     put_long, put_split_master, report,
 };
 use crate::server::Server;
-use crate::{assert_output, engine, expected, expected_long, fixture, run, test_dir, track};
+use crate::{
+    all, assert_output, engine, expected, expected_long, fixture, mp4_target, run, test_dir, track,
+};
 
 /// 中断期间窗口滑过了已录的部分（与之前没有重叠）：另起一个会话，与之前的首尾相接。
 /// 中断期间直播已结束（播放列表出现 ENDLIST），仍按直播收尾。
@@ -52,20 +54,20 @@ async fn a_new_session_is_checked_against_the_group_recorded_before() {
     let mut progress = job.control().progress();
     let reason = tokio::time::timeout(
         Duration::from_secs(10),
-        progress.wait_for(|p| p.mp4_unsupported.is_some()),
+        progress.wait_for(|p| p.merge_unsupported.is_some()),
     )
     .await
     .expect("录到新会话的第一组就应在进度里报出")
     .unwrap()
-    .mp4_unsupported
+    .merge_unsupported
     .clone();
     server.put("live.m3u8", playlist(&[2, 3], true));
     let failed = job.wait().await;
 
-    let changed = |reason: &Mp4Unsupported| {
+    let changed = |reason: &MergeUnsupported| {
         matches!(
             reason,
-            Mp4Unsupported::ParamsChanged {
+            MergeUnsupported::ParamsChanged {
                 at: Origin::Track { group: 1, track: 0 },
                 kind: StreamKind::Video,
                 ..
@@ -74,7 +76,7 @@ async fn a_new_session_is_checked_against_the_group_recorded_before() {
     };
     assert!(reason.as_ref().is_some_and(changed), "{reason:?}");
     assert!(
-        matches!(&failed, Err(Error::Unsupported(Unsupported::Mp4(reason))) if changed(reason)),
+        matches!(&failed, Err(Error::Unsupported(Unsupported::Merge(reason))) if changed(reason)),
         "{failed:?}"
     );
 }
@@ -92,10 +94,10 @@ async fn problems_recorded_before_are_reported_again_when_resuming() {
         "#EXTM3U\n#EXT-X-TARGETDURATION:0.1\n#EXTINF:1,\nseg0.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:1,\nb0.ts\n",
     );
     let req = live_request(server.url("live.m3u8"), &dir, STALL);
-    let changed = |reason: &Option<Mp4Unsupported>| {
+    let changed = |reason: &Option<MergeUnsupported>| {
         matches!(
             reason,
-            Some(Mp4Unsupported::ParamsChanged {
+            Some(MergeUnsupported::ParamsChanged {
                 at: Origin::Track { group: 1, track: 0 },
                 kind: StreamKind::Video,
                 ..
@@ -106,12 +108,12 @@ async fn problems_recorded_before_are_reported_again_when_resuming() {
     let mut progress = job.control().progress();
     let first = tokio::time::timeout(
         Duration::from_secs(10),
-        progress.wait_for(|p| p.mp4_unsupported.is_some()),
+        progress.wait_for(|p| p.merge_unsupported.is_some()),
     )
     .await
     .expect("第一次运行应在进度里报出")
     .unwrap()
-    .mp4_unsupported
+    .merge_unsupported
     .clone();
     assert!(changed(&first), "{first:?}");
     job.control().cancel();
@@ -124,18 +126,18 @@ async fn problems_recorded_before_are_reported_again_when_resuming() {
     let mut progress = job.control().progress();
     let again = tokio::time::timeout(
         Duration::from_secs(10),
-        progress.wait_for(|p| p.mp4_unsupported.is_some()),
+        progress.wait_for(|p| p.merge_unsupported.is_some()),
     )
     .await
     .expect("续录开始后应在进度里报出")
     .unwrap()
-    .mp4_unsupported
+    .merge_unsupported
     .clone();
     server.put("live.m3u8", format!("{window}#EXT-X-ENDLIST\n"));
     let failed = job.wait().await;
     assert!(changed(&again), "{again:?}");
     assert!(
-        matches!(&failed, Err(Error::Unsupported(Unsupported::Mp4(reason))) if changed(&Some(reason.clone()))),
+        matches!(&failed, Err(Error::Unsupported(Unsupported::Merge(reason))) if changed(&Some(reason.clone()))),
         "{failed:?}"
     );
 }
@@ -276,7 +278,7 @@ async fn continue_finds_the_recorded_variant() {
     assert_eq!(server.hits("hi.m3u8"), 0);
 
     // 记录的变体不在了：明确失败，不改录别的变体
-    std::fs::remove_file(req.output.target.mp4().unwrap()).unwrap();
+    std::fs::remove_file(&req.output.target.file().unwrap().path).unwrap();
     server.put("master.m3u8", format!("#EXTM3U\n{lo}"));
     server.put("lo.m3u8", media("lo", false));
     interrupt(&req, |p| p.segments.done == 2).await;
@@ -379,7 +381,7 @@ async fn reselecting_a_full_track_needs_its_own_proof() {
 
     server.put("video.m3u8", playlist_in("v/", &[0, 1, 2, 3], false));
     req.reselect = true;
-    req.source.preference.audio = AudioChoice::Language("fr".into());
+    req.source.preference.audio = Renditions::These(vec![RenditionChoice::Language("fr".into())]);
     let err = run(req).await.unwrap_err();
 
     assert!(
@@ -630,7 +632,7 @@ async fn a_tampered_segment_is_a_corrupt_work_dir_for_every_target() {
     std::fs::write(&segment, b"<html>not a segment</html>").unwrap();
 
     for target in [
-        Target::Mp4(dir.join("tampered.mp4")),
+        mp4_target(dir.join("tampered.mp4")),
         Target::Hls(dir.join("tampered-hls")),
     ] {
         let mut output = req.output.clone();
@@ -696,7 +698,7 @@ async fn changed_preference_is_rejected_for_master_playlists_only() {
     interrupt(&req, |p| p.segments.done == 4).await;
 
     let mut other = req;
-    other.source.preference.audio = AudioChoice::Language("en".into());
+    other.source.preference.audio = Renditions::These(vec![RenditionChoice::Language("en".into())]);
     let err = run(other).await.unwrap_err();
     assert!(
         matches!(
@@ -716,7 +718,7 @@ async fn changed_preference_is_rejected_for_master_playlists_only() {
     interrupt(&req, |p| p.segments.done == 2).await;
     server.put("live.m3u8", playlist(&[0, 1], true));
     let mut other = req;
-    other.source.preference.audio = AudioChoice::Language("en".into());
+    other.source.preference.audio = Renditions::These(vec![RenditionChoice::Language("en".into())]);
     let output = run(other).await.unwrap();
     assert_output(&output, &expected_long(&media_dir, &[0, 1], &[2]));
 }
@@ -838,6 +840,6 @@ async fn init_only_directory_accepts_a_new_token() {
         Some("init.mp4"),
         &["seg0.m4s", "seg1.m4s"],
     )];
-    let want = expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]);
+    let want = expected(&dir, &[all()], &[DiscontinuityGroup { tracks }]);
     assert_output(&output, &want);
 }

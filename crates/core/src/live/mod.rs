@@ -5,17 +5,17 @@
 //! 另起一个（见 [`deciding`]），再开始录。
 //!
 //! 一个事件循环驱动整个录制：刷新、拉 init 段、核对续录的内容与之前录齐的组都是后台任务（见 [`tasks`]），完成后
-//! 作为事件交回，循环从不等某一个网络请求；新录齐的组能否放进 MP4（见 [`Mp4Check`]）只读两组开头的分片，在循环里
+//! 作为事件交回，循环从不等某一个网络请求；新录齐的组能否放进合并文件（见 [`MergeCheck`]）只读两组开头的分片，在循环里
 //! 做完。拉到的播放列表先暂存在各轨，会话定下后逐份拉好 init 段、按顺序处理。
 //! 定下结束原因后不再刷新，把暂存的处理完才结束；停止（[`crate::JobControl::stop`]）也是如此，但会话定下之前停止
 //! 立即结束，不录新的分片。只录一条轨时，它的播放列表与之前刷新得到的接不上就另起会话接着录（见
 //! [`crate::NewSession`]）。
 //!
-//! 轨道编号：第 0 条为所选变体（或来源本身的媒体播放列表），第 1 条（若有）为独立的音频 rendition。
+//! 轨道编号：第 0 条为所选变体（或来源本身的媒体播放列表），其后依次是各独立音频、各字幕 rendition。
 
 mod deciding;
 mod merge;
-mod mp4_check;
+mod merge_check;
 mod session;
 mod stall;
 mod tasks;
@@ -27,13 +27,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use hs_m3u8_hls as hls;
-use hs_m3u8_remux::Streams;
+use hs_m3u8_remux::{Container, Streams};
 use tokio::sync::watch;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use self::merge::{merge_plan, report_missed};
-use self::mp4_check::{Batch, Mp4Check};
+use self::merge_check::{Batch, MergeCheck};
 use self::session::Verdicts;
 use self::stall::Stall;
 use self::tasks::{Done, Tasks};
@@ -46,8 +46,8 @@ use crate::request::LiveOptions;
 use crate::resolve::ResolvedTrack;
 use crate::workdir::{self, Stored, StoredInit, WorkDir};
 use crate::{
-    Error, LiveEnd, MissReason, Missed, Mp4Unsupported, NewSession, Progress, RefreshReason,
-    SourceBreak, Stage, WorkDirProblem,
+    Error, LiveEnd, MergeUnsupported, MissReason, Missed, NewSession, Progress, RefreshReason,
+    SegmentCounts, SourceBreak, Stage, WorkDirProblem,
 };
 
 /// 本次运行的录制结果。
@@ -114,37 +114,37 @@ struct Recorder<'a> {
     phase: Phase,
     /// 定下的结束原因：不再刷新，处理完暂存的播放列表即结束
     ending: Option<LiveEnd>,
-    /// 输出含 MP4 时录制中的核对；不输出 MP4 时为 None
-    mp4: Option<Mp4Check>,
+    /// 输出含合并文件 时录制中的核对；不输出合并文件 时为 None
+    mp4: Option<MergeCheck>,
     /// 已察觉的停滞（见 [`Recorder::observe_stall`]）
     stall: Option<Stall>,
 }
 
-/// 录制：定下会话，从首次拉到的播放列表开始，直到满足结束条件，并等已列出的分片下完。要合并 MP4 时 `mp4` 为各轨的
-/// 取流方式，录制中核对能否放进 MP4（见 [`Mp4Check`]），放不进的原因放进进度，录制照常进行。
+/// 录制：定下会话，从首次拉到的播放列表开始，直到满足结束条件，并等已列出的分片下完。要合并时 `merge` 为各轨的
+/// 取流方式，录制中核对能否放进合并文件（见 [`MergeCheck`]），放不进的原因放进进度，录制照常进行。
 ///
 /// 本次的记录有须核对的差别时（见 [`WorkDir::source_change`]），能否改记见 [`session`]。
 pub(crate) async fn record(
     ctx: Context<'_>,
     tracks: Vec<ResolvedTrack>,
     options: LiveOptions,
-    mp4: Option<Vec<Streams>>,
+    merge: Option<(Vec<Streams>, Container)>,
 ) -> Result<Outcome, Error> {
     let dir = ctx.dir;
     let stored = dir.scan(tracks.len()).await?;
     count_stored(&stored, ctx.progress);
     let now = Instant::now();
     let phase = initial_phase(&stored, dir)?;
-    let (mp4, batches) = match mp4 {
-        Some(streams) => {
-            let (check, batches) = mp4_check(streams, &stored, dir)?;
+    let (mp4, batches) = match merge {
+        Some((streams, container)) => {
+            let (check, batches) = merge_check(streams, container, &stored, dir)?;
             (Some(check), batches)
         }
         None => (None, Vec::new()),
     };
     let states = live_tracks(&tracks, &stored, now)?;
     let mut recorder = Recorder::new(&ctx, options, states, phase, mp4);
-    recorder.start_mp4_check(batches);
+    recorder.start_merge_check(batches);
     recorder.announce_recording();
     let first = tracks
         .into_iter()
@@ -178,14 +178,15 @@ fn initial_phase(stored: &Stored, dir: &WorkDir) -> Result<Phase, Error> {
     })
 }
 
-/// 录制中能否放进 MP4 的核对（`streams` 为各轨的取流方式），与核对目录里已录齐的组的各批（见 [`Mp4Check::new`]）。
-fn mp4_check(
+/// 录制中能否放进合并文件 的核对（`streams` 为各轨的取流方式），与核对目录里已录齐的组的各批（见 [`MergeCheck::new`]）。
+fn merge_check(
     streams: Vec<Streams>,
+    container: Container,
     stored: &Stored,
     dir: &WorkDir,
-) -> Result<(Mp4Check, Vec<Batch>), Error> {
+) -> Result<(MergeCheck, Vec<Batch>), Error> {
     let plan = merge_plan(&stored.segments, dir.layout())?;
-    Ok(Mp4Check::new(streams, &plan, stored))
+    Ok(MergeCheck::new(streams, container, &plan, stored))
 }
 
 /// 各轨的录制状态；之前各会话已录到的时长计入 max_duration。
@@ -210,13 +211,22 @@ fn live_tracks(
 
 /// 目录里已完成的分片与 init 段计入进度。
 pub(crate) fn count_stored(stored: &Stored, progress: &watch::Sender<Progress>) {
-    let done = stored.segments.iter().map(Vec::len).sum();
-    let bytes = stored.bytes();
     let duration_us = stored.duration_us(0);
     progress.send_modify(|p| {
-        p.segments.done = done;
-        p.segments.total = done;
-        p.bytes = bytes;
+        p.segments = SegmentCounts::default();
+        p.bytes = 0;
+        for track in 0..stored.segments.len() {
+            if let Some(t) = p.tracks.get_mut(track) {
+                t.segments = SegmentCounts::default();
+                t.bytes = 0;
+            }
+            let done = stored.segments[track].len();
+            p.segments_of(track, |s| {
+                s.done += done;
+                s.total += done;
+            });
+            p.add_bytes(track, stored.track_bytes(track));
+        }
         p.duration = Duration::from_micros(duration_us);
     });
 }
@@ -227,7 +237,7 @@ impl<'a> Recorder<'a> {
         options: LiveOptions,
         tracks: Vec<LiveTrack>,
         phase: Phase,
-        mp4: Option<Mp4Check>,
+        mp4: Option<MergeCheck>,
     ) -> Recorder<'a> {
         if let Phase::Decided { session } = phase {
             ctx.progress.send_modify(|p| p.session = Some(session));
@@ -250,14 +260,14 @@ impl<'a> Recorder<'a> {
         }
     }
 
-    /// 在后台按顺序核对目录里已录齐的组（`batches`，见 [`Mp4Check::new`]）；不输出 MP4 或没有录齐的组时什么也不做。
-    fn start_mp4_check(&mut self, batches: Vec<Batch>) {
+    /// 在后台按顺序核对目录里已录齐的组（`batches`，见 [`MergeCheck::new`]）；不输出合并文件 或没有录齐的组时什么也不做。
+    fn start_merge_check(&mut self, batches: Vec<Batch>) {
         if let Some(check) = &self.mp4
             && !batches.is_empty()
         {
             let root = self.dir.layout().root().to_path_buf();
             self.tasks
-                .check_mp4(check.streams().to_vec(), batches, root);
+                .check_merge(check.streams().to_vec(), check.container(), batches, root);
         }
     }
 
@@ -449,7 +459,7 @@ impl<'a> Recorder<'a> {
                 Ok(())
             }
             Done::Checked { track, result } => self.checked(track, result?).await,
-            Done::Mp4Checked { result } => {
+            Done::MergeChecked { result } => {
                 let check = self.mp4.as_mut().expect("只在输出 MP4 时派出");
                 let reason = check.judged(result)?;
                 self.report_mp4(reason);
@@ -459,10 +469,10 @@ impl<'a> Recorder<'a> {
     }
 
     /// 核对出的放不进 MP4 的原因放进进度；已有的不换。
-    fn report_mp4(&self, reason: Option<Mp4Unsupported>) {
+    fn report_mp4(&self, reason: Option<MergeUnsupported>) {
         if let Some(reason) = reason {
             self.progress.send_modify(|p| {
-                p.mp4_unsupported.get_or_insert(reason);
+                p.merge_unsupported.get_or_insert(reason);
             });
         }
     }
@@ -540,7 +550,7 @@ impl<'a> Recorder<'a> {
             let len = data.len() as u64;
             let stored = workdir::store_init(self.dir.layout(), track, fingerprint, data).await?;
             if stored == StoredInit::Created {
-                self.progress.send_modify(|p| p.bytes += len);
+                self.progress.send_modify(|p| p.add_bytes(track, len));
             }
         }
         let failed = update.init_failed.len();
@@ -548,10 +558,12 @@ impl<'a> Recorder<'a> {
         let expired = update.expired.as_ref().map_or(0, Missed::count);
         let listed = update.items.len() + failed;
         self.progress.send_modify(|p| {
-            p.segments.total += listed;
-            p.segments.failed += failed;
-            p.segments.gap += gaps;
-            p.segments.expired = p.segments.expired.saturating_add(expired);
+            p.segments_of(track, |s| {
+                s.total += listed;
+                s.failed += failed;
+                s.gap += gaps;
+                s.expired = s.expired.saturating_add(expired);
+            });
         });
         self.missed.extend(update.expired);
         self.missed.extend(update.init_failed);
@@ -629,7 +641,8 @@ impl<'a> Recorder<'a> {
             last: id.name.sequence,
             reason,
         });
-        self.progress.send_modify(|p| p.segments.failed += 1);
+        self.progress
+            .send_modify(|p| p.segments_of(id.track, |s| s.failed += 1));
         Ok(())
     }
 

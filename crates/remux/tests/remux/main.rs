@@ -10,6 +10,7 @@ mod keyframes;
 mod merge;
 mod packed;
 mod params;
+mod subtitles;
 mod timing;
 mod ts_damage;
 
@@ -18,7 +19,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ffmpeg_next as ffmpeg;
-use hs_m3u8_remux::{Cancel, Control, DiscontinuityGroup, Error, Segment, Streams, TrackSegments};
+use hs_m3u8_remux::{
+    Cancel, Container, Control, DiscontinuityGroup, Error, Label, MediaReport, Segment, Streams,
+    Track, TrackSegments,
+};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/media")
@@ -107,10 +111,32 @@ fn track(name: &str) -> TrackSegments {
     track_in(&fixtures().join(name))
 }
 
-/// 按顺序核对各组（组号即下标），见 [`hs_m3u8_remux::check`]。
+/// 按顺序核对各组（组号即下标）能否放进 MP4，见 [`hs_m3u8_remux::check`]。
 fn check(streams: &[Streams], groups: &[DiscontinuityGroup]) -> Result<(), Error> {
     let numbered: Vec<(usize, &DiscontinuityGroup)> = groups.iter().enumerate().collect();
-    hs_m3u8_remux::check(streams, &numbered)
+    hs_m3u8_remux::check(streams, &numbered, Container::Mp4)
+}
+
+/// 合并为 MP4，各轨不带标注，字幕封进输出（见 [`hs_m3u8_remux::remux`]）。
+fn remux(
+    streams: &[Streams],
+    groups: &[DiscontinuityGroup],
+    output: &Path,
+    control: &Control,
+) -> Result<MediaReport, Error> {
+    let tracks = unlabeled(streams);
+    hs_m3u8_remux::remux(&tracks, groups, output, Container::Mp4, true, control).map(|m| m.report)
+}
+
+/// 不带标注的各轨。
+fn unlabeled(streams: &[Streams]) -> Vec<Track> {
+    streams
+        .iter()
+        .map(|&streams| Track {
+            streams,
+            label: Label::default(),
+        })
+        .collect()
 }
 
 fn group<const N: usize>(tracks: [TrackSegments; N]) -> DiscontinuityGroup {

@@ -1,16 +1,27 @@
-//! 选轨：从主播放列表里选出要下载的视频变体与音频 rendition。
+//! 选轨：从主播放列表里选出要下载的视频变体，以及它引用的组里的音频与字幕 rendition。
 
-use url::Url;
+use crate::{
+    CodecKind, MasterPlaylist, Rendition, RenditionKey, RenditionKind, Variant, VariantKey,
+};
 
-use crate::{AudioKey, CodecKind, MasterPlaylist, Rendition, RenditionKind, Variant, VariantKey};
-
-/// 调用方对选轨的要求；默认取最高画质的变体与其音频组里的默认 rendition。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// 调用方对选轨的要求；默认取最高画质的变体、其音频组里的默认音频，不要字幕。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Preference {
     pub variant: VariantChoice,
-    /// 所选变体引用了音频组（AUDIO 属性）时取组里哪个 rendition；`Default` 与 `Language` 在变体没有引用音频组时
-    /// 不起作用
-    pub audio: AudioChoice,
+    /// 所选变体的音频组（AUDIO 属性）里取哪些音频
+    pub audio: Renditions,
+    /// 所选变体的字幕组（SUBTITLES 属性）里取哪些字幕
+    pub subtitles: Renditions,
+}
+
+impl Default for Preference {
+    fn default() -> Self {
+        Preference {
+            variant: VariantChoice::Best,
+            audio: Renditions::Default,
+            subtitles: Renditions::None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -25,37 +36,52 @@ pub enum VariantChoice {
     Matching(VariantKey),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum AudioChoice {
-    /// DEFAULT=YES 的 rendition，没有则取组内第一个
-    #[default]
+/// 一类 rendition（音频或字幕）选哪些，都在所选变体引用的那一组里找。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Renditions {
+    /// 一个也不要。音频为它时只取视频（变体里混着的音频也不要）
+    None,
+    /// 组里 DEFAULT=YES 的；音频没有时取组里第一个，字幕没有时不选。变体没有引用这类组时：音频用变体里混着的，字幕不选
     Default,
-    /// 组内第一个 LANGUAGE 与它相同（不区分大小写）的
-    Language(String),
-    /// 主播放列表里第几个音频 rendition（只数 TYPE=AUDIO 的，按出现顺序，从 0 起）；须在所选变体的音频组里。只对同一
-    /// 份主播放列表有效，同 [`VariantChoice::Index`]
-    Index(usize),
-    /// 所选变体的音频组里身份相同的音频 rendition（见 [`AudioKey`]）
-    Matching(AudioKey),
+    /// 组里全部，按出现顺序
+    All,
+    /// 逐个指定，按给出的顺序成轨；两项选到同一条时报 [`SelectError::Duplicate`]
+    These(Vec<RenditionChoice>),
 }
 
-/// 选轨结果：所选变体，以及（音频不在变体里时）独立的音频 rendition。
+/// 指定一条音频或字幕 rendition。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenditionChoice {
+    /// 组内第一个 LANGUAGE 与它相同（不区分大小写）的；变体没有引用这类组时不起作用（音频用变体里混着的）
+    Language(String),
+    /// 主播放列表里第几个这类 rendition（音频只数 TYPE=AUDIO 的，字幕只数 TYPE=SUBTITLES 的，按出现顺序，从 0 起）；
+    /// 须在所选变体的组里。只对同一份主播放列表有效，同 [`VariantChoice::Index`]
+    Index(usize),
+    /// 所选变体的组里身份相同的（见 [`RenditionKey`]）
+    Matching(RenditionKey),
+}
+
+/// 选轨结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
     /// 所选变体在 `MasterPlaylist::variants` 中的下标
     pub variant_index: usize,
     pub variant: Variant,
-    /// 独立的音频 rendition；None 表示音频混在变体流里（或没有音频）
-    pub audio: Option<SelectedAudio>,
+    /// 用变体流里混着的音频：变体没有引用音频组而音频不为 [`Renditions::None`]，或选中的音频里有没写 URI 的
+    pub muxed_audio: bool,
+    /// 选中的、有独立媒体播放列表的音频，按选的顺序
+    pub audio: Vec<SelectedRendition>,
+    /// 选中的字幕，按选的顺序；都有媒体播放列表（没写 URI 的字幕报 [`SelectError::SubtitlesWithoutUri`]）
+    pub subtitles: Vec<SelectedRendition>,
 }
 
-/// 有独立媒体播放列表的音频 rendition。
+/// 选中的一条有媒体播放列表的 rendition。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SelectedAudio {
-    /// 主播放列表里第几个音频 rendition，口径同 [`AudioChoice::Index`]
+pub struct SelectedRendition {
+    /// 主播放列表里第几个这类 rendition，口径同 [`RenditionChoice::Index`]
     pub index: usize,
     /// 该 rendition 的媒体播放列表地址
-    pub uri: Url,
+    pub uri: crate::Url,
     pub rendition: Rendition,
 }
 
@@ -68,22 +94,45 @@ pub enum SelectError {
     /// 主播放列表里没有身份与 [`VariantChoice::Matching`] 相同的变体
     #[error("主播放列表里没有身份相同的变体")]
     VariantNotFound,
-    #[error("音频组 {group} 中没有语言为 {language} 的 rendition，可选：{available:?}")]
-    AudioLanguageNotFound {
+    #[error("{} 组 {group} 中没有语言为 {language} 的 rendition，可选：{available:?}", kind_name(*kind))]
+    LanguageNotFound {
+        kind: RenditionKind,
         group: String,
         language: String,
         available: Vec<String>,
     },
-    /// 口径同 [`AudioChoice::Index`]，`count` 为音频 rendition 的个数
-    #[error("音频下标 {index} 超出范围（共 {count} 个）")]
-    AudioIndexOutOfRange { index: usize, count: usize },
-    /// 所选变体引用的音频组里没有身份与 [`AudioChoice::Matching`] 相同的音频 rendition（变体没有引用音频组时也是）
-    #[error("所选变体的音频组里没有身份相同的音频")]
-    AudioNotFound,
-    /// 按下标指定（[`AudioChoice::Index`]）的音频 rendition 不在所选变体引用的音频组里（变体没有引用音频组时 `group`
-    /// 为 None）
-    #[error("第 {index} 个音频不在所选变体的音频组（{}）里", group.as_deref().unwrap_or("无"))]
-    NotVariantAudio { index: usize, group: Option<String> },
+    /// 口径同 [`RenditionChoice::Index`]，`count` 为这类 rendition 的个数
+    #[error("{}下标 {index} 超出范围（共 {count} 个）", kind_name(*kind))]
+    IndexOutOfRange {
+        kind: RenditionKind,
+        index: usize,
+        count: usize,
+    },
+    /// 所选变体引用的组里没有身份与 [`RenditionChoice::Matching`] 相同的（变体没有引用这类组时也是）
+    #[error("所选变体的{}组里没有身份相同的", kind_name(*kind))]
+    NotFound { kind: RenditionKind },
+    /// 按下标指定的 rendition 不在所选变体引用的组里（变体没有引用这类组时 `group` 为 None）
+    #[error("第 {index} 个{}不在所选变体的组（{}）里", kind_name(*kind), group.as_deref().unwrap_or("无"))]
+    NotInGroup {
+        kind: RenditionKind,
+        index: usize,
+        group: Option<String>,
+    },
+    /// [`Renditions::These`] 里两项选到了同一条（`index` 口径同 [`RenditionChoice::Index`]）
+    #[error("第 {index} 个{}被选了两次", kind_name(*kind))]
+    Duplicate { kind: RenditionKind, index: usize },
+    /// 选中的字幕没写 URI（RFC 8216 4.3.4.1 要求 SUBTITLES 必须有）
+    #[error("第 {index} 个字幕没有 URI")]
+    SubtitlesWithoutUri { index: usize },
+}
+
+fn kind_name(kind: RenditionKind) -> &'static str {
+    match kind {
+        RenditionKind::Audio => "音频",
+        RenditionKind::Subtitles => "字幕",
+        RenditionKind::Video => "视频",
+        RenditionKind::ClosedCaptions => "隐藏字幕",
+    }
 }
 
 pub fn select(master: &MasterPlaylist, preference: &Preference) -> Result<Selection, SelectError> {
@@ -99,24 +148,127 @@ pub fn select(master: &MasterPlaylist, preference: &Preference) -> Result<Select
         VariantChoice::Best => best_variant(master).ok_or(SelectError::NoVariants)?,
     };
     let variant = &master.variants[variant_index];
-    let group = variant.audio.as_deref();
-    let audio = match (&preference.audio, group) {
-        (AudioChoice::Index(index), group) => Some(audio_by_index(master, *index, group)?),
-        (AudioChoice::Matching(key), group) => {
-            let found = group.and_then(|group| key.find(master, group));
-            Some(found.ok_or(SelectError::AudioNotFound)?)
-        }
-        (AudioChoice::Language(language), Some(group)) => {
-            Some(audio_by_language(master, group, language)?)
-        }
-        (AudioChoice::Default, Some(group)) => default_audio(master, group),
-        (AudioChoice::Language(_) | AudioChoice::Default, None) => None,
+    let audio = pick(
+        master,
+        RenditionKind::Audio,
+        variant.audio.as_deref(),
+        &preference.audio,
+    )?;
+    let subtitles = pick(
+        master,
+        RenditionKind::Subtitles,
+        variant.subtitles.as_deref(),
+        &preference.subtitles,
+    )?;
+    let muxed_audio = match (&preference.audio, &variant.audio) {
+        (Renditions::None, _) => false,
+        (_, None) => true,
+        (_, Some(_)) => audio.iter().any(|(_, r)| r.uri.is_none()),
     };
+    let subtitles = subtitles
+        .into_iter()
+        .map(|(index, rendition)| {
+            separate(index, rendition).ok_or(SelectError::SubtitlesWithoutUri { index })
+        })
+        .collect::<Result<_, _>>()?;
     Ok(Selection {
         variant_index,
         variant: variant.clone(),
-        audio: audio.and_then(|(index, rendition)| separate(index, rendition)),
+        muxed_audio,
+        audio: audio
+            .into_iter()
+            .filter_map(|(index, rendition)| separate(index, rendition))
+            .collect(),
+        subtitles,
     })
+}
+
+/// 按 `choice` 从 `group` 组里选出 `kind` 类 rendition，与它们的位置（口径同 [`RenditionChoice::Index`]）。
+fn pick<'a>(
+    master: &'a MasterPlaylist,
+    kind: RenditionKind,
+    group: Option<&str>,
+    choice: &Renditions,
+) -> Result<Vec<(usize, &'a Rendition)>, SelectError> {
+    let in_group =
+        || renditions(master, kind).filter(move |(_, r)| Some(r.group.as_str()) == group);
+    match choice {
+        Renditions::None => Ok(Vec::new()),
+        Renditions::All => Ok(in_group().collect()),
+        Renditions::Default => {
+            let default = in_group().find(|(_, r)| r.default);
+            Ok(match (default, kind) {
+                (Some(found), _) => vec![found],
+                (None, RenditionKind::Audio) => in_group().next().into_iter().collect(),
+                (None, _) => Vec::new(),
+            })
+        }
+        Renditions::These(choices) => {
+            let mut picked: Vec<(usize, &Rendition)> = Vec::with_capacity(choices.len());
+            for choice in choices {
+                if group.is_none() && matches!(choice, RenditionChoice::Language(_)) {
+                    continue;
+                }
+                let found = one(master, kind, group, choice)?;
+                if picked.iter().any(|(index, _)| *index == found.0) {
+                    return Err(SelectError::Duplicate {
+                        kind,
+                        index: found.0,
+                    });
+                }
+                picked.push(found);
+            }
+            Ok(picked)
+        }
+    }
+}
+
+/// 按 `choice` 指定的一条。
+fn one<'a>(
+    master: &'a MasterPlaylist,
+    kind: RenditionKind,
+    group: Option<&str>,
+    choice: &RenditionChoice,
+) -> Result<(usize, &'a Rendition), SelectError> {
+    match choice {
+        &RenditionChoice::Index(index) => {
+            let (_, rendition) = renditions(master, kind).nth(index).ok_or_else(|| {
+                SelectError::IndexOutOfRange {
+                    kind,
+                    index,
+                    count: renditions(master, kind).count(),
+                }
+            })?;
+            if group == Some(rendition.group.as_str()) {
+                Ok((index, rendition))
+            } else {
+                Err(SelectError::NotInGroup {
+                    kind,
+                    index,
+                    group: group.map(str::to_owned),
+                })
+            }
+        }
+        RenditionChoice::Matching(key) => group
+            .and_then(|group| key.find(master, kind, group))
+            .ok_or(SelectError::NotFound { kind }),
+        RenditionChoice::Language(language) => {
+            let in_group =
+                || renditions(master, kind).filter(|(_, r)| Some(r.group.as_str()) == group);
+            in_group()
+                .find(|(_, r)| {
+                    r.language
+                        .as_deref()
+                        .is_some_and(|l| l.eq_ignore_ascii_case(language))
+                })
+                .ok_or_else(|| SelectError::LanguageNotFound {
+                    kind,
+                    group: group.expect("没有组时不按语言找").to_owned(),
+                    language: language.to_owned(),
+                    available: in_group().filter_map(|(_, r)| r.language.clone()).collect(),
+                })
+        }
+    }
 }
 
 /// 见 [`VariantChoice::Best`]。
@@ -151,69 +303,21 @@ fn audio_only(variant: &Variant) -> bool {
             .all(|codec| CodecKind::of(codec) != CodecKind::Video)
 }
 
-/// 主播放列表里的音频 rendition 与它们的位置（口径同 [`AudioChoice::Index`]）。
-pub fn audio_renditions(master: &MasterPlaylist) -> impl Iterator<Item = (usize, &Rendition)> {
+/// 主播放列表里 `kind` 类的 rendition 与它们的位置（口径同 [`RenditionChoice::Index`]）。
+pub fn renditions(
+    master: &MasterPlaylist,
+    kind: RenditionKind,
+) -> impl Iterator<Item = (usize, &Rendition)> {
     master
         .renditions
         .iter()
-        .filter(|r| r.kind == RenditionKind::Audio)
+        .filter(move |r| r.kind == kind)
         .enumerate()
 }
 
-/// 按位置指定的音频，须在 `group` 组里。
-fn audio_by_index<'a>(
-    master: &'a MasterPlaylist,
-    index: usize,
-    group: Option<&str>,
-) -> Result<(usize, &'a Rendition), SelectError> {
-    let (_, rendition) =
-        audio_renditions(master)
-            .nth(index)
-            .ok_or_else(|| SelectError::AudioIndexOutOfRange {
-                index,
-                count: audio_renditions(master).count(),
-            })?;
-    if group == Some(rendition.group.as_str()) {
-        Ok((index, rendition))
-    } else {
-        Err(SelectError::NotVariantAudio {
-            index,
-            group: group.map(str::to_owned),
-        })
-    }
-}
-
-/// 组里第一个语言相同（不区分大小写）的音频。
-fn audio_by_language<'a>(
-    master: &'a MasterPlaylist,
-    group: &str,
-    language: &str,
-) -> Result<(usize, &'a Rendition), SelectError> {
-    let in_group = || audio_renditions(master).filter(|(_, r)| r.group == group);
-    in_group()
-        .find(|(_, r)| {
-            r.language
-                .as_deref()
-                .is_some_and(|l| l.eq_ignore_ascii_case(language))
-        })
-        .ok_or_else(|| SelectError::AudioLanguageNotFound {
-            group: group.to_owned(),
-            language: language.to_owned(),
-            available: in_group().filter_map(|(_, r)| r.language.clone()).collect(),
-        })
-}
-
-/// 组里 DEFAULT=YES 的音频，没有则取第一个；组里没有音频时为 None。
-fn default_audio<'a>(master: &'a MasterPlaylist, group: &str) -> Option<(usize, &'a Rendition)> {
-    let in_group = || audio_renditions(master).filter(|(_, r)| r.group == group);
-    in_group()
-        .find(|(_, r)| r.default)
-        .or_else(|| in_group().next())
-}
-
 /// 有独立媒体播放列表时为它；没有 URI 的 rendition 混在变体流里。
-fn separate(index: usize, rendition: &Rendition) -> Option<SelectedAudio> {
-    rendition.uri.clone().map(|uri| SelectedAudio {
+fn separate(index: usize, rendition: &Rendition) -> Option<SelectedRendition> {
+    rendition.uri.clone().map(|uri| SelectedRendition {
         index,
         uri,
         rendition: rendition.clone(),

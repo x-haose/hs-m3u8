@@ -20,7 +20,8 @@ pub struct Source {
     /// 换次大的），与已存的逐字节比较，分片都已下完、地址与所选的轨也与上次相同时不核对；直播见 [`LiveOptions`]。不是时
     /// 报 [`crate::WorkDirProblem::SourceUnverified`]。点播的轨 init 段内容变了时，已完成的分片不沿用，重新下载
     pub url: Url,
-    /// 选轨偏好。来源是主播放列表时，与任务目录记录的不同报 [`crate::WorkDirProblem::PreferenceChanged`]；任务目录里有
+    /// 选轨偏好。来源是主播放列表时，与任务目录记录的不同报 [`crate::WorkDirProblem::PreferenceChanged`]（只加减一条字幕
+    /// 也算：任务目录不能只补新轨）；任务目录里有
     /// 已完成的分片时按记录的身份找回同一条轨，不按偏好重新选（[`JobRequest::reselect`] 时重新选）；找回的变体分辨率、
     /// 编码种类须与记录的相符，来源把同一稳定 ID 给了另一档时不算同一条。按身份选的（`Matching`）续传时要给当初那个：重
     /// 新探测后再 `choice()` 得到的身份可能不同（来源没写稳定 ID 时身份含码率等属性），选的仍是同一内容时用
@@ -53,12 +54,22 @@ impl Source {
         check_scheme(url).map_err(Error::InvalidInput)
     }
 
-    /// 音频语言不能有换行：选轨偏好的摘要按行编码，播放列表里的语言也不会有换行。
+    /// 按语言选的音频、字幕的语言不能有换行：选轨偏好的摘要按行编码，播放列表里的语言也不会有换行。
     pub fn check_preference(preference: &hls::Preference) -> Result<(), Error> {
-        if let hls::AudioChoice::Language(language) = &preference.audio
-            && language.contains(['\n', '\r'])
+        for (what, renditions) in [("音频", &preference.audio), ("字幕", &preference.subtitles)]
         {
-            return Err(Error::InvalidInput(format!("音频语言不合法：{language:?}")));
+            let hls::Renditions::These(choices) = renditions else {
+                continue;
+            };
+            for choice in choices {
+                if let hls::RenditionChoice::Language(language) = choice
+                    && language.contains(['\n', '\r'])
+                {
+                    return Err(Error::InvalidInput(format!(
+                        "{what}语言不合法：{language:?}"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -151,7 +162,7 @@ pub struct JobRequest {
     /// 内容而记录找不回、或偏好的写法变了（如重新探测后再选）；换清晰度另开任务目录。选出的轨与记录的身份不同时（含来源
     /// 从主播放列表换成某一档的媒体播放列表，或反过来），与地址变了一样先核对已下载的是同一份内容（见 [`Source::url`]、
     /// [`LiveOptions`]），核对上才沿用目录、改记，否则报 [`crate::WorkDirProblem::SourceUnverified`]、记录不变；身份相
-    /// 同只差偏好时直接改记。轨道结构（有无独立音频）与记录的不同仍报 [`crate::WorkDirProblem::TracksMismatch`]，点播的
+    /// 同只差偏好时直接改记。轨道结构（各轨的取流方式：独立音频、字幕的条数）与记录的不同仍报 [`crate::WorkDirProblem::TracksMismatch`]，点播的
     /// 分片与记录的不一致仍报 [`crate::WorkDirProblem::PlanChanged`]
     pub reselect: bool,
 }

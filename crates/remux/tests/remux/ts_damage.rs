@@ -1,6 +1,8 @@
 //! TS 里损坏的音频：缺片处拼坏的包丢弃并计数，标了损坏而数据完好的照常写入。
 
-use hs_m3u8_remux::{Control, Segment, Streams, TrackSegments, remux};
+use hs_m3u8_remux::{Control, Segment, Streams, TrackSegments};
+
+use crate::remux;
 
 use crate::{concat_track, group, timelines, track, work_dir};
 

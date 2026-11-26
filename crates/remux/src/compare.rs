@@ -158,8 +158,8 @@ pub(crate) fn same_streams(
             return Err(Error::Unsupported(Unsupported::ParamsChanged {
                 at,
                 kind,
-                first: f.shape,
-                found: d.shape,
+                first: Box::new(f.shape),
+                found: Box::new(d.shape),
             }));
         }
         if config == Compared::Differs {

@@ -19,9 +19,11 @@ use std::time::Duration;
 use aes::cipher::block_padding::Pkcs7;
 use aes::cipher::{BlockModeEncrypt, KeyIvInit};
 use hs_m3u8_core::{
-    Engine, Error, JobRequest, Output, OutputOptions, RetryPolicy, Source, Target, Url,
+    Engine, Error, JobRequest, MergedFile, Output, OutputOptions, RetryPolicy, Source, Target, Url,
 };
-use hs_m3u8_remux::{Control, DiscontinuityGroup, Segment, Streams, TrackSegments, remux};
+use hs_m3u8_remux::{
+    Container, Control, DiscontinuityGroup, Label, Segment, Streams, Track, TrackSegments,
+};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// 读完一个 HTTP 请求的请求头（读到空行为止，请求体可能一同读到），返回读到的字节；连接在此之前关闭或出错时返回 None。
@@ -81,11 +83,67 @@ fn track(dir: &str, init: Option<&str>, segments: &[&str]) -> TrackSegments {
     }
 }
 
-/// 直接合并样本文件得到的期望输出。
-fn expected(dir: &Path, streams: &[Streams], groups: &[DiscontinuityGroup]) -> Vec<u8> {
+/// 直接合并样本文件得到的期望输出（MP4）。
+fn expected(dir: &Path, tracks: &[Track], groups: &[DiscontinuityGroup]) -> Vec<u8> {
     let path = dir.join("expected.mp4");
-    remux(streams, groups, &path, &Control::default()).unwrap();
+    hs_m3u8_remux::remux(
+        tracks,
+        groups,
+        &path,
+        Container::Mp4,
+        true,
+        &Control::default(),
+    )
+    .unwrap();
     std::fs::read(path).unwrap()
+}
+
+/// 来源本身是媒体播放列表时的唯一一条轨：全取，不带标注。
+fn all() -> Track {
+    Track {
+        streams: Streams::All,
+        label: Label::default(),
+    }
+}
+
+/// 音视频分离时的视频轨（所选变体），不带标注。
+fn video() -> Track {
+    Track {
+        streams: Streams::Video,
+        label: Label::default(),
+    }
+}
+
+/// 独立的音频轨，标注为来源写的 NAME、LANGUAGE 与 DEFAULT。
+fn audio(name: &str, language: Option<&str>, default: bool) -> Track {
+    Track {
+        streams: Streams::Audio,
+        label: Label {
+            language: language.map(str::to_owned),
+            name: Some(name.to_owned()),
+            default,
+            forced: false,
+        },
+    }
+}
+
+/// 输出为 MP4 文件 `path`。
+fn mp4_target(path: impl Into<PathBuf>) -> Target {
+    Target::File(MergedFile {
+        path: path.into(),
+        container: Container::Mp4,
+    })
+}
+
+/// MP4 文件 `mp4` 与本地 HLS 目录 `hls` 都要。
+fn both_targets(mp4: impl Into<PathBuf>, hls: impl Into<PathBuf>) -> Target {
+    Target::Both {
+        file: MergedFile {
+            path: mp4.into(),
+            container: Container::Mp4,
+        },
+        hls: hls.into(),
+    }
 }
 
 /// ts_long 中的分片 `indices` 按 `groups` 切成不连续段组直接合并的期望输出；`groups` 为各组的分片数。
@@ -104,7 +162,7 @@ fn expected_long(dir: &Path, indices: &[u64], groups: &[usize]) -> Vec<u8> {
         })
         .collect();
     assert!(rest.is_empty(), "groups 之和应等于分片数");
-    expected(dir, &[Streams::All], &groups)
+    expected(dir, &[all()], &groups)
 }
 
 /// macOS 在 exFAT 等卷上生成的 AppleDouble 文件 `._<名字>` 的内容：开头为魔数与版本号。
@@ -161,7 +219,7 @@ fn make_writable(dir: &Path) {
 // ---------- 任务 ----------
 
 fn request(url: Url, dir: &Path) -> JobRequest {
-    let output = OutputOptions::new(Target::Mp4(dir.join("out.mp4")));
+    let output = OutputOptions::new(mp4_target(dir.join("out.mp4")));
     let mut request = JobRequest::new(Source::new(url), output);
     request.source.http.retry = RetryPolicy {
         attempts: NonZeroU32::new(3).unwrap(),
@@ -185,7 +243,7 @@ async fn run(request: JobRequest) -> Result<Output, Error> {
 
 /// 成功的任务：MP4 与期望逐字节相同，任务目录已删除。
 fn assert_output(output: &Output, expected: &[u8]) {
-    let mp4 = &output.mp4.as_ref().expect("应输出 MP4").path;
+    let mp4 = &output.merged.as_ref().expect("应输出 MP4").path;
     assert_eq!(std::fs::read(mp4).unwrap(), expected);
     assert_eq!(output.leftovers, []);
     assert!(!mp4.with_extension("hsdl").exists());

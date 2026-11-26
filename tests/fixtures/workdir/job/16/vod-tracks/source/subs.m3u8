@@ -1,0 +1,7 @@
+#EXTM3U
+#EXT-X-TARGETDURATION:1
+#EXTINF:1,
+subs/0.vtt
+#EXTINF:1,
+subs/1.vtt
+#EXT-X-ENDLIST

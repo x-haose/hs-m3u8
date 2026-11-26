@@ -273,7 +273,7 @@ fn unsupported_error(
 ) -> PyResult<Bound<'_, PyAny>> {
     use core::Unsupported as U;
     let reason = match unsupported {
-        U::Mp4(reason) => {
+        U::Merge(reason) => {
             return instance(
                 py,
                 RequestError::chain(
@@ -283,6 +283,9 @@ fn unsupported_error(
                     },
                 ),
             );
+        }
+        U::SubtitleFormat { .. } => {
+            unreachable!("Python 的选轨偏好不要字幕，不会读字幕的媒体播放列表")
         }
         U::Hls(reason) => {
             return instance(

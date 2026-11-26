@@ -36,9 +36,16 @@ pub(crate) async fn identify(http: &Http, source: &Source) -> Result<Resource, E
     match sniffed {
         Sniffed::Playlist { url, body } => {
             let first = resolve::parse_playlist(&source.hooks, url, body).await?;
-            let resolved = resolve::resolve_playlist(http, source, first, None, &cancel)
-                .await?
-                .expect("没有记录的选轨时按偏好选，选不出即报错，不会是找不到记录");
+            let resolved = resolve::resolve_playlist(
+                http,
+                source,
+                first,
+                None,
+                resolve::SubtitleScope::Group,
+                &cancel,
+            )
+            .await?
+            .expect("没有记录的选轨时按偏好选，选不出即报错，不会是找不到记录");
             Ok(Resource::Playlist(Box::new(Probe::of(&resolved))))
         }
         Sniffed::Page { content_type } => Ok(Resource::Page { content_type }),

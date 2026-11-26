@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::info::Selected;
 use crate::remux::MediaReport;
-use crate::{FetchErrorKind, FetchFailure, HttpFailure, Mp4Unsupported, Purpose, hls};
+use crate::{FetchErrorKind, FetchFailure, HttpFailure, MergeUnsupported, Purpose, hls};
 
 /// 任务目录里已完成的内容（[`crate::Engine::inspect`]），按目录里记录的任务种类。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,14 +89,16 @@ pub struct FileOutput {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Progress {
     pub stage: Stage,
-    /// 所选的变体与音频 rendition（怎样选见 [`crate::Source::preference`]）；解析完成前、或来源本身是媒体播放列表时为
+    /// 所选的变体、音频与字幕 rendition（怎样选见 [`crate::Source::preference`]）；解析完成前、或来源本身是媒体播放列表时为
     /// None。重新选轨而选出的与记录的不是同一条时为这次选出的，核对上才沿用；核对不上时输出仍照任务目录里记录的
     pub selected: Option<Selected>,
-    /// 分片数，各轨合计
+    /// 视频与音频轨的分片数合计；字幕轨的分片很小，不计入，见 `tracks`
     pub segments: SegmentCounts,
+    /// 各轨的分片数与字节数，按轨号；解析完成前为空
+    pub tracks: Vec<TrackProgress>,
     /// 第 0 条轨已完成分片的声明时长之和；含续传前已完成的。直播即已录时长
     pub duration: Duration,
-    /// 任务目录中已完成的分片与 init 段的字节数（解密后）；含续传前已完成的
+    /// 任务目录中视频与音频轨已完成的分片与 init 段的字节数（解密后）；含续传前已完成的。字幕轨的见 `tracks`
     pub bytes: u64,
     /// 本次运行从网络读到的响应体字节数，读到即计：含播放列表与 key，含没读完、校验失败与重试前的请求。
     /// 按它的变化算下载速度
@@ -112,12 +114,12 @@ pub struct Progress {
     /// 直播：录制中的会话编号（从 0 开始，会话的含义见 [`LiveReport::session_count`]）。会话定下后才有，录制中途另起
     /// 会话（见 [`NewSession`]）时随之变；点播与会话定下之前为 None
     pub session: Option<u32>,
-    /// 直播且输出含 MP4：录到的内容放不进 MP4 的原因。续录时任务目录里已录齐的组在开始后核对一次，之后每个（会话,
+    /// 直播且输出含合并文件：录到的内容放不进合并文件的原因。续录时任务目录里已录齐的组在开始后核对一次，之后每个（会话,
     /// 不连续段）组在各轨都有分片时核对（录制循环结束、收尾时才下完的不核对）；第 0 组开头的分片判断不了时，各组只
     /// 核对自身、不与它比较。组号为核对时的，之后才录齐、排在前面的组会让合并时的组号变大。录制照常进行，停不停由调用
-    /// 方定（直播错过的内容录不回来）；合并 MP4 时照样以 [`crate::Unsupported::Mp4`] 失败，可改为只输出本地 HLS 再
-    /// 合并。点播（下载各组的第一个分片后核对，放不进时任务直接失败）与不输出 MP4 时为 None
-    pub mp4_unsupported: Option<Mp4Unsupported>,
+    /// 方定（直播错过的内容录不回来）；合并时照样以 [`crate::Unsupported::Merge`] 失败，可改存 MKV 或只输出本地 HLS 再
+    /// 合并。点播（下载各组的第一个分片后核对，放不进时任务直接失败）与不输出合并文件时为 None
+    pub merge_unsupported: Option<MergeUnsupported>,
 }
 
 /// 分片数，各轨合计（[`Progress::segments`]）。
@@ -136,11 +138,77 @@ pub struct SegmentCounts {
     pub gap: usize,
 }
 
+/// 一条轨的进度（[`Progress::tracks`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackProgress {
+    pub kind: TrackKind,
+    /// 口径同 [`Progress::segments`]，只算这条轨
+    pub segments: SegmentCounts,
+    /// 口径同 [`Progress::bytes`]，只算这条轨
+    pub bytes: u64,
+}
+
+/// 轨的种类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrackKind {
+    /// 所选变体（或来源本身），可能混着音频
+    Video,
+    /// 独立的音频 rendition
+    Audio,
+    /// 字幕 rendition
+    Subtitles,
+}
+
+impl TrackKind {
+    /// 计入 [`Progress::segments`] 与 [`Progress::bytes`]。
+    fn counted(self) -> bool {
+        self != TrackKind::Subtitles
+    }
+}
+
 impl Progress {
+    /// 按各轨的种类 `kinds`（按轨号）建出 `tracks`，各项清零；合计不动。
+    pub(crate) fn set_tracks(&mut self, kinds: &[TrackKind]) {
+        self.tracks = kinds
+            .iter()
+            .map(|&kind| TrackProgress {
+                kind,
+                segments: SegmentCounts::default(),
+                bytes: 0,
+            })
+            .collect();
+    }
+
+    /// 改第 `track` 条轨的分片数，视频与音频轨同样改合计。还没建出 `tracks` 时只改合计。
+    pub(crate) fn segments_of(&mut self, track: usize, change: impl Fn(&mut SegmentCounts)) {
+        match self.tracks.get_mut(track) {
+            Some(t) => {
+                change(&mut t.segments);
+                if t.kind.counted() {
+                    change(&mut self.segments);
+                }
+            }
+            None => change(&mut self.segments),
+        }
+    }
+
+    /// 第 `track` 条轨又有 `len` 字节落盘，视频与音频轨同样计入合计。
+    pub(crate) fn add_bytes(&mut self, track: usize, len: u64) {
+        match self.tracks.get_mut(track) {
+            Some(t) => {
+                t.bytes += len;
+                if t.kind.counted() {
+                    self.bytes += len;
+                }
+            }
+            None => self.bytes += len,
+        }
+    }
+
     /// 计入一个已完成的分片：第 `track` 条轨、声明时长 `duration_us`、`len` 字节。
     pub(crate) fn count_segment(&mut self, track: usize, duration_us: u64, len: u64) {
-        self.segments.done += 1;
-        self.bytes += len;
+        self.segments_of(track, |s| s.done += 1);
+        self.add_bytes(track, len);
         if track == 0 {
             self.duration = self
                 .duration
@@ -164,8 +232,8 @@ pub struct Retrying {
 /// 写出的进度（[`Progress::writing`]），以文件计：各组各轨的 init 段与分片各算一个（打包音频按分片）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Writing {
-    /// 合并 MP4：写完的输入文件，写到下一个分片的包时上一个才算完，合并完回读核对 MP4 时不再增长；不要 MP4 时为 None
-    pub mp4: Option<FileCount>,
+    /// 合并：写完的输入文件，写到下一个分片的包时上一个才算完，合并完回读核对时不再增长；不要合并文件时为 None
+    pub merged: Option<FileCount>,
     /// 备齐本地 HLS：放好的文件，已放过的 init 段照样算；与任务目录同盘时用硬链接，几乎不花时间。不要本地 HLS 时为 None
     pub hls: Option<FileCount>,
 }
@@ -222,7 +290,7 @@ pub enum Stage {
     Downloading,
     /// 直播：刷新播放列表并下载新分片
     Recording,
-    /// 写出输出（合并 MP4、写本地 HLS）
+    /// 写出输出（合并、写本地 HLS）
     Writing,
     Done,
 }
@@ -230,14 +298,16 @@ pub enum Stage {
 /// 任务结果：下载、录制或只合并。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output {
-    /// 生成的 MP4；没要 MP4（[`crate::Target::Hls`]）时为 None
-    pub mp4: Option<Mp4Output>,
+    /// 生成的合并文件；没要（[`crate::Target::Hls`]）时为 None
+    pub merged: Option<MergedOutput>,
     /// 生成的本地 HLS 目录（绝对路径，相对路径按开始任务时的当前目录补全）；没要 HLS 时为 None。入口为其中的
-    /// `index.m3u8`：单轨时是媒体播放列表，视频与独立音频分离时是主播放列表；各轨的分片、init 段（与分离时这条轨的
-    /// `index.m3u8`）在 `<轨道编号>/` 下。内容与 MP4 相同：只放各轨都有的不连续段组，组内缺失的分片不标出、保留原
-    /// 时间戳
+    /// `index.m3u8`：单轨时是媒体播放列表，有独立音频或字幕时是主播放列表（音频组 `audio`、字幕组 `subs`）；各轨的分片、
+    /// init 段与这条轨的 `index.m3u8` 在 `<轨道编号>/` 下，字幕为原 WebVTT 分片（`.vtt`）。内容与合并文件相同：只放各轨
+    /// 都有的不连续段组，组内缺失的分片不标出、保留原时间戳
     pub hls: Option<PathBuf>,
-    /// 输出的分片数，各轨合计
+    /// 另存的字幕文件（绝对路径），按所选字幕的顺序（见 [`crate::SubtitleOutput::files`]）；不另存或没选字幕时为空
+    pub subtitle_files: Vec<PathBuf>,
+    /// 输出的分片数，各轨合计（含字幕轨）
     pub segments: usize,
     /// 同 [`Progress::bytes`]
     pub bytes: u64,
@@ -296,12 +366,13 @@ impl fmt::Display for Leftover {
     }
 }
 
-/// 生成的 MP4。
+/// 生成的合并文件。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Mp4Output {
+pub struct MergedOutput {
     /// 绝对路径，相对路径按开始任务时的当前目录补全
     pub path: PathBuf,
-    /// 各路输出流的编码参数、包数与时长
+    pub container: hs_m3u8_remux::Container,
+    /// 各路输出流的编码参数、包数与时长；字幕流在音视频之后
     pub report: MediaReport,
 }
 

@@ -32,7 +32,7 @@ pub struct FileInput {
 ///   探测流参数读到 FFmpeg 的默认上限为止。
 /// - 每个输入按 [`FileInput::streams`] 取第一路视频和（或）第一路音频，指定的每种都要有（否则报
 ///   [`Error::MissingStream`]），且都要有包写出（否则报 [`Error::EmptyInput`]，视频的包都在第一个关键帧之前时报
-///   [`Unsupported::NoKeyframe`]；只取一路流的输入在写出别的内容之前就报）；同一类流只能来自一个输入。
+///   [`Unsupported::NoKeyframe`]；只取一路流的输入在写出别的内容之前就报）；视频只能来自一个输入，音频可以来自几个。
 /// - 各输入的时间线互不相干：每个输入各自平移，起始时刻落在输出的 0 处（同 `ffmpeg -i 视频 -i 音频 -c copy` 的默认
 ///   做法）。起始时刻取所取各路流里 FFmpeg 给的最早的（第一个包的 PTS，已按容器的编辑列表、MP3 的 Info 帧等去掉编码器
 ///   的起始延迟）；延迟里的包落在 0 之前，由输出的编辑列表（MP4）或 CodecDelay（Matroska）跳过。不核对时间戳的推进，
@@ -163,15 +163,15 @@ fn write(
         opened.push(track);
         sizes.push(size);
     }
-    let layout = layout_of(&opened)?;
-    let mut muxer = Muxer::open(path, container, cancel, &opened, &layout)?;
+    let layout = layout_of(&opened, inputs.len())?;
+    let mut muxer = Muxer::open(path, container, cancel, &opened, &layout, &[], &[])?;
     let mut sources = sources(opened, &layout, &[]);
     for source in &mut sources {
         start(source)?;
     }
     // 各输入已报为写完的字节数（见 WriteProgress）
     let mut written = vec![0u64; inputs.len()];
-    muxer.interleave(&mut sources, |source, packet, _, _| {
+    muxer.interleave(&mut sources, &mut [], |source, packet, _, _| {
         if let Ok(position) = u64::try_from(packet.position()) {
             let done = &mut written[source.at.index()];
             control.progress.add(position.saturating_sub(*done));

@@ -3,7 +3,9 @@
 use std::path::Path;
 
 use ffmpeg_next as ffmpeg;
-use hs_m3u8_remux::{Control, Error, Origin, Streams, TrackSegments, Unsupported, remux};
+use hs_m3u8_remux::{Control, Error, Origin, Streams, TrackSegments, Unsupported};
+
+use crate::remux;
 
 use crate::{check, concat_track, group, timelines, track, work_dir};
 

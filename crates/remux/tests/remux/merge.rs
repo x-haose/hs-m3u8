@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use hs_m3u8_remux::{Control, Error, Origin, Shape, StreamKind, Streams, Unsupported, remux};
+use hs_m3u8_remux::{Control, Error, Origin, Shape, StreamKind, Streams, Unsupported};
+
+use crate::remux;
 
 use crate::{Timeline, concat_track, fixtures, group, span, timelines, track, track_in, work_dir};
 
@@ -231,25 +233,37 @@ fn paths_with_quotes_and_spaces_are_read() {
     assert!(output.exists());
 }
 
+/// 音频可以来自几条轨，各成一路输出流；视频只能有一路。
 #[test]
-fn same_stream_kind_from_two_tracks_is_rejected() {
+fn several_audio_tracks_are_kept_but_not_two_videos() {
     let dir = work_dir("duplicate");
     let output = dir.join("out.mp4");
 
-    let err = remux(
-        &[Streams::All; 2],
+    let report = remux(
+        &[Streams::All, Streams::Audio],
         &[group([track("ts_a"), track("fmp4_a/audio")])],
         &output,
         &Control::default(),
     )
-    .unwrap_err();
+    .unwrap();
+    let kinds: Vec<StreamKind> = report.streams.iter().map(|s| s.shape.kind()).collect();
+    assert_eq!(
+        kinds,
+        [StreamKind::Video, StreamKind::Audio, StreamKind::Audio]
+    );
 
+    let err = remux(
+        &[Streams::Video; 2],
+        &[group([track("ts_a"), track("ts_a")])],
+        &output,
+        &Control::default(),
+    )
+    .unwrap_err();
     assert!(
         matches!(
             err,
-            Error::DuplicateKind {
-                at: Origin::Track { group: 0, track: 1 },
-                kind: StreamKind::Audio
+            Error::DuplicateVideo {
+                at: Origin::Track { group: 0, track: 1 }
             }
         ),
         "实际 {err:?}"

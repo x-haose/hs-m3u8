@@ -109,15 +109,16 @@ impl Plan {
         self.tracks.iter().map(|t| t.segments.len()).sum()
     }
 
-    /// 来源标了 EXT-X-GAP 的分片数，各轨合计。
-    pub(crate) fn gap_count(&self) -> usize {
-        let gaps = |t: &Track| {
-            t.skipped
+    /// 各轨要下载的分片数与来源标了 EXT-X-GAP 的分片数，按轨号。
+    pub(crate) fn track_counts(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+        self.tracks.iter().map(|t| {
+            let gaps = t
+                .skipped
                 .iter()
                 .filter(|(_, r)| *r == MissReason::Gap)
-                .count()
-        };
-        self.tracks.iter().map(gaps).sum()
+                .count();
+            (t.segments.len(), gaps)
+        })
     }
 
     /// 检查同一组内每条轨的 init 段内容不变（地址可以不同）。`inits[t][i]` 为第 t 条轨

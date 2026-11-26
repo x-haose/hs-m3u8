@@ -62,7 +62,7 @@ mod tests {
         let bytes = encode(&ranges);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"format_version":15,"ranges":[[0,10],[20,30]]}"#
+            r#"{"format_version":16,"ranges":[[0,10],[20,30]]}"#
         );
         assert_eq!(decode(&bytes), Ok(ranges));
         assert_eq!(decode(br#"{"format_version":14,"ranges":[]}"#), Ok(vec![]));

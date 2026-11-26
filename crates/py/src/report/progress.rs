@@ -158,7 +158,7 @@ impl From<core::Progress> for Progress {
                     total: c.total,
                 };
                 Writing {
-                    mp4: w.mp4.map(count),
+                    mp4: w.merged.map(count),
                     hls: w.hls.map(count),
                 }
             }),
@@ -167,7 +167,7 @@ impl From<core::Progress> for Progress {
                 .into_iter()
                 .map(|error| error.map(RefreshCause::from))
                 .collect(),
-            mp4_unsupported: p.mp4_unsupported.map(Mp4Unsupported::from),
+            mp4_unsupported: p.merge_unsupported.map(Mp4Unsupported::from),
         }
     }
 }

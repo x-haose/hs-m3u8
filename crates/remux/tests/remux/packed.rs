@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use hs_m3u8_remux::{Control, Error, Origin, Segment, Streams, TrackSegments, Unsupported, remux};
+use hs_m3u8_remux::{Control, Error, Origin, Segment, Streams, TrackSegments, Unsupported};
+
+use crate::remux;
 
 use crate::{
     concat_track, earliest, first_frames, group, packed_fixture, packed_segment, packet_sizes,

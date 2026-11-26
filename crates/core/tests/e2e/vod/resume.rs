@@ -2,13 +2,16 @@
 
 use std::time::Duration;
 
-use hs_m3u8_core::hls::AudioChoice;
+use hs_m3u8_core::hls::{RenditionChoice, Renditions};
 use hs_m3u8_core::{Error, HttpErrorKind, Url, WorkDirProblem};
-use hs_m3u8_remux::{DiscontinuityGroup, Streams};
+use hs_m3u8_remux::DiscontinuityGroup;
 
 use super::{TS_A, expected_ts_a, put_ts_a};
 use crate::server::Server;
-use crate::{assert_output, engine, expected, fixture, fixtures, request, run, test_dir, track};
+use crate::{
+    all, assert_output, audio, engine, expected, fixture, fixtures, request, run, test_dir, track,
+    video,
+};
 
 /// 分片 404：任务失败、不生成输出、保留任务目录；播放列表变了不能续传；恢复后续传只补缺的分片。
 #[tokio::test(flavor = "multi_thread")]
@@ -38,7 +41,7 @@ async fn failure_then_resume() {
         ),
         other => panic!("{other}"),
     }
-    assert!(!req.output.target.mp4().unwrap().exists());
+    assert!(!req.output.target.file().unwrap().path.exists());
     assert!(dir.join("out.hsdl/job.json").exists());
 
     put_ts_a(&server, "index.m3u8", 0.5);
@@ -264,7 +267,7 @@ async fn resume_finds_the_same_identical_audio_rendition() {
          #EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=320x180,AUDIO=\"aud\"\nv/index.m3u8\n",
     );
     let mut req = request(server.url("master.m3u8"), &dir);
-    req.source.preference.audio = AudioChoice::Index(1);
+    req.source.preference.audio = Renditions::These(vec![RenditionChoice::Index(1)]);
     server.remove("b/seg1.m4s");
     assert!(run(req.clone()).await.is_err());
     server.put("b/seg1.m4s", fixture("fmp4_b/audio/seg1.m4s"));
@@ -277,7 +280,11 @@ async fn resume_finds_the_same_identical_audio_rendition() {
             track("fmp4_b/audio", Some("init.mp4"), &["seg0.m4s", "seg1.m4s"]),
         ],
     };
-    let want = expected(&dir, &[Streams::Video, Streams::Audio], &[group]);
+    let want = expected(
+        &dir,
+        &[video(), audio("English", Some("en"), true)],
+        &[group],
+    );
     assert_output(&output, &want);
     assert_eq!(server.hits("a/seg1.m4s"), 0);
 }
@@ -435,7 +442,7 @@ async fn cancel_lock_and_resume() {
     );
     job.control().cancel();
     assert!(matches!(job.wait().await, Err(Error::Cancelled)));
-    assert!(!req.output.target.mp4().unwrap().exists());
+    assert!(!req.output.target.file().unwrap().path.exists());
 
     server.ungate("seg1.ts");
     let output = run(req).await.unwrap();
@@ -510,7 +517,7 @@ async fn signed_init_urls_resume_with_the_right_init() {
     let a = ["seg0.m4s", "seg1.m4s"];
     let want = expected(
         &dir,
-        &[Streams::All],
+        &[all()],
         &[
             video("fmp4_a", &a),
             video("fmp4_a", &a),
@@ -518,7 +525,7 @@ async fn signed_init_urls_resume_with_the_right_init() {
         ],
     );
     assert_eq!(
-        std::fs::read(&output.mp4.as_ref().unwrap().path).unwrap(),
+        std::fs::read(&output.merged.as_ref().unwrap().path).unwrap(),
         want
     );
 }

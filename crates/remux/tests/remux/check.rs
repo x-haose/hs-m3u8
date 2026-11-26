@@ -3,8 +3,10 @@
 use std::path::PathBuf;
 
 use hs_m3u8_remux::{
-    Control, Error, Origin, Shape, StreamKind, Streams, TrackSegments, Unsupported, remux,
+    Control, Error, Origin, Shape, StreamKind, Streams, TrackSegments, Unsupported,
 };
+
+use crate::remux;
 
 use crate::{
     check, first_frames, fixtures, group, packed_fixture, packed_segment, segs, track, work_dir,
@@ -268,16 +270,13 @@ fn check_skips_what_a_head_without_samples_cannot_tell() {
     let err = check(&[Streams::Audio], &groups).unwrap_err();
     assert!(
         matches!(
-            err,
+            &err,
             Error::Unsupported(Unsupported::ParamsChanged {
                 at: Origin::Track { group: 1, .. },
                 kind: StreamKind::Audio,
-                found: Shape::Audio {
-                    sample_rate: 44_100,
-                    ..
-                },
+                found,
                 ..
-            })
+            }) if matches!(**found, Shape::Audio { sample_rate: 44_100, .. })
         ),
         "实际 {err:?}"
     );

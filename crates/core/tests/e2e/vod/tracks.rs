@@ -5,13 +5,13 @@ use std::sync::Arc;
 use hs_m3u8_core::{
     Error, HookError, Hooks, MissReason, Missed, Purpose, RequestParts, Unsupported,
 };
-use hs_m3u8_remux::{DiscontinuityGroup, Streams};
+use hs_m3u8_remux::DiscontinuityGroup;
 
 use super::{TS_A, put_ts_a};
 use crate::server::Server;
 use crate::{
-    assert_output, engine, expected, expected_long, fixture, fixtures, request, run, test_dir,
-    track,
+    all, assert_output, audio, engine, expected, expected_long, fixture, fixtures, request, run,
+    test_dir, track, video,
 };
 
 /// 主播放列表经重定向到子目录（相对地址按最终地址解析），选出视频变体与独立音频 rendition，两个不连续段组。
@@ -64,7 +64,7 @@ async fn split_audio_video_with_redirect_and_discontinuity() {
         (selected.variant.index, selected.variant.bandwidth),
         (0, Some(200_000))
     );
-    let audio = selected.audio.as_ref().unwrap();
+    let audio = &selected.audio[0];
     assert_eq!((audio.index, audio.name.as_deref()), (0, Some("main")));
     let counts: Vec<(usize, bool)> = probe.tracks.iter().map(|t| (t.segments, t.ended)).collect();
     assert_eq!(counts, [(3, true), (5, true)]);
@@ -82,7 +82,7 @@ async fn split_audio_video_with_redirect_and_discontinuity() {
     };
     let want = expected(
         &dir,
-        &[Streams::Video, Streams::Audio],
+        &[crate::video(), crate::audio("main", None, true)],
         &[
             program(
                 "fmp4_a",
@@ -130,7 +130,7 @@ async fn selected_audio_rendition_replaces_muxed_audio() {
     ];
     let want = expected(
         &dir,
-        &[Streams::Video, Streams::Audio],
+        &[crate::video(), crate::audio("en", None, true)],
         &[DiscontinuityGroup { tracks }],
     );
     assert_output(&output, &want);
@@ -157,7 +157,7 @@ async fn byte_ranges() {
 
     let want = expected(
         &dir,
-        &[Streams::All],
+        &[all()],
         &[DiscontinuityGroup {
             tracks: vec![track(
                 "fmp4_a/video",
@@ -250,7 +250,7 @@ async fn a_group_with_only_gaps_in_one_track_is_left_out() {
             track("fmp4_a/audio", Some("init.mp4"), &["seg0.m4s", "seg1.m4s"]),
         ],
     };
-    let want = expected(&dir, &[Streams::Video, Streams::Audio], &[group]);
+    let want = expected(&dir, &[video(), audio("x", None, false)], &[group]);
     assert_output(&output, &want);
     let missed = |track, reason| Missed {
         session: 0,
@@ -336,11 +336,7 @@ async fn inits_differing_only_in_query_are_distinct() {
             &["seg0.m4s"],
         )],
     };
-    let want = expected(
-        &dir,
-        &[Streams::All],
-        &[program("fmp4_a"), program("fmp4_b")],
-    );
+    let want = expected(&dir, &[all()], &[program("fmp4_a"), program("fmp4_b")]);
     assert_output(&output, &want);
     assert_eq!(
         (

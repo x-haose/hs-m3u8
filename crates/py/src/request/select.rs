@@ -135,8 +135,8 @@ impl Preference {
     #[new]
     #[pyo3(signature = (
         *,
-        variant = Preference::from(core::hls::Preference::default()).variant,
-        audio = Preference::from(core::hls::Preference::default()).audio,
+        variant = Preference::core_default().variant,
+        audio = Preference::core_default().audio,
     ))]
     fn new(py: Python<'_>, variant: VariantChoice, audio: AudioChoice) -> PyResult<Self> {
         let preference = Preference { variant, audio };
@@ -146,10 +146,24 @@ impl Preference {
     }
 }
 
-impl From<core::hls::Preference> for Preference {
-    fn from(p: core::hls::Preference) -> Self {
+impl Preference {
+    /// 核心的默认偏好（最高画质的变体、组里默认的音频、不要字幕）对应的 Python 写法；签名里的默认值用它，与核心一致。
+    pub(crate) fn core_default() -> Self {
+        let core::hls::Preference {
+            variant,
+            audio,
+            subtitles,
+        } = core::hls::Preference::default();
+        assert_eq!(
+            (&audio, &subtitles),
+            (
+                &core::hls::Renditions::Default,
+                &core::hls::Renditions::None
+            ),
+            "Python 接口只表示得了默认音频、不要字幕的默认偏好"
+        );
         Preference {
-            variant: match p.variant {
+            variant: match variant {
                 core::hls::VariantChoice::Best => VariantChoice::Best {},
                 core::hls::VariantChoice::Index(index) => VariantChoice::Index {
                     index: Count(index),
@@ -158,14 +172,7 @@ impl From<core::hls::Preference> for Preference {
                     VariantChoice::Matching { key: key.into() }
                 }
             },
-            audio: match p.audio {
-                core::hls::AudioChoice::Default => AudioChoice::Default {},
-                core::hls::AudioChoice::Language(language) => AudioChoice::Language { language },
-                core::hls::AudioChoice::Index(index) => AudioChoice::Index {
-                    index: Count(index),
-                },
-                core::hls::AudioChoice::Matching(key) => AudioChoice::Matching { key: key.into() },
-            },
+            audio: AudioChoice::Default {},
         }
     }
 }
@@ -181,13 +188,22 @@ impl Preference {
                 }
             },
             audio: match &self.audio {
-                AudioChoice::Default {} => core::hls::AudioChoice::Default,
+                AudioChoice::Default {} => core::hls::Renditions::Default,
                 AudioChoice::Language { language } => {
-                    core::hls::AudioChoice::Language(language.clone())
+                    core::hls::Renditions::These(vec![core::hls::RenditionChoice::Language(
+                        language.clone(),
+                    )])
                 }
-                AudioChoice::Index { index } => core::hls::AudioChoice::Index(index.0),
-                AudioChoice::Matching { key } => core::hls::AudioChoice::Matching(key.to_core()),
+                AudioChoice::Index { index } => {
+                    core::hls::Renditions::These(vec![core::hls::RenditionChoice::Index(index.0)])
+                }
+                AudioChoice::Matching { key } => {
+                    core::hls::Renditions::These(vec![core::hls::RenditionChoice::Matching(
+                        key.to_core(),
+                    )])
+                }
             },
+            subtitles: core::hls::Renditions::None,
         }
     }
 }
@@ -250,14 +266,14 @@ impl VariantKey {
     }
 }
 
-impl From<core::hls::AudioKey> for AudioKey {
-    fn from(key: core::hls::AudioKey) -> Self {
+impl From<core::hls::RenditionKey> for AudioKey {
+    fn from(key: core::hls::RenditionKey) -> Self {
         match key {
-            core::hls::AudioKey::Stable { id, occurrence } => AudioKey::Stable {
+            core::hls::RenditionKey::Stable { id, occurrence } => AudioKey::Stable {
                 id,
                 occurrence: Count(occurrence),
             },
-            core::hls::AudioKey::Attributes {
+            core::hls::RenditionKey::Attributes {
                 group,
                 name,
                 language,
@@ -273,9 +289,9 @@ impl From<core::hls::AudioKey> for AudioKey {
 }
 
 impl AudioKey {
-    fn to_core(&self) -> core::hls::AudioKey {
+    fn to_core(&self) -> core::hls::RenditionKey {
         match self.clone() {
-            AudioKey::Stable { id, occurrence } => core::hls::AudioKey::Stable {
+            AudioKey::Stable { id, occurrence } => core::hls::RenditionKey::Stable {
                 id,
                 occurrence: occurrence.0,
             },
@@ -284,7 +300,7 @@ impl AudioKey {
                 name,
                 language,
                 occurrence,
-            } => core::hls::AudioKey::Attributes {
+            } => core::hls::RenditionKey::Attributes {
                 group,
                 name,
                 language,

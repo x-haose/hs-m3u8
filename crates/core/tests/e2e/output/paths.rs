@@ -5,7 +5,7 @@ use hs_m3u8_core::{Error, Target, Url};
 use super::{both, request_to};
 use crate::server::Server;
 #[cfg(unix)]
-use crate::{Writable, is_root};
+use crate::{Writable, both_targets, is_root, mp4_target};
 use crate::{engine, fixture, run, test_dir};
 
 /// 输出与任务目录的路径相同或互相包含、MP4 路径以分隔符结尾、路径以 `.` 结尾时，下载前即拒绝。
@@ -18,18 +18,12 @@ async fn invalid_output_paths_are_rejected() {
         (Target::Hls(dir.join("work/hls")), Some(dir.join("work"))),
         // 按字面规整 `..` 之后才看得出在任务目录里
         (
-            Target::Mp4(dir.join("x/../work/out.mp4")),
+            mp4_target(dir.join("x/../work/out.mp4")),
             Some(dir.join("work")),
         ),
-        (
-            Target::Both {
-                mp4: dir.join("out/a.mp4"),
-                hls: dir.join("out"),
-            },
-            None,
-        ),
-        (Target::Mp4(dir.join("out.mp4/")), None),
-        (Target::Mp4(dir.join("out.mp4/.")), None),
+        (both_targets(dir.join("out/a.mp4"), dir.join("out")), None),
+        (mp4_target(dir.join("out.mp4/")), None),
+        (mp4_target(dir.join("out.mp4/.")), None),
         (Target::Hls(dir.join("out/.")), None),
         (Target::Hls(dir.join("out")), Some(dir.join("work/."))),
     ];
@@ -59,12 +53,12 @@ async fn an_output_under_a_file_is_reported_as_occupied() {
     // 默认的任务目录与输出同级，同样建不出来：报的仍是输出路径被占用
     let cases = [
         (
-            Target::Mp4(mp4.clone()),
+            mp4_target(mp4.clone()),
             work.clone(),
             mp4.clone(),
             Some(file.clone()),
         ),
-        (Target::Mp4(mp4.clone()), None, mp4, Some(file.clone())),
+        (mp4_target(mp4.clone()), None, mp4, Some(file.clone())),
         (Target::Hls(hls.into()), work, file, None),
     ];
     for (target, work_dir, occupied, blocking) in cases {
@@ -92,10 +86,7 @@ async fn output_directories_removed_during_the_download_are_recreated() {
         "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg0.ts\n#EXT-X-ENDLIST\n",
     );
     let outdir = dir.join("outdir");
-    let target = Target::Both {
-        mp4: outdir.join("a.mp4"),
-        hls: outdir.join("a"),
-    };
+    let target = both_targets(outdir.join("a.mp4"), outdir.join("a"));
     let mut req = request_to(server.url("index.m3u8"), &dir, target);
     req.output.work_dir = Some(dir.join("work"));
     let gate = server.gate("seg0.ts");
@@ -106,7 +97,7 @@ async fn output_directories_removed_during_the_download_are_recreated() {
 
     let output = job.wait().await.unwrap();
 
-    assert!(output.mp4.unwrap().path.is_file());
+    assert!(output.merged.unwrap().path.is_file());
     assert!(output.hls.unwrap().join("index.m3u8").is_file());
 }
 
@@ -126,7 +117,7 @@ async fn output_directories_that_cannot_be_created_fail_before_downloading() {
     std::fs::create_dir(&locked).unwrap();
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
     let server = Server::start().await;
-    let target = Target::Mp4(locked.join("sub/out.mp4"));
+    let target = mp4_target(locked.join("sub/out.mp4"));
     let mut req = request_to(server.url("index.m3u8"), &dir, target);
     req.output.work_dir = Some(dir.join("work"));
 
@@ -151,11 +142,11 @@ async fn long_output_names_are_written() {
     );
     let name = format!("{}.mp4", "长".repeat(78));
     assert_eq!(name.len(), 238);
-    let target = Target::Mp4(dir.join(&name));
+    let target = mp4_target(dir.join(&name));
 
     let output = run(request_to(server.url("index.m3u8"), &dir, target))
         .await
         .unwrap();
 
-    assert!(output.mp4.unwrap().path.is_file());
+    assert!(output.merged.unwrap().path.is_file());
 }

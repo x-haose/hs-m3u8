@@ -10,7 +10,7 @@ use ffmpeg::format::stream::{Stream, StreamMut};
 use ffmpeg::util::interrupt::{self, InterruptGuard};
 use ffmpeg_next as ffmpeg;
 
-use crate::{Cancel, Container, Shape, StreamKind};
+use crate::{Cancel, Container, Shape, StreamKind, subtitles};
 
 pub(crate) fn shape(stream: &Stream<'_>, kind: StreamKind) -> Shape {
     let params = stream.parameters();
@@ -30,6 +30,7 @@ pub(crate) fn shape(stream: &Stream<'_>, kind: StreamKind) -> Shape {
             sample_rate: unsigned(p.sample_rate),
             channels: unsigned(p.ch_layout.nb_channels),
         },
+        StreamKind::Subtitle => unreachable!("字幕不经 FFmpeg 读，只取音视频流的参数"),
     }
 }
 
@@ -153,6 +154,48 @@ pub(crate) fn parsed_picture(stream: &Stream<'_>) -> Option<(u32, u32, i32)> {
         positive(parser.height)?,
         parser.format,
     ))
+}
+
+/// 把新建的输出流设成本库生成的字幕流：SubRip 不带解码配置；mov_text 带 tx3g 的样本描述
+/// （[`hs_m3u8_subtitle::MOV_TEXT_SAMPLE_ENTRY`]），封装器原样写进样本项。
+pub(crate) fn set_subtitle_parameters(ost: &mut StreamMut<'_>, codec: subtitles::Codec) {
+    let (id, extradata): (_, &[u8]) = match codec {
+        subtitles::Codec::Subrip => (ffmpeg::ffi::AVCodecID::AV_CODEC_ID_SUBRIP, &[]),
+        subtitles::Codec::MovText => (
+            ffmpeg::ffi::AVCodecID::AV_CODEC_ID_MOV_TEXT,
+            &hs_m3u8_subtitle::MOV_TEXT_SAMPLE_ENTRY,
+        ),
+    };
+    // SAFETY: codecpar 由 avformat_new_stream 分配、归输出上下文所有且非空，此时尚未写头；extradata 为空（新建的流），
+    // 用 av_mallocz 分配（含 FFmpeg 要求的填充字节）后由 codecpar 持有、随它释放。
+    unsafe {
+        let par = &mut *ost.parameters().as_mut_ptr();
+        par.codec_type = ffmpeg::ffi::AVMediaType::AVMEDIA_TYPE_SUBTITLE;
+        par.codec_id = id;
+        if !extradata.is_empty() {
+            let padding = ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize;
+            let buffer = ffmpeg::ffi::av_mallocz(extradata.len() + padding).cast::<u8>();
+            assert!(!buffer.is_null(), "分配几十字节的内存失败");
+            std::ptr::copy_nonoverlapping(extradata.as_ptr(), buffer, extradata.len());
+            par.extradata = buffer;
+            par.extradata_size = i32::try_from(extradata.len()).expect("样本描述只有几十字节");
+        }
+    }
+}
+
+/// 设输出流的默认与强制标志（AVStream 的 disposition），其余标志清掉。
+pub(crate) fn set_disposition(ost: &mut StreamMut<'_>, default: bool, forced: bool) {
+    let mut disposition = 0;
+    if default {
+        disposition |= ffmpeg::ffi::AV_DISPOSITION_DEFAULT;
+    }
+    if forced {
+        disposition |= ffmpeg::ffi::AV_DISPOSITION_FORCED;
+    }
+    // SAFETY: 流由 avformat_new_stream 分配、归输出上下文所有且非空，此时尚未写头；只改 disposition。
+    unsafe {
+        (*ost.as_mut_ptr()).disposition = disposition;
+    }
 }
 
 /// MP4 里的 HEVC 标 `hvc1`（QuickTime/Safari 不播 `hev1`）；其余置 0，由封装器按编码选择：从输入复制来的标签（如

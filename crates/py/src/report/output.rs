@@ -224,6 +224,9 @@ impl From<core::remux::StreamKind> for StreamKind {
         match kind {
             core::remux::StreamKind::Video => StreamKind::Video {},
             core::remux::StreamKind::Audio => StreamKind::Audio {},
+            core::remux::StreamKind::Subtitle => {
+                unreachable!("Python 的选轨偏好不要字幕，合并文件里没有字幕流")
+            }
         }
     }
 }
@@ -231,6 +234,9 @@ impl From<core::remux::StreamKind> for StreamKind {
 impl From<core::remux::Shape> for Shape {
     fn from(shape: core::remux::Shape) -> Self {
         match shape {
+            core::remux::Shape::Subtitle { .. } => {
+                unreachable!("Python 的选轨偏好不要字幕，合并文件里没有字幕流")
+            }
             core::remux::Shape::Video {
                 codec,
                 width,
@@ -268,8 +274,13 @@ impl From<core::remux::StreamReport> for StreamReport {
     }
 }
 
-impl From<core::Mp4Output> for Mp4Output {
-    fn from(m: core::Mp4Output) -> Self {
+impl From<core::MergedOutput> for Mp4Output {
+    fn from(m: core::MergedOutput) -> Self {
+        assert_eq!(
+            m.container,
+            core::remux::Container::Mp4,
+            "Python 的输出只有 MP4 一种合并文件"
+        );
         Mp4Output {
             path: m.path.into(),
             report: MediaReport {
@@ -363,7 +374,7 @@ impl From<core::LiveReport> for LiveReport {
 impl From<core::Output> for Output {
     fn from(o: core::Output) -> Self {
         Output {
-            mp4: o.mp4.map(Mp4Output::from),
+            mp4: o.merged.map(Mp4Output::from),
             hls: o.hls.map(PyPath::from),
             segments: o.segments,
             bytes: o.bytes,

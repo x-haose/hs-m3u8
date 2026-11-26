@@ -4,7 +4,9 @@
 
 use std::path::{Path, PathBuf};
 
-use hs_m3u8_remux::{Control, DiscontinuityGroup, Segment, Streams, TrackSegments, remux};
+use hs_m3u8_remux::{
+    Container, Control, DiscontinuityGroup, Label, Segment, Streams, Track, TrackSegments, remux,
+};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/media/ts_long")
@@ -68,9 +70,14 @@ fn many_segments_in_one_group_stay_within_the_descriptor_limit() {
     assert!(chunks.len() > 128, "分片数应远超压低后的上限");
     let expected = dir.join("expected.mp4");
     remux(
-        &[Streams::All],
+        &[Track {
+            streams: Streams::All,
+            label: Label::default(),
+        }],
         &single_group(originals),
         &expected,
+        Container::Mp4,
+        true,
         &Control::default(),
     )
     .unwrap();
@@ -78,9 +85,14 @@ fn many_segments_in_one_group_stay_within_the_descriptor_limit() {
     lower_descriptor_limit(64);
     let output = dir.join("out.mp4");
     remux(
-        &[Streams::All],
+        &[Track {
+            streams: Streams::All,
+            label: Label::default(),
+        }],
         &single_group(chunks),
         &output,
+        Container::Mp4,
+        true,
         &Control::default(),
     )
     .unwrap();

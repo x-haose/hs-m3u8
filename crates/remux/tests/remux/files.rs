@@ -267,9 +267,8 @@ fn wrong_inputs_are_reported() {
     assert!(
         matches!(
             err,
-            Error::DuplicateKind {
-                at: Origin::Input(1),
-                kind: StreamKind::Video
+            Error::DuplicateVideo {
+                at: Origin::Input(1)
             }
         ),
         "{err:?}"

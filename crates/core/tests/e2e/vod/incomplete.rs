@@ -1,11 +1,11 @@
 //! 源站给出不完整的分片：没写完的重新取，最后一个 box 的长度写 0 的改写成实际长度。
 
 use hs_m3u8_core::{Error, IntegrityFailure};
-use hs_m3u8_remux::{DiscontinuityGroup, Streams};
+use hs_m3u8_remux::DiscontinuityGroup;
 
 use super::{TS_A, expected_ts_a};
 use crate::server::Server;
-use crate::{assert_output, encrypt, expected, fixture, request, run, test_dir, track};
+use crate::{all, assert_output, encrypt, expected, fixture, request, run, test_dir, track};
 
 /// 加密的 TS 分片没写完，解出的是截在包中间的 TS：密文截在整块之内或整块处（解密失败），或截断的 TS 被完整地加密
 /// （解密成功，如填充恰好像合法的）。都重新取，取到完整的照常合并。源站对分片返回错误页面、或完整的分片后面多了字节
@@ -117,7 +117,7 @@ async fn a_truncated_fmp4_segment_is_fetched_again() {
     )];
     assert_output(
         &output,
-        &expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]),
+        &expected(&dir, &[all()], &[DiscontinuityGroup { tracks }]),
     );
     assert_eq!(server.hits("seg0.m4s"), 3);
     assert_eq!(server.hits("seg1.m4s"), 2);
@@ -180,7 +180,7 @@ async fn a_last_box_sized_to_the_end_is_rewritten() {
         Some("init.mp4"),
         &["seg0.m4s", "seg1.m4s"],
     )];
-    let want = expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]);
+    let want = expected(&dir, &[all()], &[DiscontinuityGroup { tracks }]);
     assert_output(&output, &want);
     assert_eq!(server.hits("seg0.m4s"), 2);
 }

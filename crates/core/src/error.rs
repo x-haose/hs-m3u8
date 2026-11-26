@@ -2,7 +2,7 @@
 //!
 //! 按调用方的处理方式分类：
 //! - 改请求再试：[`Error::InvalidInput`]；[`Error::OutputExists`]（要求覆盖）；[`Error::OutputOccupied`]（换路径）；
-//!   [`Error::Select`]（选轨偏好与来源不符）；[`Error::LiveNotEnabled`]（开启直播录制）；[`Unsupported::Mp4`]、
+//!   [`Error::Select`]（选轨偏好与来源不符）；[`Error::LiveNotEnabled`]（开启直播录制）；[`Unsupported::Merge`]、
 //!   [`Unsupported::Hls`]（改用另一种输出）；
 //! - 来源本身不行，同样的请求再试也不会成功：[`Error::Playlist`]、[`Error::NotMediaPlaylist`]、[`Error::Unsupported`]
 //!   的其余各项、[`Error::Integrity`]、[`Error::KeyLength`]、[`Error::ResponseTooLarge`]；文件任务的来源换了：
@@ -12,7 +12,7 @@
 //! - 说明出在哪里、看包着的原因：[`Error::Segment`]、[`Error::Key`]（哪个分片或 key）、[`Error::LiveStalled`]（直播
 //!   哪条轨停滞）、[`Error::Cleanup`]（失败后收拾也没做完，带残留列表）；
 //! - 读写文件：[`Error::Io`]（Windows 上别的进程一直开着文件时可重试，其余不可）、[`Error::VolumeUnavailable`]（盘
-//!   不在、共享连不上，接上后再试）；合并 MP4：[`Error::Remux`]；系统代理用不了：[`Error::SystemProxy`]（改用直连或
+//!   不在、共享连不上，接上后再试）；合并：[`Error::Remux`]；系统代理用不了：[`Error::SystemProxy`]（改用直连或
 //!   指定代理地址）；本机建不出 HTTP 客户端：[`Error::HttpClientInit`]（修好系统环境）。除注明的外都不可重试；
 //! - 任务目录：[`Error::WorkDir`]（按 [`WorkDirProblem`] 处理）、[`Error::NothingRecorded`]、[`Error::NoSpace`]（腾出
 //!   空间再试）；
@@ -34,7 +34,7 @@ use url::Url;
 use crate::hooks::{HookError, HookKind, Purpose};
 use crate::ident::bare_url;
 use crate::request::Method;
-use crate::{Leftover, Mp4Unsupported, RefreshReason, StallCause};
+use crate::{Leftover, MergeUnsupported, RefreshReason, StallCause};
 
 #[derive(thiserror::Error)]
 pub enum Error {
@@ -43,7 +43,7 @@ pub enum Error {
     /// 输出已存在，要求覆盖（[`crate::OutputOptions::overwrite`]）即可替换
     #[error("输出已存在：{}", .0.display())]
     OutputExists(PathBuf),
-    /// 输出路径 `path` 用不了，覆盖也不会替换（以免路径给错时删掉别人的文件），换一个路径：要输出 MP4 而那里是目录，
+    /// 输出路径 `path` 用不了，覆盖也不会替换（以免路径给错时删掉别人的文件），换一个路径：要输出合并文件而那里是目录，
     /// 要输出 HLS 而那里不是目录或目录里有不是本库写出的文件；或那里什么也没有，而最近的已存在的上级 `ancestor`
     /// 不是目录（是文件，或悬空的符号链接），建不出来。路径本身被占用时 `ancestor` 为 None
     #[error("{}", occupied_text(.path, .ancestor.as_deref()))]
@@ -162,8 +162,8 @@ pub enum Error {
     /// 来源无关，修好系统环境后再试
     #[error("无法创建 HTTP 客户端：{0}")]
     HttpClientInit(String),
-    /// 合并 MP4 或下载中核对能否合并时失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进 MP4 是
-    /// [`Unsupported::Mp4`]。合并完整文件（[`crate::merge_files`]）时，取消以外的失败都是这一项，含输入不对、内容
+    /// 合并或下载中核对能否合并时失败：FFmpeg 初始化、读分片、写出或回读核对出错；内容放不进合并文件是
+    /// [`Unsupported::Merge`]。合并完整文件（[`crate::merge_files`]）时，取消以外的失败都是这一项，含输入不对、内容
     /// 放不进输出与读写文件出错
     #[error("合并失败：{0}")]
     Remux(Box<hs_m3u8_remux::Error>),
@@ -370,13 +370,21 @@ pub enum Unsupported {
     /// 这样给，去掉这个参数即可
     #[error("播放列表 {} 第 {line} 行：EXT-X-SKIP，增量更新略去了前面的分片，去掉地址里的 _HLS_skip 参数即可", bare_url(.url))]
     DeltaUpdate { url: Box<Url>, line: usize },
-    /// 内容放不进 MP4，可只输出本地 HLS（[`crate::Target::Hls`]）：它原样保留分片，不受这些限制。下到（直播为录到）
-    /// 各组各轨的第一个分片时先核对其中判断得了的：编码，各组的流种类、编码参数与解码配置，E-AC-3 的帧结构；组内中途
-    /// 的变化、后面分片里的问题，以及只靠第一个分片判断不了的，合并时读到才报。原因里的组号为合并时的：直播为各轨
-    /// 都录到的组按会话、不连续段排列的下标
+    /// 内容放不进所选的合并文件（容器见原因里的各项）：放不进 MP4 的（如 Vorbis、低采样率的 MP3、帧结构特殊的 E-AC-3）
+    /// 可改存 MKV（[`hs_m3u8_remux::Container::Matroska`]），两种都放不进的（如 TS 里的 Opus）可只输出本地 HLS
+    /// （[`crate::Target::Hls`]）：它原样保留分片。下到（直播为录到）各组各轨的第一个分片时先核对其中判断得了的：编码，
+    /// 各组的流种类、编码参数与解码配置，E-AC-3 的帧结构；组内中途的变化、后面分片里的问题，以及只靠第一个分片判断不了
+    /// 的，合并时读到才报。原因里的组号为合并时的：直播为各轨都录到的组按会话、不连续段排列的下标
     #[error("{0}")]
-    Mp4(Mp4Unsupported),
-    /// 本地 HLS 表示不了这些内容；能否改为只输出 MP4（[`crate::Target::Mp4`]）见各项
+    Merge(MergeUnsupported),
+    /// 选到的字幕 `url`（字幕的媒体播放列表）不是本库能处理的格式；只有点名选的（[`hs_m3u8_hls::Renditions::These`]）
+    /// 或续传记录里的才报，自动选到的跳过（见 [`crate::Selected::skipped_subtitles`]）
+    #[error("字幕 {} 的格式不支持：{format}", bare_url(.url))]
+    SubtitleFormat {
+        url: Box<Url>,
+        format: crate::SubtitleFormat,
+    },
+    /// 本地 HLS 表示不了这些内容；能否改为只输出合并文件（[`crate::Target::File`]）见各项
     #[error("{0}")]
     Hls(HlsUnsupported),
     #[error("同一不连续段内 EXT-X-MAP 发生变化（第 {track} 条轨，不连续段 {discontinuity}）")]
@@ -410,15 +418,15 @@ fn base_data_offset_text(at: u64) -> String {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum HlsUnsupported {
     /// 第 `track` 条轨里没有 init 段的不连续段组排在有 init 段（fMP4）的组后面：EXT-X-MAP 一直作用到下一个
-    /// EXT-X-MAP，前面的 init 段会被用在后面的组上。直播续录时服务器从 fMP4 换成 TS 会这样。可只输出 MP4
+    /// EXT-X-MAP，前面的 init 段会被用在后面的组上。直播续录时服务器从 fMP4 换成 TS 会这样。可只输出合并文件
     #[error("第 {track} 条轨在 fMP4 的段之后又有不用 init 段的段，本地 HLS 无法表示")]
     MixedInit { track: usize },
     /// 不用 init 段的第 `track` 条轨在第 `group` 个不连续段组里换了分片格式（TS 与打包音频，或打包音频的格式之间），
     /// 来源没在换格式处标 EXT-X-DISCONTINUITY（RFC 8216 6.2.1 要求标）：本地 HLS 的分片扩展名须与格式相符，而一组共用
-    /// 一种格式。MP4 同样放不进，合并时报 [`Mp4Unsupported::FormatChangedInGroup`]
+    /// 一种格式。合并文件同样放不进，合并时报 [`MergeUnsupported::FormatChangedInGroup`]
     #[error("第 {group} 组第 {track} 条轨的分片格式在组内变了，本地 HLS 无法表示")]
     FormatChangedInGroup { group: usize, track: usize },
-    /// 音视频分离时主播放列表必须写码率（BANDWIDTH），而某条轨的分片声明的时长都为 0 算不出，来源也没写。可只输出 MP4
+    /// 音视频分离时主播放列表必须写码率（BANDWIDTH），而某条轨的分片声明的时长都为 0 算不出，来源也没写。可只输出合并文件
     #[error(
         "某条轨的分片声明的时长都为 0、来源也没写 BANDWIDTH，算不出本地 HLS 主播放列表必填的码率"
     )]
@@ -547,6 +555,9 @@ pub enum IntegrityFailure {
     UnrecognizedSegment(String),
     #[error("不是 fMP4（开头 {0}）")]
     NotFmp4(String),
+    /// 字幕分片不是 WebVTT 文本
+    #[error("字幕分片不是 WebVTT：{0}")]
+    NotWebVtt(hs_m3u8_subtitle::Error),
     /// fMP4 从第 `at` 字节起的顶层 box 的长度字段 `size` 小于 box 头的长度（8 字节，64 位长度时 16 字节）。没写完的
     /// 报 [`Error::Incomplete`]
     #[error("fMP4 第 {at} 字节起的 box 长度 {size} 小于 box 头")]

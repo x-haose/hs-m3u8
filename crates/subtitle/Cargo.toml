@@ -1,0 +1,15 @@
+[package]
+name = "hs-m3u8-subtitle"
+version.workspace = true
+description = "WebVTT parsing with HLS X-TIMESTAMP-MAP, and SRT / WebVTT / mov_text output"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true

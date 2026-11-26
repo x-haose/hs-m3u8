@@ -1,12 +1,14 @@
 //! `job.json`：任务目录记录的任务（HLS 下载、录制或单个文件），及其序列化格式与其中摘要的编码（契约）。
 
-use hs_m3u8_hls::{AudioChoice, AudioKey, Preference, Resolution, VariantChoice, VariantKey};
+use hs_m3u8_hls::{
+    Preference, RenditionChoice, RenditionKey, Renditions, Resolution, VariantChoice, VariantKey,
+};
 use hs_m3u8_remux::Streams;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::ident::digest_hex;
-use crate::selection::{AudioRecord, SelectionRecord, VariantRecord, track_streams};
+use crate::selection::{RenditionRecord, SelectionRecord, VariantRecord, track_streams};
 use crate::{JobType, WorkDirProblem};
 
 /// job.json 的格式版本，也是任务目录里其余内容的格式版本：job.json 的字段，分片与 init 段的文件名、其中指纹与摘要的
@@ -15,13 +17,15 @@ use crate::{JobType, WorkDirProblem};
 /// [`super::outputs::OUTPUTS_FORMAT_VERSION`]）。
 ///
 /// 各版本：13 为 1.0 写的；14 加了文件任务（job.json 的 `file` 一种与 `ranges.json`），HLS 任务的内容与 13 相同；15 的
-/// 文件任务记录加了 `identity_digest`（14 的读作没有），其余与 14 相同。
+/// 文件任务记录加了 `identity_digest`（14 的读作没有），其余与 14 相同；16 的选轨记录可有多条音频与字幕
+/// （`selection` 加 `muxed_audio` 与 `subtitles`，`audio` 由单项改为列表，各项加 `default` 与 `forced`；15 及以前的读作
+/// 音频 0 或 1 条、没有字幕、没有音频时用变体里混着的、标志都为假），任务目录里轨道按变体、各音频、各字幕排。
 ///
 /// 兼容约定（outputs.json 同）：此后各版本的库读得了 1.0 起各发布版本写的任务目录（[`OLDEST_JOB_FORMAT_VERSION`] 起），
 /// 按记录的格式版本解释其中的内容；下游已发布的程序按提交号依赖 core 时，那个提交写的格式也算已发布（14 即是）。格式
 /// 版本比本库写的新，或比它旧（1.0 之前开发中的版本写的）时报 [`WorkDirProblem::UnsupportedVersion`]。各已发布版本的
 /// 样本在 tests/fixtures/workdir 下，发布后不再改动。
-pub(super) const JOB_FORMAT_VERSION: u32 = 15;
+pub(super) const JOB_FORMAT_VERSION: u32 = 16;
 
 /// 读得了的最旧的 job.json 格式版本：1.0 写的。
 const OLDEST_JOB_FORMAT_VERSION: u32 = 13;
@@ -31,6 +35,9 @@ pub(super) const FILE_JOB_FORMAT_VERSION: u32 = 14;
 
 /// 文件任务记录加了内容身份（`identity_digest`）的 job.json 格式版本。
 const IDENTITY_JOB_FORMAT_VERSION: u32 = 15;
+
+/// 选轨记录可有多条音频与字幕的 job.json 格式版本。
+const TRACKS_JOB_FORMAT_VERSION: u32 = 16;
 
 /// job.json 里记录的任务。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,36 +124,40 @@ impl HlsRecord {
     }
 
     /// 与 `current` 相比，各轨所选的是否不是同一条，按轨道顺序：第 0 条比所选变体（来源本身是媒体播放列表时为没有，同一
-    /// 条见 [`VariantRecord::same_as`]），第 1 条（若有）比独立的音频（见 [`AudioRecord::same_as`]）。两者轨道结构（见
+    /// 条见 [`VariantRecord::same_as`]），其后各条依次比音频、字幕（见 [`RenditionRecord::same_as`]）。两者轨道结构（见
     /// [`HlsRecord::streams`]）相同时才有意义。
     pub(super) fn changed_tracks(&self, current: &HlsRecord) -> Vec<bool> {
-        let (recorded, current) = (self.selection.as_ref(), current.selection.as_ref());
-        let variant = match (recorded, current) {
-            (Some(recorded), Some(current)) => !recorded.variant.same_as(&current.variant),
-            (recorded, current) => recorded.is_some() != current.is_some(),
-        };
-        let mut changed = vec![variant];
-        if self.streams().len() > 1 {
-            let audio = |s: Option<&SelectionRecord>| s.and_then(|s| s.audio.clone());
-            changed.push(match (audio(recorded), audio(current)) {
-                (Some(recorded), Some(current)) => !recorded.same_as(&current),
-                (recorded, current) => recorded.is_some() != current.is_some(),
-            });
+        match (self.selection.as_ref(), current.selection.as_ref()) {
+            (Some(recorded), Some(current)) => {
+                std::iter::once(!recorded.variant.same_as(&current.variant))
+                    .chain(
+                        recorded
+                            .renditions()
+                            .zip(current.renditions())
+                            .map(|(a, b)| !a.same_as(b)),
+                    )
+                    .collect()
+            }
+            (recorded, current) => vec![recorded.is_some() != current.is_some()],
         }
-        changed
     }
 
     /// `self` 里与 `recorded` 是同一条（见 [`HlsRecord::changed_tracks`]）的轨，属性换成 `recorded` 里的：同一条轨沿用
-    /// 首次记下的属性（见 [`SelectionRecord`]）。
+    /// 首次记下的属性（见 [`SelectionRecord`]）。两者轨道结构相同时才调用。
     pub(super) fn keeping_attributes_of(mut self, recorded: &HlsRecord) -> HlsRecord {
         if let (Some(current), Some(recorded)) = (&mut self.selection, &recorded.selection) {
             if recorded.variant.same_as(&current.variant) {
                 current.variant = recorded.variant.clone();
             }
-            if let (Some(current), Some(recorded)) = (&mut current.audio, &recorded.audio)
-                && recorded.same_as(current)
-            {
-                *current = recorded.clone();
+            let pairs = current
+                .audio
+                .iter_mut()
+                .zip(&recorded.audio)
+                .chain(current.subtitles.iter_mut().zip(&recorded.subtitles));
+            for (current, recorded) in pairs {
+                if recorded.same_as(current) {
+                    *current = recorded.clone();
+                }
             }
         }
         self
@@ -186,20 +197,46 @@ impl HlsRecord {
 }
 
 /// 选轨偏好的摘要（SHA-256 十六进制）。语言代码与选轨一样不区分 ASCII 大小写；按身份选的写成 job.json 里身份的写法
-/// （JSON，其中换行已转义）。每项一行；语言里不会有换行（由 [`crate::Source`] 的校验保证），编码没有歧义。
+/// （JSON，其中换行已转义）。每项一行；语言里不会有换行（由 [`crate::Source`] 的校验保证），编码没有歧义：
+/// - `variant <变体>`，再是音频：默认为 `audio default`，指定一条为 `audio <那一条>`（同 15 及以前只能选一条音频时的写法，
+///   旧任务目录的摘要不变），其余为 `audio none`、`audio all`，或 `audio these <条数>` 后各条一行 `audio <那一条>`；
+/// - 字幕不为不要时另起几行，写法同音频、前缀为 `subtitles`（只选一条也写 `subtitles these 1`）。
 pub(crate) fn preference_digest(preference: &Preference) -> String {
     let variant = match &preference.variant {
         VariantChoice::Best => "best".to_owned(),
         VariantChoice::Index(index) => format!("index {index}"),
         VariantChoice::Matching(key) => format!("matching {}", json(&VariantKeyFile::from(key))),
     };
-    let audio = match &preference.audio {
-        AudioChoice::Default => "default".to_owned(),
-        AudioChoice::Language(language) => format!("language {}", language.to_ascii_lowercase()),
-        AudioChoice::Index(index) => format!("index {index}"),
-        AudioChoice::Matching(key) => format!("matching {}", json(&AudioKeyFile::from(key))),
+    let choice = |choice: &RenditionChoice| match choice {
+        RenditionChoice::Language(language) => {
+            format!("language {}", language.to_ascii_lowercase())
+        }
+        RenditionChoice::Index(index) => format!("index {index}"),
+        RenditionChoice::Matching(key) => {
+            format!("matching {}", json(&RenditionKeyFile::from(key)))
+        }
     };
-    digest_hex(format!("variant {variant}\naudio {audio}\n"))
+    let renditions = |prefix: &str, renditions: &Renditions, single: bool| match renditions {
+        Renditions::None => format!("{prefix} none\n"),
+        Renditions::Default => format!("{prefix} default\n"),
+        Renditions::All => format!("{prefix} all\n"),
+        Renditions::These(choices) if single && choices.len() == 1 => {
+            format!("{prefix} {}\n", choice(&choices[0]))
+        }
+        Renditions::These(choices) => {
+            let mut lines = format!("{prefix} these {}\n", choices.len());
+            for c in choices {
+                lines.push_str(&format!("{prefix} {}\n", choice(c)));
+            }
+            lines
+        }
+    };
+    let mut text = format!("variant {variant}\n");
+    text.push_str(&renditions("audio", &preference.audio, true));
+    if preference.subtitles != Renditions::None {
+        text.push_str(&renditions("subtitles", &preference.subtitles, false));
+    }
+    digest_hex(text)
 }
 
 /// job.json 里一项身份的 JSON。
@@ -226,14 +263,14 @@ enum JobFile {
         format_version: u32,
         preference_digest: String,
         url_digest: String,
-        selection: Option<SelectionFile>,
+        selection: Option<AnySelectionFile>,
         plan_digest: String,
     },
     Live {
         format_version: u32,
         preference_digest: String,
         url_digest: String,
-        selection: Option<SelectionFile>,
+        selection: Option<AnySelectionFile>,
     },
     /// 格式版本 14 起
     File {
@@ -248,12 +285,48 @@ enum JobFile {
     },
 }
 
-/// [`SelectionRecord`] 在 job.json 中的写法。
+/// 选轨记录在 job.json 中的写法：格式版本 16 起为 [`SelectionFile`]，之前为 [`SelectionFileV13`]，按版本核对是哪一种。
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum AnySelectionFile {
+    Current(SelectionFile),
+    V13(SelectionFileV13),
+}
+
+/// [`SelectionRecord`] 在 job.json 中的写法（格式版本 16 起）。
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SelectionFile {
     variant: VariantFile,
-    audio: Option<AudioFile>,
+    muxed_audio: bool,
+    audio: Vec<RenditionFile>,
+    subtitles: Vec<RenditionFile>,
+}
+
+/// 格式版本 13～15 的选轨记录：至多一条独立音频，没有时用变体里混着的。
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectionFileV13 {
+    variant: VariantFile,
+    audio: Option<AudioFileV13>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AudioFileV13 {
+    key: RenditionKeyFile,
+    name: Option<String>,
+    language: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenditionFile {
+    key: RenditionKeyFile,
+    name: Option<String>,
+    language: Option<String>,
+    default: bool,
+    forced: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -264,14 +337,6 @@ struct VariantFile {
     /// [宽, 高]
     resolution: Option<[u32; 2]>,
     codecs: Vec<String>,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AudioFile {
-    key: AudioKeyFile,
-    name: Option<String>,
-    language: Option<String>,
 }
 
 /// [`VariantKey`] 在 job.json 中的写法。
@@ -293,10 +358,10 @@ enum VariantKeyFile {
     },
 }
 
-/// [`AudioKey`] 在 job.json 中的写法。
+/// [`RenditionKey`] 在 job.json 中的写法（音频与字幕相同）。
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
-enum AudioKeyFile {
+enum RenditionKeyFile {
     Stable {
         id: String,
         occurrence: usize,
@@ -339,7 +404,10 @@ pub(super) fn encode_hls(record: &HlsRecord) -> Vec<u8> {
     let format_version = JOB_FORMAT_VERSION;
     let preference_digest = record.preference_digest.clone();
     let url_digest = record.url_digest.clone();
-    let selection = record.selection.as_ref().map(SelectionFile::from);
+    let selection = record
+        .selection
+        .as_ref()
+        .map(|s| AnySelectionFile::Current(SelectionFile::from(s)));
     let file = match &record.kind {
         RecordKind::Vod { plan_digest } => JobFile::Vod {
             format_version,
@@ -429,10 +497,24 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Recorded, WorkDirProblem> {
                 }));
             }
         };
+    let selection = match selection {
+        None => None,
+        Some(AnySelectionFile::Current(file)) if version >= TRACKS_JOB_FORMAT_VERSION => {
+            Some(file.into())
+        }
+        Some(AnySelectionFile::V13(file)) if version < TRACKS_JOB_FORMAT_VERSION => {
+            Some(file.into())
+        }
+        Some(_) => {
+            return Err(WorkDirProblem::Corrupt(format!(
+                "job.json 是格式版本 {version}，选轨记录的写法与它不符"
+            )));
+        }
+    };
     Ok(Recorded::Hls(Box::new(HlsRecord {
         preference_digest,
         url_digest,
-        selection: selection.map(SelectionRecord::from),
+        selection,
         kind,
     })))
 }
@@ -440,37 +522,89 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Recorded, WorkDirProblem> {
 impl From<&SelectionRecord> for SelectionFile {
     fn from(record: &SelectionRecord) -> Self {
         let variant = &record.variant;
+        let renditions = |records: &[RenditionRecord]| {
+            records
+                .iter()
+                .map(|r| RenditionFile {
+                    key: RenditionKeyFile::from(&r.key),
+                    name: r.name.clone(),
+                    language: r.language.clone(),
+                    default: r.default,
+                    forced: r.forced,
+                })
+                .collect()
+        };
         SelectionFile {
-            variant: VariantFile {
-                key: VariantKeyFile::from(&variant.key),
-                bandwidth: variant.bandwidth,
-                resolution: variant.resolution.map(resolution_to_file),
-                codecs: variant.codecs.clone(),
-            },
-            audio: record.audio.as_ref().map(|audio| AudioFile {
-                key: AudioKeyFile::from(&audio.key),
-                name: audio.name.clone(),
-                language: audio.language.clone(),
-            }),
+            variant: VariantFile::from(variant),
+            muxed_audio: record.muxed_audio,
+            audio: renditions(&record.audio),
+            subtitles: renditions(&record.subtitles),
+        }
+    }
+}
+
+impl From<&VariantRecord> for VariantFile {
+    fn from(variant: &VariantRecord) -> Self {
+        VariantFile {
+            key: VariantKeyFile::from(&variant.key),
+            bandwidth: variant.bandwidth,
+            resolution: variant.resolution.map(resolution_to_file),
+            codecs: variant.codecs.clone(),
+        }
+    }
+}
+
+impl From<VariantFile> for VariantRecord {
+    fn from(variant: VariantFile) -> Self {
+        VariantRecord {
+            key: variant.key.into(),
+            bandwidth: variant.bandwidth,
+            resolution: variant.resolution.map(resolution_from_file),
+            codecs: variant.codecs,
         }
     }
 }
 
 impl From<SelectionFile> for SelectionRecord {
     fn from(file: SelectionFile) -> Self {
-        let variant = file.variant;
+        let renditions = |files: Vec<RenditionFile>| {
+            files
+                .into_iter()
+                .map(|r| RenditionRecord {
+                    key: r.key.into(),
+                    name: r.name,
+                    language: r.language,
+                    default: r.default,
+                    forced: r.forced,
+                })
+                .collect()
+        };
         SelectionRecord {
-            variant: VariantRecord {
-                key: variant.key.into(),
-                bandwidth: variant.bandwidth,
-                resolution: variant.resolution.map(resolution_from_file),
-                codecs: variant.codecs,
-            },
-            audio: file.audio.map(|audio| AudioRecord {
-                key: audio.key.into(),
-                name: audio.name,
-                language: audio.language,
-            }),
+            variant: file.variant.into(),
+            muxed_audio: file.muxed_audio,
+            audio: renditions(file.audio),
+            subtitles: renditions(file.subtitles),
+        }
+    }
+}
+
+impl From<SelectionFileV13> for SelectionRecord {
+    fn from(file: SelectionFileV13) -> Self {
+        SelectionRecord {
+            variant: file.variant.into(),
+            muxed_audio: file.audio.is_none(),
+            audio: file
+                .audio
+                .into_iter()
+                .map(|a| RenditionRecord {
+                    key: a.key.into(),
+                    name: a.name,
+                    language: a.language,
+                    default: false,
+                    forced: false,
+                })
+                .collect(),
+            subtitles: Vec::new(),
         }
     }
 }
@@ -533,16 +667,16 @@ impl From<VariantKeyFile> for VariantKey {
     }
 }
 
-impl From<&AudioKey> for AudioKeyFile {
-    fn from(key: &AudioKey) -> Self {
+impl From<&RenditionKey> for RenditionKeyFile {
+    fn from(key: &RenditionKey) -> Self {
         match key.clone() {
-            AudioKey::Stable { id, occurrence } => AudioKeyFile::Stable { id, occurrence },
-            AudioKey::Attributes {
+            RenditionKey::Stable { id, occurrence } => RenditionKeyFile::Stable { id, occurrence },
+            RenditionKey::Attributes {
                 group,
                 name,
                 language,
                 occurrence,
-            } => AudioKeyFile::Attributes {
+            } => RenditionKeyFile::Attributes {
                 group,
                 name,
                 language,
@@ -552,16 +686,16 @@ impl From<&AudioKey> for AudioKeyFile {
     }
 }
 
-impl From<AudioKeyFile> for AudioKey {
-    fn from(file: AudioKeyFile) -> Self {
+impl From<RenditionKeyFile> for RenditionKey {
+    fn from(file: RenditionKeyFile) -> Self {
         match file {
-            AudioKeyFile::Stable { id, occurrence } => AudioKey::Stable { id, occurrence },
-            AudioKeyFile::Attributes {
+            RenditionKeyFile::Stable { id, occurrence } => RenditionKey::Stable { id, occurrence },
+            RenditionKeyFile::Attributes {
                 group,
                 name,
                 language,
                 occurrence,
-            } => AudioKey::Attributes {
+            } => RenditionKey::Attributes {
                 group,
                 name,
                 language,
@@ -597,8 +731,8 @@ mod tests {
         }
     }
 
-    fn audio_key() -> AudioKey {
-        AudioKey::Attributes {
+    fn audio_key() -> RenditionKey {
+        RenditionKey::Attributes {
             group: "aud".into(),
             name: Some("Eng\n\"lish\"".into()),
             language: Some("en".into()),
@@ -614,14 +748,14 @@ mod tests {
         }
     }
 
-    fn stable_audio_key() -> AudioKey {
-        AudioKey::Stable {
+    fn stable_audio_key() -> RenditionKey {
+        RenditionKey::Stable {
             id: "Audio-37262".into(),
             occurrence: 0,
         }
     }
 
-    fn selection(variant: VariantKey, audio: AudioKey) -> SelectionRecord {
+    fn selection(variant: VariantKey, audio: RenditionKey) -> SelectionRecord {
         SelectionRecord {
             variant: VariantRecord {
                 key: variant,
@@ -632,11 +766,24 @@ mod tests {
                 }),
                 codecs: vec!["avc1.640020".into()],
             },
-            audio: Some(AudioRecord {
+            muxed_audio: false,
+            audio: vec![RenditionRecord {
                 key: audio,
                 name: Some("Eng\n\"lish\"".into()),
                 language: Some("en".into()),
-            }),
+                default: true,
+                forced: false,
+            }],
+            subtitles: vec![RenditionRecord {
+                key: RenditionKey::Stable {
+                    id: "sub-zh".into(),
+                    occurrence: 0,
+                },
+                name: None,
+                language: Some("zh-Hans".into()),
+                default: false,
+                forced: true,
+            }],
         }
     }
 
@@ -651,7 +798,7 @@ mod tests {
         let bytes = encode_hls(&live);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"kind":"live","format_version":15,"preference_digest":"ab","url_digest":"cd","selection":{"variant":{"key":{"attributes":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020","mp4a.40.2"],"audio_group":"aud","occurrence":1}},"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"]},"audio":{"key":{"stable":{"id":"Audio-37262","occurrence":0}},"name":"Eng\n\"lish\"","language":"en"}}}"#
+            r#"{"kind":"live","format_version":16,"preference_digest":"ab","url_digest":"cd","selection":{"variant":{"key":{"attributes":{"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020","mp4a.40.2"],"audio_group":"aud","occurrence":1}},"bandwidth":2000,"resolution":[1280,720],"codecs":["avc1.640020"]},"muxed_audio":false,"audio":[{"key":{"stable":{"id":"Audio-37262","occurrence":0}},"name":"Eng\n\"lish\"","language":"en","default":true,"forced":false}],"subtitles":[{"key":{"stable":{"id":"sub-zh","occurrence":0}},"name":null,"language":"zh-Hans","default":false,"forced":true}]}}"#
         );
         assert_eq!(decode(&bytes), Ok(Recorded::Hls(Box::new(live.clone()))));
         let stable = HlsRecord {
@@ -681,7 +828,7 @@ mod tests {
         let bytes = encode_file(&file);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"kind":"file","format_version":15,"url_digest":"cd","length":1099511627776,"etag":"\"x\"","last_modified":null,"identity_digest":"ef"}"#
+            r#"{"kind":"file","format_version":16,"url_digest":"cd","length":1099511627776,"etag":"\"x\"","last_modified":null,"identity_digest":"ef"}"#
         );
         assert_eq!(decode(&bytes), Ok(Recorded::File(file)));
         // 14 的文件任务记录没有内容身份
@@ -696,14 +843,32 @@ mod tests {
         // 1.0 写的格式版本 13 照样读
         let v13 = r#"{"kind":"vod","format_version":13,"preference_digest":"a","url_digest":"u","selection":null,"plan_digest":"p"}"#;
         assert!(matches!(decode(v13.as_bytes()), Ok(Recorded::Hls(_))));
+        // 15 及以前的选轨记录：至多一条音频，没有时用变体里混着的
+        let old = |audio: &str| {
+            format!(
+                r#"{{"kind":"live","format_version":15,"preference_digest":"a","url_digest":"u","selection":{{"variant":{{"key":{{"stable":{{"id":"v","audio_group":null,"occurrence":0}}}},"bandwidth":null,"resolution":null,"codecs":[]}},"audio":{audio}}}}}"#
+            )
+        };
+        let read = |text: String| match decode(text.as_bytes()) {
+            Ok(Recorded::Hls(record)) => record.selection.unwrap(),
+            other => panic!("{other:?}"),
+        };
+        let muxed = read(old("null"));
+        assert!(muxed.muxed_audio && muxed.audio.is_empty() && muxed.subtitles.is_empty());
+        let separate = read(old(
+            r#"{"key":{"stable":{"id":"a","occurrence":0}},"name":"n","language":"en"}"#,
+        ));
+        assert!(!separate.muxed_audio);
+        assert_eq!(separate.audio.len(), 1);
+        assert_eq!(separate.audio[0].language.as_deref(), Some("en"));
 
-        for found in [12, 16] {
+        for found in [12, 17] {
             assert_eq!(
                 decode(format!(r#"{{"kind":"vod","format_version":{found}}}"#).as_bytes()),
                 Err(WorkDirProblem::UnsupportedVersion {
                     file: "job.json",
                     found,
-                    supported: 15
+                    supported: 16
                 })
             );
         }
@@ -719,6 +884,9 @@ mod tests {
             r#"{"kind":"vod","format_version":13,"preference_digest":"a","selection":null,"plan_digest":"p"}"#,
             r#"{"kind":"live","format_version":13,"preference_digest":"a","url_digest":"u","selection":{"variant":{"key":{"stable":{"id":"x","audio_group":null,"occurrence":0,"uri":"x"}},"bandwidth":null,"resolution":null,"codecs":[]},"audio":null}}"#,
             r#"{"kind":"live","format_version":13,"preference_digest":"a","url_digest":"u","selection":{"variant":{"key":{"uri":{"id":"x","occurrence":0}},"bandwidth":null,"resolution":null,"codecs":[]},"audio":null}}"#,
+            // 版本与选轨记录的写法不符
+            r#"{"kind":"live","format_version":16,"preference_digest":"a","url_digest":"u","selection":{"variant":{"key":{"stable":{"id":"x","audio_group":null,"occurrence":0}},"bandwidth":null,"resolution":null,"codecs":[]},"audio":null}}"#,
+            r#"{"kind":"live","format_version":15,"preference_digest":"a","url_digest":"u","selection":{"variant":{"key":{"stable":{"id":"x","audio_group":null,"occurrence":0}},"bandwidth":null,"resolution":null,"codecs":[]},"muxed_audio":true,"audio":[],"subtitles":[]}}"#,
         ] {
             assert!(decode(rejected.as_bytes()).is_err(), "{rejected}");
         }
@@ -754,7 +922,9 @@ mod tests {
 
         let muxed_audio = HlsRecord {
             selection: Some(SelectionRecord {
-                audio: None,
+                muxed_audio: true,
+                audio: Vec::new(),
+                subtitles: Vec::new(),
                 ..selection(variant_key(), audio_key())
             }),
             ..recorded.clone()
@@ -785,7 +955,8 @@ mod tests {
     fn digests_are_fixed() {
         let best = Preference {
             variant: VariantChoice::Best,
-            audio: AudioChoice::Language("EN".into()),
+            audio: Renditions::These(vec![RenditionChoice::Language("EN".into())]),
+            subtitles: Renditions::None,
         };
         assert_eq!(
             preference_digest(&best),
@@ -793,7 +964,8 @@ mod tests {
         );
         let index = Preference {
             variant: VariantChoice::Index(2),
-            audio: AudioChoice::Default,
+            audio: Renditions::Default,
+            subtitles: Renditions::None,
         };
         assert_eq!(
             preference_digest(&index),
@@ -801,7 +973,8 @@ mod tests {
         );
         let matching = Preference {
             variant: VariantChoice::Matching(variant_key()),
-            audio: AudioChoice::Matching(audio_key()),
+            audio: Renditions::These(vec![RenditionChoice::Matching(audio_key())]),
+            subtitles: Renditions::None,
         };
         assert_eq!(
             preference_digest(&matching),
@@ -809,7 +982,8 @@ mod tests {
         );
         let stable = Preference {
             variant: VariantChoice::Matching(stable_variant_key()),
-            audio: AudioChoice::Matching(stable_audio_key()),
+            audio: Renditions::These(vec![RenditionChoice::Matching(stable_audio_key())]),
+            subtitles: Renditions::None,
         };
         assert_eq!(
             preference_digest(&stable),
@@ -829,24 +1003,70 @@ mod tests {
 
     #[test]
     fn preference_digest_ignores_language_case_only() {
-        let digest = |variant, audio| preference_digest(&Preference { variant, audio });
-        let base = digest(VariantChoice::Best, AudioChoice::Language("EN".into()));
-        assert_eq!(
-            base,
-            digest(VariantChoice::Best, AudioChoice::Language("en".into()))
-        );
+        let one = |c| Renditions::These(vec![c]);
+        let digest = |variant, audio| {
+            preference_digest(&Preference {
+                variant,
+                audio,
+                subtitles: Renditions::None,
+            })
+        };
+        let en = |l: &str| one(RenditionChoice::Language(l.into()));
+        let base = digest(VariantChoice::Best, en("EN"));
+        assert_eq!(base, digest(VariantChoice::Best, en("en")));
         for other in [
-            digest(VariantChoice::Index(0), AudioChoice::Language("en".into())),
+            digest(VariantChoice::Index(0), en("en")),
+            digest(VariantChoice::Matching(variant_key()), en("en")),
+            digest(VariantChoice::Best, Renditions::Default),
+            digest(VariantChoice::Best, one(RenditionChoice::Index(0))),
             digest(
-                VariantChoice::Matching(variant_key()),
-                AudioChoice::Language("en".into()),
+                VariantChoice::Best,
+                one(RenditionChoice::Matching(audio_key())),
             ),
-            digest(VariantChoice::Best, AudioChoice::Default),
-            digest(VariantChoice::Best, AudioChoice::Index(0)),
-            digest(VariantChoice::Best, AudioChoice::Matching(audio_key())),
+            digest(VariantChoice::Best, Renditions::None),
+            digest(VariantChoice::Best, Renditions::All),
+            digest(
+                VariantChoice::Best,
+                Renditions::These(vec![
+                    RenditionChoice::Language("en".into()),
+                    RenditionChoice::Index(0),
+                ]),
+            ),
         ] {
             assert_ne!(base, other);
         }
+    }
+
+    /// 多条音频与字幕的偏好按文档的写法编码；期望值用另一个 SHA-256 实现按那段文字算出。选了字幕的与没选的不同。
+    #[test]
+    fn digests_of_several_renditions_are_fixed() {
+        let preference = Preference {
+            variant: VariantChoice::Best,
+            audio: Renditions::These(vec![
+                RenditionChoice::Language("DE".into()),
+                RenditionChoice::Index(1),
+            ]),
+            subtitles: Renditions::These(vec![RenditionChoice::Language("zh-Hans".into())]),
+        };
+        assert_eq!(
+            preference_digest(&preference),
+            digest_hex(
+                "variant best\naudio these 2\naudio language de\naudio index 1\n\
+                 subtitles these 1\nsubtitles language zh-hans\n"
+            )
+        );
+        let all = Preference {
+            subtitles: Renditions::All,
+            ..Preference::default()
+        };
+        assert_eq!(
+            preference_digest(&all),
+            digest_hex("variant best\naudio default\nsubtitles all\n")
+        );
+        assert_ne!(
+            preference_digest(&all),
+            preference_digest(&Preference::default())
+        );
     }
 }
 

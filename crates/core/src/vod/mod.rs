@@ -6,7 +6,7 @@ use std::cmp::Reverse;
 use std::ops::Range;
 
 use hs_m3u8_hls::Segment;
-use hs_m3u8_remux::Streams;
+use hs_m3u8_remux::{Container, Streams};
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -20,9 +20,9 @@ use crate::recheck::{Candidate, OnTransient, Recheck, recheck};
 use crate::workdir::{self, Layout, SegmentName, SessionStart, WorkDir};
 use crate::{Error, Progress, Stage, WorkDirProblem, blocking};
 
-/// 下载计划中的 init 段与尚未完成的分片到任务目录 `dir`，返回合并输入；返回 `Ok` 即全部已在任务目录中。合并 MP4 时
-/// `mp4` 为各轨的取流方式：先下各组各轨的第一个分片，核对能否放进 MP4（见 [`output::check_mp4`]），放不进的不必下完
-/// 才报。
+/// 下载计划中的 init 段与尚未完成的分片到任务目录 `dir`，返回合并输入；返回 `Ok` 即全部已在任务目录中。合并时 `merge`
+/// 为各轨的取流方式与合并文件的容器：先下各组各轨的第一个分片，核对能否放进（见 [`output::check_merge`]），放不进的不必
+/// 下完才报。
 ///
 /// 任务目录里有已完成的分片时，先核对这次取到的是同一份内容（要核对哪些见 [`to_verify`]）：要核对的各组里已完成的分片重
 /// 新下载第一个取得到的，与已存的比较（见 [`recheck`]，重试后仍是临时故障即如实上抛）。有组不同或都已取不到报
@@ -36,14 +36,18 @@ pub(crate) async fn download(
     fetcher: &mut Fetcher,
     plan: &Plan,
     dir: &WorkDir,
-    mp4: Option<&[Streams]>,
+    merge: Option<(&[Streams], Container)>,
     progress: &watch::Sender<Progress>,
     cancel: &CancellationToken,
 ) -> Result<Vec<Vec<GroupTrack>>, Error> {
     progress.send_modify(|p| {
         p.stage = Stage::Downloading;
-        p.segments.total = plan.segment_count();
-        p.segments.gap = plan.gap_count();
+        for (track, (total, gap)) in plan.track_counts().enumerate() {
+            p.segments_of(track, |s| {
+                s.total += total;
+                s.gap += gap;
+            });
+        }
     });
     let layout = dir.layout();
     let inits = store_inits(&fetcher.direct(), plan, layout, progress, cancel).await?;
@@ -52,7 +56,7 @@ pub(crate) async fn download(
     verify_completed(fetcher, plan, &names, dir, cancel).await?;
 
     let mut items = items(plan, &names, layout);
-    if let Some(streams) = mp4 {
+    if let Some((streams, container)) = merge {
         let heads = plan
             .groups
             .iter()
@@ -67,7 +71,7 @@ pub(crate) async fn download(
                 .collect();
         let streams = streams.to_vec();
         let root = layout.root().to_path_buf();
-        blocking(move || output::check_mp4(&streams, &groups, &root)).await??;
+        blocking(move || output::check_merge(&streams, &groups, container, &root)).await??;
     }
     let rest = items.into_iter().flatten().flatten().collect();
     fetch(fetcher, rest, progress).await?;
@@ -288,7 +292,7 @@ async fn store_inits(
             workdir::store_init(layout, track, fingerprint, data).await?;
             // 内容相同的 init 段共用一个文件，字节数只计一次
             if !fingerprints.contains(&fingerprint) {
-                progress.send_modify(|p| p.bytes += len);
+                progress.send_modify(|p| p.add_bytes(track, len));
             }
             fingerprints.push(fingerprint);
         }

@@ -15,14 +15,14 @@ mod media;
 mod select;
 
 pub use codecs::{CodecKind, codec_family};
-pub use key::{AudioKey, VariantKey};
+pub use key::{RenditionKey, VariantKey};
 pub use master::{MasterPlaylist, Rendition, RenditionKind, Resolution, Variant};
 pub use media::{
     ByteRange, InitKey, InitSection, MediaPlaylist, PlaylistType, Segment, SegmentKey,
 };
 pub use select::{
-    AudioChoice, Preference, SelectError, SelectedAudio, Selection, VariantChoice,
-    audio_renditions, select,
+    Preference, RenditionChoice, Renditions, SelectError, SelectedRendition, Selection,
+    VariantChoice, renditions, select,
 };
 pub use url::Url;
 

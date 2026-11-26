@@ -5,7 +5,7 @@ use ffmpeg_next as ffmpeg;
 
 use crate::codecs::check_codec;
 use crate::compare::{Config, Desc, same_streams};
-use crate::hls::{HLS_CONTAINER, Numbered};
+use crate::hls::Numbered;
 use crate::inband::{Inband, PacketCheck};
 use crate::input::Input;
 use crate::nal::Framing;
@@ -97,21 +97,25 @@ pub(crate) struct OpenTrack {
     pub(crate) selected: Vec<Selected>,
 }
 
-/// 打开第 `group` 组的各轨并选流（见 [`select`]）。`layout` 为第 0 组各轨选中的流（见 [`layout_of`]），其余组的流种类、
+/// 打开第 `group` 组的各音视频轨并选流（见 [`select`]），字幕轨不打开。`layout` 为第 0 组各轨选中的流（见 [`layout_of`]），其余组的流种类、
 /// 参数与解码配置须与它相同（见 [`same_streams`]），各轨都没有确定的不同、而有项只有一边探测出时报
 /// [`Unsupported::ParamsUnknown`]；打开第 0 组时为 None。
 pub(crate) fn open_group(
     streams: &[Streams],
     (group, tracks): Numbered<'_>,
     layout: Option<&[Vec<Desc>]>,
+    container: Container,
     cancel: &Cancel,
 ) -> Result<Vec<OpenTrack>, Error> {
     let mut opened = Vec::new();
     let mut unknown = None;
     for (track, segments) in tracks.tracks.iter().enumerate() {
+        if streams[track] == Streams::Subtitles {
+            continue;
+        }
         let at = Origin::Track { group, track };
         let input = Input::open(segments, at, cancel)?;
-        let selected = select(&input, streams[track], HLS_CONTAINER, at)?;
+        let selected = select(&input, streams[track], container, at)?;
         let found: Vec<&Desc> = selected.iter().map(|s| &s.desc).collect();
         if let Some(layout) = layout
             && let Some(kind) = same_streams(&found, &layout[track], at)?
@@ -131,24 +135,21 @@ pub(crate) fn open_group(
     }
 }
 
-/// 第 0 组各轨（或各完整文件）选中的流，下标为轨号；依次排开即各路输出流。同一类流只能来自一条轨，各轨合起来至少
-/// 一路。
-pub(crate) fn layout_of(first: &[OpenTrack]) -> Result<Vec<Vec<Desc>>, Error> {
-    let mut layout: Vec<Vec<Desc>> = Vec::new();
+/// 第 0 组各轨（或各完整文件）选中的流，下标为轨号（共 `tracks` 条；没打开的字幕轨为空）；依次排开即各路音视频输出流。
+/// 视频只能来自一条轨，各轨合起来至少一路。
+pub(crate) fn layout_of(first: &[OpenTrack], tracks: usize) -> Result<Vec<Vec<Desc>>, Error> {
+    let mut layout: Vec<Vec<Desc>> = vec![Vec::new(); tracks];
+    let mut video = false;
     for t in first {
-        let duplicate = t.selected.iter().find(|s| {
-            layout
-                .iter()
-                .flatten()
-                .any(|d| d.shape.kind() == s.desc.shape.kind())
-        });
-        if let Some(s) = duplicate {
-            return Err(Error::DuplicateKind {
-                at: t.at,
-                kind: s.desc.shape.kind(),
-            });
+        for s in &t.selected {
+            if s.desc.shape.kind() == StreamKind::Video {
+                if video {
+                    return Err(Error::DuplicateVideo { at: t.at });
+                }
+                video = true;
+            }
         }
-        layout.push(t.selected.iter().map(|s| s.desc.clone()).collect());
+        layout[t.at.index()] = t.selected.iter().map(|s| s.desc.clone()).collect();
     }
     if layout.iter().all(Vec::is_empty) {
         return Err(Error::Unsupported(Unsupported::NoStreams));

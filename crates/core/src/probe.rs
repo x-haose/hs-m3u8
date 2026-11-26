@@ -5,16 +5,17 @@ use tokio_util::sync::CancellationToken;
 use crate::http::Http;
 use crate::info::{MasterInfo, TrackInfo};
 use crate::request::Source;
-use crate::resolve::Resolved;
+use crate::resolve::{Resolved, SubtitleScope};
 use crate::{Error, resolve};
 
 /// 探测结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Probe {
-    /// 来源是主播放列表时：可选的变体与音频，以及按 [`Source::preference`] 选中的。新开的下载选的与它相同；探测
+    /// 来源是主播放列表时：可选的变体、音频与字幕（所选变体字幕组里的都读过媒体播放列表，标明能不能下），以及按
+    /// [`Source::preference`] 选中的。新开的下载选的与它相同；探测
     /// 不读任务目录，续传时下载怎样选见 [`Source::preference`]，可能与它不同。来源本身是媒体播放列表时为 None
     pub master: Option<MasterInfo>,
-    /// 所选各轨的概况：第 0 条为所选变体（或来源本身），第 1 条（若有）为独立的音频
+    /// 所选各轨的概况，按轨号：第 0 条为所选变体（或来源本身），其后是各独立音频、各字幕（见 [`crate::Selected`]）
     pub tracks: Vec<TrackInfo>,
     /// 是否直播：有任一条轨没有 EXT-X-ENDLIST。新开的下载按同一判定走直播或点播；探测不读任务目录，续录中途
     /// 直播已结束的，下载仍按直播继续
@@ -25,7 +26,7 @@ pub struct Probe {
 pub(crate) async fn probe(http: &Http, source: &Source) -> Result<Probe, Error> {
     let cancel = CancellationToken::new();
     let _cancel_on_drop = cancel.clone().drop_guard();
-    let resolved = resolve::resolve(http, source, None, &cancel)
+    let resolved = resolve::resolve(http, source, None, SubtitleScope::Group, &cancel)
         .await?
         .expect("没有记录的选轨时按偏好选，选不出即报错，不会是找不到记录");
     Ok(Probe::of(&resolved))
@@ -36,10 +37,7 @@ impl Probe {
     pub(crate) fn of(resolved: &Resolved) -> Probe {
         Probe {
             live: resolved.is_live(),
-            master: resolved
-                .master
-                .as_ref()
-                .map(|m| MasterInfo::of(&m.playlist, &m.selection)),
+            master: resolved.master.as_ref().map(MasterInfo::of),
             tracks: resolved
                 .tracks
                 .iter()

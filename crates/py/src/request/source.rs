@@ -70,7 +70,7 @@ impl Source {
     #[pyo3(signature = (
         url,
         *,
-        preference = Preference::from(core::hls::Preference::default()),
+        preference = Preference::core_default(),
         http = HttpOptions::from(core::HttpOptions::default()),
         hooks = None,
     ))]

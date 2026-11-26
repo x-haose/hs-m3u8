@@ -380,7 +380,9 @@ impl From<core::hls::SelectError> for SelectFailure {
                 SelectFailure::VariantIndexOutOfRange { index, count }
             }
             E::VariantNotFound => SelectFailure::VariantNotFound {},
-            E::AudioLanguageNotFound {
+            // Python 的选轨偏好只选一条音频、不要字幕（见 Preference::to_core），只会有音频的这几种
+            E::LanguageNotFound {
+                kind: core::hls::RenditionKind::Audio,
                 group,
                 language,
                 available,
@@ -389,11 +391,20 @@ impl From<core::hls::SelectError> for SelectFailure {
                 language,
                 available: Seq(available),
             },
-            E::AudioIndexOutOfRange { index, count } => {
-                SelectFailure::AudioIndexOutOfRange { index, count }
-            }
-            E::AudioNotFound => SelectFailure::AudioNotFound {},
-            E::NotVariantAudio { index, group } => SelectFailure::NotVariantAudio { index, group },
+            E::IndexOutOfRange {
+                kind: core::hls::RenditionKind::Audio,
+                index,
+                count,
+            } => SelectFailure::AudioIndexOutOfRange { index, count },
+            E::NotFound {
+                kind: core::hls::RenditionKind::Audio,
+            } => SelectFailure::AudioNotFound {},
+            E::NotInGroup {
+                kind: core::hls::RenditionKind::Audio,
+                index,
+                group,
+            } => SelectFailure::NotVariantAudio { index, group },
+            other => unreachable!("Python 的选轨偏好只选一条音频、不要字幕，不会有：{other}"),
         }
     }
 }
@@ -429,6 +440,7 @@ impl From<core::IntegrityFailure> for IntegrityFailure {
     fn from(integrity: core::IntegrityFailure) -> Self {
         use core::IntegrityFailure as I;
         match integrity {
+            I::NotWebVtt(_) => unreachable!("Python 的选轨偏好不要字幕，不会下字幕分片"),
             I::Padding => IntegrityFailure::Padding {},
             I::CipherLength(length) => IntegrityFailure::CipherLength { length },
             I::RangeLength { expected, found } => IntegrityFailure::RangeLength { expected, found },

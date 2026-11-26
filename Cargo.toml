@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/hls", "crates/py", "crates/remux", "crates/sysproxy"]
+members = ["crates/core", "crates/hls", "crates/py", "crates/remux", "crates/subtitle", "crates/sysproxy"]
 
 [workspace.package]
 # 发布的版本（SemVer）；Python 包的版本由 maturin 按 PEP 440 换写，如 1.0.0-dev.0 即 1.0.0.dev0
@@ -19,6 +19,8 @@ axum = "0.8.9"
 cbc = "0.2.1"
 # 文件任务开始前查任务目录所在卷的可用空间（available_space）；默认特性是文件锁，用不上
 fs4 = { version = "1.1.0", default-features = false }
+# 探测与开始任务时并发拉各条字幕的媒体播放列表（future::join_all）；reqwest 已依赖同一版本
+futures-util = { version = "0.3.34", default-features = false, features = ["alloc"] }
 ffmpeg-next = { version = "9.0.0", default-features = false, features = ["format", "static"] }
 h2 = "0.4.20"
 http = "1.5.0"

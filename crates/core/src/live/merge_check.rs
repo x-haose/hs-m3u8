@@ -1,27 +1,28 @@
-//! 录制中核对能否合并进 MP4（见 [`output::check_mp4`]）。放不进 MP4 的原因交给调用方放进进度
-//! （[`crate::Progress::mp4_unsupported`]），录制照常进行：直播错过的内容录不回来，停不停由调用方定；合并 MP4 时照样
-//! 报错。
-//! - 录制开始时任务目录里已录齐的组（之前几次运行录的）在后台逐组与第 0 组一起核对一次（见 [`Mp4Check::new`]）。
+//! 录制中核对能否合并进所选的合并文件（见 [`output::check_merge`]）。放不进的原因交给调用方放进进度
+//! （[`crate::Progress::merge_unsupported`]），录制照常进行：直播错过的内容录不回来，停不停由调用方定；合并时照样报错。
+//! - 录制开始时任务目录里已录齐的组（之前几次运行录的）在后台逐组与第 0 组一起核对一次（见 [`MergeCheck::new`]）。
 //! - 之后每个（会话, 不连续段）组在各轨都有分片时（含之前录了一部分、这次才录齐的），拿各轨的第一个分片与合并时的第 0
 //!   组一起核对一次；第 0 组开头的分片判断不了时只核对这一组自身。报的组号为核对时的：之后才录齐、排在前面的组会让
 //!   合并时的组号变大。
 
 use std::collections::{BTreeSet, HashMap};
 
-use hs_m3u8_remux::Streams;
+use hs_m3u8_remux::{Container, Streams};
 
 use super::merge::MergePlan;
 use crate::fetch::ItemInfo;
 use crate::output::{self, GroupTrack};
 use crate::workdir::{GroupKey, Layout, SegmentName, Stored};
-use crate::{Error, Mp4Unsupported, Unsupported, blocking};
+use crate::{Error, MergeUnsupported, Unsupported, blocking};
 
-/// 一次核对（见 [`output::check_mp4`]）：各组合并时的组号与各轨的第一个分片，第一项为第 0 组。
+/// 一次核对（见 [`output::check_merge`]）：各组合并时的组号与各轨的第一个分片，第一项为第 0 组。
 pub(super) type Batch = Vec<(usize, Vec<GroupTrack>)>;
 
-pub(super) struct Mp4Check {
+pub(super) struct MergeCheck {
     /// 各轨的取流方式
     streams: Vec<Streams>,
+    /// 合并文件的容器
+    container: Container,
     /// 合并时的第 0 组（各轨都有分片的组里键最小的）的键与各轨开头的分片；还没有这样的组时为 None
     first: Option<(GroupKey, Vec<GroupTrack>)>,
     /// 各轨都有分片的组：录制开始时任务目录里的与本次录齐的
@@ -32,11 +33,12 @@ pub(super) struct Mp4Check {
     unsupported: bool,
 }
 
-impl Mp4Check {
+impl MergeCheck {
     /// `plan` 为录制开始时任务目录的合并计划，`stored` 为目录里的分片。另返回核对目录里已录齐的组的各批：逐组与第 0
     /// 组一起（只有第 0 组时为它自身），由调用方交给后台按顺序核对；没有录齐的组时为空。
     pub(super) fn new(
         streams: Vec<Streams>,
+        container: Container,
         plan: &MergePlan,
         stored: &Stored,
     ) -> (Self, Vec<Batch>) {
@@ -65,13 +67,14 @@ impl Mp4Check {
                     .get_or_insert(file.name);
             }
         }
-        let check = Mp4Check {
+        let check = MergeCheck {
             first: plan
                 .keys
                 .first()
                 .copied()
                 .zip(recorded.first().map(|(_, heads)| heads.clone())),
             streams,
+            container,
             complete,
             pending,
             unsupported: false,
@@ -96,12 +99,17 @@ impl Mp4Check {
         &self.streams
     }
 
-    /// 分片 `id` 录到了任务目录；它所在的组各轨都有分片时核对这一组，放不进 MP4 时返回原因（见 [`Mp4Check::judged`]）。
+    /// 合并文件的容器。
+    pub(super) fn container(&self) -> Container {
+        self.container
+    }
+
+    /// 分片 `id` 录到了任务目录；它所在的组各轨都有分片时核对这一组，放不进合并文件时返回原因（见 [`MergeCheck::judged`]）。
     pub(super) async fn recorded(
         &mut self,
         id: ItemInfo,
         layout: &Layout,
-    ) -> Result<Option<Mp4Unsupported>, Error> {
+    ) -> Result<Option<MergeUnsupported>, Error> {
         let key = id.name.group();
         if self.unsupported || self.complete.contains(&key) {
             return Ok(None);
@@ -141,18 +149,20 @@ impl Mp4Check {
         self.first.get_or_insert((key, group));
         let streams = self.streams.clone();
         let root = layout.root().to_path_buf();
-        let result = blocking(move || output::check_mp4(&streams, &batch, &root)).await?;
+        let container = self.container;
+        let result =
+            blocking(move || output::check_merge(&streams, &batch, container, &root)).await?;
         self.judged(result)
     }
 
-    /// 一次核对的结果：放不进 MP4 时返回原因，之后不再核对；文件读写等其余失败上抛。
+    /// 一次核对的结果：放不进合并文件时返回原因，之后不再核对；文件读写等其余失败上抛。
     pub(super) fn judged(
         &mut self,
         result: Result<(), Error>,
-    ) -> Result<Option<Mp4Unsupported>, Error> {
+    ) -> Result<Option<MergeUnsupported>, Error> {
         match result {
             Ok(()) => Ok(None),
-            Err(Error::Unsupported(Unsupported::Mp4(reason))) => {
+            Err(Error::Unsupported(Unsupported::Merge(reason))) => {
                 self.unsupported = true;
                 Ok(Some(reason))
             }

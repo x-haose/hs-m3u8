@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 ffmpeg-next.workspace = true
+hs-m3u8-subtitle = { path = "../subtitle" }
 thiserror.workspace = true
 
 [target.'cfg(windows)'.dependencies]

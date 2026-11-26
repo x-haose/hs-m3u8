@@ -1,4 +1,4 @@
-//! 输出：合并为 MP4、写出可直接播放的本地 HLS，或两者都要；按选项替换已有的输出，成功后删除任务目录。
+//! 输出：合并为 MP4 或 Matroska（另可把字幕另存为文件）、写出可直接播放的本地 HLS，或两者都要；按选项替换已有的输出，成功后删除任务目录。
 
 mod commit;
 mod hls;
@@ -9,28 +9,31 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use hs_m3u8_remux::{
-    Cancel, Control, DiscontinuityGroup, MediaReport, Segment, Streams, TrackSegments,
-    WriteProgress,
+    Cancel, Container, Control, DiscontinuityGroup, MediaReport, Merged, Segment, Streams, Track,
+    TrackSegments, WriteProgress,
 };
+use hs_m3u8_subtitle::Cue;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) use self::commit::recover_recorded;
-pub use self::options::{FileOutputOptions, OutputOptions, Target};
+pub use self::options::{
+    FileOutputOptions, MergedFile, OutputOptions, SubtitleFileFormat, SubtitleOutput, Target,
+};
 pub(crate) use self::options::{ResolvedOutput, absolute_path};
 
 use self::commit::{Commit, Occupant};
 use crate::error::io_error;
-use crate::selection::SelectionRecord;
-use crate::workdir::{FileDir, Layout, OutputKind, SegmentName, WorkDir};
+use crate::selection::{SelectionRecord, track_labels};
+use crate::workdir::{FileDir, Layout, OutputKind, PendingOutput, SegmentName, WorkDir};
 use crate::{
-    Error, FileCount, Leftover, LeftoverKind, LiveReport, Missed, Mp4Output, Output, Progress,
+    Error, FileCount, Leftover, LeftoverKind, LiveReport, MergedOutput, Missed, Output, Progress,
     WorkDirProblem, Writing, blocking,
 };
 
 /// 交给输出的内容。
 pub(crate) struct Content {
-    /// 各轨的取流方式（合并 MP4 用）
+    /// 各轨的取流方式（合并用）
     pub streams: Vec<Streams>,
     /// 各不连续段组，每组各轨一项，轨道顺序与 `streams` 一致；至少一组，每项至少一个分片
     pub groups: Vec<Vec<GroupTrack>>,
@@ -114,6 +117,15 @@ pub(crate) fn prepare(options: &ResolvedOutput) -> Result<(), Error> {
     create_dirs(options)
 }
 
+/// 任务开头之后才定下的输出（另存的字幕文件，见 [`ResolvedOutput::with_subtitle_files`]）在下载之前核对：路径建不建得
+/// 出来、能否写，再建出所在的目录（见 [`prepare`]）。已有的输出照样再查一遍。要读写文件系统，在阻塞线程池中调用；
+/// 调用方已给任务目录加锁。
+pub(crate) fn check_more(options: &ResolvedOutput) -> Result<(), Error> {
+    check_creatable(options)?;
+    check_all(options)?;
+    create_dirs(options)
+}
+
 /// 建出各输出所在的目录，已有的不动：根存在而中间建不出（没有写权限，如 macOS 上外置盘卸载后的 /Volumes）时报出。
 /// 任务开头与写出前各调一次：下载期间目录被删了就重建。
 fn create_dirs(options: &ResolvedOutput) -> Result<(), Error> {
@@ -147,9 +159,9 @@ fn check_all(options: &ResolvedOutput) -> Result<Vec<Occupant>, Error> {
 struct Advance(watch::Sender<Progress>);
 
 impl Advance {
-    /// MP4 又写完 `files` 个输入文件。
-    fn mp4(&self, files: usize) {
-        self.add(files, |w| w.mp4.as_mut());
+    /// 合并文件又写完 `files` 个输入文件。
+    fn merged(&self, files: usize) {
+        self.add(files, |w| w.merged.as_mut());
     }
 
     /// 本地 HLS 又放好 `files` 个文件。
@@ -169,8 +181,8 @@ impl Advance {
     }
 }
 
-/// 写出输出，按选项删除任务目录。`bytes` 为任务目录中已完成的分片与 init 段的字节数。`cancel` 在换上输出之前都生效
-/// （见 [`write_files`]）。写出的进度计入 `progress`（见 [`Progress::writing`]）。
+/// 写出输出，按选项删除任务目录。`bytes` 为任务目录中已完成的视频与音频分片与 init 段的字节数。`cancel` 在换上输出之前
+/// 都生效（见 [`write_files`]）。写出的进度计入 `progress`（见 [`Progress::writing`]）。
 pub(crate) async fn write(
     dir: WorkDir,
     content: Content,
@@ -192,7 +204,7 @@ pub(crate) async fn write(
     let advance = Advance(progress.clone());
     let files = options.clone();
     let cancel = cancel.clone();
-    let (mp4, mut leftovers) = blocking(move || {
+    let (merged, mut leftovers) = blocking(move || {
         write_files(
             &streams,
             &groups,
@@ -207,10 +219,14 @@ pub(crate) async fn write(
         leftovers.extend(dir.remove().await);
     }
     Ok(Output {
-        mp4,
+        merged,
         hls: options
             .get(OutputKind::Hls)
             .map(|o| o.target().to_path_buf()),
+        subtitle_files: options
+            .subtitle_files()
+            .map(|o| o.target().to_path_buf())
+            .collect(),
         segments,
         bytes,
         leftovers,
@@ -288,27 +304,25 @@ fn place(src: &Path, dst: &Path) -> Result<u64, Error> {
     Ok(len)
 }
 
-/// 写出开始时的进度：每种要写的输出都是各组各轨的分片与 init 段合计。
+/// 写出开始时的进度：合并文件与本地 HLS 都是各组各轨的分片与 init 段合计。
 fn writing(groups: &[Vec<GroupTrack>], options: &ResolvedOutput) -> Writing {
     let per_output: usize = groups
         .iter()
         .flatten()
         .map(|t| t.segments.len() + usize::from(t.init.is_some()))
         .sum();
-    let count = |kind| {
-        options.get(kind).map(|_| FileCount {
-            done: 0,
-            total: per_output,
-        })
+    let count = FileCount {
+        done: 0,
+        total: per_output,
     };
     Writing {
-        mp4: count(OutputKind::Mp4),
-        hls: count(OutputKind::Hls),
+        merged: options.merged().map(|_| count),
+        hls: options.get(OutputKind::Hls).map(|_| count),
     }
 }
 
-/// 先把 MP4 合并到临时名、HLS 备齐到准备目录，都成功后再换上（见 [`commit_outputs`]）。合并 MP4 失败时还没有动到
-/// 输出。成功时另返回收尾没删掉的东西。`cancel` 在合并 MP4（见 [`hs_m3u8_remux::Cancel`]）与备齐 HLS 的每个文件之间也
+/// 先把合并文件与另存的字幕文件写到临时名、HLS 备齐到准备目录，都成功后再换上（见 [`commit_outputs`]）。合并失败时还没有
+/// 动到输出。成功时另返回收尾没删掉的东西。`cancel` 在合并（见 [`hs_m3u8_remux::Cancel`]）与备齐 HLS 的每个文件之间也
 /// 检查。
 fn write_files(
     streams: &[Streams],
@@ -317,21 +331,22 @@ fn write_files(
     options: &ResolvedOutput,
     cancel: &CancellationToken,
     advance: &Advance,
-) -> Result<(Option<Mp4Output>, Vec<Leftover>), Error> {
+) -> Result<(Option<MergedOutput>, Vec<Leftover>), Error> {
     if options.get(OutputKind::Hls).is_some() {
-        hls::check_content(groups, selection)?;
+        hls::check_content(streams, groups, selection)?;
     }
     let (report, leftovers) = commit_outputs(options, cancel, || {
         write_temps(streams, groups, selection, options, cancel, advance)
     })?;
-    let mp4 = options
-        .get(OutputKind::Mp4)
+    let merged = options
+        .merged()
         .zip(report)
-        .map(|(mp4, report)| Mp4Output {
-            path: mp4.target().to_path_buf(),
+        .map(|((merged, container), report)| MergedOutput {
+            path: merged.target().to_path_buf(),
+            container,
             report,
         });
-    Ok((mp4, leftovers))
+    Ok((merged, leftovers))
 }
 
 /// 写出各临时输出，写好一个文件报给 `advance`；失败时可能留有写了一半的，由调用方删除。
@@ -343,21 +358,32 @@ fn write_temps(
     cancel: &CancellationToken,
     advance: &Advance,
 ) -> Result<Option<MediaReport>, Error> {
-    let report = match options.get(OutputKind::Mp4) {
-        Some(mp4) => Some(write_mp4(
-            mp4.temp(),
-            streams,
-            groups,
-            &options.work_dir,
-            cancel,
-            advance,
-        )?),
+    let report = match options.merged() {
+        Some((merged, container)) => {
+            let tracks: Vec<Track> = streams
+                .iter()
+                .zip(track_labels(selection))
+                .map(|(&streams, label)| Track { streams, label })
+                .collect();
+            let written = write_merged(
+                merged.temp(),
+                container,
+                &tracks,
+                groups,
+                options,
+                cancel,
+                advance,
+            )?;
+            write_subtitle_files(options, &written.subtitles)?;
+            Some(written.report)
+        }
         None => None,
     };
     if let Some(hls) = options.get(OutputKind::Hls) {
         hls::stage(
             hls.temp(),
             &options.work_dir,
+            streams,
             groups,
             selection,
             cancel,
@@ -367,16 +393,17 @@ fn write_temps(
     Ok(report)
 }
 
-/// 合并为 MP4 写到 `temp`，写完输入文件报给 `advance`（见 [`WriteProgress`]）；失败或取消时 `temp` 上可能留有写了一半的
-/// 文件。`work_dir` 为分片所在的任务目录。
-fn write_mp4(
+/// 合并为 `container` 写到 `temp`，字幕按 `options.subtitles` 封进去与否，写完输入文件报给 `advance`（见
+/// [`WriteProgress`]）；失败或取消时 `temp` 上可能留有写了一半的文件。
+fn write_merged(
     temp: &Path,
-    streams: &[Streams],
+    container: Container,
+    tracks: &[Track],
     groups: &[Vec<GroupTrack>],
-    work_dir: &Path,
+    options: &ResolvedOutput,
     cancel: &CancellationToken,
     advance: &Advance,
-) -> Result<MediaReport, Error> {
+) -> Result<Merged, Error> {
     let groups: Vec<DiscontinuityGroup> = groups.iter().map(|g| remux_group(g)).collect();
     let token = cancel.clone();
     let advance = advance.clone();
@@ -384,23 +411,47 @@ fn write_mp4(
         cancel: Cancel::new(move || token.is_cancelled()),
         // 合并 HLS 时单位为文件，合计不超过分片与 init 段的个数，在 usize 范围内
         progress: WriteProgress::new(move |files| {
-            advance.mp4(usize::try_from(files).expect("文件个数在 usize 范围内"))
+            advance.merged(usize::try_from(files).expect("文件个数在 usize 范围内"))
         }),
     };
-    hs_m3u8_remux::remux(streams, &groups, temp, &control).map_err(|e| remux_error(e, work_dir))
+    let embed = options.subtitles.embed;
+    hs_m3u8_remux::remux(tracks, &groups, temp, container, embed, &control)
+        .map_err(|e| remux_error(e, &options.work_dir))
 }
 
-/// 下载完之前核对能否合并进 MP4（见 [`hs_m3u8_remux::check`]），各轨只需开头的分片。`groups` 的各项为合并时的组号与
-/// 这一组，第一项为第 0 组；`work_dir` 为分片所在的任务目录。要读文件，在阻塞线程池中调用。
-pub(crate) fn check_mp4(
+/// 把对齐后的字幕（按字幕的轨号，见 [`Merged::subtitles`]）写到各另存的字幕文件的临时名。
+fn write_subtitle_files(options: &ResolvedOutput, subtitles: &[Vec<Cue>]) -> Result<(), Error> {
+    let Some(format) = options.subtitles.files else {
+        return Ok(());
+    };
+    let files: Vec<&PendingOutput> = options.subtitle_files().collect();
+    assert_eq!(
+        files.len(),
+        subtitles.len(),
+        "另存的字幕文件按所选的字幕建出，与合并给出的字幕轨一一对应"
+    );
+    for (file, cues) in files.into_iter().zip(subtitles) {
+        let text = match format {
+            SubtitleFileFormat::Srt => hs_m3u8_subtitle::srt(cues),
+            SubtitleFileFormat::WebVtt => hs_m3u8_subtitle::webvtt(cues),
+        };
+        hls::write_file(file.temp(), &text)?;
+    }
+    Ok(())
+}
+
+/// 下载完之前核对能否合并进 `container`（见 [`hs_m3u8_remux::check`]），各轨只需开头的分片。`groups` 的各项为合并时的组号
+/// 与这一组，第一项为第 0 组；`work_dir` 为分片所在的任务目录。要读文件，在阻塞线程池中调用。
+pub(crate) fn check_merge(
     streams: &[Streams],
     groups: &[(usize, Vec<GroupTrack>)],
+    container: Container,
     work_dir: &Path,
 ) -> Result<(), Error> {
     let remux: Vec<(usize, DiscontinuityGroup)> =
         groups.iter().map(|(n, g)| (*n, remux_group(g))).collect();
     let numbered: Vec<(usize, &DiscontinuityGroup)> = remux.iter().map(|(n, g)| (*n, g)).collect();
-    hs_m3u8_remux::check(streams, &numbered).map_err(|e| remux_error(e, work_dir))
+    hs_m3u8_remux::check(streams, &numbered, container).map_err(|e| remux_error(e, work_dir))
 }
 
 /// 任务目录里的分片认不出格式：下载时都核对过，认不出即目录里的文件被改动过。
@@ -411,8 +462,8 @@ pub(super) fn unrecognized_segment(work_dir: &Path, path: &Path) -> Error {
     }
 }
 
-/// 合并或核对任务目录里的分片时 remux 的错误：放不进 MP4 的为 [`crate::Unsupported::Mp4`]；认不出的分片与结构不对的
-/// fMP4 为任务目录损坏（下载时都核对过，即目录里的文件被改动过），认不出的与写本地 HLS 时相同（见
+/// 合并或核对任务目录里的分片时 remux 的错误：放不进合并文件的为 [`crate::Unsupported::Merge`]；认不出的分片、结构不对的
+/// fMP4 与解析不了的字幕分片为任务目录损坏（下载时都核对过，即目录里的文件被改动过），认不出的与写本地 HLS 时相同（见
 /// [`unrecognized_segment`]）；读分片、写出、关闭或回读输出时文件出错为 [`Error::Io`]（如盘满），取消为
 /// [`Error::Cancelled`]；其余为 [`Error::Remux`]。
 fn remux_error(error: hs_m3u8_remux::Error, work_dir: &Path) -> Error {
@@ -428,16 +479,15 @@ fn remux_error(error: hs_m3u8_remux::Error, work_dir: &Path) -> Error {
         },
         hs_m3u8_remux::Error::Cancelled => Error::Cancelled,
         hs_m3u8_remux::Error::Unsupported(unsupported) => {
-            Error::Unsupported(crate::Unsupported::Mp4(unsupported))
+            Error::Unsupported(crate::Unsupported::Merge(unsupported))
         }
         hs_m3u8_remux::Error::Unrecognized(path) => unrecognized_segment(work_dir, &path),
-        error
-        @ (hs_m3u8_remux::Error::Fmp4 { .. } | hs_m3u8_remux::Error::Fmp4OpenEnded { .. }) => {
-            Error::WorkDir {
-                path: work_dir.to_path_buf(),
-                problem: WorkDirProblem::Corrupt(error.to_string()),
-            }
-        }
+        error @ (hs_m3u8_remux::Error::Fmp4 { .. }
+        | hs_m3u8_remux::Error::Fmp4OpenEnded { .. }
+        | hs_m3u8_remux::Error::Subtitle { .. }) => Error::WorkDir {
+            path: work_dir.to_path_buf(),
+            problem: WorkDirProblem::Corrupt(error.to_string()),
+        },
         other => Error::Remux(Box::new(other)),
     }
 }

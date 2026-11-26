@@ -7,14 +7,15 @@ mod hooks;
 mod incomplete;
 mod resume;
 mod retry;
+mod subtitles;
 mod tracks;
 
 use std::path::Path;
 
-use hs_m3u8_remux::{DiscontinuityGroup, Streams};
+use hs_m3u8_remux::DiscontinuityGroup;
 
 use crate::server::Server;
-use crate::{expected, fixture, track};
+use crate::{all, expected, fixture, track};
 
 /// ts_a 的分片（H.264 + AAC 的 TS）。
 const TS_A: [&str; 2] = ["seg0.ts", "seg1.ts"];
@@ -22,7 +23,7 @@ const TS_A: [&str; 2] = ["seg0.ts", "seg1.ts"];
 /// ts_a 两个分片单轨合并的期望输出。
 fn expected_ts_a(dir: &Path) -> Vec<u8> {
     let tracks = vec![track("ts_a", None, &TS_A)];
-    expected(dir, &[Streams::All], &[DiscontinuityGroup { tracks }])
+    expected(dir, &[all()], &[DiscontinuityGroup { tracks }])
 }
 
 /// ts_a 的两个分片，明文；`duration` 为每个分片声明的时长。

@@ -75,12 +75,12 @@ async fn rejected_before_download() {
     let server = Server::start().await;
 
     let req = request(server.url("index.m3u8"), &dir);
-    std::fs::write(req.output.target.mp4().unwrap(), b"").unwrap();
+    std::fs::write(&req.output.target.file().unwrap().path, b"").unwrap();
     assert!(matches!(
         run(req.clone()).await,
         Err(Error::OutputExists(_))
     ));
-    std::fs::remove_file(req.output.target.mp4().unwrap()).unwrap();
+    std::fs::remove_file(&req.output.target.file().unwrap().path).unwrap();
 
     server.put(
         "live.m3u8",

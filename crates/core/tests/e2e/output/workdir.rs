@@ -1,7 +1,7 @@
 //! 写出之后删除任务目录：只删本库写的文件，系统生成的元数据文件不妨碍删除。
 
 use crate::server::Server;
-use crate::{apple_double, engine, fixture, request, run, test_dir};
+use crate::{apple_double, engine, fixture, mp4_target, request, run, test_dir};
 
 /// 输出经符号链接落在任务目录里（按字面比较看不出）：删除任务目录时只删本库写的文件，输出留下，
 /// 没删干净记在 leftovers 里；job.json 也留下，目录仍是任务目录，再运行（覆盖）照常进行。
@@ -9,7 +9,7 @@ use crate::{apple_double, engine, fixture, request, run, test_dir};
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn outputs_inside_the_work_dir_survive_its_removal() {
-    use hs_m3u8_core::{LeftoverKind, Target};
+    use hs_m3u8_core::LeftoverKind;
 
     use super::request_to;
 
@@ -26,7 +26,7 @@ async fn outputs_inside_the_work_dir_survive_its_removal() {
         std::fs::write(work.join(name), apple_double()).unwrap();
     }
     std::os::unix::fs::symlink(&work, dir.join("link")).unwrap();
-    let target = Target::Mp4(dir.join("link/out.mp4"));
+    let target = mp4_target(dir.join("link/out.mp4"));
     let mut req = request_to(server.url("index.m3u8"), &dir, target);
     req.output.work_dir = Some(work.clone());
 

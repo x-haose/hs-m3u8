@@ -1,9 +1,9 @@
 //! 本地 HLS 输出：任务目录中已解密的分片原样放进一个可直接播放的目录，不经 FFmpeg。
 //!
 //! ```text
-//! index.m3u8              入口：单轨时为媒体播放列表；视频与独立音频分离时为主播放列表
-//! <轨道>/index.m3u8        音视频分离时这条轨的媒体播放列表
-//! <轨道>/<n>.<扩展名>       分片，n 为这条轨里的播放顺序（从 0 起）；扩展名见 extension
+//! index.m3u8              入口：单轨时为媒体播放列表；有独立音频或字幕时为主播放列表
+//! <轨道>/index.m3u8        多轨时这条轨的媒体播放列表
+//! <轨道>/<n>.<扩展名>       分片，n 为这条轨里的播放顺序（从 0 起）；扩展名见 extension，字幕为 vtt
 //! <轨道>/init-<指纹>.mp4    fMP4 的 init 段，文件名同任务目录
 //! ```
 //!
@@ -16,8 +16,8 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
-use hs_m3u8_remux::fmp4;
 use hs_m3u8_remux::standalone::{self, Format};
+use hs_m3u8_remux::{Streams, fmp4};
 use tokio_util::sync::CancellationToken;
 
 use super::GroupTrack;
@@ -26,12 +26,15 @@ use crate::entries::{self, is_canonical_number};
 use crate::error::{corrupt_fmp4, io_error};
 use crate::ident::Fingerprint;
 use crate::selection::SelectionRecord;
-use crate::{Error, HlsUnsupported, Unsupported};
+use crate::{Error, HlsUnsupported, Unsupported, WorkDirProblem};
 
 const INDEX: &str = "index.m3u8";
 
 /// fMP4 分片的扩展名。
 const FMP4: &str = "m4s";
+
+/// 字幕分片（WebVTT）的扩展名。
+const VTT: &str = "vtt";
 
 /// 没有 init 段的分片的扩展名，与 FFmpeg 识别出的格式对应：FFmpeg 读 HLS 时核对分片的扩展名与识别出的格式
 /// （`extension_picky`，默认开启），不一致即拒绝。
@@ -57,10 +60,11 @@ pub(super) fn occupant(dir: &Path) -> Result<Occupant, Error> {
     }
 }
 
-/// 本地 HLS 能否写出这些内容：见 [`check_layout`]；音视频分离时主播放列表必须写码率，某条轨的分片声明的时长都为 0
+/// 本地 HLS 能否写出这些内容：见 [`check_layout`]；多轨时主播放列表必须写码率，某条音视频轨的分片声明的时长都为 0
 /// （算不出峰值码率，见 [`TrackFiles::peak_bps`]）而来源也没写时报 [`HlsUnsupported::BandwidthUnknown`]。只看声明，
-/// 在合并 MP4 之前判定。
+/// 在合并之前判定。`streams` 为各轨的取流方式。
 pub(super) fn check_content(
+    streams: &[Streams],
     groups: &[Vec<GroupTrack>],
     selection: Option<&SelectionRecord>,
 ) -> Result<(), Error> {
@@ -69,15 +73,16 @@ pub(super) fn check_content(
         .map(|g| g.iter().map(|t| t.init.is_some()).collect())
         .collect();
     check_layout(&has_init)?;
-    let tracks = groups.first().map_or(0, Vec::len);
-    let measurable = (0..tracks).all(|track| {
-        groups
-            .iter()
-            .flat_map(|g| &g[track].segments)
-            .any(|s| s.duration_us > 0)
-    });
+    let measurable = (0..streams.len())
+        .filter(|&track| streams[track] != Streams::Subtitles)
+        .all(|track| {
+            groups
+                .iter()
+                .flat_map(|g| &g[track].segments)
+                .any(|s| s.duration_us > 0)
+        });
     let source = selection.and_then(|s| s.variant.bandwidth);
-    if tracks == 2 && !measurable && source.is_none() {
+    if streams.len() > 1 && !measurable && source.is_none() {
         return Err(Error::Unsupported(Unsupported::Hls(
             HlsUnsupported::BandwidthUnknown,
         )));
@@ -110,60 +115,70 @@ fn check_layout(has_init: &[Vec<bool>]) -> Result<(), Error> {
 pub(super) fn stage(
     stage: &Path,
     work_dir: &Path,
+    streams: &[Streams],
     groups: &[Vec<GroupTrack>],
     selection: Option<&SelectionRecord>,
     cancel: &CancellationToken,
     placed: &dyn Fn(usize),
 ) -> Result<(), Error> {
     fs::create_dir(stage).map_err(io_error("创建", stage))?;
-    fill(stage, work_dir, groups, selection, cancel, placed)
+    fill(stage, work_dir, streams, groups, selection, cancel, placed)
 }
 
 /// 在 `stage` 里放好各轨的分片、init 段与播放列表；`placed` 见 [`stage`]。
 fn fill(
     stage: &Path,
     work_dir: &Path,
+    streams: &[Streams],
     groups: &[Vec<GroupTrack>],
     selection: Option<&SelectionRecord>,
     cancel: &CancellationToken,
     placed: &dyn Fn(usize),
 ) -> Result<(), Error> {
-    let track_count = groups.first().map_or(0, Vec::len);
-    let mut tracks = Vec::with_capacity(track_count);
-    for track in 0..track_count {
+    let mut tracks = Vec::with_capacity(streams.len());
+    for (track, &kind) in streams.iter().enumerate() {
         let dir = stage.join(track.to_string());
         fs::create_dir(&dir).map_err(io_error("创建", &dir))?;
         tracks.push(fill_track(
             &dir,
             work_dir,
             track,
+            kind == Streams::Subtitles,
             groups.iter().map(|g| &g[track]),
             cancel,
             placed,
         )?);
     }
-    match (&tracks[..], selection) {
-        ([only], _) => write_file(&stage.join(INDEX), &media_playlist(&only.groups, "0/")),
-        ([video, audio], Some(selection)) => {
-            for (track, written) in tracks.iter().enumerate() {
-                let path = stage.join(track.to_string()).join(INDEX);
-                write_file(&path, &media_playlist(&written.groups, ""))?;
-            }
-            // 两条轨分片峰值码率之和是 RFC 8216 4.3.4.2 要求的上限；算不出时用来源写的，它同样是上限
-            let bandwidth = video
-                .peak_bps
-                .zip(audio.peak_bps)
-                .map(|(v, a)| v.saturating_add(a))
-                .or(selection.variant.bandwidth)
-                .expect("写出前已确认算得出码率（check_content）");
-            write_file(&stage.join(INDEX), &master_playlist(selection, bandwidth))
-        }
-        (tracks, selection) => panic!(
-            "轨道只有所选变体与独立音频两种，后者只来自主播放列表：{} 条，有选轨 {}",
-            tracks.len(),
-            selection.is_some()
+    let selection = match (&tracks[..], selection) {
+        ([only], _) => return write_file(&stage.join(INDEX), &media_playlist(&only.groups, "0/")),
+        (_, Some(selection)) => selection,
+        (tracks, None) => panic!(
+            "多条轨只来自主播放列表（独立的音频与字幕）：{} 条，没有选轨",
+            tracks.len()
         ),
+    };
+    for (track, written) in tracks.iter().enumerate() {
+        let path = stage.join(track.to_string()).join(INDEX);
+        write_file(&path, &media_playlist(&written.groups, ""))?;
     }
+    // RFC 8216 4.3.4.2：BANDWIDTH 是任一种可播放的组合（变体加每组里的一条）的分片峰值码率之和的上限，取变体加各组
+    // 里最大的；算不出时用来源写的，它同样是上限
+    let peak = |range: std::ops::Range<usize>| {
+        tracks[range]
+            .iter()
+            .map(|t| t.peak_bps)
+            .try_fold(0u64, |max, peak| peak.map(|p| max.max(p)))
+    };
+    let audio = 1..1 + selection.audio.len();
+    let subtitles = audio.end..tracks.len();
+    let bandwidth = tracks[0]
+        .peak_bps
+        .zip(peak(audio))
+        .zip(peak(subtitles.clone()))
+        .map(|((v, a), s)| v.saturating_add(a).saturating_add(s))
+        .or(selection.variant.bandwidth)
+        .expect("写出前已确认算得出码率（check_content）");
+    write_file(&stage.join(INDEX), &master_playlist(selection, bandwidth))
 }
 
 /// 一条轨放进 HLS 目录的内容。
@@ -179,6 +194,7 @@ fn fill_track<'a>(
     dir: &Path,
     work_dir: &Path,
     track: usize,
+    subtitles: bool,
     groups: impl Iterator<Item = &'a GroupTrack>,
     cancel: &CancellationToken,
     placed: &dyn Fn(usize),
@@ -210,6 +226,7 @@ fn fill_track<'a>(
                 placed(1);
                 (Some(name), Content::Fmp4(trex))
             }
+            None if subtitles => (None, Content::WebVtt),
             None => (None, Content::Standalone(None)),
         };
         let mut segments = Vec::with_capacity(group.segments.len());
@@ -240,6 +257,8 @@ enum Content {
     Standalone(Option<Format>),
     /// fMP4：分片结构完整（见 [`fmp4::check`]），值为组的 init 段里各轨的默认样本长度
     Fmp4(HashMap<u32, u32>),
+    /// 字幕：WebVTT 文本（见 [`hs_m3u8_subtitle::parse`]）
+    WebVtt,
 }
 
 impl Content {
@@ -258,6 +277,17 @@ impl Content {
                     .map_err(io_error("读取", path))?
                     .map_err(|problem| corrupt_fmp4(work_dir, path, problem))?;
                 Ok(FMP4)
+            }
+            Content::WebVtt => {
+                let bytes = fs::read(path).map_err(io_error("读取", path))?;
+                hs_m3u8_subtitle::parse(&bytes).map_err(|cause| Error::WorkDir {
+                    path: work_dir.to_path_buf(),
+                    problem: WorkDirProblem::Corrupt(format!(
+                        "字幕分片 {} 无法解析：{cause}",
+                        path.display()
+                    )),
+                })?;
+                Ok(VTT)
             }
             Content::Standalone(first) => {
                 let format = sniff(path, work_dir)?;
@@ -297,7 +327,8 @@ fn sniff(path: &Path, work_dir: &Path) -> Result<Format, Error> {
         .ok_or_else(|| super::unrecognized_segment(work_dir, path))
 }
 
-fn write_file(path: &Path, text: &str) -> Result<(), Error> {
+/// 写文本文件并落盘。
+pub(super) fn write_file(path: &Path, text: &str) -> Result<(), Error> {
     File::create(path)
         .and_then(|mut file| {
             file.write_all(text.as_bytes())?;
@@ -341,27 +372,50 @@ fn media_playlist(groups: &[PlaylistGroup], prefix: &str) -> String {
     text + "#EXT-X-ENDLIST\n"
 }
 
-/// 视频与独立音频分离时的主播放列表：第 0 条轨为变体，第 1 条为音频 rendition。BANDWIDTH 为 `bandwidth`，分辨率与编码照
-/// 抄来源（来源没写的也不写）；音频组固定为 `audio`。名称与语言照抄来源，带有引号或换行（带引号的字符串里不允许）时不
-/// 用：没有可用的名称时名称为 `audio`，语言不写。
+/// 多轨时的主播放列表：第 0 条轨为变体，其后依次是各独立音频（组 `audio`）、各字幕（组 `subs`）的 rendition，轨号即目录
+/// 名。BANDWIDTH 为 `bandwidth`，分辨率与编码照抄来源（来源没写的也不写）。名称与语言照抄来源，带有引号或换行（带引号的
+/// 字符串里不允许）时不用：没有可用的名称时名称为语言，再没有时为 `audio<n>` 或 `subs<n>`（n 为组里第几条，从 1 起；
+/// NAME 在组里须唯一，RFC 8216 4.3.4.1.1）。默认的为来源标了 DEFAULT 的，音频组里都没标时为第一条；字幕另写 FORCED
+/// 与 AUTOSELECT。
 fn master_playlist(selection: &SelectionRecord, bandwidth: u64) -> String {
-    let audio = selection
-        .audio
-        .as_ref()
-        .expect("两条轨时第 1 条是独立的音频 rendition");
     let quotable = |text: &&str| !text.contains(['"', '\r', '\n']);
-    let language = audio.language.as_deref().filter(quotable);
-    let name = audio
-        .name
-        .as_deref()
-        .filter(quotable)
-        .or(language)
-        .unwrap_or("audio");
-    let mut media = format!("#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"{name}\"");
-    if let Some(language) = language {
-        media.push_str(&format!(",LANGUAGE=\"{language}\""));
+    let mut media = String::new();
+    let mut track = 1;
+    let groups = [
+        ("AUDIO", "audio", &selection.audio),
+        ("SUBTITLES", "subs", &selection.subtitles),
+    ];
+    for (kind, group, renditions) in groups {
+        let any_default = renditions.iter().any(|r| r.default);
+        let mut names: Vec<String> = Vec::new();
+        for (n, rendition) in renditions.iter().enumerate() {
+            let language = rendition.language.as_deref().filter(quotable);
+            let mut name = rendition
+                .name
+                .as_deref()
+                .filter(quotable)
+                .or(language)
+                .map_or_else(|| format!("{group}{}", n + 1), str::to_owned);
+            if names.contains(&name) {
+                name = format!("{name} ({})", n + 1);
+            }
+            names.push(name.clone());
+            let default = rendition.default || (kind == "AUDIO" && !any_default && n == 0);
+            let yes = |flag: bool| if flag { "YES" } else { "NO" };
+            media.push_str(&format!(
+                "#EXT-X-MEDIA:TYPE={kind},GROUP-ID=\"{group}\",NAME=\"{name}\""
+            ));
+            if let Some(language) = language {
+                media.push_str(&format!(",LANGUAGE=\"{language}\""));
+            }
+            media.push_str(&format!(",DEFAULT={},AUTOSELECT=YES", yes(default)));
+            if kind == "SUBTITLES" {
+                media.push_str(&format!(",FORCED={}", yes(rendition.forced)));
+            }
+            media.push_str(&format!(",URI=\"{track}/index.m3u8\"\n"));
+            track += 1;
+        }
     }
-    media.push_str(",DEFAULT=YES,AUTOSELECT=YES,URI=\"1/index.m3u8\"\n");
 
     let variant = &selection.variant;
     let mut attributes = Vec::new();
@@ -373,7 +427,12 @@ fn master_playlist(selection: &SelectionRecord, bandwidth: u64) -> String {
     if !codecs.is_empty() && quotable(&codecs.as_str()) {
         attributes.push(format!("CODECS=\"{codecs}\""));
     }
-    attributes.push("AUDIO=\"audio\"".to_owned());
+    if !selection.audio.is_empty() {
+        attributes.push("AUDIO=\"audio\"".to_owned());
+    }
+    if !selection.subtitles.is_empty() {
+        attributes.push("SUBTITLES=\"subs\"".to_owned());
+    }
     format!(
         "#EXTM3U\n{media}#EXT-X-STREAM-INF:{}\n0/index.m3u8\n",
         attributes.join(",")
@@ -418,16 +477,16 @@ fn is_track_file_name(name: &str) -> bool {
     }
     name.split_once('.').is_some_and(|(n, ext)| {
         is_canonical_number(n)
-            && (ext == FMP4 || Format::ALL.into_iter().any(|f| extension(f) == ext))
+            && (ext == FMP4 || ext == VTT || Format::ALL.into_iter().any(|f| extension(f) == ext))
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use hs_m3u8_hls::{AudioKey, Playlist, Resolution, Url, VariantKey, parse};
+    use hs_m3u8_hls::{Playlist, RenditionKey, Resolution, Url, VariantKey, parse};
 
     use super::*;
-    use crate::selection::{AudioRecord, VariantRecord};
+    use crate::selection::{RenditionRecord, VariantRecord};
 
     fn url() -> Url {
         Url::parse("file:///out/index.m3u8").unwrap()
@@ -500,15 +559,92 @@ mod tests {
                 }),
                 codecs: codecs.iter().map(|c| (*c).to_owned()).collect(),
             },
-            audio: Some(AudioRecord {
-                key: AudioKey::Stable {
-                    id: "a".into(),
-                    occurrence: 0,
-                },
-                name: name.map(str::to_owned),
-                language: language.map(str::to_owned),
-            }),
+            muxed_audio: false,
+            audio: vec![rendition("a", name, language, false)],
+            subtitles: Vec::new(),
         }
+    }
+
+    fn rendition(
+        id: &str,
+        name: Option<&str>,
+        language: Option<&str>,
+        forced: bool,
+    ) -> RenditionRecord {
+        RenditionRecord {
+            key: RenditionKey::Stable {
+                id: id.into(),
+                occurrence: 0,
+            },
+            name: name.map(str::to_owned),
+            language: language.map(str::to_owned),
+            default: false,
+            forced,
+        }
+    }
+
+    /// 两条音频、两条字幕：轨号即目录，音频都没标默认时第一条为默认，同名的加序号，字幕写 FORCED。
+    #[test]
+    fn master_playlist_lists_every_rendition() {
+        let mut record = selection(Some("English"), Some("en"), &["avc1.64001f"]);
+        record
+            .audio
+            .push(rendition("b", Some("English"), Some("en"), false));
+        record.subtitles = vec![
+            rendition("s1", None, Some("zh-Hans"), false),
+            rendition("s2", None, None, true),
+        ];
+        let text = master_playlist(&record, 1);
+        let Ok(Playlist::Master(master)) = parse(&text, &url()) else {
+            panic!("应为主播放列表：{text}");
+        };
+        assert_eq!(master.variants[0].subtitles.as_deref(), Some("subs"));
+        // (组, 名称, 语言, 默认, 强制, 地址的路径)
+        type Row<'a> = (&'a str, &'a str, Option<&'a str>, bool, bool, &'a str);
+        let seen: Vec<Row<'_>> = master
+            .renditions
+            .iter()
+            .map(|r| {
+                (
+                    r.group.as_str(),
+                    r.name.as_deref().unwrap(),
+                    r.language.as_deref(),
+                    r.default,
+                    r.forced,
+                    r.uri.as_ref().unwrap().path(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (
+                    "audio",
+                    "English",
+                    Some("en"),
+                    true,
+                    false,
+                    "/out/1/index.m3u8"
+                ),
+                (
+                    "audio",
+                    "English (2)",
+                    Some("en"),
+                    false,
+                    false,
+                    "/out/2/index.m3u8"
+                ),
+                (
+                    "subs",
+                    "zh-Hans",
+                    Some("zh-Hans"),
+                    false,
+                    false,
+                    "/out/3/index.m3u8"
+                ),
+                ("subs", "subs2", None, false, true, "/out/4/index.m3u8"),
+            ]
+        );
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use hs_m3u8_core::{Error, HttpErrorKind, LiveEnd, LiveOptions, StallCause, StallReason, Url};
-use hs_m3u8_remux::{DiscontinuityGroup, Streams};
+use hs_m3u8_remux::DiscontinuityGroup;
 
 use super::{
     STALL, expected_split, expected_split_long, interrupt, judged_in, live_request, media_playlist,
@@ -14,7 +14,7 @@ use super::{
     signed_fmp4_playlist, slow_retry, split_source,
 };
 use crate::server::Server;
-use crate::{assert_output, engine, expected, expected_long, fixture, run, test_dir, track};
+use crate::{all, assert_output, engine, expected, expected_long, fixture, run, test_dir, track};
 
 /// 并发下载时，会话开头的分片还在下载、后面的已完成就被中断：续录时它仍在窗口里，补录进原会话。
 #[tokio::test(flavor = "multi_thread")]
@@ -432,7 +432,7 @@ async fn inits_of_recorded_segments_are_not_fetched_again() {
     };
     let want = expected(
         &dir,
-        &[Streams::All],
+        &[all()],
         &[
             group("fmp4_a/video", &["seg0.m4s", "seg1.m4s"]),
             group("fmp4_b/video", &["seg0.m4s"]),

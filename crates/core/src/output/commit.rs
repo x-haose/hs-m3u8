@@ -35,9 +35,9 @@ pub(super) enum Occupant {
     Nothing,
     /// 没有内容的目录（系统自动生成的元数据文件不算）
     EmptyDir,
-    /// 输出：MP4 或文件任务的输出路径上的文件，或全是本库写出的文件的 HLS 目录
+    /// 输出：合并文件、另存的字幕文件或文件任务的输出路径上的文件，或全是本库写出的文件的 HLS 目录
     Output,
-    /// 别的东西：MP4 或文件任务的输出路径上的目录，HLS 路径上的文件或有别的文件的目录
+    /// 别的东西：这类文件的输出路径上的目录，HLS 路径上的文件或有别的文件的目录
     Other,
     /// 什么也没有，但建不出来：最近的已存在的上级不是目录（是文件，或悬空的符号链接）
     Blocked { ancestor: PathBuf },
@@ -52,7 +52,9 @@ fn occupant(o: &PendingOutput) -> Result<Occupant, Error> {
         Err(cause) => return Err(io_error("检查", target)(cause)),
     };
     match (o.kind(), meta.is_dir()) {
-        (OutputKind::Mp4 | OutputKind::File, false) => Ok(Occupant::Output),
+        (OutputKind::Merged(_) | OutputKind::File | OutputKind::Subtitles(_), false) => {
+            Ok(Occupant::Output)
+        }
         (OutputKind::Hls, true) => hls::occupant(target),
         _ => Ok(Occupant::Other),
     }
@@ -230,7 +232,7 @@ fn settle(o: &PendingOutput, restorable: bool) -> Result<bool, Error> {
 fn remove_empty_dir(dir: &Path) -> Result<(), Error> {
     for entry in entries::list(dir)? {
         if entry.is_system_file() {
-            remove(&entry.path, OutputKind::Mp4)?;
+            remove(&entry.path, OutputKind::File)?;
         }
     }
     fs::remove_dir(dir).map_err(io_error("删除", dir))
@@ -397,11 +399,13 @@ fn move_aside(o: &PendingOutput) -> Result<bool, Error> {
 /// 的。目录改名到非空目录失败；改名到空目录时替换它，没有可丢的。
 fn install(from: &Path, to: &Path, kind: OutputKind, action: &'static str) -> Result<bool, Error> {
     let renamed = match kind {
-        OutputKind::Mp4 | OutputKind::File => match fs::hard_link(from, to) {
-            Ok(()) => return Ok(true),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
-            Err(_) => busy::retrying(|| fs::rename(from, to)),
-        },
+        OutputKind::Merged(_) | OutputKind::File | OutputKind::Subtitles(_) => {
+            match fs::hard_link(from, to) {
+                Ok(()) => return Ok(true),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
+                Err(_) => busy::retrying(|| fs::rename(from, to)),
+            }
+        }
         OutputKind::Hls => busy::retrying(|| fs::rename(from, to)),
     };
     match renamed {
@@ -414,7 +418,9 @@ fn install(from: &Path, to: &Path, kind: OutputKind, action: &'static str) -> Re
 /// 删掉文件或目录；已不存在的不算失败，根读不到时报错（见 [`volume::reachable`]）。
 fn remove(path: &Path, kind: OutputKind) -> Result<(), Error> {
     let removed = busy::retrying(|| match kind {
-        OutputKind::Mp4 | OutputKind::File => fs::remove_file(path),
+        OutputKind::Merged(_) | OutputKind::File | OutputKind::Subtitles(_) => {
+            fs::remove_file(path)
+        }
         OutputKind::Hls => fs::remove_dir_all(path),
     });
     match removed {
@@ -445,6 +451,8 @@ fn is_absent(error: &io::Error) -> bool {
 mod tests {
     use std::path::PathBuf;
 
+    use hs_m3u8_remux::Container;
+
     use super::*;
     use crate::ident::Fingerprint;
     use crate::scratch::Scratch;
@@ -462,7 +470,7 @@ mod tests {
 
     fn outputs(dir: &Path) -> [PendingOutput; 2] {
         [
-            pending(OutputKind::Mp4, dir.join("a.mp4")),
+            pending(OutputKind::Merged(Container::Mp4), dir.join("a.mp4")),
             pending(OutputKind::Hls, dir.join("a")),
         ]
     }
@@ -470,7 +478,9 @@ mod tests {
     /// 在 `o` 的 `path`（输出路径或某个保留名）上放内容为 `text` 的输出，HLS 放在目录里的 `index.m3u8`。
     fn put(o: &PendingOutput, path: &Path, text: &str) {
         match o.kind() {
-            OutputKind::Mp4 | OutputKind::File => fs::write(path, text).unwrap(),
+            OutputKind::Merged(_) | OutputKind::File | OutputKind::Subtitles(_) => {
+                fs::write(path, text).unwrap()
+            }
             OutputKind::Hls => {
                 fs::create_dir_all(path).unwrap();
                 fs::write(path.join("index.m3u8"), text).unwrap();
@@ -480,7 +490,9 @@ mod tests {
 
     fn read(o: &PendingOutput, path: &Path) -> Option<String> {
         let file = match o.kind() {
-            OutputKind::Mp4 | OutputKind::File => path.to_path_buf(),
+            OutputKind::Merged(_) | OutputKind::File | OutputKind::Subtitles(_) => {
+                path.to_path_buf()
+            }
             OutputKind::Hls => path.join("index.m3u8"),
         };
         fs::read_to_string(file).ok()
@@ -648,7 +660,7 @@ mod tests {
 
     /// 检查 `target` 时应报建不出来，挡住它的是上级 `ancestor`。
     fn assert_blocked(target: &Path, ancestor: &Path) {
-        for kind in [OutputKind::Mp4, OutputKind::Hls] {
+        for kind in [OutputKind::Merged(Container::Mp4), OutputKind::Hls] {
             match check(&pending(kind, target.to_path_buf()), true) {
                 Err(Error::OutputOccupied {
                     path,
@@ -668,7 +680,7 @@ mod tests {
 
         assert_blocked(&dir.join("file/out"), &file);
         assert_blocked(&dir.join("file/sub/out"), &file);
-        for kind in [OutputKind::Mp4, OutputKind::Hls] {
+        for kind in [OutputKind::Merged(Container::Mp4), OutputKind::Hls] {
             let creatable = pending(kind, dir.join("new/sub/out"));
             assert_eq!(check(&creatable, false).unwrap(), Occupant::Nothing);
         }
@@ -710,7 +722,10 @@ mod tests {
     fn an_output_on_a_missing_drive_is_reported() {
         let drive = missing_drive();
         for target in [drive.join("out.mp4"), drive.join("movies").join("out.mp4")] {
-            assert_unavailable(check(&pending(OutputKind::Mp4, target), false), &drive);
+            assert_unavailable(
+                check(&pending(OutputKind::Merged(Container::Mp4), target), false),
+                &drive,
+            );
         }
     }
 
@@ -721,7 +736,10 @@ mod tests {
         let dir = scratch("missing_drive");
         let work = dir.join("work");
         let drive = missing_drive();
-        let outputs = [pending(OutputKind::Mp4, drive.join("movies").join("a.mp4"))];
+        let outputs = [pending(
+            OutputKind::Merged(Container::Mp4),
+            drive.join("movies").join("a.mp4"),
+        )];
         workdir::record_outputs(&work, &outputs, false).unwrap();
 
         assert_unavailable(recover(&work, &[]), &drive);

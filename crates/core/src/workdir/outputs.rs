@@ -5,6 +5,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use hs_m3u8_remux::Container;
 use serde::{Deserialize, Serialize};
 
 use super::record::check_version;
@@ -19,8 +20,9 @@ pub(super) const OUTPUTS_FILE: &str = "outputs.json";
 /// [`PendingOutput::new`]）与 `swapped` 的含义，任何一项改变都要升。兼容约定同 [`super::record::JOB_FORMAT_VERSION`]：
 /// 放弃任务与之后的运行要按旧版本的规则找到写到一半的输出与挪开的旧输出，读不懂时什么也不动。
 ///
-/// 各版本：13 为 1.0 写的；14 加了文件任务的输出（`file` 一种）。
-pub(super) const OUTPUTS_FORMAT_VERSION: u32 = 14;
+/// 各版本：13 为 1.0 写的；14 加了文件任务的输出（`file` 一种）；15 加了 Matroska 合并文件（`mkv`）与另存的字幕文件
+/// （`{"subtitles":{"index":<n>}}`，n 为第几个字幕，保留名的种类段为 `sub<n>`）。
+pub(super) const OUTPUTS_FORMAT_VERSION: u32 = 15;
 
 /// 读得了的最旧的 outputs.json 格式版本：1.0 写的。
 const OLDEST_OUTPUTS_FORMAT_VERSION: u32 = 13;
@@ -28,15 +30,20 @@ const OLDEST_OUTPUTS_FORMAT_VERSION: u32 = 13;
 /// 加了文件任务的输出的 outputs.json 格式版本。
 const FILE_OUTPUTS_FORMAT_VERSION: u32 = 14;
 
+/// 加了 Matroska 合并文件与另存的字幕文件的 outputs.json 格式版本。
+const TRACKS_OUTPUTS_FORMAT_VERSION: u32 = 15;
+
 /// 输出的种类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OutputKind {
-    /// MP4 文件
-    Mp4,
+    /// 合并文件（MP4 或 Matroska）
+    Merged(Container),
     /// 本地 HLS 目录
     Hls,
     /// 文件任务下载的文件
     File,
+    /// 另存的第 n 个字幕文件（按所选字幕的顺序，从 0 起）
+    Subtitles(usize),
 }
 
 /// 正在写的一个输出：输出路径（绝对路径，与当前目录无关），以及由它与任务目录指纹定下的两个与它同级的保留名。
@@ -51,13 +58,15 @@ pub(crate) struct PendingOutput {
 
 impl PendingOutput {
     /// `target` 须是以文件名结尾的绝对路径；`fingerprint` 为任务目录的指纹。两个保留名为
-    /// `hsdl-<fingerprint>.<mp4|hls|file>.part` 与 `.old`：定长，不随输出名变长；几个任务（任务目录不同）输出到同一处时
-    /// 各写各的。
+    /// `hsdl-<fingerprint>.<种类>.part` 与 `.old`，种类为 `mp4`、`mkv`、`hls`、`file` 或 `sub<n>`：不随输出名变长；几个任务
+    /// （任务目录不同）输出到同一处时各写各的。
     pub(crate) fn new(kind: OutputKind, target: PathBuf, fingerprint: Fingerprint) -> Self {
         let ext = match kind {
-            OutputKind::Mp4 => "mp4",
-            OutputKind::Hls => "hls",
-            OutputKind::File => "file",
+            OutputKind::Merged(Container::Mp4) => "mp4".to_owned(),
+            OutputKind::Merged(Container::Matroska) => "mkv".to_owned(),
+            OutputKind::Hls => "hls".to_owned(),
+            OutputKind::File => "file".to_owned(),
+            OutputKind::Subtitles(n) => format!("sub{n}"),
         };
         let dir = target
             .parent()
@@ -164,6 +173,12 @@ enum KindFile {
     Hls,
     /// 格式版本 14 起
     File,
+    /// 格式版本 15 起
+    Mkv,
+    /// 格式版本 15 起
+    Subtitles {
+        index: usize,
+    },
 }
 
 fn encode(outputs: &[PendingOutput], swapped: bool) -> Vec<u8> {
@@ -174,9 +189,11 @@ fn encode(outputs: &[PendingOutput], swapped: bool) -> Vec<u8> {
             .iter()
             .map(|o| OutputFile {
                 kind: match o.kind {
-                    OutputKind::Mp4 => KindFile::Mp4,
+                    OutputKind::Merged(Container::Mp4) => KindFile::Mp4,
+                    OutputKind::Merged(Container::Matroska) => KindFile::Mkv,
                     OutputKind::Hls => KindFile::Hls,
                     OutputKind::File => KindFile::File,
+                    OutputKind::Subtitles(index) => KindFile::Subtitles { index },
                 },
                 target: o
                     .target
@@ -215,7 +232,7 @@ fn decode(bytes: &[u8]) -> Result<OutputsRecord, WorkDirProblem> {
             let fingerprint = Fingerprint::parse(&o.fingerprint)
                 .ok_or_else(|| format!("{OUTPUTS_FILE} 里的指纹无法识别：{}", o.fingerprint))?;
             let kind = match o.kind {
-                KindFile::Mp4 => OutputKind::Mp4,
+                KindFile::Mp4 => OutputKind::Merged(Container::Mp4),
                 KindFile::Hls => OutputKind::Hls,
                 KindFile::File if version < FILE_OUTPUTS_FORMAT_VERSION => {
                     return Err(format!(
@@ -223,6 +240,15 @@ fn decode(bytes: &[u8]) -> Result<OutputsRecord, WorkDirProblem> {
                     ));
                 }
                 KindFile::File => OutputKind::File,
+                KindFile::Mkv | KindFile::Subtitles { .. }
+                    if version < TRACKS_OUTPUTS_FORMAT_VERSION =>
+                {
+                    return Err(format!(
+                        "{OUTPUTS_FILE} 是格式版本 {version}，那时还没有 Matroska 与字幕文件的输出"
+                    ));
+                }
+                KindFile::Mkv => OutputKind::Merged(Container::Matroska),
+                KindFile::Subtitles { index } => OutputKind::Subtitles(index),
             };
             Ok(PendingOutput::new(kind, target, fingerprint))
         })
@@ -284,7 +310,19 @@ mod tests {
     #[test]
     fn outputs_file_round_trips_and_rejects_other_versions_and_fields() {
         let fingerprint = Fingerprint::parse("0123456789abcdef").unwrap();
-        let mp4 = PendingOutput::new(OutputKind::Mp4, "/d/a.mp4".into(), fingerprint);
+        let mp4 = PendingOutput::new(
+            OutputKind::Merged(Container::Mp4),
+            "/d/a.mp4".into(),
+            fingerprint,
+        );
+        let mkv = PendingOutput::new(
+            OutputKind::Merged(Container::Matroska),
+            "/d/a.mkv".into(),
+            fingerprint,
+        );
+        let srt = PendingOutput::new(OutputKind::Subtitles(1), "/d/a.en.srt".into(), fingerprint);
+        assert_eq!(mkv.temp(), Path::new("/d/hsdl-0123456789abcdef.mkv.part"));
+        assert_eq!(srt.aside(), Path::new("/d/hsdl-0123456789abcdef.sub1.old"));
         let hls = PendingOutput::new(OutputKind::Hls, "/d/a/".into(), fingerprint);
         let file = PendingOutput::new(OutputKind::File, "/d/a.zip".into(), fingerprint);
         assert_eq!(file.aside(), Path::new("/d/hsdl-0123456789abcdef.file.old"));
@@ -296,11 +334,11 @@ mod tests {
             )
         );
         assert_eq!(hls.temp(), Path::new("/d/hsdl-0123456789abcdef.hls.part"));
-        let outputs = vec![mp4, hls, file];
+        let outputs = vec![mp4, hls, file, mkv, srt];
         let bytes = encode(&outputs, true);
         assert_eq!(
             String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"format_version":14,"swapped":true,"outputs":[{"kind":"mp4","target":"/d/a.mp4","fingerprint":"0123456789abcdef"},{"kind":"hls","target":"/d/a/","fingerprint":"0123456789abcdef"},{"kind":"file","target":"/d/a.zip","fingerprint":"0123456789abcdef"}]}"#
+            r#"{"format_version":15,"swapped":true,"outputs":[{"kind":"mp4","target":"/d/a.mp4","fingerprint":"0123456789abcdef"},{"kind":"hls","target":"/d/a/","fingerprint":"0123456789abcdef"},{"kind":"file","target":"/d/a.zip","fingerprint":"0123456789abcdef"},{"kind":"mkv","target":"/d/a.mkv","fingerprint":"0123456789abcdef"},{"kind":{"subtitles":{"index":1}},"target":"/d/a.en.srt","fingerprint":"0123456789abcdef"}]}"#
         );
         assert_eq!(
             decode(&bytes),
@@ -312,16 +350,17 @@ mod tests {
 
         let entry = |kind: &str, target: &str, fingerprint: &str| {
             format!(
-                r#"{{"format_version":14,"swapped":false,"outputs":[{{"kind":"{kind}","target":"{target}","fingerprint":"{fingerprint}"}}]}}"#
+                r#"{{"format_version":15,"swapped":false,"outputs":[{{"kind":"{kind}","target":"{target}","fingerprint":"{fingerprint}"}}]}}"#
             )
         };
         for rejected in [
             r#"{"format_version":12,"outputs":[]}"#.to_owned(),
             r#"{"format_version":13,"swapped":false,"outputs":[],"extra":1}"#.to_owned(),
-            r#"{"format_version":15,"swapped":false,"outputs":[]}"#.to_owned(),
+            r#"{"format_version":16,"swapped":false,"outputs":[]}"#.to_owned(),
+            r#"{"format_version":14,"swapped":false,"outputs":[{"kind":"mkv","target":"/d/a.mkv","fingerprint":"0123456789abcdef"}]}"#.to_owned(),
             r#"{"format_version":13,"swapped":false,"outputs":[{"kind":"file","target":"/d/a","fingerprint":"0123456789abcdef"}]}"#.to_owned(),
             r#"{"format_version":13,"outputs":[]}"#.to_owned(),
-            entry("mkv", "/d/a", "0123456789abcdef"),
+            entry("webm", "/d/a", "0123456789abcdef"),
             entry("mp4", "d/a.mp4", "0123456789abcdef"),
             entry("mp4", "/", "0123456789abcdef"),
             entry("mp4", "/d/a.mp4", "../../x"),

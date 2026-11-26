@@ -1,7 +1,7 @@
-//! 变体与音频 rendition 的身份：来源写了稳定 ID 时以它为主，没写时是属性；再加上身份相同的里面排第几。地址常带令牌、
+//! 变体与音频、字幕 rendition 的身份：来源写了稳定 ID 时以它为主，没写时是属性；再加上身份相同的里面排第几。地址常带令牌、
 //! 主播放列表会增删重排变体，按身份能在后来拉到的主播放列表里找回同一条轨（见 [`crate::VariantChoice::Matching`]）。
 
-use crate::{MasterPlaylist, Rendition, Resolution, Variant, audio_renditions};
+use crate::{MasterPlaylist, Rendition, RenditionKind, Resolution, Variant, renditions};
 
 /// 变体的身份。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,13 +94,13 @@ impl VariantKey {
     }
 }
 
-/// 音频 rendition 的身份，在所选变体引用的音频组里认（组由变体给出）。
+/// 音频或字幕 rendition 的身份，在所选变体引用的组里认（组由变体给出：音频为 AUDIO 属性，字幕为 SUBTITLES 属性）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AudioKey {
+pub enum RenditionKey {
     /// 来源写了 STABLE-RENDITION-ID：只按它认，同 [`VariantKey::Stable`]
     Stable {
         id: String,
-        /// 同一组里稳定 ID 相同的音频 rendition 里排第几（从 0 起）
+        /// 同一组里稳定 ID 相同的同类 rendition 里排第几（从 0 起）
         occurrence: usize,
     },
     /// 来源没写稳定 ID：各项取自 [`Rendition`] 的同名属性（`group` 即 [`Rendition::group`]），同
@@ -112,47 +112,50 @@ pub enum AudioKey {
         name: Option<String>,
         /// LANGUAGE
         language: Option<String>,
-        /// 主播放列表中上面几项与它完全相同的音频 rendition 里排第几（从 0 起）；同组同语言同名的音频（违反 RFC 8216
+        /// 主播放列表中上面几项与它完全相同的同类 rendition 里排第几（从 0 起）；同组同语言同名的（违反 RFC 8216
         /// 4.3.4.1.1 的 NAME 唯一，但确有其事）只能这样区分
         occurrence: usize,
     },
 }
 
-impl AudioKey {
-    /// `master` 里第 `index` 个音频 rendition（口径同 [`crate::AudioChoice::Index`]）的身份；下标超出范围时为 None。
-    pub fn of(master: &MasterPlaylist, index: usize) -> Option<AudioKey> {
-        let (_, rendition) = audio_renditions(master).nth(index)?;
+impl RenditionKey {
+    /// `master` 里第 `index` 个 `kind` 类 rendition（口径同 [`crate::RenditionChoice::Index`]）的身份；下标超出范围时为
+    /// None。
+    pub fn of(master: &MasterPlaylist, kind: RenditionKind, index: usize) -> Option<RenditionKey> {
+        let (_, rendition) = renditions(master, kind).nth(index)?;
         let mut key = match &rendition.stable_id {
-            Some(id) => AudioKey::Stable {
+            Some(id) => RenditionKey::Stable {
                 id: id.clone(),
                 occurrence: 0,
             },
-            None => AudioKey::Attributes {
+            None => RenditionKey::Attributes {
                 group: rendition.group.clone(),
                 name: rendition.name.clone(),
                 language: rendition.language.clone(),
                 occurrence: 0,
             },
         };
-        let earlier = audio_renditions(master)
+        let earlier = renditions(master, kind)
             .take(index)
             .filter(|(_, r)| r.group == rendition.group && key.matches(r))
             .count();
-        let (AudioKey::Stable { occurrence, .. } | AudioKey::Attributes { occurrence, .. }) =
+        let (RenditionKey::Stable { occurrence, .. } | RenditionKey::Attributes { occurrence, .. }) =
             &mut key;
         *occurrence = earlier;
         Some(key)
     }
 
-    /// 身份是它的、在 `group` 组里的音频 rendition，与它在 `master` 里的位置（口径同 [`crate::AudioChoice::Index`]）；
-    /// 没有时为 None。
+    /// 身份是它的、在 `group` 组里的 `kind` 类 rendition，与它的位置（口径同 [`crate::RenditionChoice::Index`]）；没有时
+    /// 为 None。
     pub fn find<'a>(
         &self,
         master: &'a MasterPlaylist,
+        kind: RenditionKind,
         group: &str,
     ) -> Option<(usize, &'a Rendition)> {
-        let (AudioKey::Stable { occurrence, .. } | AudioKey::Attributes { occurrence, .. }) = self;
-        audio_renditions(master)
+        let (RenditionKey::Stable { occurrence, .. } | RenditionKey::Attributes { occurrence, .. }) =
+            self;
+        renditions(master, kind)
             .filter(|(_, r)| r.group == group && self.matches(r))
             .nth(*occurrence)
     }
@@ -160,8 +163,8 @@ impl AudioKey {
     /// 除排第几以外与 `rendition` 相同。
     fn matches(&self, rendition: &Rendition) -> bool {
         match self {
-            AudioKey::Stable { id, occurrence: _ } => rendition.stable_id.as_ref() == Some(id),
-            AudioKey::Attributes {
+            RenditionKey::Stable { id, occurrence: _ } => rendition.stable_id.as_ref() == Some(id),
+            RenditionKey::Attributes {
                 group,
                 name,
                 language,

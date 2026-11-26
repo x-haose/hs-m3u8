@@ -1,8 +1,9 @@
 //! 主播放列表解析与选轨。
 
 use hs_m3u8_hls::{
-    AudioChoice, AudioKey, Error, Malformed, MasterPlaylist, Playlist, Preference, RenditionKind,
-    Resolution, SelectError, SyntaxError, Url, VariantChoice, VariantKey, parse, select,
+    Error, Malformed, MasterPlaylist, Playlist, Preference, RenditionChoice, RenditionKey,
+    RenditionKind, Renditions, Resolution, SelectError, SyntaxError, Url, VariantChoice,
+    VariantKey, parse, select,
 };
 
 const BASE: &str = "https://video.example.com/ext_tw_video/123/pu/pl/master.m3u8?tag=12";
@@ -129,14 +130,14 @@ fn equal_resolutions_fall_back_to_bandwidth() {
     );
     let selection = select(&m, &Preference::default()).unwrap();
     assert_eq!(selection.variant.bandwidth, Some(5000));
-    assert_eq!(selection.audio, None);
+    assert!(selection.audio.is_empty());
 }
 
 #[test]
 fn audio_rendition_is_chosen_by_default_flag_or_language() {
     let m = master(SPLIT);
     let default = select(&m, &Preference::default()).unwrap();
-    let audio = default.audio.unwrap();
+    let audio = default.audio.into_iter().next().unwrap();
     assert_eq!(audio.rendition.language.as_deref(), Some("zh"));
     assert_eq!(
         audio.uri.as_str(),
@@ -145,18 +146,26 @@ fn audio_rendition_is_chosen_by_default_flag_or_language() {
 
     let english = Preference {
         variant: VariantChoice::Best,
-        audio: AudioChoice::Language("EN".into()),
+        audio: Renditions::These(vec![RenditionChoice::Language("EN".into())]),
+        subtitles: Renditions::None,
     };
-    let audio = select(&m, &english).unwrap().audio.unwrap();
+    let audio = select(&m, &english)
+        .unwrap()
+        .audio
+        .into_iter()
+        .next()
+        .unwrap();
     assert_eq!(audio.rendition.name.as_deref(), Some("English"));
 
     let missing = Preference {
         variant: VariantChoice::Best,
-        audio: AudioChoice::Language("ja".into()),
+        audio: Renditions::These(vec![RenditionChoice::Language("ja".into())]),
+        subtitles: Renditions::None,
     };
     assert_eq!(
         select(&m, &missing).unwrap_err(),
-        SelectError::AudioLanguageNotFound {
+        SelectError::LanguageNotFound {
+            kind: RenditionKind::Audio,
             group: "aud".into(),
             language: "ja".into(),
             available: vec!["en".into(), "zh".into()],
@@ -170,13 +179,23 @@ fn audio_rendition_is_chosen_by_index() {
     let m = master(SPLIT);
     let by_index = |index| Preference {
         variant: VariantChoice::Best,
-        audio: AudioChoice::Index(index),
+        audio: Renditions::These(vec![RenditionChoice::Index(index)]),
+        subtitles: Renditions::None,
     };
-    let audio = select(&m, &by_index(0)).unwrap().audio.unwrap();
+    let audio = select(&m, &by_index(0))
+        .unwrap()
+        .audio
+        .into_iter()
+        .next()
+        .unwrap();
     assert_eq!(audio.rendition.name.as_deref(), Some("English"));
     assert_eq!(
         select(&m, &by_index(2)).unwrap_err(),
-        SelectError::AudioIndexOutOfRange { index: 2, count: 2 }
+        SelectError::IndexOutOfRange {
+            kind: RenditionKind::Audio,
+            index: 2,
+            count: 2
+        }
     );
 
     // 下标只数音频：排在前面的字幕不算
@@ -188,6 +207,8 @@ fn audio_rendition_is_chosen_by_index() {
     let audio = select(&with_subtitles, &by_index(1))
         .unwrap()
         .audio
+        .into_iter()
+        .next()
         .unwrap();
     assert_eq!(
         (audio.index, audio.rendition.name.as_deref()),
@@ -201,7 +222,8 @@ fn audio_rendition_is_chosen_by_index() {
     );
     assert_eq!(
         select(&other_group, &by_index(1)).unwrap_err(),
-        SelectError::NotVariantAudio {
+        SelectError::NotInGroup {
+            kind: RenditionKind::Audio,
             index: 1,
             group: Some("a".into())
         }
@@ -214,7 +236,9 @@ fn rendition_without_uri_means_audio_is_muxed_into_the_variant() {
         "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"main\",DEFAULT=YES\n\
          #EXT-X-STREAM-INF:BANDWIDTH=1000,RESOLUTION=640x360,AUDIO=\"a\"\nv.m3u8\n",
     );
-    assert_eq!(select(&m, &Preference::default()).unwrap().audio, None);
+    let selection = select(&m, &Preference::default()).unwrap();
+    assert!(selection.audio.is_empty());
+    assert!(selection.muxed_audio);
 }
 
 #[test]
@@ -222,7 +246,8 @@ fn variant_index_is_bounds_checked() {
     let m = master(SPLIT);
     let first = Preference {
         variant: VariantChoice::Index(0),
-        audio: AudioChoice::Default,
+        audio: Renditions::Default,
+        subtitles: Renditions::None,
     };
     assert_eq!(
         select(&m, &first).unwrap().variant.resolution,
@@ -233,7 +258,8 @@ fn variant_index_is_bounds_checked() {
     );
     let out = Preference {
         variant: VariantChoice::Index(9),
-        audio: AudioChoice::Default,
+        audio: Renditions::Default,
+        subtitles: Renditions::None,
     };
     assert_eq!(
         select(&m, &out).unwrap_err(),
@@ -247,7 +273,10 @@ const LOW: &str = "#EXT-X-STREAM-INF:BANDWIDTH=1000,RESOLUTION=640x360,AUDIO=\"a
 fn matching(master: &MasterPlaylist, variant: usize, audio: usize) -> Preference {
     Preference {
         variant: VariantChoice::Matching(VariantKey::of(master, variant).unwrap()),
-        audio: AudioChoice::Matching(AudioKey::of(master, audio).unwrap()),
+        audio: Renditions::These(vec![RenditionChoice::Matching(
+            RenditionKey::of(master, RenditionKind::Audio, audio).unwrap(),
+        )]),
+        subtitles: Renditions::None,
     }
 }
 
@@ -268,7 +297,7 @@ fn matching_finds_the_same_tracks_after_the_master_changes() {
         selected.variant.uri.as_str(),
         "https://video.example.com/ext_tw_video/123/pu/pl/low.m3u8?t=2"
     );
-    let audio = selected.audio.unwrap();
+    let audio = selected.audio.into_iter().next().unwrap();
     assert_eq!(audio.index, 1);
     assert_eq!(
         audio.uri.as_str(),
@@ -292,7 +321,9 @@ fn matching_reports_tracks_that_are_gone() {
     let without_audio = master(&format!("#EXTM3U\n{}{LOW}", EN.replace("\"en\"", "\"fr\"")));
     assert_eq!(
         select(&without_audio, &preference).unwrap_err(),
-        SelectError::AudioNotFound
+        SelectError::NotFound {
+            kind: RenditionKind::Audio
+        }
     );
 }
 
@@ -311,7 +342,8 @@ fn redundant_variants_are_told_apart_by_position() {
         );
         let preference = Preference {
             variant: VariantChoice::Matching(key),
-            audio: AudioChoice::Default,
+            audio: Renditions::Default,
+            subtitles: Renditions::None,
         };
         assert_eq!(select(&m, &preference).unwrap().variant_index, index);
     }
@@ -352,10 +384,10 @@ fn stable_ids_find_the_same_tracks_after_attributes_change() {
     );
     assert_eq!(
         preference.audio,
-        AudioChoice::Matching(AudioKey::Stable {
+        Renditions::These(vec![RenditionChoice::Matching(RenditionKey::Stable {
             id: "Audio-37262".into(),
             occurrence: 0
-        })
+        })])
     );
 
     // 码率变了、地址换了令牌，路径 B 排到了前面，最前面还多了一档
@@ -375,7 +407,7 @@ fn stable_ids_find_the_same_tracks_after_attributes_change() {
         selected.variant.uri.as_str(),
         "https://backup.example.com/768/video.m3u8?t=2"
     );
-    let audio = selected.audio.unwrap();
+    let audio = selected.audio.into_iter().next().unwrap();
     assert_eq!((audio.index, audio.rendition.group.as_str()), (1, "B"));
 }
 
@@ -402,7 +434,8 @@ fn rows_of_one_stream_are_told_apart_by_audio_group() {
     ));
     let preference = Preference {
         variant: VariantChoice::Matching(VariantKey::of(&before, 1).unwrap()),
-        audio: AudioChoice::Default,
+        audio: Renditions::Default,
+        subtitles: Renditions::None,
     };
     let after = master(&format!(
         "#EXTM3U\n{}{}{}{}{}{}",
@@ -418,7 +451,14 @@ fn rows_of_one_stream_are_told_apart_by_audio_group() {
 
     assert_eq!(selected.variant.audio.as_deref(), Some("ec3"));
     assert_eq!(
-        selected.audio.unwrap().rendition.stable_id.as_deref(),
+        selected
+            .audio
+            .into_iter()
+            .next()
+            .unwrap()
+            .rendition
+            .stable_id
+            .as_deref(),
         Some("ec3-en")
     );
 }
@@ -429,9 +469,17 @@ fn matching_audio_is_looked_up_in_the_variant_group() {
     let m = pathways(&[VARIANTS_A, VARIANTS_B]);
     let preference = Preference {
         variant: VariantChoice::Index(1),
-        audio: AudioChoice::Matching(AudioKey::of(&m, 1).unwrap()),
+        audio: Renditions::These(vec![RenditionChoice::Matching(
+            RenditionKey::of(&m, RenditionKind::Audio, 1).unwrap(),
+        )]),
+        subtitles: Renditions::None,
     };
-    let audio = select(&m, &preference).unwrap().audio.unwrap();
+    let audio = select(&m, &preference)
+        .unwrap()
+        .audio
+        .into_iter()
+        .next()
+        .unwrap();
     assert_eq!((audio.index, audio.rendition.group.as_str()), (0, "A"));
 
     let without_group = master(&format!(
@@ -439,11 +487,16 @@ fn matching_audio_is_looked_up_in_the_variant_group() {
     ));
     let preference = Preference {
         variant: VariantChoice::Best,
-        audio: AudioChoice::Matching(AudioKey::of(&without_group, 0).unwrap()),
+        audio: Renditions::These(vec![RenditionChoice::Matching(
+            RenditionKey::of(&without_group, RenditionKind::Audio, 0).unwrap(),
+        )]),
+        subtitles: Renditions::None,
     };
     assert_eq!(
         select(&without_group, &preference).unwrap_err(),
-        SelectError::AudioNotFound
+        SelectError::NotFound {
+            kind: RenditionKind::Audio
+        }
     );
 }
 
@@ -463,5 +516,112 @@ fn attribute_keys_find_tracks_that_gained_stable_ids() {
     ));
     let selected = select(&after, &preference).unwrap();
     assert_eq!(selected.variant_index, 0);
-    assert_eq!(selected.audio.unwrap().index, 0);
+    assert_eq!(selected.audio.into_iter().next().unwrap().index, 0);
+}
+
+/// 两条音频、两条字幕（一条 DEFAULT=YES、FORCED=YES），变体引用两个组。
+const TRACKS: &str = "#EXTM3U\n\
+    #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"English\",LANGUAGE=\"en\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"2\",URI=\"en.m3u8\"\n\
+    #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"Deutsch\",LANGUAGE=\"de\",CHANNELS=\"6\",URI=\"de.m3u8\"\n\
+    #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"s\",NAME=\"简体\",LANGUAGE=\"zh-Hans\",URI=\"zh.m3u8\"\n\
+    #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"s\",NAME=\"English (forced)\",LANGUAGE=\"en\",DEFAULT=YES,FORCED=YES,URI=\"enf.m3u8\"\n\
+    #EXT-X-STREAM-INF:BANDWIDTH=1000,RESOLUTION=640x360,AUDIO=\"a\",SUBTITLES=\"s\"\nv.m3u8\n";
+
+fn names(selected: &[hs_m3u8_hls::SelectedRendition]) -> Vec<&str> {
+    selected
+        .iter()
+        .map(|s| s.rendition.name.as_deref().unwrap())
+        .collect()
+}
+
+#[test]
+fn subtitle_group_and_rendition_flags_are_parsed() {
+    let m = master(TRACKS);
+    assert_eq!(m.variants[0].subtitles.as_deref(), Some("s"));
+    let (en, forced) = (&m.renditions[0], &m.renditions[3]);
+    assert!(en.autoselect && !en.forced);
+    assert_eq!(en.channels.as_deref(), Some("2"));
+    assert_eq!(forced.kind, RenditionKind::Subtitles);
+    assert!(forced.forced && forced.default && !forced.autoselect);
+}
+
+/// 全部、逐个指定（按给出的顺序）、不要；默认不选字幕。
+#[test]
+fn several_audio_and_subtitle_renditions_are_selected() {
+    let m = master(TRACKS);
+    let default = select(&m, &Preference::default()).unwrap();
+    assert_eq!(names(&default.audio), ["English"]);
+    assert!(default.subtitles.is_empty() && !default.muxed_audio);
+
+    let all = Preference {
+        audio: Renditions::All,
+        subtitles: Renditions::All,
+        ..Preference::default()
+    };
+    let all = select(&m, &all).unwrap();
+    assert_eq!(names(&all.audio), ["English", "Deutsch"]);
+    assert_eq!(names(&all.subtitles), ["简体", "English (forced)"]);
+    assert_eq!(all.subtitles[1].index, 1);
+
+    let these = Preference {
+        audio: Renditions::These(vec![
+            RenditionChoice::Language("de".into()),
+            RenditionChoice::Index(0),
+        ]),
+        subtitles: Renditions::Default,
+        ..Preference::default()
+    };
+    let these = select(&m, &these).unwrap();
+    assert_eq!(names(&these.audio), ["Deutsch", "English"]);
+    assert_eq!(names(&these.subtitles), ["English (forced)"]);
+
+    let none = Preference {
+        audio: Renditions::None,
+        ..Preference::default()
+    };
+    let none = select(&m, &none).unwrap();
+    assert!(none.audio.is_empty() && !none.muxed_audio);
+}
+
+/// 两项选到同一条报错；字幕按下标只数字幕。
+#[test]
+fn a_rendition_chosen_twice_is_an_error() {
+    let m = master(TRACKS);
+    let twice = Preference {
+        subtitles: Renditions::These(vec![
+            RenditionChoice::Language("EN".into()),
+            RenditionChoice::Index(1),
+        ]),
+        ..Preference::default()
+    };
+    assert_eq!(
+        select(&m, &twice).unwrap_err(),
+        SelectError::Duplicate {
+            kind: RenditionKind::Subtitles,
+            index: 1
+        }
+    );
+}
+
+/// 没写 URI 的字幕不合 RFC 8216，选到时报错；变体里没有音频组时默认用混着的音频，选 None 则不要。
+#[test]
+fn subtitles_without_uri_and_muxed_audio() {
+    let m = master(
+        "#EXTM3U\n#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"s\",NAME=\"x\",DEFAULT=YES\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=1000,SUBTITLES=\"s\"\nv.m3u8\n",
+    );
+    let preference = Preference {
+        subtitles: Renditions::Default,
+        ..Preference::default()
+    };
+    assert_eq!(
+        select(&m, &preference).unwrap_err(),
+        SelectError::SubtitlesWithoutUri { index: 0 }
+    );
+    assert!(select(&m, &Preference::default()).unwrap().muxed_audio);
+    let none = Preference {
+        audio: Renditions::None,
+        ..Preference::default()
+    };
+    assert!(!select(&m, &none).unwrap().muxed_audio);
 }

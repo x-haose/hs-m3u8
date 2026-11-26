@@ -79,8 +79,8 @@ pub(crate) struct SegmentFile {
 pub(crate) struct Stored {
     /// 各轨的分片，按（会话, 序号）排列
     pub segments: Vec<Vec<SegmentFile>>,
-    /// 各轨 init 段的字节数之和
-    pub init_bytes: u64,
+    /// 各轨 init 段的字节数之和，按轨号
+    pub init_bytes: Vec<u64>,
 }
 
 impl Stored {
@@ -92,9 +92,14 @@ impl Stored {
             .fold(0u64, u64::saturating_add)
     }
 
-    /// 分片与 init 段的字节数之和。
+    /// 分片与 init 段的字节数之和，各轨合计。
     pub(crate) fn bytes(&self) -> u64 {
-        self.segments.iter().flatten().map(|f| f.len).sum::<u64>() + self.init_bytes
+        (0..self.segments.len()).map(|t| self.track_bytes(t)).sum()
+    }
+
+    /// 第 `track` 条轨的分片与 init 段的字节数之和。
+    pub(crate) fn track_bytes(&self, track: usize) -> u64 {
+        self.segments[track].iter().map(|f| f.len).sum::<u64>() + self.init_bytes[track]
     }
 }
 
@@ -257,7 +262,7 @@ fn lock_or_create(root: &Path, lock: Option<Lock>) -> Result<Lock, Error> {
 fn scan(layout: &Layout, tracks: usize) -> Result<Stored, Error> {
     let mut stored = Stored {
         segments: vec![Vec::new(); tracks],
-        init_bytes: 0,
+        init_bytes: vec![0; tracks],
     };
     for (track, dir) in track_dirs(&layout.root)? {
         let Some(segments) = stored.segments.get_mut(track) else {
@@ -270,7 +275,7 @@ fn scan(layout: &Layout, tracks: usize) -> Result<Stored, Error> {
         files.sort_by_key(|f| (f.name.session, f.name.sequence));
         *segments = files;
         for (_, _, len) in list(&dir, parse_init_name)? {
-            stored.init_bytes += len;
+            stored.init_bytes[track] += len;
         }
     }
     Ok(stored)

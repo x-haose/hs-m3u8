@@ -196,9 +196,9 @@ variants! {
     }
 }
 
-impl From<core::Mp4Unsupported> for Mp4Unsupported {
-    fn from(unsupported: core::Mp4Unsupported) -> Self {
-        use core::Mp4Unsupported as U;
+impl From<core::MergeUnsupported> for Mp4Unsupported {
+    fn from(unsupported: core::MergeUnsupported) -> Self {
+        use core::MergeUnsupported as U;
         // NoStreams 不带位置，它的分支不用组号与轨号
         let (group, track) = unsupported.at().map_or((0, 0), hls_track);
         match unsupported {
@@ -221,8 +221,8 @@ impl From<core::Mp4Unsupported> for Mp4Unsupported {
                 group,
                 track,
                 kind: kind.into(),
-                first: first.into(),
-                found: found.into(),
+                first: (*first).into(),
+                found: (*found).into(),
             },
             U::ConfigChanged { kind, .. } => Mp4Unsupported::ConfigChanged {
                 group,

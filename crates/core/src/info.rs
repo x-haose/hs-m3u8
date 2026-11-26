@@ -4,11 +4,12 @@
 use std::time::Duration;
 
 use hs_m3u8_hls::{
-    AudioChoice, AudioKey, MasterPlaylist, MediaPlaylist, Resolution, Selection, VariantChoice,
-    VariantKey, audio_renditions,
+    MasterPlaylist, MediaPlaylist, RenditionChoice, RenditionKey, RenditionKind, Resolution,
+    VariantChoice, VariantKey, renditions,
 };
 
-use crate::resolve;
+use crate::HttpFailure;
+use crate::resolve::{self, Chosen};
 
 /// 一个变体的属性。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +24,8 @@ pub struct VariantInfo {
     pub codecs: Vec<String>,
     /// 引用的音频组（AUDIO 属性）
     pub audio_group: Option<String>,
+    /// 引用的字幕组（SUBTITLES 属性）
+    pub subtitle_group: Option<String>,
     /// 身份，开始任务按它选（[`VariantInfo::choice`]）
     pub key: VariantKey,
 }
@@ -46,17 +49,74 @@ pub struct AudioInfo {
     pub language: Option<String>,
     /// DEFAULT=YES
     pub default: bool,
+    /// CHANNELS 原样，如 `2`、`6`、`16/JOC`
+    pub channels: Option<String>,
     /// 有独立的媒体播放列表；为 false 时音频混在变体流里，选它即用变体里的音频
     pub separate: bool,
     /// 身份，开始任务按它选（[`AudioInfo::choice`]）
-    pub key: AudioKey,
+    pub key: RenditionKey,
 }
 
 impl AudioInfo {
-    /// 按身份选这个音频 rendition（[`AudioChoice::Matching`]），同 [`VariantInfo::choice`]。
-    pub fn choice(&self) -> AudioChoice {
-        AudioChoice::Matching(self.key.clone())
+    /// 按身份选这个音频 rendition（[`RenditionChoice::Matching`]），同 [`VariantInfo::choice`]。
+    pub fn choice(&self) -> RenditionChoice {
+        RenditionChoice::Matching(self.key.clone())
     }
+}
+
+/// 一个字幕 rendition 的属性。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubtitleInfo {
+    /// 主播放列表里第几个字幕 rendition（只数字幕），也是在 [`MasterInfo::subtitles`] 里的位置；只对这一份主播放列表
+    /// 有效，开始任务按 [`SubtitleInfo::choice`] 选
+    pub index: usize,
+    pub group: String,
+    pub name: Option<String>,
+    /// LANGUAGE，BCP 47（如 `zh-Hans`）
+    pub language: Option<String>,
+    /// DEFAULT=YES
+    pub default: bool,
+    /// AUTOSELECT=YES
+    pub autoselect: bool,
+    /// FORCED=YES：只含画面里外语对白等必须显示的内容
+    pub forced: bool,
+    /// 能不能下：要读它的媒体播放列表才知道，只有所选变体的字幕组里的才读；不在那一组里的（选不到）为 None
+    pub support: Option<Result<(), SubtitleProblem>>,
+    /// 身份，开始任务按它选（[`SubtitleInfo::choice`]）
+    pub key: RenditionKey,
+}
+
+impl SubtitleInfo {
+    /// 按身份选这个字幕 rendition（[`RenditionChoice::Matching`]），同 [`VariantInfo::choice`]。
+    pub fn choice(&self) -> RenditionChoice {
+        RenditionChoice::Matching(self.key.clone())
+    }
+}
+
+/// 字幕下不了的原因。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SubtitleProblem {
+    /// 不是本库能处理的格式（只处理分段的 WebVTT 文本）
+    #[error("字幕格式不支持：{0}")]
+    Format(SubtitleFormat),
+    /// 拉不到它的媒体播放列表（重试之后），原因如实给出
+    #[error("拉不到字幕的媒体播放列表：{0}")]
+    Fetch(HttpFailure),
+    /// 它的媒体播放列表写坏了，或用了不支持的特性
+    #[error("字幕的媒体播放列表不能用：{0}")]
+    Playlist(String),
+}
+
+/// 本库不处理的字幕格式。
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SubtitleFormat {
+    /// 分片是 fMP4（有 EXT-X-MAP），里面是 WebVTT（wvtt）或 TTML（stpp）；`codecs` 为所选变体 CODECS 里的字幕编码，
+    /// 没写时为空
+    #[error("fMP4 里的字幕（{}）", if codecs.is_empty() { "CODECS 没写".to_owned() } else { codecs.join("、") })]
+    Fmp4 { codecs: Vec<String> },
+    /// 分片地址的扩展名表明不是 WebVTT 文本（如 `.ttml`、`.xml`、`.dfxp` 的 TTML）
+    #[error("扩展名为 {0} 的字幕文件")]
+    Extension(String),
 }
 
 /// 主播放列表里可选的轨与选中的轨。
@@ -66,15 +126,23 @@ pub struct MasterInfo {
     pub variants: Vec<VariantInfo>,
     /// 音频 rendition，按出现顺序
     pub audio: Vec<AudioInfo>,
+    /// 字幕 rendition，按出现顺序
+    pub subtitles: Vec<SubtitleInfo>,
     pub selected: Selected,
 }
 
-/// 选中的变体与音频。
+/// 选中的轨，顺序即任务目录里的轨号：变体之后是各音频、各字幕。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selected {
     pub variant: VariantInfo,
-    /// 独立的音频 rendition；None 表示音频混在变体流里（或没有音频）
-    pub audio: Option<AudioInfo>,
+    /// 用变体流里混着的音频
+    pub muxed_audio: bool,
+    /// 有独立媒体播放列表的音频，按选的顺序
+    pub audio: Vec<AudioInfo>,
+    /// 字幕，按选的顺序
+    pub subtitles: Vec<SubtitleInfo>,
+    /// 按 [`hs_m3u8_hls::Renditions::Default`] 或 [`hs_m3u8_hls::Renditions::All`] 自动选到、但下不了而没选上的字幕
+    pub skipped_subtitles: Vec<SubtitleInfo>,
 }
 
 /// 一条轨的媒体播放列表概况。
@@ -95,28 +163,44 @@ pub struct TrackInfo {
 }
 
 impl MasterInfo {
-    pub(crate) fn of(master: &MasterPlaylist, selection: &Selection) -> Self {
+    pub(crate) fn of(chosen: &Chosen) -> Self {
+        let master = &chosen.playlist;
         MasterInfo {
             variants: (0..master.variants.len())
                 .map(|i| variant_info(master, i))
                 .collect(),
-            audio: audio_renditions(master)
+            audio: renditions(master, RenditionKind::Audio)
                 .map(|(i, _)| audio_info(master, i))
                 .collect(),
-            selected: Selected::of(master, selection),
+            subtitles: renditions(master, RenditionKind::Subtitles)
+                .map(|(i, _)| subtitle_info(chosen, i))
+                .collect(),
+            selected: Selected::of(chosen),
         }
     }
 }
 
 impl Selected {
-    /// `selection` 为从 `master` 中选出的轨。
-    pub(crate) fn of(master: &MasterPlaylist, selection: &Selection) -> Self {
+    pub(crate) fn of(chosen: &Chosen) -> Self {
+        let (master, selection) = (&chosen.playlist, &chosen.selection);
         Selected {
             variant: variant_info(master, selection.variant_index),
+            muxed_audio: selection.muxed_audio,
             audio: selection
                 .audio
-                .as_ref()
-                .map(|a| audio_info(master, a.index)),
+                .iter()
+                .map(|a| audio_info(master, a.index))
+                .collect(),
+            subtitles: selection
+                .subtitles
+                .iter()
+                .map(|s| subtitle_info(chosen, s.index))
+                .collect(),
+            skipped_subtitles: chosen
+                .skipped_subtitles
+                .iter()
+                .map(|&index| subtitle_info(chosen, index))
+                .collect(),
         }
     }
 }
@@ -151,20 +235,47 @@ fn variant_info(master: &MasterPlaylist, index: usize) -> VariantInfo {
         resolution: variant.resolution,
         codecs: variant.codecs.clone(),
         audio_group: variant.audio.clone(),
+        subtitle_group: variant.subtitles.clone(),
         key: VariantKey::of(master, index).expect("下标在范围内"),
     }
 }
 
-/// 第 `index` 个音频 rendition（口径同 [`AudioChoice::Index`]）。
+/// 第 `index` 个音频 rendition（口径同 [`RenditionChoice::Index`]）。
 fn audio_info(master: &MasterPlaylist, index: usize) -> AudioInfo {
-    let (_, rendition) = audio_renditions(master).nth(index).expect("下标在范围内");
+    let (_, rendition) = renditions(master, RenditionKind::Audio)
+        .nth(index)
+        .expect("下标在范围内");
     AudioInfo {
         index,
         group: rendition.group.clone(),
         name: rendition.name.clone(),
         language: rendition.language.clone(),
         default: rendition.default,
+        channels: rendition.channels.clone(),
         separate: rendition.uri.is_some(),
-        key: AudioKey::of(master, index).expect("下标在范围内"),
+        key: RenditionKey::of(master, RenditionKind::Audio, index).expect("下标在范围内"),
+    }
+}
+
+/// 第 `index` 个字幕 rendition（口径同 [`RenditionChoice::Index`]），能不能下取自 `chosen` 里读过的。
+fn subtitle_info(chosen: &Chosen, index: usize) -> SubtitleInfo {
+    let master = &chosen.playlist;
+    let (_, rendition) = renditions(master, RenditionKind::Subtitles)
+        .nth(index)
+        .expect("下标在范围内");
+    SubtitleInfo {
+        index,
+        group: rendition.group.clone(),
+        name: rendition.name.clone(),
+        language: rendition.language.clone(),
+        default: rendition.default,
+        autoselect: rendition.autoselect,
+        forced: rendition.forced,
+        support: chosen
+            .subtitle_support
+            .iter()
+            .find(|(i, _)| *i == index)
+            .map(|(_, support)| support.clone()),
+        key: RenditionKey::of(master, RenditionKind::Subtitles, index).expect("下标在范围内"),
     }
 }

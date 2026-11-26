@@ -105,7 +105,7 @@ async fn outputs_taken_during_the_download_leave_nothing_behind() {
 
     server.status("seg0.ts", axum::http::StatusCode::FORBIDDEN);
     let output = run(req).await.unwrap();
-    assert_hls_matches(&dir.join("out"), &output.mp4.unwrap().path);
+    assert_hls_matches(&dir.join("out"), &output.merged.unwrap().path);
     assert_eq!(server.hits("seg0.ts"), 1);
 }
 
@@ -207,7 +207,7 @@ async fn old_outputs_that_cannot_be_removed_are_reported_and_removed_later() {
     assert_eq!(leftover.kind, LeftoverKind::Removable);
     let old = leftover.path.clone();
     assert!(old.to_string_lossy().ends_with(".hls.old"), "{leftover}");
-    assert_hls_matches(&dir.join("out"), &output.mp4.unwrap().path);
+    assert_hls_matches(&dir.join("out"), &output.merged.unwrap().path);
     assert!(dir.join("out.hsdl/outputs.json").exists());
 
     let hits = server.hits("index.m3u8");

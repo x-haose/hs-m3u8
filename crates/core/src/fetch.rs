@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use hs_m3u8_hls::{InitSection, Segment};
-use hs_m3u8_remux::fmp4;
+use hs_m3u8_remux::{Streams, fmp4};
 use tokio::sync::{OnceCell, watch};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -21,7 +21,7 @@ use crate::hooks::{HookKind, Hooks, Purpose, run_hook};
 use crate::http::{Http, Permit};
 use crate::request::KeyOverride;
 use crate::verify::{Container, ContentError, check, decrypt_failure};
-use crate::workdir::{self, SegmentName};
+use crate::workdir::{self, SegmentName, WorkDir};
 use crate::{Error, Progress};
 
 /// 一项下载：第 `track` 条轨的分片，`name` 为它在任务目录中的名字，`path` 为由名字得出的写入位置，`init` 为它所用的
@@ -62,6 +62,8 @@ struct Ctx {
     key_override: Option<KeyOverride>,
     /// 分片与 key 的请求占哪一份引擎名额
     permit: Permit,
+    /// 按轨号：这条轨是字幕（分片按 WebVTT 校验）
+    subtitles: Vec<bool>,
     keys: Mutex<Keys>,
 }
 
@@ -109,24 +111,31 @@ pub(crate) struct Fetcher {
 }
 
 impl Fetcher {
-    /// `work_dir` 为任务目录，各项的 init 段在其中；`permit` 为分片与 key 的请求占哪一份引擎名额（点播的或直播的，见
-    /// [`crate::Engine::new`]）。
+    /// `dir` 为任务目录：各项的 init 段在其中，记录的选轨定下哪些轨是字幕（分片按 WebVTT 校验）；`permit` 为分片与 key
+    /// 的请求占哪一份引擎名额（点播的或直播的，见 [`crate::Engine::new`]）。
     pub(crate) fn new(
         http: Arc<Http>,
         hooks: Arc<dyn Hooks>,
         key_override: Option<KeyOverride>,
         limit: NonZeroUsize,
-        work_dir: &Path,
+        dir: &WorkDir,
         permit: Permit,
         cancel: &CancellationToken,
     ) -> Self {
+        let subtitles = dir
+            .record()
+            .streams()
+            .iter()
+            .map(|&s| s == Streams::Subtitles)
+            .collect();
         Fetcher {
             ctx: Arc::new(Ctx {
                 http,
                 hooks,
-                work_dir: work_dir.to_path_buf(),
+                work_dir: dir.layout().root().to_path_buf(),
                 key_override,
                 permit,
+                subtitles,
                 keys: Mutex::new(Keys::default()),
             }),
             limit: limit.get(),
@@ -220,7 +229,7 @@ impl Direct {
         init: Option<&Path>,
         cancel: &CancellationToken,
     ) -> Result<Vec<u8>, Error> {
-        fetch_segment(&self.ctx, segment, init, cancel)
+        fetch_segment(&self.ctx, track, segment, init, cancel)
             .await
             .map_err(|e| segment_error(track, segment, e))
     }
@@ -297,7 +306,7 @@ async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
         init,
         ..
     } = item;
-    let data = fetch_segment(&ctx, &segment, init.as_deref(), &cancel)
+    let data = fetch_segment(&ctx, track, &segment, init.as_deref(), &cancel)
         .await
         .map_err(|e| segment_error(track, &segment, e));
     let result = match data {
@@ -315,6 +324,7 @@ async fn run(ctx: Arc<Ctx>, item: Item, cancel: CancellationToken) -> Finished {
 /// EXT-X-GAP 的分片不取（RFC 8216 4.4.4.7），交到这里是本库的错误。
 async fn fetch_segment(
     ctx: &Ctx,
+    track: usize,
     segment: &Segment,
     init: Option<&Path>,
     cancel: &CancellationToken,
@@ -331,6 +341,7 @@ async fn fetch_segment(
         Some(path) => Container::Fmp4 {
             trex: stored_trex(&ctx.work_dir, path).await?,
         },
+        None if ctx.subtitles.get(track).copied().unwrap_or(false) => Container::WebVtt,
         None => Container::Standalone,
     };
     ctx.http

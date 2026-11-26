@@ -3,7 +3,9 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use hs_m3u8_remux::{Control, Error, Streams, WriteProgress, remux};
+use hs_m3u8_remux::{Control, Error, Streams, WriteProgress};
+
+use crate::remux;
 
 use crate::{counting_cancel, group, track, work_dir};
 

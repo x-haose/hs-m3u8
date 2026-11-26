@@ -1,8 +1,10 @@
 //! 组内的时间戳：往回跳、往前跳与不算跳变的中断，以及 33 位时间戳的回绕。
 
 use hs_m3u8_remux::{
-    Control, Error, Origin, Segment, StreamKind, Streams, TrackSegments, Unsupported, remux,
+    Control, Error, Origin, Segment, StreamKind, Streams, TrackSegments, Unsupported,
 };
+
+use crate::remux;
 
 use crate::{concat_track, earliest, group, timelines, track, work_dir};
 

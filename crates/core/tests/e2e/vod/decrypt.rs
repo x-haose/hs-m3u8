@@ -6,13 +6,13 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use hs_m3u8_core::{Error, IntegrityFailure, KeyOverride, Stage, Unsupported};
-use hs_m3u8_remux::{DiscontinuityGroup, Streams};
+use hs_m3u8_remux::DiscontinuityGroup;
 
 use super::{TS_A, expected_ts_a};
 use crate::server::Server;
 use crate::{
-    assert_output, encrypt, engine, expected, expected_long, fixture, hex, request, run, test_dir,
-    track,
+    all, assert_output, encrypt, engine, expected, expected_long, fixture, hex, request, run,
+    test_dir, track,
 };
 
 /// ts_long 的四个分片：第一个用显式 IV，其余三个换了 key 并用媒体序号推出的 IV。
@@ -91,7 +91,7 @@ async fn encrypted_init_sections_are_decrypted_and_ts_ones_are_unsupported() {
     let want = |dir: &Path| {
         let segments = ["seg0.m4s", "seg1.m4s"];
         let tracks = vec![track("fmp4_a/video", Some("init.mp4"), &segments)];
-        expected(dir, &[Streams::All], &[DiscontinuityGroup { tracks }])
+        expected(dir, &[all()], &[DiscontinuityGroup { tracks }])
     };
 
     let output = run(request(server.url("index.m3u8"), &dir)).await.unwrap();

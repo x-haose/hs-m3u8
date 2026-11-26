@@ -1,17 +1,17 @@
 //! 录制派出的后台任务：刷新播放列表、准备暂存的播放列表（拉它要用的 init 段）、续录时核对内容、续录时核对之前录齐的组
-//! 能否放进 MP4。事件循环不等它们，由 [`Tasks`] 持有，完成后作为事件交回；录制结束时取消并等它们退出（协作取消：在途
+//! 能否放进合并文件。事件循环不等它们，由 [`Tasks`] 持有，完成后作为事件交回；录制结束时取消并等它们退出（协作取消：在途
 //! 的回调返回、在核对的那一组核完才结束）。
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use hs_m3u8_hls::MediaPlaylist;
-use hs_m3u8_remux::Streams;
+use hs_m3u8_remux::{Container, Streams};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::mp4_check::Batch;
+use super::merge_check::Batch;
 use super::track::{Fetched, RefreshRequest};
 use super::window::{InitsToFetch, NewInits};
 use crate::fetch::Direct;
@@ -41,8 +41,8 @@ pub(super) enum Done {
         track: usize,
         result: Result<Recheck, Error>,
     },
-    /// 之前录齐的组能否放进 MP4
-    Mp4Checked { result: Result<(), Error> },
+    /// 之前录齐的组能否放进合并文件
+    MergeChecked { result: Result<(), Error> },
 }
 
 /// 在途的后台任务。
@@ -121,12 +121,18 @@ impl Tasks {
         });
     }
 
-    /// 核对之前录齐的组能否放进 MP4：按顺序核对 `batches`（见 [`super::mp4_check::Mp4Check::new`]）；`root` 为任务目录。
-    pub(super) fn check_mp4(&mut self, streams: Vec<Streams>, batches: Vec<Batch>, root: PathBuf) {
+    /// 核对之前录齐的组能否放进合并文件：按顺序核对 `batches`（见 [`super::merge_check::MergeCheck::new`]）；`root` 为任务目录。
+    pub(super) fn check_merge(
+        &mut self,
+        streams: Vec<Streams>,
+        container: Container,
+        batches: Vec<Batch>,
+        root: PathBuf,
+    ) {
         let cancel = self.cancel.clone();
         self.set.spawn(async move {
-            let result = check_mp4(streams, batches, root, &cancel).await;
-            Done::Mp4Checked { result }
+            let result = check_merge(streams, container, batches, root, &cancel).await;
+            Done::MergeChecked { result }
         });
     }
 
@@ -153,9 +159,10 @@ impl Tasks {
     }
 }
 
-/// 见 [`Tasks::check_mp4`]：按顺序核对各批，批与批之间看取消信号，取消时返回 [`Error::Cancelled`]。
-async fn check_mp4(
+/// 见 [`Tasks::check_merge`]：按顺序核对各批，批与批之间看取消信号，取消时返回 [`Error::Cancelled`]。
+async fn check_merge(
     streams: Vec<Streams>,
+    container: Container,
     batches: Vec<Batch>,
     root: PathBuf,
     cancel: &CancellationToken,
@@ -166,7 +173,7 @@ async fn check_mp4(
             return Err(Error::Cancelled);
         }
         let (streams, root) = (streams.clone(), root.clone());
-        blocking(move || output::check_mp4(&streams, &batch, &root)).await??;
+        blocking(move || output::check_merge(&streams, &batch, container, &root)).await??;
     }
     Ok(())
 }

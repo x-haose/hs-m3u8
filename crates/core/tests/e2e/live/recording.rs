@@ -6,10 +6,10 @@ use std::time::Duration;
 use axum::http::StatusCode;
 use hs_m3u8_core::hls::SyntaxError;
 use hs_m3u8_core::{
-    Engine, Error, FetchErrorKind, HttpErrorKind, HttpFailure, LiveEnd, LiveOptions, MissReason,
-    Missed, Mp4Unsupported, RefreshReason, Stage, Unsupported,
+    Engine, Error, FetchErrorKind, HttpErrorKind, HttpFailure, LiveEnd, LiveOptions,
+    MergeUnsupported, MissReason, Missed, RefreshReason, Stage, Unsupported,
 };
-use hs_m3u8_remux::{DiscontinuityGroup, Streams};
+use hs_m3u8_remux::DiscontinuityGroup;
 
 use super::{
     STALL, expected_split, live_request, missed, outcome, playlist, playlist_in, put_long, report,
@@ -17,8 +17,8 @@ use super::{
 };
 use crate::server::Server;
 use crate::{
-    assert_output, encrypt, engine, expected, expected_long, fixture, hex, request, run, test_dir,
-    track,
+    all, assert_output, encrypt, engine, expected, expected_long, fixture, hex, request, run,
+    test_dir, track,
 };
 
 /// 刷新一次多一个分片、窗口前移，直到出现 EXT-X-ENDLIST。stall_timeout 大到无法表示时视为不限。
@@ -67,15 +67,15 @@ async fn unsupported_codecs_show_in_progress_while_recording_goes_on() {
     let mut progress = job.control().progress();
     let reason = tokio::time::timeout(
         Duration::from_secs(10),
-        progress.wait_for(|p| p.mp4_unsupported.is_some()),
+        progress.wait_for(|p| p.merge_unsupported.is_some()),
     )
     .await
     .expect("录到第一个分片就应在进度里报出")
     .unwrap()
-    .mp4_unsupported
+    .merge_unsupported
     .clone();
     assert!(
-        matches!(reason, Some(Mp4Unsupported::Codec { codec: "opus", .. })),
+        matches!(reason, Some(MergeUnsupported::Codec { codec: "opus", .. })),
         "{reason:?}"
     );
 
@@ -84,8 +84,8 @@ async fn unsupported_codecs_show_in_progress_while_recording_goes_on() {
     assert!(
         matches!(
             failed,
-            Err(Error::Unsupported(Unsupported::Mp4(
-                Mp4Unsupported::Codec { codec: "opus", .. }
+            Err(Error::Unsupported(Unsupported::Merge(
+                MergeUnsupported::Codec { codec: "opus", .. }
             )))
         ),
         "{failed:?}"
@@ -312,7 +312,7 @@ async fn a_gap_before_its_init_is_fetched_is_skipped() {
     let group = DiscontinuityGroup {
         tracks: vec![track("fmp4_a/video", Some("init.mp4"), &["seg1.m4s"])],
     };
-    assert_output(&output, &expected(&dir, &[Streams::All], &[group]));
+    assert_output(&output, &expected(&dir, &[all()], &[group]));
     assert_eq!(
         outcome(&output),
         report(LiveEnd::EndList, 1, vec![missed(0, 0, MissReason::Gap)])
@@ -348,7 +348,7 @@ async fn segments_still_incomplete_after_retries_are_missed() {
     let tracks = vec![track("fmp4_a/video", Some("init.mp4"), &["seg0.m4s"])];
     assert_output(
         &output,
-        &expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]),
+        &expected(&dir, &[all()], &[DiscontinuityGroup { tracks }]),
     );
     let incomplete = MissReason::Failed(FetchErrorKind::Incomplete);
     assert_eq!(
@@ -464,7 +464,7 @@ async fn unavailable_new_init_is_missed() {
         (1, 2, 1, 0)
     );
     let tracks = vec![track("fmp4_a/video", Some("init.mp4"), &["seg0.m4s"])];
-    let want = expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]);
+    let want = expected(&dir, &[all()], &[DiscontinuityGroup { tracks }]);
     assert_output(&output, &want);
     let not_found = MissReason::InitFailed(FetchErrorKind::Http(HttpErrorKind::Status(404)));
     assert_eq!(
@@ -521,7 +521,7 @@ async fn refresh_does_not_wait_for_engine_permits() {
         Some("init.mp4"),
         &["seg0.m4s", "seg1.m4s"],
     )];
-    let want = expected(&dir, &[Streams::All], &[DiscontinuityGroup { tracks }]);
+    let want = expected(&dir, &[all()], &[DiscontinuityGroup { tracks }]);
     assert_output(&output, &want);
     assert_eq!(outcome(&output), report(LiveEnd::EndList, 1, vec![]));
 }

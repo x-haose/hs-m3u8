@@ -18,6 +18,8 @@ pub(crate) enum Container {
     Fmp4 { trex: HashMap<u32, u32> },
     /// 没有 init 段的分片：TS 或打包音频
     Standalone,
+    /// 字幕分片：WebVTT 文本
+    WebVtt,
 }
 
 /// 分片或 init 段内容校验失败的原因。
@@ -71,7 +73,8 @@ impl ContentError {
 
 /// 校验取到的 `data`：fMP4 的 init 段与分片见 [`fmp4::check`]（init 段按它自己的 trex；不是 fMP4 而是 TS 的 init 段
 /// 报不支持），并把长度写 0 的最后一个 box 改写成实际长度（见 [`fmp4::seal`]）；没有 init 段的分片须认得出格式（见
-/// [`standalone::read_head`]），截在 TS 包、帧或标签中间的为没写完（见 [`standalone::truncated`]）。
+/// [`standalone::read_head`]），截在 TS 包、帧或标签中间的为没写完（见 [`standalone::truncated`]）；字幕分片须是 WebVTT
+/// （见 [`hs_m3u8_subtitle::parse`]，文本截断看不出来）。
 pub(crate) fn check(data: &mut [u8], container: &Container) -> Result<(), ContentError> {
     match container {
         Container::Fmp4Init => {
@@ -81,6 +84,9 @@ pub(crate) fn check(data: &mut [u8], container: &Container) -> Result<(), Conten
         Container::Fmp4 { trex } => {
             fmp4::seal(data, trex).map_err(|p| ContentError::of_fmp4(p, data))
         }
+        Container::WebVtt => hs_m3u8_subtitle::parse(data)
+            .map(drop)
+            .map_err(|e| ContentError::Invalid(IntegrityFailure::NotWebVtt(e))),
         Container::Standalone => match standalone_head(data) {
             Some(found) if standalone::truncated(data, &found) => Err(ContentError::Incomplete),
             Some(_) => Ok(()),

@@ -4,14 +4,17 @@ use std::path::PathBuf;
 
 use axum::http::StatusCode;
 use hs_m3u8_core::{
-    Error, FileCount, HlsUnsupported, LiveOptions, Mp4Unsupported, Target, Unsupported, Url,
+    Error, FileCount, HlsUnsupported, LiveOptions, MergeUnsupported, Target, Unsupported, Url,
     Writing,
 };
 use hs_m3u8_hls::Playlist;
 
 use super::{assert_hls_matches, both, names_in, read_hls, read_playlist, request_to};
 use crate::server::Server;
-use crate::{assert_output, engine, expected_long, fixture, fixtures, run, test_dir};
+use crate::{
+    assert_output, both_targets, engine, expected_long, fixture, fixtures, mp4_target, run,
+    test_dir,
+};
 
 /// 视频与独立音频分离、两个不连续段组的点播（fmp4_a 后接 fmp4_b），返回主播放列表的地址。
 fn put_split_vod(server: &Server) -> Url {
@@ -64,7 +67,7 @@ async fn split_source_writes_both_outputs() {
     assert_eq!(names_in(&dir), ["out", "out.mp4"]);
     let hls = dir.join("out");
     assert_eq!(output.hls.as_deref(), Some(hls.as_path()));
-    let mp4 = output.mp4.as_ref().unwrap();
+    let mp4 = output.merged.as_ref().unwrap();
     assert_eq!(mp4.report.streams.len(), 2);
     assert_hls_matches(&hls, &mp4.path);
     let Playlist::Master(master) = read_playlist(&hls.join("index.m3u8")) else {
@@ -106,7 +109,7 @@ async fn split_source_writes_both_outputs() {
         total: files,
     });
     let writing = Writing {
-        mp4: count,
+        merged: count,
         hls: count,
     };
     assert_eq!(progress.borrow().writing, Some(writing));
@@ -127,7 +130,7 @@ async fn hls_only_keeps_codecs_the_mp4_cannot_take() {
     let req = request_to(server.url("index.m3u8"), &dir, Target::Hls(hls.clone()));
     let output = run(req).await.unwrap();
 
-    assert_eq!(output.mp4, None);
+    assert_eq!(output.merged, None);
     let Playlist::Media(media) = read_playlist(&hls.join("index.m3u8")) else {
         panic!("单轨时入口应为媒体播放列表");
     };
@@ -164,7 +167,7 @@ async fn live_holes_and_sessions_in_hls() {
     req.live = Some(LiveOptions::default());
     // 第一次：录到 seg0、seg2（seg1 缺失）；保留目录供续录
     let mut first = req.clone();
-    first.output.target = Target::Mp4(dir.join("first.mp4"));
+    first.output.target = mp4_target(dir.join("first.mp4"));
     first.output.work_dir = Some(dir.join("out.hsdl"));
     first.output.keep_work_dir = true;
     run(first).await.unwrap();
@@ -191,7 +194,7 @@ async fn live_holes_and_sessions_in_hls() {
         .map(|(name, d)| (hls.join(name), d))
         .into();
     assert_eq!(seen, want);
-    assert_hls_matches(&hls, &output.mp4.as_ref().unwrap().path);
+    assert_hls_matches(&hls, &output.merged.as_ref().unwrap().path);
     assert_output(&output, &expected_long(&dir, &[0, 2, 3], &[2, 1]));
 }
 
@@ -209,10 +212,11 @@ async fn switching_to_hls_after_an_unsupported_codec_reuses_the_download() {
     server.put("index.m3u8", playlist + "#EXT-X-ENDLIST\n");
     let hits = || [0, 1, 2].map(|i| server.hits(&format!("seg{i}.ts")));
     let url = server.url("index.m3u8");
-    let mp4 = request_to(url.clone(), &dir, Target::Mp4(dir.join("out.mp4")));
+    let mp4 = request_to(url.clone(), &dir, mp4_target(dir.join("out.mp4")));
     match run(mp4).await {
-        Err(Error::Unsupported(Unsupported::Mp4(Mp4Unsupported::Codec {
-            codec: "opus", ..
+        Err(Error::Unsupported(Unsupported::Merge(MergeUnsupported::Codec {
+            codec: "opus",
+            ..
         }))) => {}
         other => panic!("TS 里的 Opus 音频应放不进 MP4：{other:?}"),
     }
@@ -306,10 +310,7 @@ async fn bandwidth_falls_back_to_the_source_and_fails_without_it() {
     assert_eq!(master.variants[0].bandwidth, Some(200_000));
 
     server.put("master.m3u8", SPLIT_MASTER.replace("BANDWIDTH=200000,", ""));
-    let other = Target::Both {
-        mp4: dir.join("other.mp4"),
-        hls: dir.join("other"),
-    };
+    let other = both_targets(dir.join("other.mp4"), dir.join("other"));
     match run(request_to(url, &dir, other)).await {
         Err(Error::Unsupported(Unsupported::Hls(HlsUnsupported::BandwidthUnknown))) => {}
         other => panic!("应报算不出码率：{other:?}"),

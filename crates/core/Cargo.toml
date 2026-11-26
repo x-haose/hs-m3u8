@@ -12,8 +12,10 @@ publish = false
 aes.workspace = true
 cbc.workspace = true
 fs4.workspace = true
+futures-util.workspace = true
 hs-m3u8-hls = { path = "../hls" }
 hs-m3u8-remux = { path = "../remux" }
+hs-m3u8-subtitle = { path = "../subtitle" }
 hs-m3u8-sysproxy = { path = "../sysproxy" }
 http.workspace = true
 httpdate.workspace = true

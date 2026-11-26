@@ -189,7 +189,13 @@ impl From<core::Selected> for Selected {
     fn from(s: core::Selected) -> Self {
         Selected {
             variant: s.variant.into(),
-            audio: s.audio.map(AudioInfo::from),
+            audio: {
+                assert!(
+                    s.audio.len() <= 1 && s.subtitles.is_empty(),
+                    "Python 的选轨偏好只选一条音频、不要字幕"
+                );
+                s.audio.into_iter().next().map(AudioInfo::from)
+            },
         }
     }
 }
