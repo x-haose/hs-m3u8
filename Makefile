@@ -19,6 +19,7 @@ README_EXAMPLES := target/readme-examples
 check: rs_check py_check py_cov compat
 
 # 播放列表与字幕解析器的模糊测试（fuzz/，独立的工作区）：先查它的依赖安全公告与 clippy，再每个目标跑 FUZZ_SECONDS 秒。
+# 目标平台取这个工具链的主机平台：cargo-fuzz 默认取它自己编译时的平台，预编译的 Linux 版是 musl，与 sanitizer 不兼容。
 # 工具链为 fuzz/rust-toolchain.toml 固定的 nightly（cargo-fuzz 要它），在 fuzz/ 下运行即用它。找到的输入在
 # fuzz/artifacts/<目标>/，运行中积累的语料在 fuzz/corpus/<目标>/，种子语料在 fuzz/seeds/<目标>/
 FUZZ_SECONDS ?= 60
@@ -29,7 +30,8 @@ fuzz:
 	cd fuzz && cargo clippy --locked --all-targets -- -D warnings
 	cd fuzz && for target in $(FUZZ_TARGETS); do \
 		mkdir -p corpus/$$target && \
-		cargo fuzz run $$target corpus/$$target seeds/$$target -- -max_total_time=$(FUZZ_SECONDS) || exit 1; \
+		cargo fuzz run --target "$$(rustc -vV | sed -n 's/^host: //p')" $$target corpus/$$target seeds/$$target \
+			-- -max_total_time=$(FUZZ_SECONDS) || exit 1; \
 	done
 
 # 对外契约（Python 接口、任务目录格式）与最近的发布比较；要完整的提交历史与标签

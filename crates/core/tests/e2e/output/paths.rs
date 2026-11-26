@@ -5,8 +5,8 @@ use hs_m3u8_core::{Error, Target, Url};
 use super::{both, request_to};
 use crate::server::Server;
 #[cfg(unix)]
-use crate::{Writable, both_targets, is_root, mp4_target};
-use crate::{engine, fixture, run, test_dir};
+use crate::{Writable, is_root};
+use crate::{both_targets, engine, fixture, mp4_target, run, test_dir};
 
 /// 输出与任务目录的路径相同或互相包含、MP4 路径以分隔符结尾、路径以 `.` 结尾时，下载前即拒绝。
 #[tokio::test(flavor = "multi_thread")]
