@@ -382,3 +382,33 @@ async fn subtitles_whose_discontinuities_do_not_match_are_reported() {
     assert_eq!(server.hits("s/0.vtt"), 0);
     assert_eq!(output.merged.unwrap().report.streams.len(), 3);
 }
+
+/// 变体没写 BANDWIDTH、字幕播放列表为空时，本地 HLS 的主播放列表照样算得出码率：字幕轨补的空分片按画面的时长计。
+#[tokio::test(flavor = "multi_thread")]
+async fn local_hls_measures_blank_subtitle_groups() {
+    let dir = test_dir("subtitles_blank_bandwidth");
+    let server = Server::start().await;
+    server.put("v/seg0.ts", fixture("ts_a/seg0.ts"));
+    server.put(
+        "v.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nv/seg0.ts\n#EXT-X-ENDLIST\n",
+    );
+    server.put(
+        "empty.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-ENDLIST\n",
+    );
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n\
+         #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"s\",NAME=\"空\",LANGUAGE=\"en\",URI=\"empty.m3u8\"\n\
+         #EXT-X-STREAM-INF:SUBTITLES=\"s\"\nv.m3u8\n",
+    );
+    let mut req = request(server.url("master.m3u8"), &dir);
+    req.source.preference.subtitles = Renditions::All;
+    req.output.target = Target::Hls(dir.join("out"));
+
+    run(req).await.unwrap();
+
+    let master = std::fs::read_to_string(dir.join("out/index.m3u8")).unwrap();
+    assert!(master.contains("BANDWIDTH="), "{master}");
+}

@@ -118,6 +118,8 @@ struct Recorder<'a> {
     merge: Option<MergeCheck>,
     /// 已察觉的停滞（见 [`Recorder::observe_stall`]）
     stall: Option<Stall>,
+    /// 按轨号：这条轨是音视频轨（字幕轨为 false，不定录制的结束）
+    media: Vec<bool>,
 }
 
 /// 录制：定下会话，从首次拉到的播放列表开始，直到满足结束条件，并等已列出的分片下完。要合并时 `merge` 为各轨的
@@ -257,6 +259,13 @@ impl<'a> Recorder<'a> {
             ending: None,
             merge,
             stall: None,
+            media: ctx
+                .dir
+                .record()
+                .streams()
+                .iter()
+                .map(|&s| s != Streams::Subtitles)
+                .collect(),
         }
     }
 
@@ -321,15 +330,22 @@ impl<'a> Recorder<'a> {
     }
 
     /// 录制结束时的结束原因；还没结束时为 None。暂存的播放列表都处理完才算结束：判定期间拉到的候选可能
-    /// 已带 ENDLIST，这条轨已算结束，候选还没处理。
+    /// 已带 ENDLIST，这条轨已算结束，候选还没处理。各条音视频轨都出现 ENDLIST（或都录满）即结束，字幕轨不看。
     fn finished(&self) -> Option<LiveEnd> {
         if matches!(self.phase, Phase::Deciding(_)) || self.tracks.iter().any(LiveTrack::has_held) {
             return None;
         }
+        // 字幕轨不定录制的结束：有的服务器不给字幕播放列表补 ENDLIST
+        let mut media = self
+            .tracks
+            .iter()
+            .zip(&self.media)
+            .filter(|(_, media)| **media)
+            .map(|(t, _)| t);
         match &self.ending {
             Some(end) => Some(end.clone()),
-            None if self.tracks.iter().all(LiveTrack::is_ended) => Some(LiveEnd::EndList),
-            None if !self.tracks.iter().any(|t| t.needs_refresh(self.max_us())) => {
+            None if media.clone().all(LiveTrack::is_ended) => Some(LiveEnd::EndList),
+            None if !media.any(|t| t.needs_refresh(self.max_us())) => {
                 Some(LiveEnd::DurationReached)
             }
             None => None,

@@ -37,6 +37,9 @@ const FMP4: &str = "m4s";
 /// 字幕分片（WebVTT）的扩展名。
 const VTT: &str = "vtt";
 
+/// 字幕轨在一组里没有分片时补的分片：只有文件头的 WebVTT。
+const BLANK_VTT: &str = "WEBVTT\n";
+
 /// 没有 init 段的分片的扩展名，与 FFmpeg 识别出的格式对应：FFmpeg 读 HLS 时核对分片的扩展名与识别出的格式
 /// （`extension_picky`，默认开启），不一致即拒绝。
 fn extension(format: Format) -> &'static str {
@@ -61,9 +64,9 @@ pub(super) fn occupant(dir: &Path) -> Result<Occupant, Error> {
     }
 }
 
-/// 本地 HLS 能否写出这些内容：见 [`check_layout`]；多轨时主播放列表必须写码率，某条音视频轨的分片声明的时长都为 0
-/// （算不出峰值码率，见 [`TrackFiles::peak_bps`]）而来源也没写时报 [`HlsUnsupported::BandwidthUnknown`]。只看声明，
-/// 在合并之前判定。`streams` 为各轨的取流方式。
+/// 本地 HLS 能否写出这些内容：见 [`check_layout`]；多轨时主播放列表必须写码率，某条轨（字幕轨含补的空分片）的分片声明的
+/// 时长都为 0（算不出峰值码率，见 [`TrackFiles::peak_bps`]）而来源也没写时报 [`HlsUnsupported::BandwidthUnknown`]。只看
+/// 声明，在合并之前判定。`streams` 为各轨的取流方式。
 pub(super) fn check_content(
     streams: &[Streams],
     groups: &[Vec<GroupTrack>],
@@ -74,14 +77,16 @@ pub(super) fn check_content(
         .map(|g| g.iter().map(|t| t.init.is_some()).collect())
         .collect();
     check_layout(&has_init)?;
-    let measurable = (0..streams.len())
-        .filter(|&track| streams[track] != Streams::Subtitles)
-        .all(|track| {
-            groups
-                .iter()
-                .flat_map(|g| &g[track].segments)
-                .any(|s| s.duration_us > 0)
-        });
+    // 字幕轨在一组里没有分片时补的空分片用第 0 条轨这一组的声明时长（见 fill），同样算得出码率
+    let measurable = (0..streams.len()).all(|track| {
+        groups.iter().any(|g| {
+            let own = g[track].segments.iter().any(|s| s.duration_us > 0);
+            let blank = streams[track] == Streams::Subtitles
+                && g[track].segments.is_empty()
+                && g[0].segments.iter().any(|s| s.duration_us > 0);
+            own || blank
+        })
+    });
     let source = selection.and_then(|s| s.variant.bandwidth);
     if streams.len() > 1 && !measurable && source.is_none() {
         return Err(Error::Unsupported(Unsupported::Hls(
@@ -242,7 +247,10 @@ fn fill_track<'a>(
             && group.segments.is_empty()
         {
             let name = format!("{index}.{VTT}");
-            write_file(&dir.join(&name), "WEBVTT\n")?;
+            write_file(&dir.join(&name), BLANK_VTT)?;
+            if let Some(bps) = bits_per_second(BLANK_VTT.len() as u64, durations[group_index]) {
+                written.peak_bps = Some(written.peak_bps.map_or(bps, |peak| peak.max(bps)));
+            }
             written.groups.push(PlaylistGroup {
                 init: None,
                 segments: vec![(name, durations[group_index])],

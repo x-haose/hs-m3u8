@@ -71,3 +71,42 @@ async fn subtitles_are_recorded_with_the_other_tracks() {
         (Shape::Subtitle { codec: "subrip" }, 1)
     );
 }
+
+/// 画面与音频出现 ENDLIST 即结束录制，字幕播放列表一直没有 ENDLIST 也不等它。
+#[tokio::test(flavor = "multi_thread")]
+async fn the_recording_ends_without_waiting_for_the_subtitle_playlist() {
+    let dir = test_dir("live_subtitles_end");
+    let server = Server::start().await;
+    server.put("v/seg0.ts", fixture("ts_a/seg0.ts"));
+    let video = "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nv/seg0.ts\n";
+    server.put("v.m3u8", video);
+    server.put("subs/0.vtt", "WEBVTT\n\n00:00.300 --> 00:01.200\n字幕\n");
+    server.put(
+        "subs.m3u8",
+        "#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nsubs/0.vtt\n",
+    );
+    server.put(
+        "master.m3u8",
+        "#EXTM3U\n\
+         #EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"zh\",LANGUAGE=\"zh\",URI=\"subs.m3u8\"\n\
+         #EXT-X-STREAM-INF:BANDWIDTH=200000,SUBTITLES=\"subs\"\nv.m3u8\n",
+    );
+    let mut req = live_request(server.url("master.m3u8"), &dir, STALL);
+    req.source.preference.subtitles = Renditions::All;
+    req.output.target = Target::File(MergedFile {
+        path: dir.join("out.mkv"),
+        container: Container::Matroska,
+    });
+
+    let job = engine().start(req).unwrap();
+    let mut progress = job.control().progress();
+    progress
+        .wait_for(|p| p.tracks.iter().map(|t| t.segments.done).eq([1, 1]))
+        .await
+        .unwrap();
+    // 画面结束，字幕播放列表照旧没有 ENDLIST
+    server.put("v.m3u8", format!("{video}#EXT-X-ENDLIST\n"));
+    let output = job.wait().await.unwrap();
+
+    assert_eq!(output.live.unwrap().end, Some(LiveEnd::EndList));
+}
