@@ -1,3 +1,3 @@
 [env]
-# hs-m3u8-ffmpeg-sys 从这里找静态 FFmpeg（见 crates/ffmpeg-sys/build.rs）；由 third_party/ffmpeg/build.sh 生成
+# hs-m3u8-ffmpeg-sys 从这里找静态 FFmpeg（见 crates/ffmpeg-sys/build/main.rs；不设时下载预编译的）；由 third_party/ffmpeg/build.sh 生成
 FFMPEG_DIR = { value = "third_party/ffmpeg/dist", relative = true }

@@ -1,0 +1,3 @@
+# 当前的预编译 FFmpeg（crates/ffmpeg-sys/build/download.rs 下载的 Release）：标签，与编出它的 build.sh 去掉注释行、空行后
+# 的 SHA-256。改了 build.sh 的版本或组件后发新的一版，再更新这里与 download.rs；scripts/check_prebuilt_ffmpeg.py 核对。
+ffmpeg-9.0.2-1 0012a55d9b78886857dd1d184d3927d5169b024629a3d61cd2155dbf042ef37c

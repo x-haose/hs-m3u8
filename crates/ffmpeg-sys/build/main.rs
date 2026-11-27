@@ -32,13 +32,33 @@ fn main() {
         write(&out.join("ffmpeg_dir.rs"), "");
         return;
     }
-    let dir = match env::var_os("FFMPEG_DIR") {
-        Some(dir) => PathBuf::from(dir),
-        None => download::prebuilt(&target, &out),
+    let (dir, source) = match env::var_os("FFMPEG_DIR") {
+        Some(dir) => (PathBuf::from(dir), Source::FfmpegDir),
+        None => (download::prebuilt(&target, &out), Source::Prebuilt),
     };
+    let pcs = LIBS.map(|name| PkgConfig::read(&dir, name));
+    if source == Source::FfmpegDir {
+        // 静态库会被打包进本 crate 的 rlib：FFmpeg 重新编译后（如增减组件）构建脚本要重跑，否则链接的仍是旧库。
+        // 下载的预编译库由 download.rs 里写死的哈希决定，不看文件（解压出的目录每次运行都是新的）
+        for path in [dir.join("lib"), dir.join("include")] {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+        for pc in &pcs {
+            println!("cargo:rerun-if-changed={}", pc.path.display());
+        }
+    }
     use_bindings(&bindings(&target, &dir, &out));
-    write(&out.join("ffmpeg_dir.rs"), &version_checks(&dir));
-    link(&dir, &target);
+    write(&out.join("ffmpeg_dir.rs"), &version_checks(&dir, &pcs));
+    link(&dir, &target, source, &pcs);
+}
+
+/// FFmpeg 目录的来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// `FFMPEG_DIR`：自己编译安装的
+    FfmpegDir,
+    /// 下载并校验过的预编译库（见 [`download`]）
+    Prebuilt,
 }
 
 fn write(path: &Path, contents: &str) {
@@ -71,38 +91,67 @@ fn bindings(target: &str, _dir: &Path, _out: &Path) -> PathBuf {
     committed_bindings(target)
 }
 
-/// 由 FFmpeg 目录 `dir` 的头文件生成的绑定（见模块说明），连同生成用的 libclang 的版本写在 `out` 下。
+/// 由 FFmpeg 目录 `dir` 的头文件生成的绑定（见模块说明）。
 #[cfg(feature = "bindgen")]
 fn bindings(target: &str, dir: &Path, out: &Path) -> PathBuf {
-    let bindings = out.join("bindings.rs");
-    generate::write(&dir.join("include"), target, &bindings);
-    write(&out.join("libclang.txt"), &bindgen::clang_version().full);
-    bindings
+    generate::write(&dir.join("include"), target, out)
 }
 
-/// `dir` 下三个库的 `.pc` 文件里的版本（`主.次.修订`），写成与绑定里 `LIB<名>_VERSION_MAJOR` 等常量比较的编译期断言。
-fn version_checks(dir: &Path) -> String {
-    let mut checks = String::new();
-    for name in LIBS {
-        let pc = dir.join("lib/pkgconfig").join(format!("lib{name}.pc"));
-        println!("cargo:rerun-if-changed={}", pc.display());
-        let text =
-            fs::read_to_string(&pc).unwrap_or_else(|e| panic!("读取 {} 失败：{e}", pc.display()));
+/// 一个库的 `.pc` 文件里用到的两项。
+struct PkgConfig {
+    name: &'static str,
+    path: PathBuf,
+    /// `Version` 行，`主.次.修订`
+    version: String,
+    /// `Libs` 与 `Libs.private` 行里的链接项
+    libs: Vec<String>,
+}
+
+impl PkgConfig {
+    /// FFmpeg 目录 `dir` 里库 `name` 的 `.pc`（`lib/pkgconfig/lib<名>.pc`）。
+    fn read(dir: &Path, name: &'static str) -> PkgConfig {
+        let path = dir.join("lib/pkgconfig").join(format!("lib{name}.pc"));
+        let text = fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("读取 {} 失败：{e}", path.display()));
         let version = text
             .lines()
             .find_map(|line| line.strip_prefix("Version:"))
-            .unwrap_or_else(|| panic!("{} 里没有 Version 行", pc.display()))
-            .trim();
+            .unwrap_or_else(|| panic!("{} 里没有 Version 行", path.display()))
+            .trim()
+            .to_owned();
+        let libs = text
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("Libs:")
+                    .or_else(|| line.strip_prefix("Libs.private:"))
+            })
+            .flat_map(str::split_whitespace)
+            .map(str::to_owned)
+            .collect();
+        PkgConfig {
+            name,
+            path,
+            version,
+            libs,
+        }
+    }
+}
+
+/// 三个库的版本写成与绑定里 `LIB<名>_VERSION_MAJOR` 等常量比较的编译期断言。
+fn version_checks(dir: &Path, pcs: &[PkgConfig]) -> String {
+    let mut checks = String::new();
+    for pc in pcs {
+        let (name, version) = (pc.name, &pc.version);
         let parts: Vec<u32> = version
             .split('.')
             .map(|part| {
                 part.parse().unwrap_or_else(|_| {
-                    panic!("{} 的版本 {version:?} 不是 主.次.修订", pc.display())
+                    panic!("{} 的版本 {version:?} 不是 主.次.修订", pc.path.display())
                 })
             })
             .collect();
         let [major, minor, micro] = parts[..] else {
-            panic!("{} 的版本 {version:?} 不是 主.次.修订", pc.display());
+            panic!("{} 的版本 {version:?} 不是 主.次.修订", pc.path.display());
         };
         let upper = name.to_uppercase();
         checks.push_str(&format!(
@@ -119,12 +168,9 @@ fn version_checks(dir: &Path) -> String {
     checks
 }
 
-/// 链接 `dir` 下的静态 FFmpeg 及其依赖的系统库。
-fn link(dir: &Path, target: &str) {
+/// 链接 FFmpeg 目录 `dir` 下的静态 FFmpeg 及其依赖的系统库。
+fn link(dir: &Path, target: &str, source: Source, pcs: &[PkgConfig]) {
     let lib = dir.join("lib");
-    // 静态库会被打包进本 crate 的 rlib：FFmpeg 重新编译后（如增减组件）构建脚本要重跑，否则链接的仍是旧库
-    println!("cargo:rerun-if-changed={}", lib.display());
-    println!("cargo:rerun-if-changed={}", dir.join("include").display());
     let msvc = target.ends_with("-msvc");
     for name in LIBS {
         let file = lib.join(if msvc {
@@ -132,65 +178,61 @@ fn link(dir: &Path, target: &str) {
         } else {
             format!("lib{name}.a")
         });
-        if !file.is_file() {
-            panic!(
-                "FFmpeg 目录 {} 里没有编译好的 FFmpeg 静态库 {}：用 hs-m3u8 仓库的 third_party/ffmpeg/build.sh 编译，\
+        if file.is_file() {
+            continue;
+        }
+        match source {
+            Source::FfmpegDir => panic!(
+                "FFMPEG_DIR（{}）里没有编译好的 FFmpeg 静态库 {}：用 hs-m3u8 仓库的 third_party/ffmpeg/build.sh 编译，\
                  或把 FFMPEG_DIR 设为按它的参数编译安装的 FFmpeg 目录",
                 dir.display(),
                 file.display()
-            );
+            ),
+            // 压缩包的哈希与写死的相符，内容却缺库：发布的那一版本身有误
+            Source::Prebuilt => panic!(
+                "预编译 FFmpeg 的压缩包里没有 {}：这一版的预编译库有误，请到 hs-m3u8 仓库报告；可先用 build.sh 编译后设 \
+                 FFMPEG_DIR",
+                file.display()
+            ),
         }
     }
     println!("cargo:rustc-link-search=native={}", lib.display());
     for name in LIBS {
         println!("cargo:rustc-link-lib=static={name}");
     }
-    for link in system_libs(&lib.join("pkgconfig")) {
+    for link in system_libs(pcs) {
         println!("cargo:rustc-link-lib={link}");
     }
 }
 
-/// 各静态库的 `.pc` 文件 `Libs` 与 `Libs.private` 行里的系统库，按出现的顺序去重，写成 `rustc-link-lib` 的值
-/// （`bcrypt`、`framework=CoreFoundation`）。FFmpeg 自身的库、libm 与 `-pthread`（Rust 标准库已链接）、`-L`（指向 FFmpeg
-/// 自己的库目录）不算。
-fn system_libs(pkgconfig: &Path) -> Vec<String> {
+/// `.pc` 文件链接项里的系统库，按出现的顺序去重，写成 `rustc-link-lib` 的值（`bcrypt`、`framework=CoreFoundation`）。
+/// FFmpeg 自身的库、libm 与 `-pthread`（Rust 标准库已链接）、`-L`（指向 FFmpeg 自己的库目录）不算。
+fn system_libs(pcs: &[PkgConfig]) -> Vec<String> {
     let mut links: Vec<String> = Vec::new();
-    for name in LIBS {
-        let pc = pkgconfig.join(format!("lib{name}.pc"));
-        println!("cargo:rerun-if-changed={}", pc.display());
-        let text =
-            fs::read_to_string(&pc).unwrap_or_else(|e| panic!("读取 {} 失败：{e}", pc.display()));
-        for line in text.lines() {
-            let Some(rest) = line
-                .strip_prefix("Libs:")
-                .or_else(|| line.strip_prefix("Libs.private:"))
-            else {
-                continue;
-            };
-            let mut tokens = rest.split_whitespace();
-            while let Some(token) = tokens.next() {
-                let link = if token == "-framework" {
-                    let name = tokens
-                        .next()
-                        .unwrap_or_else(|| panic!("{} 中 -framework 后缺少名称", pc.display()));
-                    format!("framework={name}")
-                } else if let Some(name) = token
-                    .strip_prefix("-l")
-                    .or_else(|| token.strip_suffix(".lib"))
-                {
-                    // libm 由 Rust 标准库在 Unix 上链接，再给一次 macOS 的链接器会警告重复的库
-                    if LIBS.contains(&name) || name == "m" {
-                        continue;
-                    }
-                    name.to_owned()
-                } else if token.starts_with("-L") || token == "-pthread" {
+    for pc in pcs {
+        let mut tokens = pc.libs.iter().map(String::as_str);
+        while let Some(token) = tokens.next() {
+            let link = if token == "-framework" {
+                let name = tokens
+                    .next()
+                    .unwrap_or_else(|| panic!("{} 中 -framework 后缺少名称", pc.path.display()));
+                format!("framework={name}")
+            } else if let Some(name) = token
+                .strip_prefix("-l")
+                .or_else(|| token.strip_suffix(".lib"))
+            {
+                // libm 由 Rust 标准库在 Unix 上链接，再给一次 macOS 的链接器会警告重复的库
+                if LIBS.contains(&name) || name == "m" {
                     continue;
-                } else {
-                    panic!("{} 的链接参数中有无法识别的项 {token:?}", pc.display());
-                };
-                if !links.contains(&link) {
-                    links.push(link);
                 }
+                name.to_owned()
+            } else if token.starts_with("-L") || token == "-pthread" {
+                continue;
+            } else {
+                panic!("{} 的链接参数中有无法识别的项 {token:?}", pc.path.display());
+            };
+            if !links.contains(&link) {
+                links.push(link);
             }
         }
     }

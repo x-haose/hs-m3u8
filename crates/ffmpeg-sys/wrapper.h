@@ -1,4 +1,4 @@
-/* 生成绑定用的头文件：只含用到的 FFmpeg 公共头文件，生成的范围由 build.rs 的 allowlist 决定。 */
+/* 生成绑定用的头文件：只含用到的 FFmpeg 公共头文件，生成的范围由 build/generate.rs 的 allowlist 决定。 */
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavformat/avio.h>

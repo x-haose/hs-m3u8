@@ -1,8 +1,8 @@
-//! 用 bindgen 生成绑定。scripts/ffmpeg_bindings.py 开 `bindgen` 特性构建，取生成的文件与 `$OUT_DIR/libclang.txt`（生成用的
-//! libclang 的版本）。
+//! 开 `bindgen` 特性时用 bindgen 从 FFmpeg 目录的头文件生成绑定：没有预生成绑定的目标在构建时用它；
+//! scripts/ffmpeg_bindings.py 也开这个特性构建，取生成的文件更新 `src/bindings/<目标>.rs`。
 
 use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use bindgen::callbacks::{IntKind, ParseCallbacks};
@@ -62,7 +62,7 @@ const TYPES: [&str; 3] = ["AVCodecID", "AVMediaType", "AVRounding"];
 /// 只经指针传递、不读写字段的结构体：生成为大小与对齐相同的不透明字节块，不依赖它们的字段布局。
 const OPAQUE: [&str; 3] = ["AVCodec", "AVCodecContext", "AVFrame"];
 
-/// 用到的宏常量，及三个库的版本（build.rs 与 FFMPEG_DIR 里的比较，见模块说明）。
+/// 用到的宏常量，及三个库的版本（与 FFmpeg 目录里的比较，见 main.rs 的模块说明）。
 const VARS: [&str; 20] = [
     "AVFMT_FLAG_CUSTOM_IO",
     "AVIO_FLAG_WRITE",
@@ -96,8 +96,9 @@ impl ParseCallbacks for IntMacros {
     }
 }
 
-/// 由 `include`（FFmpeg 的头文件目录）为目标 `target` 生成绑定，写到 `out`。
-pub(super) fn write(include: &Path, target: &str, out: &Path) {
+/// 由 `include`（FFmpeg 的头文件目录）为目标 `target` 生成绑定，写到 `out` 下的 bindings.rs 并返回它的路径；生成用的
+/// libclang 的版本写到同目录的 libclang.txt（scripts/ffmpeg_bindings.py 打印它）。
+pub(super) fn write(include: &Path, target: &str, out: &Path) -> PathBuf {
     println!("cargo:rerun-if-changed=wrapper.h");
     println!("cargo:rerun-if-env-changed=BINDGEN_EXTRA_CLANG_ARGS");
     let mut builder = bindgen::Builder::default()
@@ -126,11 +127,16 @@ pub(super) fn write(include: &Path, target: &str, out: &Path) {
         // bindgen 加载的 libclang 不一定带默认的 SDK 路径（如 Homebrew 的 LLVM），那样找不到 stdint.h 等系统头文件
         builder = builder.clang_arg(format!("-isysroot{}", macos_sdk()));
     }
+    let bindings = out.join("bindings.rs");
     builder
         .generate()
         .unwrap_or_else(|e| panic!("生成绑定失败：{e}"))
-        .write_to_file(out)
-        .unwrap_or_else(|e| panic!("写 {} 失败：{e}", out.display()));
+        .write_to_file(&bindings)
+        .unwrap_or_else(|e| panic!("写 {} 失败：{e}", bindings.display()));
+    let libclang = out.join("libclang.txt");
+    std::fs::write(&libclang, bindgen::clang_version().full)
+        .unwrap_or_else(|e| panic!("写 {} 失败：{e}", libclang.display()));
+    bindings
 }
 
 /// 本机 macOS SDK 的路径（`xcrun --show-sdk-path`）。

@@ -46,13 +46,14 @@ rs_fmt:
 	cargo fmt --all --check
 	cargo fmt --manifest-path fuzz/Cargo.toml --check
 
-# 与平台无关的检查：依赖方向与 unsafe 的位置、压制属性与注释、依赖的安全公告与许可证、随发布包分发的声明是否最新
+# 与平台无关的检查：依赖方向与 unsafe 的位置、压制属性与注释、预编译 FFmpeg 与 build.sh 是否一致、依赖的安全公告与许可证、随发布包分发的声明是否最新
 rs_lint: py_env
 	scripts/check_deps.sh
 	scripts/check_no_suppression.sh
 	@cargo deny --version >/dev/null 2>&1 || { echo "缺少 cargo-deny，版本见 .github/workflows/rust.yml"; exit 1; }
 	cargo deny --locked check
 	uv run --no-sync python scripts/licenses.py --check
+	uv run --no-sync python scripts/check_prebuilt_ffmpeg.py
 
 # 依赖或 FFmpeg 版本变了之后重新生成 LICENSES 下的声明
 licenses: py_env

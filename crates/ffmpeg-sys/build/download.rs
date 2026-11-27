@@ -1,6 +1,6 @@
 //! 预编译的 FFmpeg：没设 `FFMPEG_DIR` 时，从 hs-m3u8 的 GitHub Release 下载本目标的静态库压缩包（由
 //! .github/workflows/ffmpeg.yml 编出并发布，内容与 build.sh 的安装目录相同），按 [`PREBUILT`] 里的 SHA-256 校验后存进
-//! 缓存目录，每次构建解压到 `$OUT_DIR/ffmpeg`。
+//! 缓存目录，解压到 `$OUT_DIR/ffmpeg`（构建脚本重跑时重解，见 main.rs 的 rerun 规则）。
 //!
 //! - 缓存：`HS_M3U8_FFMPEG_CACHE_DIR`，没设时为用户缓存目录（macOS 的 `~/Library/Caches`、Linux 的
 //!   `$XDG_CACHE_HOME` 或 `~/.cache`、Windows 的 LocalAppData）下的 `hs-m3u8-ffmpeg`。文件以 SHA-256 命名；哈希不符的
@@ -9,6 +9,10 @@
 //!   的文件。
 //! - 离线：`CARGO_NET_OFFLINE` 为 `true`、缓存里又没有时直接失败。cargo 不把 `--offline` 告诉构建脚本，只认这个环境变量。
 //! - 代理：读 `ALL_PROXY`、`HTTPS_PROXY`、`HTTP_PROXY`（含小写）与 `NO_PROXY`，支持 http 与 socks5 代理。
+//! - TLS：用系统的信任库核对证书（rustls-platform-verifier），公司网关做 TLS 拦截、自己装了根证书时照样能用。
+//!
+//! 简化：被中断的下载留下的 `<哈希>.tar.gz.<进程号>.part` 不清理（同时运行的构建可能正在写它），只占缓存目录的空间；
+//! 多到成问题时按修改时间清理。
 
 use std::env;
 use std::fs::{self, File};
@@ -18,8 +22,10 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
-/// 预编译库对应的 FFmpeg 版本与构建修订号：Release 的标签为 `ffmpeg-<版本>-<修订号>`。换任一项时 crate 升次版本号，
-/// 依赖方 `cargo update` 不会换掉链接的 FFmpeg。
+/// 预编译库对应的 FFmpeg 版本与构建修订号：Release 的标签为 `ffmpeg-<版本>-<修订号>`，须与
+/// third_party/ffmpeg/prebuilt.txt 一致（scripts/check_prebuilt_ffmpeg.py 核对）。换任一项时 crate 升次版本号：
+/// crates.io 上的依赖方按 SemVer 只自动升到同一次版本号（0.x 时为同一修订号以内），`cargo update` 不会悄悄换掉链接的
+/// FFmpeg。
 const VERSION: &str = "9.0.2";
 const REVISION: u32 = 1;
 
@@ -93,8 +99,19 @@ fn cached(target: &str, sha256: &str) -> PathBuf {
             cache.display()
         );
     }
-    fs::create_dir_all(&cache).unwrap_or_else(|e| panic!("创建 {} 失败：{e}", cache.display()));
-    let base = env::var("HS_M3U8_FFMPEG_MIRROR").unwrap_or_else(|_| RELEASES.to_owned());
+    fs::create_dir_all(&cache).unwrap_or_else(|e| {
+        panic!(
+            "创建缓存目录 {} 失败：{e}。设 HS_M3U8_FFMPEG_CACHE_DIR 指向可写的目录，或设 FFMPEG_DIR",
+            cache.display()
+        )
+    });
+    let base = match env::var("HS_M3U8_FFMPEG_MIRROR") {
+        Ok(base) => base,
+        Err(env::VarError::NotPresent) => RELEASES.to_owned(),
+        Err(env::VarError::NotUnicode(value)) => {
+            panic!("HS_M3U8_FFMPEG_MIRROR 不是有效的 UTF-8：{value:?}")
+        }
+    };
     let url = format!(
         "{}/ffmpeg-{VERSION}-{REVISION}/{target}.tar.gz",
         base.trim_end_matches('/')
@@ -155,7 +172,11 @@ fn download(url: &str, to: &Path) -> String {
              或用 hs-m3u8 仓库的 third_party/ffmpeg/build.sh 编译后设 FFMPEG_DIR"
         )
     };
+    let tls = ureq::tls::TlsConfig::builder()
+        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+        .build();
     let agent: ureq::Agent = ureq::Agent::config_builder()
+        .tls_config(tls)
         .proxy(ureq::Proxy::try_from_env())
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_per_read(Some(READ_TIMEOUT))

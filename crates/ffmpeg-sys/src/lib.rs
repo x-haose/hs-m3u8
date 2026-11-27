@@ -1,10 +1,11 @@
 //! hs-m3u8 用到的那部分 FFmpeg 9.0（libavformat、libavcodec、libavutil）的原始绑定，静态链接。
 //!
-//! 绑定由 bindgen 按 build.rs 里的清单生成，每个目标一份（`src/bindings/<目标>.rs`）；其中各结构体大小与字段偏移的编译期
+//! 绑定由 bindgen 按 build/generate.rs 里的清单生成，每个目标一份（`src/bindings/<目标>.rs`）；其中各结构体大小与字段偏移的编译期
 //! 断言核对的是生成时的布局与本目标上 Rust 的布局。C 的枚举生成为整数常量（如 `AV_CODEC_ID_H264`），不生成 Rust 的
 //! enum：FFmpeg 返回的值不在 enum 里时是未定义行为。bindgen 生成不了的宏在本文件里手写。
 //!
-//! 链接的 FFmpeg 由 `FFMPEG_DIR` 指定，见 build.rs；它的三个库与绑定的版本（主、次、修订号）不一致时编译失败。
+//! 链接的 FFmpeg 为 `FFMPEG_DIR` 指定的目录，没设时为下载的预编译库，见 build/main.rs；它的三个库与绑定的版本（主、次、
+//! 修订号）不一致时编译失败。
 
 use std::ffi::c_int;
 

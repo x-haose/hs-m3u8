@@ -12,7 +12,8 @@ build = "build/main.rs"
 publish = false
 
 [features]
-# 构建时用 bindgen 从 FFMPEG_DIR 的头文件生成绑定，不用 src/bindings 下预生成的；要 libclang
+# 构建时用 bindgen 从 FFmpeg 目录（FFMPEG_DIR 或下载的预编译库）的头文件生成绑定，不用 src/bindings 下预生成的；
+# 要 libclang
 bindgen = ["dep:bindgen"]
 
 [dependencies]

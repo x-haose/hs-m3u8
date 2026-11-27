@@ -48,7 +48,8 @@ thiserror = "2.0.21"
 tokio = "1.54.1"
 tokio-rustls = "0.26.6"
 tokio-util = "0.7.20"
-# 默认特性是 rustls（ring 与 webpki-roots 的根证书）与 gzip；gzip 用不上，socks-proxy 支持 socks5 代理
-ureq = { version = "3.5.2", default-features = false, features = ["rustls", "socks-proxy"] }
+# 默认特性是 rustls（ring 与 webpki-roots 的根证书）与 gzip；gzip 用不上；platform-verifier 用系统的信任库核对证书，
+# socks-proxy 支持 socks5 代理
+ureq = { version = "3.5.2", default-features = false, features = ["rustls", "platform-verifier", "socks-proxy"] }
 url = "2.5.9"
 windows-registry = "0.6.1"

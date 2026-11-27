@@ -55,7 +55,7 @@ jobs:
         env:
           UV_PYTHON: "3.12"
 
-      # 预生成的 FFmpeg 绑定须与 FFmpeg 的头文件、crates/ffmpeg-sys/build.rs 的清单一致，以这里生成的为准；没有提交过或
+      # 预生成的 FFmpeg 绑定须与 FFmpeg 的头文件、crates/ffmpeg-sys/build/generate.rs 的清单一致，以这里生成的为准；没有提交过或
       # 不一致时失败并上传新生成的（见这个 action）。在编译之前：没有文件时后面的步骤都编不过。Linux 的两个目标在
       # wheels.yml 的 manylinux 容器里生成。macOS 用 Xcode 带的 libclang，Windows 用运行机装好的 LLVM（clang-sys 自己
       # 找到）
