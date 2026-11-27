@@ -51,6 +51,14 @@ jobs:
           PATH="$RUNNER_TEMP/no-curl:$PATH" bash third_party/ffmpeg/build.sh
           "$GITHUB_WORKSPACE/.venv/bin/maturin" build --release --locked --out "$RUNNER_TEMP/from-sdist"
 
+      # README「从源码构建」里没有预生成绑定的平台的做法：经 PEP 517 的 config-settings 开 bindgen 特性，在构建时生成
+      # 绑定（这里的目标有预生成的，开了特性即不用），核对 py、core、remux 转发的特性与 maturin 的 build-args 能用
+      - name: 从 sdist 构建（bindgen 特性）
+        run: |
+          sudo apt-get install -y --no-install-recommends libclang-dev
+          cd "$RUNNER_TEMP"/sdist/*/
+          uv build --wheel --out-dir "$RUNNER_TEMP/from-sdist-bindgen" --config-setting build-args="--features bindgen" .
+
       # 开发环境里只有开发工具、没有从源码装的 hs_m3u8，测试用的即从 sdist 构建的 wheel
       - name: 装上从 sdist 构建的 wheel 测试
         run: |

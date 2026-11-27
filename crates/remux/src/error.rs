@@ -121,9 +121,14 @@ pub enum Error {
     OpenOutput { path: PathBuf, cause: FfmpegError },
     #[error("封装器不接受选项 {0:?}")]
     RejectedOptions(Vec<(String, String)>),
-    /// 读取输入出错：FFmpeg 读包的错误；进输出的流里读到既没有数据也没有附加数据的包时 `cause` 为 AVERROR_INVALIDDATA
+    /// 读取输入出错：FFmpeg 读包的错误
     #[error("读取{at}失败：{cause}")]
     Read { at: Origin, cause: FfmpegError },
+    /// 进输出的流里读到既没有数据也没有附加数据的包。输出为 MP4 时封装器会丢掉它而不报错，写出与回读的包数就对不上；
+    /// 链接的 FFmpeg 里 mov 与 matroska 的解复用器读到大小为 0 的样本时自己报 AVERROR_INVALIDDATA（[`Error::OpenInput`]
+    /// 或 [`Error::Read`]），TS 与裸音频的解复用器不保证不给出这样的包
+    #[error("{at}的{kind}流里有既没有数据也没有附加数据的包")]
+    EmptyPacket { at: Origin, kind: StreamKind },
     #[error("写入输出失败：{0}")]
     Mux(FfmpegError),
     #[error("回读输出 {path} 失败：{cause}")]
@@ -320,9 +325,9 @@ mod tests {
             file_error(&full).map(|e| e.kind()),
             Some(io::ErrorKind::StorageFull)
         );
-        // AVERROR_INVALIDDATA（FFERRTAG('I','N','D','A')）是 FFmpeg 自己的错误码，不是 errno
+        // AVERROR_INVALIDDATA 是 FFmpeg 自己的错误码，不是 errno
         let invalid = FfmpegError {
-            code: -1_094_995_529,
+            code: hs_m3u8_ffmpeg_sys::AVERROR_INVALIDDATA,
             message: "Invalid data found when processing input".to_owned(),
         };
         assert!(file_error(&invalid).is_none());

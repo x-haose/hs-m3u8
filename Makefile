@@ -46,7 +46,7 @@ rs_fmt:
 	cargo fmt --all --check
 	cargo fmt --manifest-path fuzz/Cargo.toml --check
 
-# 与平台无关的检查：依赖方向、压制属性与注释、依赖的安全公告与许可证、随发布包分发的声明是否最新
+# 与平台无关的检查：依赖方向与 unsafe 的位置、压制属性与注释、依赖的安全公告与许可证、随发布包分发的声明是否最新
 rs_lint: py_env
 	scripts/check_deps.sh
 	scripts/check_no_suppression.sh
@@ -60,6 +60,10 @@ licenses: py_env
 
 rs_clippy: ffmpeg_present py_env
 	cargo clippy --workspace --all-targets -- -D warnings
+
+# hs-m3u8-ffmpeg-sys 的 bindgen 特性（构建脚本里生成绑定的代码）；要 libclang，不在 rs_check 里，CI 在 macOS 上查
+rs_clippy_bindgen: ffmpeg_present
+	cargo clippy -p hs-m3u8-ffmpeg-sys --features bindgen --all-targets -- -D warnings
 
 # 文档注释里的链接须都能解析（含私有项）：改名、删除后留下的断链在这里失败
 rs_doc: ffmpeg_present py_env

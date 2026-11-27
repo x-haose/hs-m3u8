@@ -80,8 +80,8 @@ impl Drop for CustomIo {
     }
 }
 
-/// 读回调：读到末尾为 AVERROR_EOF；读错误换成 AVERROR（见 [`io_error_code`]）；`Interrupted` 重试；报读到的字节数比
-/// 缓冲区大（违反 [`Read`] 的约定）为 EIO。
+/// 读回调：读到末尾为 AVERROR_EOF；读错误换成 AVERROR（见 [`io_error_code`]）；`Interrupted` 重试。读源都是本 crate
+/// 的（分片链与文件），报读到的字节数比缓冲区大即违反 [`Read`] 的约定，是缺陷：panic，在 `extern "C"` 回调里即中止进程。
 ///
 /// # Safety
 /// `opaque` 为 [`CustomIo`] 的 reader，`buf` 可写 `size` 字节；FFmpeg 不并发调用同一上下文的回调。
@@ -96,8 +96,8 @@ unsafe extern "C" fn read(opaque: *mut c_void, buf: *mut u8, size: c_int) -> c_i
     loop {
         return match reader.source.read(&mut reader.scratch) {
             Ok(0) => sys::AVERROR_EOF,
-            Ok(n) if n > size => sys::AVERROR(libc::EIO),
             Ok(n) => {
+                assert!(n <= size, "Read 报读到 {n} 字节，超出缓冲区的 {size} 字节");
                 // SAFETY: buf 可写 size 字节，scratch 有 size 字节，n 不超过 size，两者不重叠。
                 unsafe { std::ptr::copy_nonoverlapping(reader.scratch.as_ptr(), buf, n) };
                 c_int::try_from(n).expect("不超过 size")
@@ -148,15 +148,20 @@ unsafe extern "C" fn seek(opaque: *mut c_void, offset: i64, whence: c_int) -> i6
 }
 
 /// 读写错误交给 FFmpeg 的错误码：Unix 上带 errno 的照原样（Windows 上的是 Win32 错误码，不是 errno，不用）；其余按
-/// 种类：提前读到末尾为 AVERROR_EOF，WouldBlock、TimedOut、Unsupported 为 EAGAIN、ETIMEDOUT、ENOSYS，别的为 EIO。
+/// 种类：提前读到末尾为 AVERROR_EOF，TimedOut、Unsupported 为 ETIMEDOUT、ENOSYS，别的为 EIO。
+///
+/// 不交给 FFmpeg EAGAIN（含 WouldBlock）：读源是阻塞的，而 avio 把回调的错误记下后不再调用回调，每次读都返回同一个
+/// EAGAIN，`avformat_find_stream_info` 遇到 EAGAIN 重试，探测就停不下来；按 EIO 报。
 fn io_error_code(error: &io::Error) -> c_int {
     #[cfg(unix)]
-    if let Some(errno) = error.raw_os_error().filter(|&errno| errno > 0) {
+    if let Some(errno) = error
+        .raw_os_error()
+        .filter(|&errno| errno > 0 && errno != libc::EAGAIN && errno != libc::EWOULDBLOCK)
+    {
         return sys::AVERROR(errno);
     }
     match error.kind() {
         io::ErrorKind::UnexpectedEof => sys::AVERROR_EOF,
-        io::ErrorKind::WouldBlock => sys::AVERROR(libc::EAGAIN),
         io::ErrorKind::TimedOut => sys::AVERROR(libc::ETIMEDOUT),
         io::ErrorKind::Unsupported => sys::AVERROR(libc::ENOSYS),
         _ => sys::AVERROR(libc::EIO),

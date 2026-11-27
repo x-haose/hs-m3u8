@@ -82,7 +82,7 @@ jobs:
 
       - name: 格式、clippy、文档、测试（macOS）
         if: runner.os == 'macOS'
-        run: make rs_fmt rs_clippy rs_doc rs_test py_test
+        run: make rs_fmt rs_clippy rs_clippy_bindgen rs_doc rs_test py_test
 
       # Windows 的 make 只在 MSYS2 里，而 MSYS2 的 link.exe 会遮住 MSVC 的链接器，所以直接运行与 Makefile 的
       # rs_fmt、rs_clippy、rs_doc、rs_test、py_test 相同的命令。每条命令单独一步：PowerShell 里一步跑几条命令时，只有最后一条的

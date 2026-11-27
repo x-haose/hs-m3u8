@@ -120,7 +120,7 @@ options = OutputOptions(
 
 ## 用法（Rust，API 未定型）
 
-Rust 库没有发布到 crates.io。在自己的项目里用 git 依赖（`hs-m3u8-core`）时，要按 `third_party/ffmpeg/build.sh` 编译 FFmpeg、把 `FFMPEG_DIR` 设为它的安装目录。FFmpeg 的绑定（`hs-m3u8-ffmpeg-sys`）预生成在仓库里，有 aarch64-apple-darwin、x86_64 与 aarch64 的 unknown-linux-gnu、x86_64-pc-windows-msvc 四个目标的；其他目标要开 `bindgen` 特性在构建时生成（要装 libclang；`hs-m3u8-core` 有同名特性，转给它）。
+Rust 库没有发布到 crates.io。在自己的项目里用 git 依赖（`hs-m3u8-core`）时，要按 `third_party/ffmpeg/build.sh` 编译 FFmpeg、把 `FFMPEG_DIR` 设为它的安装目录。FFmpeg 的绑定（`hs-m3u8-ffmpeg-sys`）预生成在仓库里，有 aarch64-apple-darwin、x86_64 与 aarch64 的 unknown-linux-gnu、x86_64-pc-windows-msvc 四个目标的；其他目标要在构建时生成：开 `hs-m3u8-core` 的 `bindgen` 特性（它转给 `hs-m3u8-ffmpeg-sys`），并装 libclang。`FFMPEG_DIR` 里 FFmpeg 的版本须与绑定的一致（用同一提交的 `build.sh` 编出的即可），不一致时编译失败。
 
 ```rust no_run
 use std::num::NonZeroUsize;
@@ -166,7 +166,7 @@ bash third_party/ffmpeg/build.sh
 pip install .
 ```
 
-Windows 上在已加载 MSVC 环境的 MSYS2 里运行 `build.sh`。已按 `build.sh` 的参数编译安装过 FFmpeg 时，把环境变量 `FFMPEG_DIR` 设为它的安装目录，再直接 `pip install hs-m3u8` 即可。
+Windows 上在已加载 MSVC 环境的 MSYS2 里运行 `build.sh`。已按同一版本 `build.sh` 的参数编译安装过 FFmpeg 时，把环境变量 `FFMPEG_DIR` 设为它的安装目录，再直接 `pip install hs-m3u8` 即可（其他平台同样要加上面的 `--config-settings`）。
 
 ## 开发
 
@@ -194,6 +194,6 @@ make compat       # 对外契约与最近的发布比较：Python 接口（griff
 uv run --no-sync python examples/download.py   # 运行示例（先 make ffmpeg 与 make py_develop）
 ```
 
-FFmpeg 的绑定（`crates/ffmpeg-sys/src/bindings`）以 CI 生成的为准：换了 FFmpeg 或改了 `crates/ffmpeg-sys/build.rs` 里的清单后推上去，CI 在各目标上重新生成，与提交的不一致时失败，并把新文件作为附件 `ffmpeg-bindings-<目标>` 上传，照它提交。本地的 `scripts/ffmpeg_bindings.py`（要 libclang）只用于调试，不同的 libclang 生成的文件会有细微差别。
+FFmpeg 的绑定（`crates/ffmpeg-sys/src/bindings`）以 CI 生成的为准：换了 FFmpeg 或改了 `crates/ffmpeg-sys/build.rs` 里的清单后推上去，CI 在各目标上重新生成，与仓库里的不一致时失败，并把新文件作为附件 `ffmpeg-bindings-<目标>` 上传，照它提交。不同的 libclang 生成的文件会有细微差别（如指针的 const）；CI 用的是运行机镜像里的（manylinux 容器的 clang-devel、macOS 的 Xcode、Windows 预装的 LLVM，版本打印在这一步的日志里），镜像更新换了 libclang 时也可能要照附件重新提交。本地的 `scripts/ffmpeg_bindings.py`（要 libclang）只用于调试。
 
 换 Python 版本另给目录，如 `make py_test VENV=.venv-3.15 UV_PYTHON=3.15`。Windows：在已加载 MSVC 环境的 MSYS2 中运行 `third_party/ffmpeg/build.sh`，其余步骤见 `.github/workflows/rust.yml`。发布用的 sdist 与各平台 wheel 由 `.github/workflows/wheels.yml` 构建并测试；推送标签 `v<主>.<次>.<修订>`（与 `Cargo.toml` 的版本一致，提交已在 main 上）时，另对那个提交跑 `.github/workflows/rust.yml` 的全部检查，都通过后发布到 PyPI。升了 job.json 的格式版本（`crates/core/src/workdir/record.rs`）时，用 `cargo test -p hs-m3u8-core --test e2e -- --ignored --exact samples::write_samples` 生成新版本的任务目录样本；升了 outputs.json 的（`outputs.rs`）时，照 `tests/fixtures/workdir/outputs` 下已有的写法手写新版本各平台的记录与推出的保留名。没有当前版本的样本时测试失败。

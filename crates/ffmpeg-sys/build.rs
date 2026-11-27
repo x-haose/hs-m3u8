@@ -1,7 +1,9 @@
 //! 选定绑定并静态链接 FFmpeg。
 //!
-//! - 绑定：默认用 `src/bindings/<目标>.rs`（由 scripts/ffmpeg_bindings.py 生成并提交）；开 `bindgen` 特性时在构建时从
-//!   `$FFMPEG_DIR/include` 生成。选中的文件经环境变量 `HS_M3U8_FFMPEG_BINDINGS` 交给 lib.rs。
+//! - 绑定：默认用 `src/bindings/<目标>.rs`（由 CI 开 `bindgen` 特性生成，见 .github/actions/ffmpeg-bindings）；开
+//!   `bindgen` 特性时在构建时从 `$FFMPEG_DIR/include` 生成。选中的文件经环境变量 `HS_M3U8_FFMPEG_BINDINGS` 交给 lib.rs。
+//! - 版本：`$FFMPEG_DIR` 里三个库的版本（`.pc` 的 `Version` 行）写成 `$OUT_DIR/ffmpeg_dir.rs` 里的编译期断言，由 lib.rs
+//!   与绑定里的版本常量比较：不一致时结构体布局可能不同，编译失败。
 //! - 链接：`$FFMPEG_DIR/lib` 下由 third_party/ffmpeg/build.sh 编出的 avformat、avcodec、avutil 三个静态库，加上 FFmpeg
 //!   安装的 `.pc` 文件 `Libs` 行里的系统库（如 macOS 的 CoreFoundation、Windows 上 `av_get_random_seed` 要的 bcrypt）。
 //! - `DOCS_RS` 有值时不链接：docs.rs 构建时没有 FFmpeg，也不能联网。
@@ -23,10 +25,18 @@ fn main() {
         "cargo:rustc-env=HS_M3U8_FFMPEG_BINDINGS={}",
         bindings.display()
     );
+    let out = PathBuf::from(env::var("OUT_DIR").expect("cargo 设了 OUT_DIR"));
     if env::var_os("DOCS_RS").is_some() {
+        write(&out.join("ffmpeg_dir.rs"), "");
         return;
     }
-    link(&ffmpeg_dir(), &target);
+    let dir = ffmpeg_dir();
+    write(&out.join("ffmpeg_dir.rs"), &version_checks(&dir));
+    link(&dir, &target);
+}
+
+fn write(path: &Path, contents: &str) {
+    fs::write(path, contents).unwrap_or_else(|e| panic!("写 {} 失败：{e}", path.display()));
 }
 
 /// 绑定文件的路径（见模块说明）。
@@ -37,8 +47,8 @@ fn bindings(target: &str) -> PathBuf {
     let path = manifest.join("src/bindings").join(format!("{target}.rs"));
     if !path.is_file() {
         panic!(
-            "没有目标 {target} 的预生成绑定（{}）。开 bindgen 特性在构建时生成（要 libclang，并设 FFMPEG_DIR），或在\
-             这个目标上运行 scripts/ffmpeg_bindings.py 生成该文件",
+            "没有目标 {target} 的预生成绑定（{}）。开 bindgen 特性在构建时生成，要 libclang 与 FFMPEG_DIR；依赖方与 \
+             Python 包怎样打开它见 hs-m3u8 仓库 README 的「从源码构建」",
             path.display()
         );
     }
@@ -48,15 +58,11 @@ fn bindings(target: &str) -> PathBuf {
 /// 绑定文件的路径（见模块说明）。
 #[cfg(feature = "bindgen")]
 fn bindings(target: &str) -> PathBuf {
-    let Some(dir) = env::var_os("FFMPEG_DIR") else {
-        panic!(
-            "bindgen 特性要从 FFMPEG_DIR 读头文件：把它设为用 hs-m3u8 仓库的 third_party/ffmpeg/build.sh 编译安装的 \
-             FFmpeg 目录"
-        );
-    };
-    let out = PathBuf::from(env::var("OUT_DIR").expect("cargo 设了 OUT_DIR")).join("bindings.rs");
-    generate::write(&PathBuf::from(dir).join("include"), target, &out);
-    out
+    let out = PathBuf::from(env::var("OUT_DIR").expect("cargo 设了 OUT_DIR"));
+    let bindings = out.join("bindings.rs");
+    generate::write(&ffmpeg_dir().join("include"), target, &bindings);
+    write(&out.join("libclang.txt"), &bindgen::clang_version().full);
+    bindings
 }
 
 /// `FFMPEG_DIR`：third_party/ffmpeg/build.sh 编译安装的 FFmpeg 目录（含 include 与 lib）。
@@ -68,6 +74,45 @@ fn ffmpeg_dir() -> PathBuf {
              third_party/ffmpeg/dist），再把 FFMPEG_DIR 设为安装目录"
         ),
     }
+}
+
+/// `dir` 下三个库的 `.pc` 文件里的版本（`主.次.修订`），写成与绑定里 `LIB<名>_VERSION_MAJOR` 等常量比较的编译期断言。
+fn version_checks(dir: &Path) -> String {
+    let mut checks = String::new();
+    for name in LIBS {
+        let pc = dir.join("lib/pkgconfig").join(format!("lib{name}.pc"));
+        println!("cargo:rerun-if-changed={}", pc.display());
+        let text =
+            fs::read_to_string(&pc).unwrap_or_else(|e| panic!("读取 {} 失败：{e}", pc.display()));
+        let version = text
+            .lines()
+            .find_map(|line| line.strip_prefix("Version:"))
+            .unwrap_or_else(|| panic!("{} 里没有 Version 行", pc.display()))
+            .trim();
+        let parts: Vec<u32> = version
+            .split('.')
+            .map(|part| {
+                part.parse().unwrap_or_else(|_| {
+                    panic!("{} 的版本 {version:?} 不是 主.次.修订", pc.display())
+                })
+            })
+            .collect();
+        let [major, minor, micro] = parts[..] else {
+            panic!("{} 的版本 {version:?} 不是 主.次.修订", pc.display());
+        };
+        let upper = name.to_uppercase();
+        checks.push_str(&format!(
+            "const _: () = assert!(\n    \
+             LIB{upper}_VERSION_MAJOR == {major} && LIB{upper}_VERSION_MINOR == {minor} && LIB{upper}_VERSION_MICRO == {micro},\n    \
+             {:?}\n);\n",
+            format!(
+                "FFMPEG_DIR（{}）里的 lib{name} 是 {version}，与绑定的版本（LIB{upper}_VERSION_*）不同：结构体布局可能对不上。\
+                 用与绑定对应的 FFmpeg（hs-m3u8 仓库的 third_party/ffmpeg/build.sh），或开 bindgen 特性按它生成绑定",
+                dir.display()
+            )
+        ));
+    }
+    checks
 }
 
 /// 链接 `dir` 下的静态 FFmpeg 及其依赖的系统库。
@@ -148,7 +193,8 @@ fn system_libs(pkgconfig: &Path) -> Vec<String> {
     links
 }
 
-/// 用 bindgen 生成绑定。scripts/ffmpeg_bindings.py 开 `bindgen` 特性构建，把生成的文件复制成 `src/bindings/<目标>.rs`。
+/// 用 bindgen 生成绑定。scripts/ffmpeg_bindings.py 开 `bindgen` 特性构建，取生成的文件与 `$OUT_DIR/libclang.txt`（生成用的
+/// libclang 的版本）。
 #[cfg(feature = "bindgen")]
 mod generate {
     use std::env;
@@ -212,8 +258,8 @@ mod generate {
     /// 只经指针传递、不读写字段的结构体：生成为大小与对齐相同的不透明字节块，不依赖它们的字段布局。
     const OPAQUE: [&str; 3] = ["AVCodec", "AVCodecContext", "AVFrame"];
 
-    /// 用到的宏常量。
-    const VARS: [&str; 11] = [
+    /// 用到的宏常量，及三个库的版本（build.rs 与 FFMPEG_DIR 里的比较，见模块说明）。
+    const VARS: [&str; 20] = [
         "AVFMT_FLAG_CUSTOM_IO",
         "AVIO_FLAG_WRITE",
         "AVPROBE_PADDING_SIZE",
@@ -225,6 +271,15 @@ mod generate {
         "AV_INPUT_BUFFER_PADDING_SIZE",
         "AV_LOG_QUIET",
         "AV_PKT_FLAG_KEY",
+        "LIBAVCODEC_VERSION_MAJOR",
+        "LIBAVCODEC_VERSION_MICRO",
+        "LIBAVCODEC_VERSION_MINOR",
+        "LIBAVFORMAT_VERSION_MAJOR",
+        "LIBAVFORMAT_VERSION_MICRO",
+        "LIBAVFORMAT_VERSION_MINOR",
+        "LIBAVUTIL_VERSION_MAJOR",
+        "LIBAVUTIL_VERSION_MICRO",
+        "LIBAVUTIL_VERSION_MINOR",
     ];
 
     /// 宏常量都按 C 的 int 生成：它们在 FFmpeg 里与 int 型的参数、字段一起用。
@@ -244,8 +299,6 @@ mod generate {
         let mut builder = bindgen::Builder::default()
             .header("wrapper.h")
             .clang_arg(format!("-I{}", include.display()))
-            // 按目标的布局生成（交叉编译时不是本机的）
-            .clang_arg(format!("--target={target}"))
             .rust_edition(bindgen::RustEdition::Edition2024)
             .default_enum_style(bindgen::EnumVariation::Consts)
             .prepend_enum_name(false)

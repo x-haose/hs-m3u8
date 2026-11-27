@@ -587,13 +587,22 @@ pub struct AVPixFmtDescriptor {
 pub struct AVOption {
     pub _address: u8,
 }
+pub const LIBAVUTIL_VERSION_MAJOR: ::std::os::raw::c_int = 61;
+pub const LIBAVUTIL_VERSION_MINOR: ::std::os::raw::c_int = 1;
+pub const LIBAVUTIL_VERSION_MICRO: ::std::os::raw::c_int = 102;
 pub const AV_LOG_QUIET: ::std::os::raw::c_int = -8;
 pub const AV_DICT_IGNORE_SUFFIX: ::std::os::raw::c_int = 2;
 pub const AV_INPUT_BUFFER_PADDING_SIZE: ::std::os::raw::c_int = 64;
+pub const LIBAVCODEC_VERSION_MAJOR: ::std::os::raw::c_int = 63;
 pub const AV_PKT_FLAG_KEY: ::std::os::raw::c_int = 1;
+pub const LIBAVCODEC_VERSION_MINOR: ::std::os::raw::c_int = 1;
+pub const LIBAVCODEC_VERSION_MICRO: ::std::os::raw::c_int = 102;
+pub const LIBAVFORMAT_VERSION_MAJOR: ::std::os::raw::c_int = 63;
 pub const AVSEEK_SIZE: ::std::os::raw::c_int = 65536;
 pub const AVSEEK_FORCE: ::std::os::raw::c_int = 131072;
 pub const AVIO_FLAG_WRITE: ::std::os::raw::c_int = 2;
+pub const LIBAVFORMAT_VERSION_MINOR: ::std::os::raw::c_int = 1;
+pub const LIBAVFORMAT_VERSION_MICRO: ::std::os::raw::c_int = 102;
 pub const AVPROBE_PADDING_SIZE: ::std::os::raw::c_int = 32;
 pub const AV_DISPOSITION_DEFAULT: ::std::os::raw::c_int = 1;
 pub const AV_DISPOSITION_FORCED: ::std::os::raw::c_int = 64;

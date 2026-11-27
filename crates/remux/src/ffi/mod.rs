@@ -36,11 +36,6 @@ pub(crate) fn error(code: c_int) -> FfmpegError {
     }
 }
 
-/// 输入里的包既没有数据也没有附加数据：按 FFmpeg 的 AVERROR_INVALIDDATA 报。
-pub(crate) fn empty_packet() -> FfmpegError {
-    error(sys::AVERROR_INVALIDDATA)
-}
-
 /// FFmpeg 的日志一律不输出（进程内全局的设置）。
 pub(crate) fn quiet_logs() {
     // SAFETY: 只设一个全局的日志级别，不涉及指针。

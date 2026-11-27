@@ -46,8 +46,9 @@ for rule in "${direct_rules[@]}"; do
     fi
   done
 done
-# unsafe 块、函数、impl、trait 与 extern 块；注释里的「unsafe」一词不算
-unsafe_outside=$(git grep --untracked -nE '(^|[^[:alnum:]_])unsafe[[:space:]]*(\{|fn|impl|trait|extern)' -- \
+# unsafe 块、函数、impl、trait、extern 块与属性（`#[unsafe(no_mangle)]`）：unsafe 后跟 `{`、`(` 或这几个关键字；注释里
+# 写成这样的也算
+unsafe_outside=$(git grep --untracked -nE '(^|[^[:alnum:]_])unsafe[[:space:]]*(\{|\(|fn|impl|trait|extern)' -- \
   'crates/remux/src/*.rs' ':!crates/remux/src/ffi/*' || [[ $? == 1 ]])
 if [[ -n $unsafe_outside ]]; then
   echo "$unsafe_outside" >&2

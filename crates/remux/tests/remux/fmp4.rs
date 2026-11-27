@@ -117,9 +117,8 @@ fn empty_samples_are_reported_as_invalid_input() {
         &Control::default(),
     )
     .unwrap_err();
-    let invalid_data = -i32::from_le_bytes(*b"INDA");
     assert!(
-        matches!(&err, Error::OpenInput { at: Origin::Track { group: 0, track: 0 }, cause } if cause.code == invalid_data),
+        matches!(&err, Error::OpenInput { at: Origin::Track { group: 0, track: 0 }, cause } if cause.code == hs_m3u8_ffmpeg_sys::AVERROR_INVALIDDATA),
         "实际 {err:?}"
     );
 }

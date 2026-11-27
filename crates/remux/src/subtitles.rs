@@ -145,11 +145,12 @@ impl Lane {
                 }
             }
             Codec::MovText => {
-                let (texted, blank): (Vec<Cue>, Vec<Cue>) = cues
+                let texted: Vec<Cue> = cues
                     .iter()
+                    .filter(|cue| !subtitle::plain_text(&cue.text).is_empty())
                     .cloned()
-                    .partition(|cue| !subtitle::plain_text(&cue.text).is_empty());
-                self.packet_discarded += blank.len() as u64;
+                    .collect();
+                self.packet_discarded += (cues.len() - texted.len()) as u64;
                 // 空档不写空样本：链接的 FFmpeg 的 movenc 在任何一路的包越过上一个字幕样本的结尾时自己补一个清屏的空样本
                 // （mov_write_packet 与 mov_write_trailer），自己再写会多出一个；slices 不给空档出段
                 for slice in subtitle::slices(&texted) {
