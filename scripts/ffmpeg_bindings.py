@@ -10,6 +10,7 @@ third_party/ffmpeg/dist（先 make ffmpeg）。
 
 import argparse
 import difflib
+import io
 import json
 import os
 import shutil
@@ -55,6 +56,12 @@ def generated() -> Path:
 
 def main() -> int:
     """生成并复制到 crates/ffmpeg-sys/src/bindings 下；`--check` 时没有提交过或不一致返回 1。"""
+    # Windows 上输出接到管道时默认用系统区域编码（如 cp1252），写不出中文和绑定里的字符
+    for stream in (sys.stdout, sys.stderr):
+        if not isinstance(stream, io.TextIOWrapper):
+            message = f"标准输出或标准错误被换成了 {type(stream).__name__}，改不了编码"
+            raise SystemExit(message)
+        stream.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description="生成本机目标的 hs-m3u8-ffmpeg-sys 绑定")
     parser.add_argument("--check", action="store_true", help="与提交的比较（CI 用）")
     check = parser.parse_args().check
