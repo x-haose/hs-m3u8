@@ -1,5 +1,5 @@
 .PHONY: check ffmpeg ffmpeg_present licenses fuzz \
-	rs_check rs_fmt rs_lint rs_clippy rs_doc rs_test rs_cov \
+	rs_check rs_fmt rs_lint rs_clippy rs_clippy_bindgen rs_doc rs_test rs_cov \
 	py_check py_cov py_env py_develop py_stubs py_test compat
 
 FFMPEG_DIST := third_party/ffmpeg/dist

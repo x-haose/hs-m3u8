@@ -122,5 +122,7 @@ for lib in "${libs[@]}"; do
   fi
 done
 
+# configure 的命令行随库一起提供（LGPL 要求随二进制给出构建方式；预编译库的压缩包里也带着它）
+{ printf './configure'; printf ' %q' "${flags[@]}"; printf '\n'; } > "$PREFIX/configure.txt"
 cp "$ROOT/build.sh" "$PREFIX/$MARKER"
 echo "FFmpeg $VERSION 已安装到 $PREFIX"

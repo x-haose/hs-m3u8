@@ -1,0 +1,125 @@
+name: ffmpeg
+
+# 预编译的 FFmpeg 静态库：hs-m3u8-ffmpeg-sys 不设 FFMPEG_DIR 时按目标下载的那几个文件。每个目标用 build.sh 从核对过
+# SHA-256 的源码包现编（不用缓存），打成 <目标>.tar.gz（include、lib 与 configure.txt），作为附件上传。推
+# ffmpeg-<FFmpeg 版本>-<构建修订号> 标签时另把它们连同 FFmpeg 源码包、build.sh 与 SHA256SUMS 发布成同名的 GitHub
+# Release（LGPL 要求源码、构建方式与二进制在同一处提供）；发布后把 SHA256SUMS 里的哈希写进 crates/ffmpeg-sys/build.rs。
+# 标签不用 v 开头：wheels.yml 对 v* 标签发布到 PyPI。
+on:
+  push:
+    tags: ["ffmpeg-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        # 与 wheels.yml 的构建环境相同：Linux 的库在 manylinux_2_28 里编，链接的 glibc 符号不新于 2.28；macOS 与
+        # wheel 同在 macos-15 上编（build.sh 设了最低系统版本）
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+            image: quay.io/pypa/manylinux_2_28_x86_64@sha256:4131ddd7acb9c6c966af02fe7e71edc51e078c2d41f475966697676430bfa2ae
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            image: quay.io/pypa/manylinux_2_28_aarch64@sha256:abd1230aa9e4058a74b89d27cd14ba18c0db036d7bfe6e6f219a29ea63c24eb6
+          - target: aarch64-apple-darwin
+            runner: macos-15
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+    runs-on: ${{ matrix.runner }}
+    # 没有 image 的目标为空串，不用容器
+    container: ${{ matrix.image }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: MSVC 环境（Windows）
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/msvc-env
+
+      - name: MSYS2（Windows）
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2.33.0
+        with:
+          msystem: MSYS
+          path-type: inherit
+          update: false
+          install: make diffutils xz
+
+      - name: FFmpeg
+        uses: ./.github/actions/ffmpeg
+        with:
+          cache-key: ""
+
+      # COPYFILE_DISABLE：macOS 的 tar 不带上扩展属性（._ 文件）
+      - name: 打包
+        shell: bash
+        env:
+          COPYFILE_DISABLE: "1"
+        run: |
+          mkdir -p out
+          tar -czf "out/${{ matrix.target }}.tar.gz" -C third_party/ffmpeg/dist include lib configure.txt
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ffmpeg-${{ matrix.target }}
+          path: out/${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/ffmpeg-')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # 标签须为 ffmpeg-<build.sh 的 VERSION>-<构建修订号>，所在的提交已在 main 上
+      - name: 核对标签与提交
+        id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^VERSION=//p' third_party/ffmpeg/build.sh)
+          [[ "$TAG" =~ ^ffmpeg-${version//./\\.}-[1-9][0-9]*$ ]] \
+            || { echo "标签须为 ffmpeg-$version-<构建修订号>（从 1 起）：$TAG"; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "$TAG 所在的提交不在 main 上"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: release
+          merge-multiple: true
+
+      # 与预编译库一起提供的源码与构建方式：build.sh 下载并核对过的 FFmpeg 源码包，以及 build.sh 本身
+      - name: 源码与 SHA256SUMS
+        run: |
+          bash third_party/ffmpeg/build.sh --fetch
+          cp "third_party/ffmpeg/build/ffmpeg-${{ steps.tag.outputs.version }}.tar.xz" third_party/ffmpeg/build.sh release/
+          cd release
+          [[ $(ls ./*-*-*.tar.gz | wc -l) == 4 ]] || { echo "应有 4 个目标的压缩包："; ls; exit 1; }
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: 发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          notes="hs-m3u8-ffmpeg-sys 下载的预编译 FFmpeg $VERSION 静态库（avformat、avcodec、avutil，LGPL 2.1 或更高版本）。
+          ffmpeg-$VERSION.tar.xz 是对应的源码，build.sh 是编译脚本；各目标的 configure 命令行在压缩包的 configure.txt 里。"
+          gh release create "$TAG" release/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "FFmpeg $VERSION（$TAG）" \
+            --notes "$notes"
