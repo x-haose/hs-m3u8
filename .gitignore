@@ -1,7 +1,8 @@
 # python generated files
 __pycache__/
 *.py[oc]
-build/
+# Python 构建工具在仓库根目录生成的目录
+/build/
 dist/
 wheels/
 *.egg-info
