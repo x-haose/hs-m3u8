@@ -8,6 +8,7 @@ license.workspace = true
 repository.workspace = true
 # 链接方式：同一个程序里只能有一份静态 FFmpeg，Cargo 不许两个声明了同名 links 的包同时出现在依赖图里
 links = "ffmpeg"
+build = "build/main.rs"
 publish = false
 
 [features]
@@ -19,6 +20,11 @@ libc.workspace = true
 
 [build-dependencies]
 bindgen = { workspace = true, optional = true }
+# 下载预编译的 FFmpeg（build/download.rs）：HTTP 客户端、解 .tar.gz、SHA-256 校验
+flate2.workspace = true
+sha2.workspace = true
+tar.workspace = true
+ureq.workspace = true
 
 [lints.rust]
 # 绑定是 extern 声明与按 C 布局的结构体

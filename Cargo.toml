@@ -19,6 +19,7 @@ axum = "0.8.9"
 # 只在 hs-m3u8-ffmpeg-sys 开 bindgen 特性时用；runtime：运行时加载 libclang，不在构建时链接它
 bindgen = { version = "0.73.2", default-features = false, features = ["runtime"] }
 cbc = "0.2.1"
+flate2 = "1.1.11"
 # 文件任务开始前查任务目录所在卷的可用空间（available_space）；默认特性是文件锁，用不上
 fs4 = { version = "1.1.0", default-features = false }
 # 探测与开始任务时并发拉各条字幕的媒体播放列表（future::join_all）；reqwest 已依赖同一版本
@@ -42,9 +43,12 @@ sha2 = "0.11.0"
 # 请求补的 Accept-Language 取系统的首选语言
 sys-locale = "0.3.2"
 system-configuration = "0.7.0"
+tar = "0.4.46"
 thiserror = "2.0.21"
 tokio = "1.54.1"
 tokio-rustls = "0.26.6"
 tokio-util = "0.7.20"
+# 默认特性是 rustls（ring 与 webpki-roots 的根证书）与 gzip；gzip 用不上，socks-proxy 支持 socks5 代理
+ureq = { version = "3.5.2", default-features = false, features = ["rustls", "socks-proxy"] }
 url = "2.5.9"
 windows-registry = "0.6.1"

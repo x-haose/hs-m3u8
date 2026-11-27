@@ -38,6 +38,8 @@ exceptions = [
     { allow = ["CC0-1.0"], crate = "tiny-keccak" },
     # 同上的解析器用；Unicode-3.0 的前一版，同样宽松
     { allow = ["Unicode-DFS-2016"], crate = "unicode_names2" },
+    # hs-m3u8-ffmpeg-sys 的构建脚本下载预编译 FFmpeg 时 ureq 用的根证书（Mozilla 的证书列表），不进产物；宽松的数据许可证
+    { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
 ]
 
 [bans]

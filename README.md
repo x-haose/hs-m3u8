@@ -120,7 +120,12 @@ options = OutputOptions(
 
 ## 用法（Rust，API 未定型）
 
-Rust 库没有发布到 crates.io。在自己的项目里用 git 依赖（`hs-m3u8-core`）时，要按 `third_party/ffmpeg/build.sh` 编译 FFmpeg、把 `FFMPEG_DIR` 设为它的安装目录。FFmpeg 的绑定（`hs-m3u8-ffmpeg-sys`）预生成在仓库里，有 aarch64-apple-darwin、x86_64 与 aarch64 的 unknown-linux-gnu、x86_64-pc-windows-msvc 四个目标的；其他目标要在构建时生成：开 `hs-m3u8-core` 的 `bindgen` 特性（它转给 `hs-m3u8-ffmpeg-sys`），并装 libclang。`FFMPEG_DIR` 里 FFmpeg 的版本须与绑定的一致（用同一提交的 `build.sh` 编出的即可），不一致时编译失败。
+Rust 库没有发布到 crates.io，在自己的项目里用 git 依赖（`hs-m3u8-core`）。FFmpeg 静态链接：在 aarch64-apple-darwin、x86_64 与 aarch64 的 unknown-linux-gnu、x86_64-pc-windows-msvc 四个目标上，构建时从本仓库的 GitHub Release 下载预编译的 FFmpeg 并按写死的 SHA-256 校验，不用装别的。
+
+- 下载的文件缓存在用户缓存目录的 `hs-m3u8-ffmpeg` 下（macOS 的 `~/Library/Caches`、Linux 的 `$XDG_CACHE_HOME` 或 `~/.cache`、Windows 的 `%LOCALAPPDATA%`），`HS_M3U8_FFMPEG_CACHE_DIR` 可以换；`HS_M3U8_FFMPEG_MIRROR` 换掉地址里的 `https://github.com/x-haose/hs-m3u8/releases/download`（哈希照样校验）；代理读 `HTTPS_PROXY`、`ALL_PROXY` 等环境变量，支持 http 与 socks5。
+- 离线构建：cargo 不把 `--offline` 告诉构建脚本，要另设环境变量 `CARGO_NET_OFFLINE=true`，缓存里没有时直接失败。
+- 自己编译：按 `third_party/ffmpeg/build.sh` 编译 FFmpeg，把 `FFMPEG_DIR` 设为它的安装目录，就不再下载。`FFMPEG_DIR` 里 FFmpeg 的版本须与绑定的一致（用同一提交的 `build.sh` 编出的即可），不一致时编译失败。
+- 其他目标：既没有预编译的 FFmpeg，也没有预生成的绑定，要设 `FFMPEG_DIR`，并开 `hs-m3u8-core` 的 `bindgen` 特性（它转给 `hs-m3u8-ffmpeg-sys`）在构建时生成绑定，要装 libclang。
 
 ```rust no_run
 use std::num::NonZeroUsize;
@@ -193,6 +198,8 @@ make licenses     # 依赖或 FFmpeg 的版本变了之后重新生成 LICENSES 
 make compat       # 对外契约与最近的发布比较：Python 接口（griffe）、已发布的任务目录样本不得改动
 uv run --no-sync python examples/download.py   # 运行示例（先 make ffmpeg 与 make py_develop）
 ```
+
+预编译的 FFmpeg 由 `.github/workflows/ffmpeg.yml` 编出：手动运行只把各目标的压缩包作为附件；在 main 上推标签 `ffmpeg-<FFmpeg 版本>-<构建修订号>` 时发布成同名的 Release（连同源码包、`build.sh` 与 `SHA256SUMS`）。改了 `build.sh`（FFmpeg 版本或组件）后要发新的一版：推下一个修订号的标签，再把修订号与 `SHA256SUMS` 里的哈希写进 `crates/ffmpeg-sys/build/download.rs`，并升 `hs-m3u8-ffmpeg-sys` 的次版本号。没发之前，下载的仍是按旧 `build.sh` 编的库，CI 的「prebuilt-ffmpeg」测的就是它。
 
 FFmpeg 的绑定（`crates/ffmpeg-sys/src/bindings`）以 CI 生成的为准：换了 FFmpeg 或改了 `crates/ffmpeg-sys/build.rs` 里的清单后推上去，CI 在各目标上重新生成，与仓库里的不一致时失败，并把新文件作为附件 `ffmpeg-bindings-<目标>` 上传，照它提交。不同的 libclang 生成的文件会有细微差别（如指针的 const）；CI 用的是运行机镜像里的（manylinux 容器的 clang-devel、macOS 的 Xcode、Windows 预装的 LLVM，版本打印在这一步的日志里），镜像更新换了 libclang 时也可能要照附件重新提交。本地的 `scripts/ffmpeg_bindings.py`（要 libclang）只用于调试。
 

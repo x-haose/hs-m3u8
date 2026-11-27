@@ -122,6 +122,38 @@ jobs:
         if: runner.os == 'Windows'
         run: uv run --no-sync pytest
 
+  # 依赖方的做法：不设 FFMPEG_DIR，hs-m3u8-ffmpeg-sys 下载并校验 Release 里的预编译 FFmpeg（crates/ffmpeg-sys/build/
+  # download.rs），4 个目标各跑一次 remux 的测试。在仓库之外的目录里运行 cargo，读不到仓库的 .cargo/config.toml（其中设了
+  # FFMPEG_DIR），工具链另按 rust-toolchain.toml 指定
+  prebuilt-ffmpeg:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-26, windows-2025, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: 工具链
+        shell: bash
+        run: |
+          toolchain=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$toolchain" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+
+      - name: 测试（下载的 FFmpeg）
+        if: runner.os != 'Windows'
+        working-directory: ${{ runner.temp }}
+        run: cargo test --locked --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" -p hs-m3u8-remux
+
+      # Windows 上不用 bash：Git 的 bash 把 /usr/bin 放在 PATH 前面，其中的 link.exe 遮住 MSVC 的链接器
+      - name: 测试（下载的 FFmpeg，Windows）
+        if: runner.os == 'Windows'
+        working-directory: ${{ runner.temp }}
+        shell: pwsh
+        run: cargo test --locked --manifest-path "$env:GITHUB_WORKSPACE/Cargo.toml" -p hs-m3u8-remux
+
   # 播放列表与字幕解析器的模糊测试短跑；只用纯 Rust 的 hls 与 subtitle crate，不要 FFmpeg
   fuzz:
     runs-on: ubuntu-24.04
