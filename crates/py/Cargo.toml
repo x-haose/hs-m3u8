@@ -20,6 +20,11 @@ doctest = false
 name = "stub_gen"
 test = false
 
+[features]
+# 构建时用 bindgen 生成 FFmpeg 的绑定（见 hs-m3u8-ffmpeg-sys 的同名特性），用于没有预生成绑定的目标；从源码分发包
+# 构建时用 pip 的 --config-settings="build-args=--features bindgen" 打开
+bindgen = ["hs-m3u8-core/bindgen"]
+
 [dependencies]
 hs-m3u8-core = { path = "../core" }
 pyo3.workspace = true

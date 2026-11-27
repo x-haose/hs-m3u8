@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+# 构建时用 bindgen 生成 FFmpeg 的绑定（见 hs-m3u8-ffmpeg-sys 的同名特性），用于没有预生成绑定的目标
+bindgen = ["hs-m3u8-ffmpeg-sys/bindgen"]
+
 [dependencies]
 hs-m3u8-ffmpeg-sys = { path = "../ffmpeg-sys" }
 hs-m3u8-subtitle = { path = "../subtitle" }

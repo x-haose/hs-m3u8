@@ -120,7 +120,7 @@ options = OutputOptions(
 
 ## 用法（Rust，API 未定型）
 
-Rust 库没有发布到 crates.io。在自己的项目里用 git 依赖（`hs-m3u8-core`）时，要按 `third_party/ffmpeg/build.sh` 编译 FFmpeg、把 `FFMPEG_DIR` 设为它的安装目录。FFmpeg 的绑定（`hs-m3u8-ffmpeg-sys`）预生成在仓库里，目前只有 aarch64-apple-darwin 的；其他目标要开它的 `bindgen` 特性在构建时生成（要装 libclang）。
+Rust 库没有发布到 crates.io。在自己的项目里用 git 依赖（`hs-m3u8-core`）时，要按 `third_party/ffmpeg/build.sh` 编译 FFmpeg、把 `FFMPEG_DIR` 设为它的安装目录。FFmpeg 的绑定（`hs-m3u8-ffmpeg-sys`）预生成在仓库里，有 aarch64-apple-darwin、x86_64 与 aarch64 的 unknown-linux-gnu、x86_64-pc-windows-msvc 四个目标的；其他目标要开 `bindgen` 特性在构建时生成（要装 libclang；`hs-m3u8-core` 有同名特性，转给它）。
 
 ```rust no_run
 use std::num::NonZeroUsize;
@@ -156,7 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## 从源码构建
 
-没有预编译 wheel 的平台上，pip 会下载源码分发包构建。需要 Rust（rustup 按 `rust-toolchain.toml` 装对应的版本）、C 编译器、make 与 xz，Linux 与 Windows 另需 libclang；FFmpeg 要先单独编译（源码分发包里带着 FFmpeg 的源码包，不必另外下载）：
+没有预编译 wheel 的平台上，pip 会下载源码分发包构建。需要 Rust（rustup 按 `rust-toolchain.toml` 装对应的版本）、C 编译器、make 与 xz；FFmpeg 要先单独编译（源码分发包里带着 FFmpeg 的源码包，不必另外下载）。FFmpeg 的绑定只预生成了有 wheel 的那几个目标的，其他平台要另装 libclang，并把最后一步换成 `pip install . --config-settings="build-args=--features bindgen"`，在构建时生成绑定：
 
 ```bash
 pip download --no-binary :all: --no-deps hs-m3u8
@@ -180,7 +180,7 @@ Windows 上在已加载 MSVC 环境的 MSYS2 里运行 `build.sh`。已按 `buil
 
 桌面下载器在独立的仓库 [hs-dlx](https://github.com/x-haose/hs-dlx)，经 git 依赖使用这里的 `hs-m3u8-core`。
 
-需要：Rust（版本由 `rust-toolchain.toml` 固定）、[uv](https://docs.astral.sh/uv/)（版本见 `pyproject.toml` 的 `required-version`）、cargo-deny 与 cargo-llvm-cov（版本见 `.github/workflows/rust.yml`）；macOS 另需 Xcode 命令行工具，Linux 与 Windows 另需 libclang（bindgen 用）；编译 FFmpeg 还要 C 编译器、make、curl 与 xz。Python 开发工具由 uv 按 `uv.lock` 装进 `.venv`（默认 Python 3.12）。
+需要：Rust（版本由 `rust-toolchain.toml` 固定）、[uv](https://docs.astral.sh/uv/)（版本见 `pyproject.toml` 的 `required-version`）、cargo-deny 与 cargo-llvm-cov（版本见 `.github/workflows/rust.yml`）；macOS 另需 Xcode 命令行工具；编译 FFmpeg 还要 C 编译器、make、curl 与 xz。Python 开发工具由 uv 按 `uv.lock` 装进 `.venv`（默认 Python 3.12）。
 
 ```bash
 make ffmpeg       # 下载并编译精简 FFmpeg 静态库到 third_party/ffmpeg/dist，只需一次
@@ -193,5 +193,7 @@ make licenses     # 依赖或 FFmpeg 的版本变了之后重新生成 LICENSES 
 make compat       # 对外契约与最近的发布比较：Python 接口（griffe）、已发布的任务目录样本不得改动
 uv run --no-sync python examples/download.py   # 运行示例（先 make ffmpeg 与 make py_develop）
 ```
+
+FFmpeg 的绑定（`crates/ffmpeg-sys/src/bindings`）以 CI 生成的为准：换了 FFmpeg 或改了 `crates/ffmpeg-sys/build.rs` 里的清单后推上去，CI 在各目标上重新生成，与提交的不一致时失败，并把新文件作为附件 `ffmpeg-bindings-<目标>` 上传，照它提交。本地的 `scripts/ffmpeg_bindings.py`（要 libclang）只用于调试，不同的 libclang 生成的文件会有细微差别。
 
 换 Python 版本另给目录，如 `make py_test VENV=.venv-3.15 UV_PYTHON=3.15`。Windows：在已加载 MSVC 环境的 MSYS2 中运行 `third_party/ffmpeg/build.sh`，其余步骤见 `.github/workflows/rust.yml`。发布用的 sdist 与各平台 wheel 由 `.github/workflows/wheels.yml` 构建并测试；推送标签 `v<主>.<次>.<修订>`（与 `Cargo.toml` 的版本一致，提交已在 main 上）时，另对那个提交跑 `.github/workflows/rust.yml` 的全部检查，都通过后发布到 PyPI。升了 job.json 的格式版本（`crates/core/src/workdir/record.rs`）时，用 `cargo test -p hs-m3u8-core --test e2e -- --ignored --exact samples::write_samples` 生成新版本的任务目录样本；升了 outputs.json 的（`outputs.rs`）时，照 `tests/fixtures/workdir/outputs` 下已有的写法手写新版本各平台的记录与推出的保留名。没有当前版本的样本时测试失败。
